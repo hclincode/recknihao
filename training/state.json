@@ -1,6 +1,7 @@
 {
-  "iteration": 803,
+  "iteration": 804,
   "phase": "extended",
+  "notes_804": "iter804 durability-breadth sweep, no edits — 4 fresh adjacent topics (substring-between-delims / date-part-quarter-week / cast-string-bool / mode-or-interval-arith)",
   "notes_803": "iter803 durability-breadth sweep, no edits — 4 fresh adjacent topics incl. LAST_VALUE default-frame trap probe",
   "notes_802": "iter802 durability-breadth sweep, no edits — 4 fresh adjacent topics (first_value-last_value / approx_distinct / unnest-map-to-rows / NTILE-or-fresh)",
   "notes_801": "iter801 durability-breadth sweep, no edits — 4 fresh adjacent topics (top-N-per-category / array_position / arrays_overlap-or-intersect / consecutive-delta-or-approx_distinct)",

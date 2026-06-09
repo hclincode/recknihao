@@ -1,54 +1,67 @@
-# Judge Feedback — iter803 (DEFAULT NO-OP / durability-breadth sweep)
+# Judge Feedback — iter804
 
+**Mode:** DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits; 4 fresh adjacent probes). Phase: extended.
 **Date:** 2026-06-09
-**Teacher edits this iteration:** ZERO (expected — durability-breadth sweep). Four probes: Q1 LAST_VALUE default-frame trap, Q2 percent_rank, Q3 count-char-via-length-diff, Q4 row-wise GREATEST over dates.
-**Verification:** Every dialect claim verified against trino.io/docs/467 (functions/window.html, functions/comparison.html) + WebSearch 2026-06-09 — not relying on resources/ as ground truth.
 
-## Q1 — LAST_VALUE: most-recent status stamped on every ticket row
+**Overall: 4.06 PASS** (overall average governs; no single-Q veto).
 
-`LAST_VALUE(status) OVER (PARTITION BY ticket_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`. Explicitly explained that WITHOUT the full frame, LAST_VALUE defaults to a frame ending at the CURRENT row and returns the current row's value; the full frame returns the partition's final value. Cites r07.
+All dialect claims verified against trino.io/docs/467 (functions/datetime.html, functions/regexp.html, functions/aggregate.html) on 2026-06-09.
 
-VERIFIED: Trino default frame with ORDER BY = RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW → bare `LAST_VALUE(x)` returns the current-row (peer) value, NOT the partition last. The explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame correctly extends to the partition's final row. The responder used the correct full frame AND correctly explained the trap. **Trap AVOIDED — CLEAN.** (Alternatives `max_by(status,event_time)` / `FIRST_VALUE(... ORDER BY event_time DESC)` also valid; not required.)
+---
 
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+## Per-question scores
 
-## Q2 — percent_rank: "scored better than X% of people"
+### Q1 — quarter (1-4) + ISO week-of-year from order_date — **avg 2.50 (DEFECT)**
+- Accuracy: **2** — Completeness: 3 — Clarity: 3 — Actionability: 2
+- Responder answer: `'Q' || quarter_of_year(order_date) AS quarter, week_of_year(order_date) AS week_of_year`.
+- **DEFECT: `quarter_of_year()` is a FABRICATED function.** VERIFIED vs trino.io/docs/467/functions/datetime.html: Trino's quarter function is **`quarter(x) -> bigint`** ("Returns the quarter of the year from x. Ranges 1-4"). There is **NO `quarter_of_year()`** registered function or alias. The query would fail at planning with "function quarter_of_year not registered." (Only the `day_*` family has of-year-style aliases — day_of_week/dow, day_of_year/doy; quarter does NOT.)
+- The week half is CORRECT: VERIFIED `week_of_year(x)` IS a documented **alias for `week(x)`** ("ISO week of the year, 1-53"). So `week_of_year(order_date)` compiles and is right.
+- (Secondary: `'Q' || quarter_of_year(...)` would need a CAST of the bigint to varchar for `||`; moot given the fabrication.)
+- **Correct forms:** `quarter(order_date)` or `EXTRACT(QUARTER FROM order_date)`; week is fine as-is (or `EXTRACT(WEEK FROM order_date)`).
+- **Verdict: RESPONDER SLIP against CLEAN resources.** Resources never contain `quarter_of_year`. They show the correct `quarter()` repeatedly: `resources/07-analytical-query-patterns.md:3069` (`quarter(order_date) = quarter(current_date)`) and `:3075`, and `resources/27-oracle-plsql-to-dbt-trino.md:592` (`use quarter(ts)`). `EXTRACT(QUARTER ...)` documented at `resources/13-postgres-to-iceberg-ingestion.md:5683` (QUARTER listed among EXTRACT fields). The responder fabricated the `_of_year` suffix by over-generalizing the day_of_year alias pattern.
 
-`PERCENT_RANK() OVER (ORDER BY score ASC) AS fraction_below` — 0.0..1.0, lowest=0, highest=1. Cites r07 Pattern C2.
+### Q2 — substring between markers: value after 'action=' before next space → 'login' — **avg 2.50 (DEFECT)**
+- Accuracy: **2** — Completeness: 3 — Clarity: 3 — Actionability: 2
+- Responder answer: `regexp_extract(log_message, 'action=(\S+)') AS action_value`; prose claim "extracts the first capture group (the parenthesized part)."
+- **DEFECT: the 2-arg `regexp_extract` returns the WHOLE match, not the capture group.** VERIFIED vs trino.io/docs/467/functions/regexp.html: `regexp_extract(string, pattern) -> varchar` returns "the first substring matched by the regular expression pattern" (the ENTIRE match). So on `'user=42 action=login status=ok'` with `'action=(\S+)'` it returns **`'action=login'`** (includes the `action=` prefix), NOT `'login'` as claimed. The prose claim that the 2-arg form "extracts the first capture group" is **FALSE**.
+- **Correct form:** `regexp_extract(log_message, 'action=(\S+)', 1)` — the **3-arg form with group index 1** returns capture group 1 = `'login'`. (`regexp_extract(string, pattern, group) -> varchar` returns capturing group N; group 0 = whole match.) The pattern `'action=(\S+)'` itself is fine; the missing group-index arg is the bug.
+- **Verdict: RESPONDER SLIP against CLEAN resources.** r23 has the EXACT correct canonical: `resources/23-sql-best-practices-olap.md:2809` — `regexp_extract(s, 'id=([0-9]+)', 1)  -- 'id=987;x' -> '987' (group 1)`. Semantics spelled out correctly at `:2818` (2-arg = "FIRST substring matched") vs `:2819` (3-arg = "capture group N (1-indexed; group 0 = whole match)"). The responder had the right card, dropped the `, 1` group-index arg, and mis-attributed capture-group semantics to the 2-arg form.
 
-VERIFIED: percent_rank = (r-1)/(n-1), range 0..1; ASC ⇒ lowest=0, highest=1, value = fraction strictly below (ties share rank). This is the conventional metric for "better than X%". Responder did NOT confuse it with cume_dist (fraction at-or-below, range 1/n..1). CORRECT pick. Minor: could have named the percent_rank-vs-cume_dist distinction explicitly for completeness, but the chosen function is right and well-explained.
+### Q3 — SLA deadline = created_at + 2 hours 30 minutes — **avg 5.00 (CLEAN)**
+- Accuracy: 5 — Completeness: 5 — Clarity: 5 — Actionability: 5
+- `created_at + INTERVAL '2' HOUR + INTERVAL '30' MINUTE AS deadline` — VERIFIED valid chained interval addition on timestamp. Equivalent `date_add('minute', 150, created_at)` also correct. CASE-based SLA-status framing is a practical bonus. No defect.
 
-- Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 — **avg 4.875**
+### Q4 — most common device_type per country (mode per group) — **avg 5.00 (CLEAN)**
+- Accuracy: 5 — Completeness: 5 — Clarity: 5 — Actionability: 5
+- Inner `SELECT country, device_type, COUNT(*) AS cnt ... GROUP BY country, device_type`, outer `max_by(device_type, cnt) GROUP BY country`. VERIFIED vs functions/aggregate.html: `max_by(x, y)` returns x at the max of y → device_type with highest per-country count = the mode. Standing mode=max_by-over-COUNT pin reconfirmed. `max_by(device_type, ROW(cnt, device_type))` deterministic tie-break is valid (lexicographic ROW comparison). No defect.
 
-## Q3 — count commas in csv_line (+1 = field count)
-
-`LENGTH(csv_line) - LENGTH(REPLACE(csv_line, ',', '')) AS comma_count`; +1 = field count; worked example 'north,east,pending,3' → 4 commas → 5 fields. Cites r27 + r23.
-
-VERIFIED: replace removes all commas; the length drop = comma count. length() and 2-arg replace(s,search) both valid Trino. Trino has no direct char-count function, so the length-diff is the canonical idiom. Worked example correct. (cardinality(split(s,',')) is an equally valid alternative; not required.) CLEAN.
-
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
-
-## Q4 — row-wise max of 3 date columns
-
-`GREATEST(last_login_date, last_purchase_date, last_support_date) AS last_activity_date`; notes GREATEST returns NULL if ANY arg is NULL in Trino (unlike Postgres), wrap `COALESCE(col, DATE '1900-01-01')` if nulls possible. Cites r23 + r27.
-
-VERIFIED: greatest() supports DATE (also DOUBLE/BIGINT/VARCHAR/TIMESTAMP/TIMESTAMP WITH TIME ZONE) and returns NULL if any argument is NULL — Trino docs explicitly contrast Postgres. The COALESCE-sentinel workaround is apt and correctly flagged. CLEAN.
-
-- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+---
 
 ## Overall
 
 | Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 LAST_VALUE | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 percent_rank | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q3 count-char | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 GREATEST dates | 5 | 5 | 5 | 5 | 5.00 |
+|---|-----|------|------|-----|-----|
+| Q1 | 2 | 3 | 3 | 2 | 2.50 |
+| Q2 | 2 | 3 | 3 | 2 | 2.50 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+| **Overall** | | | | | **4.06 PASS** |
 
-**Overall avg = 4.97 — PASS** (threshold 3.5).
+PASS on the overall-average rule, but with **TWO non-compiling/wrong-value defects (Q1, Q2)** — both pure responder slips against clean, correct resources. A findability/discipline regression, not a resource gap.
 
-### Explicit verdicts
-- **(a) LAST_VALUE default-frame trap (Q1): AVOIDED.** Responder used the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame and correctly explained that the bare/default frame returns the current row's value. The standing LAST_VALUE-default-frame-trap pin is reconfirmed CLEAN by this datapoint.
-- **(b) iter804 designation: DEFAULT NO-OP / durability-breadth.** No open defect, no FIX-A needed. All four standing pins held (LAST_VALUE-default-frame-trap, percent_rank-vs-cume_dist, count-char-length-diff-replace, greatest-least-NULL-if-any-null). Teacher should make ZERO edits; suggested fresh probes for iter804: cume_dist-vs-percent_rank direct contrast / NTH_VALUE-with-frame / array_agg-DISTINCT-ORDER-BY / date_diff-week-or-quarter / regexp_replace-capture-group-backref.
+---
 
-PRESERVE r07 window cards (LAST_VALUE full-frame, percent_rank), r23/r27 length/replace + greatest cards — verified clean, churn risk. DO NOT bump training/state.json (already 803).
+## Verdicts (explicit)
+
+**(a) Q1 — `quarter_of_year` fabrication.** Correct = `quarter(order_date)` or `EXTRACT(QUARTER FROM order_date)`. **RESPONDER SLIP** — resources clean & correct: `resources/07-analytical-query-patterns.md:3069`/`:3075` show `quarter()`; `resources/27-oracle-plsql-to-dbt-trino.md:592` shows `use quarter(ts)`; `resources/13-postgres-to-iceberg-ingestion.md:5683` lists QUARTER as an EXTRACT field. No `quarter_of_year` anywhere. The responder over-generalized the `day_of_year`/`day_of_week` alias pattern onto quarter.
+
+**(b) Q2 — `regexp_extract` 2-arg returns whole match.** Correct = 3-arg `regexp_extract(log_message, 'action=(\S+)', 1)` for the capture group. **RESPONDER SLIP** — `resources/23-sql-best-practices-olap.md:2809` already shows the exact `regexp_extract(s, 'id=([0-9]+)', 1)` 3-arg group-1 canonical, and `:2818`/`:2819` correctly state 2-arg=whole-match vs 3-arg=group-N. The responder dropped the group index and mis-described the 2-arg semantics.
+
+**(c) iter805 designation — LIGHT INOCULATION FIX-A (both slips, clean resources).**
+Both defects trace to clean resources, so no large rewrite is warranted. Two surgical, additive, keyword-landing inoculations:
+1. **r07 date-part canonical:** add a short fenced "quarter + ISO week from a date" card LEADING with `quarter(order_date)` and `week_of_year(order_date)` (and `EXTRACT(QUARTER FROM ...)` / `EXTRACT(WEEK FROM ...)`), with an inline un-copyable WRONG-marker on `quarter_of_year(...)` ("not a Trino function — use `quarter()`"). Land on keywords: "quarter of year", "which quarter", "week number", "week of year", "ISO week". Directly answers Q1's phrasing and defangs the fabricated alias.
+2. **r23 regexp_extract between-markers card:** add a short "pull value between two markers / after a delimiter" fenced canonical on the EXISTING correct `:2809` pattern — `regexp_extract(log_message, 'action=(\S+)', 1)` → `'login'` — with an explicit one-liner: "the **2-arg** form returns the WHOLE match (`'action=login'`); you MUST pass the **group index `, 1`** to get just the captured part." Land on keywords: "value after", "between markers", "substring after = before space", "extract field from log line".
+
+If the teacher prefers zero churn, a pure NO-OP is defensible (resources are correct; these are responder slips) — but the same 2-arg-vs-3-arg regexp_extract confusion has appeared before, so inoculation #2 is the higher-value move. PRESERVE all existing verified cards (r07 quarter()/interval, r23:2806-2819 regexp_extract, r23 mode=max_by) — do NOT churn them.
+
+**DO NOT bump training/state.json (already 804).**
