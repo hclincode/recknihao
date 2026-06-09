@@ -1138,10 +1138,40 @@ How it works: the three parenthesized groups `(\d{3})(\d{3})(\d{4})` capture the
 
 > **❌ DO NOT COPY:** `regexp_replace(phone,'(\d{3})(\d{3})(\d{4})','(\1) \2-\3')` — **Trino backreferences use `$1`, not `\1`** — `\1` is Oracle / Java-`Matcher` syntax and on Trino emits a LITERAL backslash-1 (two characters), NOT the captured group. Always write `$<digit>`.
 
+#### SIMPLEST ANSWER FIRST — remove/replace a FIXED character or substring → plain `replace()` (NO regex)
+
+> **READ THIS FIRST if your question is "remove every space/dash from a phone string — is there a simpler function?" or contains:** `replace all occurrences`, `remove every space`, `remove every dash`, `strip a fixed character`, `substitute a literal substring`, `normalize by removing characters`, `replace without regex`, `remove a specific character Trino`, `simpler than regexp_replace`. The simple, regex-free tool is Trino's plain **`replace(string, search[, replacement])`** — reach for it BEFORE `regexp_replace` whenever the thing you are removing/replacing is a FIXED literal (a space, a dash, `'$'`, `'old'→'new'`).
+
+```sql
+-- ✅ COPY THIS — Replace / remove ALL occurrences of a FIXED character or substring (no regex needed):
+replace(phone, ' ', '')         -- remove every space
+replace(phone, '-', '')         -- remove every dash
+replace(status, 'old', 'new')   -- 3-arg: replace every 'old' with 'new'
+
+-- Remove BOTH spaces and dashes — nest two plain replace() calls (still no regex):
+replace(replace(phone, ' ', ''), '-', '')   -- '555 123-4567' → '5551234567'
+```
+
+Verified against [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html):
+- **`replace(string, search) -> varchar`** — *"Removes all instances of `search` from `string`."* The **2-arg form REMOVES** all instances.
+- **`replace(string, search, replace) -> varchar`** — *"Replaces all instances of `search` with `replace` in `string`."* The **3-arg form REPLACES** all instances.
+
+Both are non-regex literal-substring operations.
+
+**DISAMBIGUATOR — `replace()` vs `regexp_replace()` (pick the right one):**
+
+| What you are removing/replacing | Use | Example |
+|---|---|---|
+| **FIXED literal char/substring** — a space, a dash, `'$'`, `'old'`→`'new'` | **plain `replace(string, search[, replacement])`** — simplest, **NO regex**. 2-arg `replace(s, search)` **REMOVES** all instances; 3-arg `replace(s, search, replacement)` **REPLACES** all instances. | `replace(phone, '-', '')` ; `replace(s, 'old', 'new')` |
+| **PATTERN / character-CLASS** — all non-digits, all whitespace (incl. tabs), any digit, anything-except-letters | **`regexp_replace(string, pattern[, replacement])`** — needs a regex; a fixed `replace()` cannot express "any non-digit". | `regexp_replace(phone, '[^0-9]', '')` (digits-only — the canonical below) |
+
+> **Rule of thumb:** `replace()` = the simple fixed-char tool (one specific character or substring you can type out). `regexp_replace()` = patterns and character classes (a whole *category* of characters). If you can name the exact character(s), use `replace()`; if you mean "every character of some kind", use `regexp_replace()`.
+
 **Clean vs reformat — pick the right idiom (ROUTER):**
 
 | You want to... | Use | Form |
 |---|---|---|
+| **REMOVE a FIXED char/substring** — every space, every dash, a literal `'$'` | plain `replace()` (no regex — see the card just above) | `replace(phone, ' ', '')` ; `replace(replace(phone,' ',''),'-','')` |
 | **CLEAN** — remove formatting, keep only the digits | strip non-digits (see the canonical immediately below) | `regexp_replace(phone, '[^0-9]', '')` → `'5551234567'` |
 | **REFORMAT** — rearrange the digits into a new pattern with parens/dashes | capture-group backreferences (this canonical) | `regexp_replace(phone, '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')` → `'(555) 123-4567'` |
 
