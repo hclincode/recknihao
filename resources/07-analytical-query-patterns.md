@@ -67,6 +67,39 @@ Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/curren
 
 > **Note:** the `UNNEST(sequence(...))` patterns in §4 (time-series gap-fill) and §5 Pattern B2 (YoY gap-fill spine) never drop rows because `sequence(start, stop, step)` always returns a non-NULL, non-empty array — the NULL/empty-array gotcha only applies to UNNEST over a real ARRAY column whose values can be NULL or `ARRAY[]`.
 
+### Native array column vs. JSON ARRAY STRING column — which one can you UNNEST directly? (DISAMBIGUATOR)
+
+**Keyword anchor (READ THIS FIRST if your question contains any of these phrases):** explode a JSON array, JSON array string column, json_parse then UNNEST, flatten a JSON array varchar, one row per element of a JSON array, tags stored as a JSON array string, turn a JSON array into rows, parse a JSON array column to rows, column holds `'["vip","beta","trial"]'`, explode varchar array string, UNNEST a string column.
+
+**The crisp rule:** `UNNEST` requires an **ARRAY** (or MAP) — **you CANNOT `UNNEST` a `varchar`.** So the very first question is: *is the column already a native `ARRAY` type, or is it a `varchar` that merely holds JSON array text?*
+
+- **NATIVE `array(varchar)` column** (the type is genuinely `ARRAY(...)`) -> `UNNEST(col)` directly, exactly like FORM 1 / FORM 2 above.
+- **JSON ARRAY STRING column** (the type is `varchar`, holding text like `'["vip","beta","trial"]'`) -> **parse it to an array FIRST**, then `UNNEST`: `CAST(json_parse(col) AS ARRAY(VARCHAR))` (or `ARRAY(BIGINT)` when the elements are numbers). `json_parse(varchar) -> json`; `CAST(json AS ARRAY(VARCHAR)) -> the array`. Verified at [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html): `CAST(json_parse('["vip","beta"]') AS ARRAY(VARCHAR))` returns `ARRAY['vip','beta']`.
+
+```sql
+-- Explode an array column into one row per element:
+
+-- (A) NATIVE array(varchar) column -> UNNEST directly:
+SELECT e.event_id, t.tag
+FROM events e
+CROSS JOIN UNNEST(e.tags) AS t(tag);
+
+-- (B) JSON ARRAY STRING column (a varchar holding '["vip","beta","trial"]')
+--     -> parse to an array FIRST, then UNNEST:
+SELECT e.event_id, t.tag
+FROM events e
+CROSS JOIN UNNEST(CAST(json_parse(e.tags) AS ARRAY(VARCHAR))) AS t(tag);
+
+-- numeric JSON array '[10,20,30]' -> CAST(json_parse(e.ids) AS ARRAY(BIGINT)):
+SELECT e.event_id, t.id
+FROM events e
+CROSS JOIN UNNEST(CAST(json_parse(e.ids) AS ARRAY(BIGINT))) AS t(id);
+
+-- WRONG: CROSS JOIN UNNEST(tags) AS t(tag)  -- when tags is a JSON-array STRING (varchar) this is a TYPE ERROR (UNNEST needs an ARRAY). CAST(json_parse(tags) AS ARRAY(VARCHAR)) first -- DO NOT COPY
+```
+
+Use `LEFT JOIN UNNEST(...) ON TRUE` instead of `CROSS JOIN` in either branch if you must keep parent rows whose array is NULL/empty (see FORM 2 above). Same `json_parse`/`CAST` family as the JSON->ROW/struct extraction in `resources/09-lakehouse-schema-design.md` (§ JSON->ROW).
+
 > **Sub-note — `WITH ORDINALITY` for the ORIGINAL array position (1-based bigint, appended LAST in the alias list).** **Keyword anchor (READ THIS FIRST if your question contains any of these phrases — route HERE, NOT to `array_position`):** UNNEST with ordinality Trino, array element index/position, original array offset, explode array keep index, explode array keep position, which position in array, position in array per element, ordinal per unnested row, index of each element, which position was this tag in, step number in the sequence, first tag vs second tag, row number within an exploded array, position of each item while expanding a list, per-element ordinal, 1-based position of each tag, get the index alongside each element, what position is this element in the array, give me the position of every tag as I explode. Append `WITH ORDINALITY AS t(elem, ord)` to either UNNEST form to recover the 1-based ORIGINAL array offset of each element. Per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html), `WITH ORDINALITY` appends an **additional bigint ordinality column** at the **END** of the unnested columns — element first, ordinality last. The `AS t(elem, ord)` clause names BOTH columns (alias for the unnested element + alias for the ordinality column). **Canonical worked example (copy this — names the position column `position`, matches the common SaaS phrasing "position of each tag"):**
 > ```sql
 > -- Per-element ordinal alongside each exploded element — TRUE 1-based per-row position.

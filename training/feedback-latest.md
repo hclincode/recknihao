@@ -1,63 +1,57 @@
-# Judge Feedback — iter798 (DEFAULT NO-OP / durability-breadth sweep; teacher ZERO resource edits)
+# Judge Feedback — iter799 (ADDITIVE FINDABILITY FIX-A: explode-JSON-array-STRING re-probe + 3 fresh)
 
-**Verdict: overall avg 4.31 — PASS** (threshold 3.5; overall average governs, no single-Q veto).
-All dialect claims verified against trino.io/docs/467 (window / select / json / datetime .html) via WebFetch on 2026-06-09.
+**Verdict: overall avg 4.84 — PASS** (threshold 3.5; overall average governs, no single-Q veto).
+All dialect claims verified against trino.io/docs/467 (json / array / datetime / select .html) via WebFetch on 2026-06-09.
+
+FIX-A context: iter798 Q3 used bare `UNNEST(varchar)` on a JSON-array-string column (type error). iter799 teacher added a native-vs-JSON-string disambiguator + `UNNEST(CAST(json_parse(...) AS ARRAY(VARCHAR)))` canonical at r07 §1a (lines 70-101, with a DO-NOT-COPY defang of the bare-`UNNEST(varchar)` form). Q1 re-probes it.
 
 ---
 
 ## Per-question scores
 
-### Q1 — 2nd-highest DISTINCT salary (tied top = one tier) — avg **5.00 PASS**
+### Q1 — explode a JSON-array-STRING (varchar) column into one row per element — avg **5.00 PASS**
 - Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5**
-- Answer: `SELECT DISTINCT salary FROM (SELECT salary, DENSE_RANK() OVER (ORDER BY salary DESC) AS salary_rank FROM employees) WHERE salary_rank = 2`.
-- VERIFIED vs functions/window.html: DENSE_RANK "tie values do not produce gaps in the sequence" → assigns 1,1,2,… so `salary_rank=2` is the 2nd distinct tier; tied top correctly collapses to one tier. Responder correctly chose DENSE_RANK over RANK (RANK would skip after a tie) and noted the empty-result-if-no-2nd-tier edge. Matches the RANK/DENSE_RANK pin. Clean. Cites r23.
+- Answer: `CROSS JOIN UNNEST(CAST(json_parse(roles_json) AS ARRAY(VARCHAR))) AS t(role)`; `json_parse` string->json, CAST json->array, UNNEST array->rows; `LEFT JOIN UNNEST(...) ON TRUE` to keep NULL/empty parents. Cites new r07 card (lines 70-101).
+- **FIX CONFIRMED — explode-JSON-array-STRING CLOSED (1st clean post-fix datapoint).** The responder NOW LEADS with `json_parse`+`CAST`+`UNNEST` and did NOT emit the iter798 bare `UNNEST(varchar)` type error. Verified vs functions/json.html: `json_parse(string) -> json` ("Returns the JSON value deserialized from the input JSON text"); `CAST(json AS ARRAY(VARCHAR))` valid for a homogeneous string array. Verified vs sql/select.html: UNNEST requires an ARRAY/MAP — a varchar cannot be unnested, so the parse-first step is exactly what makes this compile. The LEFT-JOIN-ON-TRUE parent-preservation nuance is correct. Clean.
 
-### Q2 — flag each sale above its OWN region's average — avg **5.00 PASS**
-- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5**
-- Answer: subquery computes `AVG(sale_amount) OVER (PARTITION BY region) AS region_avg`, outer query `CASE WHEN sale_amount > region_avg THEN true ELSE false END`.
-- VERIFIED vs functions/window.html + select.html: window AVG partitioned per region is per-region mean (not global); wrapping in a subquery is REQUIRED because a window result cannot be referenced by its alias in the same SELECT's CASE (and the WHERE/SELECT alias scoping rule). Comparison `sale_amount > region_avg` is the correct above-group-avg flag. Matches the above-group-avg / standing-deviation pattern. Clean. Cites r07.
+### Q2 — convert event_time (UTC) to 'America/New_York' incl. DST — avg **4.81 PASS**
+- Accuracy **5** · Completeness **4.75** · Clarity **5** · Actionability **4.5**
+- Answer: `event_time AT TIME ZONE 'America/New_York' AS event_time_eastern`; DST handled automatically; group via `date_trunc('day', event_time AT TIME ZONE 'America/New_York')`; IANA zone names. Cites r07.
+- Verified vs functions/datetime.html: `AT TIME ZONE` "sets the time zone of a timestamp"; the doc example (`'2012-10-31 01:00 UTC' AT TIME ZONE 'America/Los_Angeles'` -> `2012-10-30 18:00`) shows it re-renders the SAME instant in the named IANA zone; IANA identifiers inherently carry DST rules, so DST is correct. For a UTC-normalized Iceberg `timestamp(p) with time zone` (the prod stack) the responder's usage is correct. Minor un-penalized nuance: if `event_time` were a plain `timestamp WITHOUT time zone`, `AT TIME ZONE` interprets it as being IN that zone rather than converting — not the prod case, and the responder's UTC-timestamptz assumption matches Iceberg ingestion; a one-line caveat about the without-tz case would have earned the last half-point. Solid.
 
-### Q3 — explode a JSON-ARRAY-STRING (varchar `'["vip","beta","trial"]'`) to one row per tag — avg **2.25** (PRIMARY DEFECT)
-- Accuracy **2** · Completeness **2** · Clarity **3** · Actionability **2**
-- Answer used `CROSS JOIN UNNEST(tags) AS t(tag)` directly and reframed the column as a NATIVE array ("tags = ARRAY['vip','beta','trial']"). LEFT JOIN UNNEST … ON TRUE for empty/null noted.
-- **DEFECT — bare `UNNEST(tags)` on a varchar column is a TYPE ERROR.** VERIFIED vs sql/select.html: "UNNEST can be used to expand an ARRAY or MAP into a relation" — UNNEST requires an ARRAY (or MAP) argument. A varchar holding JSON text is NOT an array; `UNNEST(varchar)` fails to type-check ("cannot UNNEST varchar"). The responder skipped the mandatory parse step and mischaracterized the stated JSON-string column as a native array, so the answer does NOT solve the question as asked.
-- **CORRECT CANONICAL (state explicitly to teacher):**
-  ```sql
-  SELECT o.order_id, t.tag
-  FROM iceberg.analytics.orders o
-  CROSS JOIN UNNEST(CAST(json_parse(o.tags) AS ARRAY(VARCHAR))) AS t(tag);
-  ```
-  VERIFIED vs functions/json.html: `json_parse(varchar) -> json` deserializes the JSON text; casting a JSON array value to `ARRAY(VARCHAR)` is supported. Pipeline: varchar → `json_parse` → JSON → `CAST(... AS ARRAY(VARCHAR))` → ARRAY → `UNNEST`. (Use `LEFT JOIN UNNEST(...) ON TRUE` to keep rows whose array is empty/null, as the responder noted for the native case.)
-- **FINDABILITY MISS, not a content gap.** The parse half EXISTS in resources but is unreachable from explode/UNNEST keywords:
-  - `resources/09-lakehouse-schema-design.md:876` — `SELECT CAST(json_parse(tags_raw) AS ARRAY(VARCHAR)) AS tags` (the exact parse-to-array step) — BUT this section (r09 §"CAST(json_col AS … ARRAY(T))" LEADING CANONICAL, lines 849–900) is keyword-anchored to "parse JSON into ROW / JSON to struct / deserialize JSON to typed columns" and does NOT combine the result with UNNEST or anchor on "explode JSON array / one row per tag / flatten JSON array string".
-  - `resources/07-analytical-query-patterns.md:41` (§1a) — the explode/UNNEST landing the responder DID reach — covers ONLY a NATIVE `tags ARRAY(VARCHAR)` column (`UNNEST(u.tags)`, line 54); it has NO branch for a JSON-array-STRING (varchar) column and never mentions json_parse/CAST.
-  - GREP confirms NO occurrence of the combined `UNNEST(CAST(json_parse(...) AS ARRAY(...)))` form anywhere in resources/.
-  - Net: each half is present (explode in r07 §1a; json_parse→array in r09:876) but they are NEVER connected, and the explode landing assumes a native array. **Resource/findability gap, NOT a pure responder slip** — a Haiku responder keying on "explode JSON array column" lands at r07 §1a (native array) and has no signal to insert the parse step.
+### Q3 — subtotals + grand total (per region,product / per-region / one grand total) in one query — avg **4.94 PASS**
+- Accuracy **5** · Completeness **5** · Clarity **4.75** · Actionability **5**
+- Answer: `GROUP BY ROLLUP(region, product)`, `SUM(amount)`, label via `CASE GROUPING(region, product) WHEN 0 THEN 'Detail' WHEN 1 THEN 'Region Total' WHEN 3 THEN 'Grand Total' END`, `ORDER BY GROUPING(...), region NULLS LAST, product NULLS LAST`. Notes `ROLLUP(a,b) = GROUPING SETS ((a,b),(a),())` and "ROLLUP takes COLUMN NAMES only not expressions (pre-compute in a CTE)". Cites r28.
+- Verified vs sql/select.html: ROLLUP generates subtotals; `ROLLUP(region,product)` = grouping sets `((region,product),(region),())` = detail + per-region subtotal + grand total. **GROUPING bitmask verified**: "a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise" -> bit=1 means rolled up; leftmost arg = higher-order bit. So Detail (both present)=0b00=0; region subtotal (product rolled up)=0b01=1; grand total (both rolled up)=0b11=3. The responder's WHEN 0/1/3 mapping is exactly right. The "ROLLUP takes column names only, not expressions" pin is correct (pre-compute derived grouping keys in a CTE). Tiny clarity ding only: the bitmask reasoning (why 1 and 3, not 2) is asserted rather than shown; otherwise textbook. Strong.
 
-### Q4 — dynamic first-day-of-current-month MTD boundary — avg **5.00 PASS**
-- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5**
-- Answer: `WHERE event_date >= date_trunc('month', current_date)`; auto-rolls each month; `CAST(date_trunc('month', current_date) AS DATE)` for a DATE-typed boundary.
-- VERIFIED vs functions/datetime.html: `date_trunc('month', current_date)` returns the first day of the current month; `current_date` is the start-of-query date (no parens). `event_date >= that` is month-to-date and auto-rolls on the 1st. CAST AS DATE valid. Matches the standing date_trunc pin. Clean. Cites r07.
+### Q4 — filter a NATIVE integer array per row, keep scores >= 60 — avg **4.63 PASS**
+- Accuracy **5** · Completeness **4.5** · Clarity **5** · Actionability **4.0**
+- Answer: `filter(scores, s -> s >= 60) AS passing_scores`; higher-order `filter` keeps elements where the lambda is true, array-in/array-out, no row explosion; `array_remove(scores, 40)` for exact-value removal. Cites r07.
+- Verified vs functions/array.html: `filter(array(T), function(T,boolean)) -> array(T)` "Constructs an array from those elements of array for which function returns true" -> `filter(scores, s -> s >= 60)` on `ARRAY[55,90,72,40]` yields `ARRAY[90,72]`. Correct, array-in/array-out, no UNNEST/no row explosion. `array_remove(x, element)` "Remove all elements that equal element" is valid for the exact-value variant. Matches the higher-order-filter pin. Minor actionability ding: the answer does not contrast `filter` (keep-in-place, array out) vs `UNNEST + WHERE + array_agg` (explode/refilter/recollect) — a one-liner on when each is appropriate would have rounded it out, but for the question as asked `filter` is the right and most direct tool.
 
 ---
 
 ## Overall
 
-`(5.00 + 5.00 + 2.25 + 5.00) / 4 = 4.31 → PASS`
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 explode-JSON-array-string | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 AT TIME ZONE named tz | 5 | 4.75 | 5 | 4.5 | **4.81** |
+| Q3 ROLLUP + GROUPING bitmask | 5 | 5 | 4.75 | 5 | **4.94** |
+| Q4 filter native array | 5 | 4.5 | 5 | 4.0 | **4.63** |
 
-Three of four probes (nth-highest-distinct via DENSE_RANK, above-group-avg via window AVG, MTD via date_trunc) are bulletproof and reconfirm standing pins. The lone defect is Q3.
+**Overall avg = (5.00 + 4.81 + 4.94 + 4.63) / 4 = 4.845 -> 4.84 — PASS.**
 
-## Teacher feedback / iter799 designation
+---
 
-**iter799 = FIX-A (additive findability).** Findability/content-connection gap, not a pure responder slip — surface a JSON-array-STRING → rows canonical reachable from explode/UNNEST keywords:
+## Teacher feedback
 
-1. Add a branch in **r07 §1a** (the explode/UNNEST landing, ~lines 41–66) that DISAMBIGUATES native-array vs JSON-array-string columns. For a varchar column holding `'["vip","beta","trial"]'`, the canonical is:
-   ```sql
-   CROSS JOIN UNNEST(CAST(json_parse(tags) AS ARRAY(VARCHAR))) AS t(tag)
-   ```
-   Lead with: "If `tags` is a native `ARRAY(VARCHAR)` column, `UNNEST(tags)` directly. If `tags` is a VARCHAR holding a JSON array string, you MUST first `CAST(json_parse(tags) AS ARRAY(VARCHAR))` — `UNNEST` requires an ARRAY/MAP and **`UNNEST(<varchar>)` is a type error** (verified sql/select.html)."
-2. Keyword-anchor it: "explode JSON array string, UNNEST JSON array column, one row per tag from JSON string, flatten JSON array varchar, json_parse then UNNEST, tags stored as JSON string to rows, CAST json_parse AS ARRAY then UNNEST."
-3. DEFANG the trap inline (un-copyable WRONG mark): `UNNEST(tags)` when `tags` is a varchar JSON string → **WRONG, type error "cannot UNNEST varchar"**; and do NOT reinterpret a JSON-string column as a native `ARRAY[...]` literal.
-4. Cross-ref to r09:876 (`CAST(json_parse(tags_raw) AS ARRAY(VARCHAR))`). Apply Reconcile-Don't-Append: keep r07 §1a's native-array form as-is, add the JSON-string branch so the responder picks the right one.
+**(a) Is explode-JSON-array-STRING CLOSED?** YES — Q1 fix WORKED (1st clean post-fix datapoint). The responder led with `UNNEST(CAST(json_parse(col) AS ARRAY(VARCHAR)))`, did NOT recur the iter798 bare-`UNNEST(varchar)` type error, and cited the new r07 §1a card. The native-vs-JSON-string disambiguator + DO-NOT-COPY defang at r07:70-101 routed correctly. Needs ONE more phrasing (e.g. a NUMERIC JSON-array-string `'[10,20,30]'` -> `CAST(json_parse(col) AS ARRAY(BIGINT))`, or a "tags stored as JSON text" wording) to move from CLOSED -> BULLETPROOFED.
 
-PRESERVE (verified clean this iter, churn risk): r23 DENSE_RANK nth-distinct card, r07 window-AVG above-group-avg card, r07 date_trunc MTD-boundary card.
+**(b) iter800 designation: DEFAULT NO-OP / durability-breadth sweep.** No open defect surfaced this iteration — all 4 clean on-pin and docs-verified. Teacher should make ZERO edits. Suggested iter800 probes:
+- 1 fresh explode-JSON-array-STRING re-probe with a NUMERIC array string (`ARRAY(BIGINT)` branch) to bank the 2nd post-fix datapoint and bulletproof.
+- Fresh adjacent: `AT TIME ZONE` with a plain `timestamp WITHOUT time zone` source (the without-tz interpret-not-convert nuance from Q2) / `transform(array, lambda)` map-over-array (sibling to `filter`) / `GROUPING SETS` explicit form vs `CUBE` (sibling to ROLLUP).
+
+**PRESERVE (verified clean, churn risk):** r07 §1a native-vs-JSON-string explode card + disambiguator + DO-NOT-COPY defang (lines 70-101, drove the Q1 fix); r07/r28 ROLLUP+GROUPING-bitmask card; r07 `AT TIME ZONE` card; r07 higher-order `filter`/`array_remove` card. Do not append or churn these.
+
+**Standing pins all held:** UNNEST-needs-array (json_parse+CAST for JSON-string), AT-TIME-ZONE-named-IANA-tz-DST-aware, ROLLUP-GROUPING-bitmask (1=rolled-up, leftmost=high bit, column-names-only), higher-order-filter-lambda-array-in-array-out.
