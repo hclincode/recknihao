@@ -1,58 +1,54 @@
-# iter848 Judge Feedback — DEFAULT NO-OP durability sweep
+# Judge Feedback — iter849 (DEFAULT NO-OP durability sweep; teacher made ZERO resource edits)
 
-**Mode**: Final/extended phase. Teacher made ZERO resource edits. End-of-iteration feedback only.
+**Verdict: overall avg 4.88 — STRONG PASS** (threshold 3.5; overall average governs, no per-Q veto).
+All dialect claims verified against trino.io/docs/467 (datetime.html, math.html, functions/list.html) + WebSearch 2026-06-09. PIN Trino 467.
 
-**Overall: 5.00 — STRONG PASS** (PASS threshold 3.5; overall average governs, no per-Q veto)
+## Per-question scores
 
-All dialect claims verified against trino.io/docs/467 (conversion.html, datetime.html, math.html, binary.html) + WebSearch, 2026-06-09. PIN Trino 467.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 last_day_of_month | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 clamp least(greatest(...)) | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 truncate to 2 decimals no rounding | 5 | 4 | 5 | 5 | 4.75 |
+| Q4 Unix epoch seconds for Node | 5 | 4 | 5 | 5 | 4.75 |
 
----
-
-## Per-Q scores
-
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | format currency `$1,234.56` | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | day-of-year (1..366) | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | trig + degrees→radians | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | hex string→int / int→binary | 5 | 5 | 5 | 5 | 5.00 |
-
-**Overall avg = 5.00 → PASS**
+**Overall avg = (5.00 + 5.00 + 4.75 + 4.75) / 4 = 4.875 ≈ 4.88** — STRONG PASS.
 
 ---
 
-## Verification detail
+## Q1 — snap to last day of month (5.00 CLEAN)
+`last_day_of_month(signup_date)` is exactly right. VERIFIED vs datetime.html: `last_day_of_month(x) → date`, "Returns the last day of the month." Confirmed Trino has NO `LAST_DAY()` (Oracle) and NO `end_of_month()` (BQ/Snowflake) alias — only `last_day_of_month()` lowercase. Responder correctly named the foreign aliases as absent and pointed to the native fn (much cleaner than the Postgres date_trunc+interval pattern the engineer asked to replace). The "N months out" CASE/date_add note is sound and addresses the future-month-end-clamp nuance. No defect.
 
-**Q1 — `format('$%,.2f', revenue_amount)` → '$1,234.56'** — CLEAN.
-Verified conversion.html: Trino `format(format, args...)→varchar` uses java.util.Formatter (Java/printf-style). `%,.2f` = thousands grouping (`,` flag) + 2 decimals; doc-confirmed `format('%,.2f', 1234567.89)` → '1,234,567.89'. Literal `$` (non-`%` char) passes through unchanged → '$1,234.56' for 1234.56. "Cleaner than ||+CAST" is sound. No defect.
+## Q2 — clamp health score to [0,100] (5.00 CLEAN)
+`least(greatest(health_score_raw, 0), 100)` is the canonical idiom and correct. VERIFIED vs Trino 467: greatest/least are row-wise scalars over the arg list; `greatest(x,0)` floors at 0, `least(...,100)` caps at 100 (-5→0, 150→100, 75→75). **NULL caveat CONFIRMED CORRECT**: Trino's greatest/least return NULL if ANY argument is NULL — this DIFFERS from Postgres (which skips NULLs and returns NULL only when ALL args are NULL). The `COALESCE(x,0)` wrap recommendation is exactly the right defensive fix. No defect.
 
-**Q2 — `day_of_year(created_at)` / `doy(created_at)`** — CLEAN.
-Verified datetime.html: `day_of_year(x)→bigint`, range 1..366 (Jan 1=1); `doy` is the documented alias. Feb 1=32 arithmetically correct (Jan has 31 days). day_* family all confirmed: day_of_week/dow (ISO 1=Mon..7=Sun), week_of_year/week (week_of_year is alias for week), year_of_week/yow. BIGINT return correct. No defect.
+## Q3 — truncate to 2 decimals WITHOUT rounding (4.75)
+**TWO-ARG TRUNCATE VERDICT: Trino 467 DOES have a two-arg `truncate(x, n)`** ("Returns x truncated to n decimal places") in ADDITION to the one-arg `truncate(x)` (toward-zero to integer). The WebFetch markdown converter repeatedly collapsed the two adjacent overload lines on math.html and surfaced only the one-arg form, but WebSearch against trino.io math.html (and the Presto lineage the function descends from) confirms both overloads exist in 467. So the SIMPLER direct form `truncate(amount, 2)` was available.
 
-**Q3 — trig family takes RADIANS; `radians()` to convert** — CLEAN.
-Verified math.html: sin/cos/tan/asin/acos/atan/atan2(y,x) all present; "All trigonometric function arguments are expressed in radians." `radians(x)` degrees→radians, `degrees(x)` reverse, `pi()` exists. The WARNING is correct and high-value: `sin(30)` treats 30 as radians (30 rad ≈ 1719°, sin ≈ −0.988), NOT 0.5 — must wrap `sin(radians(30))` ≈ 0.5 for degree data. `cos(radians(90))` ≈ 0 correct. No defect.
+The responder used `truncate(amount * 100) / 100`. This is **correct**: ×100 → 1267.9, one-arg `truncate()` drops the fractional part toward zero → 1267, ÷100 → 12.67 (pure truncation, no rounding). Verified `round(amount, 2)` IS half-up (12.679 → 12.68), so round is correctly rejected when truncation is required.
 
-**Q4 — from_base/to_base for integer radix; to_hex/from_hex are VARBINARY (CRITICAL distinction)** — CLEAN.
-Verified math.html: `from_base(string, radix)→bigint`, `to_base(x, radix)→varchar`. Arithmetic confirmed: 0x1a3f = 1·4096+10·256+3·16+15 = 6719 ✓; 255 = '11111111' base-2 ✓; 255 = 'ff' base-16 ✓. "Radix 2-36" is the correct implementation bound (docs don't state the range; standard Trino enforcement). Critically, the caveat is CORRECT and verified against binary.html: `from_hex(string)→varbinary` and `to_hex(binary)→varchar` operate on VARBINARY (binary blobs / hash digests, e.g. `to_hex(md5(...))`), NOT integers — so they are NOT the integer-radix converters. Steering legacy-hex-string→integer to `from_base(..,16)` and integer→binary-string to `to_base(..,2)`, while explicitly warning OFF to_hex/from_hex, is exactly right and is the single most error-prone confusion in this area. No defect.
+**−0.25 completeness only** (NOT accuracy): the responder did not mention that the direct `truncate(amount, 2)` overload exists, which is the cleaner one-liner the engineer could use. The ×100/100 trick is fully correct and a legitimate canonical approach — just slightly more verbose than necessary. No error, no fabrication, no parse risk. The `CAST(... AS DECIMAL(18,2))` display note is sound.
+
+## Q4 — current Unix epoch seconds for Node.js (4.75)
+`to_unixtime(current_timestamp)` VERIFIED → returns DOUBLE (fractional epoch seconds). `CAST(... AS BIGINT)` for whole seconds and `*1000` then CAST for millis are both correct and idiomatic. The Node `new Date(epochSeconds*1000)` framing is accurate and helpful for the audit-log use case.
+
+**CAST-ROUNDS NUANCE (−0.25 completeness, NOT accuracy)**: `CAST(double AS BIGINT)` in Trino 467 ROUNDS half-up (pinned fact), it does NOT floor/truncate. So `CAST(to_unixtime(current_timestamp) AS BIGINT)` rounds the fractional second to the nearest whole second rather than flooring it. The responder did not state this and the Node `Math.floor()` mental model is slightly imprecise (rounds vs floors). This is **negligible in practice**: a "current time" epoch is captured continuously, so whether the sub-second fraction rounds or floors shifts the recorded second by at most 1 and is irrelevant for an audit-log timestamp. Core `to_unixtime` + CAST approach is fully correct. (For strict floor semantics the engineer could wrap `CAST(floor(to_unixtime(current_timestamp)) AS BIGINT)`, but this was not required.)
 
 ---
 
-## Findings / gaps
+## Defect / gap summary
+- **No defects.** No fabrication, no parse-error risk, no dialect error, no prod-env conflict (all pure SQL; on-prem Trino 467 + Iceberg + MinIO stack unaffected).
+- Two minor completeness nuances, both non-errors:
+  - Q3: direct `truncate(x, 2)` overload exists and is simpler (responder's ×100/100 trick is still correct).
+  - Q4: `CAST(double AS BIGINT)` rounds rather than floors (negligible for whole-second epochs).
 
-- No defect, no fabrication, no parse-error risk, no dialect error, no findability slip across all 4 answers.
-- Pure-SQL questions; no production-environment (on-prem MinIO / Trino 467 / OPA / JWT) conflict surfaced.
-- Q4 is the standout: the from_base/to_base vs to_hex/from_hex VARBINARY distinction is correctly and proactively drawn — a classic trap handled cleanly.
-- Q3's radians-input warning demonstrates strong defensive framing (anticipates the silent-wrong-result failure mode).
+## iter850 directive
+**iter850 = DEFAULT NO-OP / durability sweep (NOT a FIX-A — no defect surfaced).** Both Q3/Q4 dings are sub-0.5 completeness nuances on otherwise-correct canonicals, not content defects warranting an edit. Optionally, IF the teacher chooses a light findability touch (NOT required, NOT a FIX-A), the highest-value adjacent improvements would be:
+  - co-locate the `truncate(x, 2)` two-arg form alongside the ×100/100 truncate-no-round card so the simpler form is reachable on "truncate to N decimals" keywords;
+  - add a one-line note that `CAST(double AS BIGINT)` ROUNDS (half-up) not floors at the to_unixtime/epoch card, with a `floor()` wrap for strict floor semantics.
 
-## iter849 directive
+Re-probe fresh adjacent 2nd-angle batch next iter: `truncate(x, -2)` negative-places / `floor` vs `truncate` toward-zero-vs-neg-infinity contrast / `from_unixtime(double) → timestamp` reverse direction / multi-arg `greatest`/`least` over 3+ columns / clamp with a dynamic upper-bound column.
 
-**iter849 = DEFAULT NO-OP / durability sweep (NOT a FIX-A — no defect surfaced).**
-Teacher: ZERO resource edits. Re-probe fresh adjacent 2nd-angle batch to keep breadth honest, e.g.:
-- format() with multiple args / percent label `format('%.1f%%', ...)` (escaped literal `%%`) — 2nd angle on the format/Java-Formatter card.
-- `quarter()` / `extract(QUARTER FROM ...)` or `last_day_of_month()` — 2nd angle on the date-part family.
-- `degrees(atan2(y,x))` bearing-angle or `power`/`sqrt`/`ln`/`exp` — 2nd angle on math family.
-- `from_base`/`to_base` round-trip or an out-of-range-radix / non-numeric-string edge — 2nd angle on radix conversion; re-confirm the to_hex/from_hex-VARBINARY distinction holds under rephrase.
+PRESERVE iter843 approx_percentile accuracy framing + iter842 value-vs-rank clarifier + iter840 weighted-avg §3.1B-WA + iter837 string→DATE MySQL-vs-Joda + iter836 lpad/format pad + iter831 month-name grouping + iter827 boolean-aggregate-NULL + iter824/823 split_part/GROUP-BY-alias/repeat-char + trim char-set + default-NULLS-LAST + CAST-rounds-half-up + full iter534-848 pins. NO federation edits (federation 4.49944/310).
 
-PRESERVE all standing pins: iter843 approx_percentile accuracy framing, iter842 value-vs-rank clarifier, iter840 weighted-avg §3.1B-WA, iter837 string→DATE MySQL-vs-Joda disambiguator, iter836 lpad/format pad+truncate, iter831 month-name grouping, iter827 boolean-aggregate-NULL, iter824/823 split_part/GROUP-BY-alias/repeat-char, trim char-set, default-NULLS-LAST, full iter534-847 lock inventory. NO federation edits (federation row stays 4.49944/310).
-
-**DO NOT bump training/state.json (already 848).**
+**DO NOT bump training/state.json (already 849).**
