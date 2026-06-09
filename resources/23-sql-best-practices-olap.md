@@ -583,6 +583,26 @@ FROM customer_summary;
 
 **Why prefer `format()` over long `||` chains.** `format()` handles the type conversion automatically — `%d` takes a BIGINT directly, `%.2f` takes a DOUBLE/DECIMAL directly. The `||` / `concat()` operator in Trino REQUIRES all-VARCHAR arguments (does NOT auto-coerce numerics), so building the same string via `||` requires `CAST(...)` on every numeric piece: `'User ' || user_id || ' made ' || CAST(purchase_count AS VARCHAR) || ' purchases totaling $' || CAST(total_amount AS VARCHAR)` — uglier AND loses the comma-grouping / decimal-precision formatting.
 
+#### SUB-CANONICAL — pad a STRING to a FIXED WIDTH (`rpad` / `lpad`) — the one-function answer for fixed-width flat-file exports
+
+> **Use this when you need to:** pad a string to a fixed width, build a **fixed-width flat-file export**, right-pad with spaces, left-pad, pad to N characters, **truncate if longer**, align text in a fixed field, make every value exactly 20 chars, pad to a fixed-width column. (Keyword anchors so the responder lands here: *pad a string to fixed width, fixed-width flat-file export, right-pad with spaces, left-pad, pad to N characters, truncate if longer, rpad, lpad, fixed-width column, align text in a fixed field, pad product_code to 20 chars*.) **`format()` does NOT do this** — `format('%-20s', s)` left-justifies in a 20-wide field but does NOT TRUNCATE a longer string. The correct tool is **`rpad` / `lpad`**.
+
+```sql
+-- ✅ COPY THIS — pad a string to a FIXED WIDTH (e.g. a fixed-width flat-file export):
+rpad(product_code, 20, ' ')        -- right-pad to 20 chars with spaces; TRUNCATES to 20 if longer
+lpad(product_code, 20, ' ')        -- left-pad to 20 chars with spaces; also truncates to 20 if longer
+lpad(CAST(id AS VARCHAR), 8, '0')  -- left-pad a number to width 8 with leading zeros -> '00000042'
+```
+
+**Behavior (verbatim per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html)).** `rpad(string, size, padstring) -> varchar` *"Right pads `string` to `size` characters with `padstring`. If `size` is less than the length of `string`, the result is truncated to `size` characters."* `lpad(string, size, padstring)` is the analogous left-pad — **also truncates** when the input is longer than `size`. Both take a **`padstring`**: `' '` for spaces, `'0'` for leading zeros. This is the ONE-function answer for fixed-width padding: it pads **and** truncates in a single call, so a 25-char `product_code` and a 12-char `product_code` both come out exactly 20 wide.
+
+```sql
+-- ❌ LEFT(product_code, 20)         -- Trino has NO left()/right() — use substr(product_code, 1, 20) — DO NOT COPY
+-- ❌ format('%-20s', product_code)  -- pads but does NOT truncate a longer string (would need %-20.20s); prefer rpad — DO NOT COPY
+```
+
+**Cross-reference.** For the Oracle `LPAD` / `RPAD` migration angle and the numeric-zero-pad CAST rule (Trino's `lpad` first arg must be VARCHAR — `lpad(CAST(account_id AS VARCHAR), 10, '0')` — no implicit number coercion), see [resource 27 §7A.3.1 string-function port table, `LPAD`/`RPAD` row](27-oracle-plsql-to-dbt-trino.md).
+
 **Distinguish from related "format" functions — DIFFERENT functions, different uses:**
 
 | Function | Use it for | Format string style |
