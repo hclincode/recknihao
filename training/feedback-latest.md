@@ -1,42 +1,69 @@
-# Judge Feedback — iter868 (EXTENDED PHASE)
+# Judge Feedback — iter869 (EXTENDED PHASE)
 
-**Overall: 4.97 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.875 = 19.875 / 4 = 4.96875; margin +1.47; overall average governs, no per-Q veto)
+## Verdict: STRONG PASS — overall avg 4.94 (per-Q 5.00 / 5.00 / 5.00 / 4.75 = 19.75/4 = 4.9375; margin +1.44)
 
-**Federation NOT probed** — r22 §13.x row UNCHANGED (4.49944 / 310, still FAIL).
+Overall average governs; no per-Q veto. Federation NOT probed this iteration — the 4.49944/310 FAIL row is UNCHANGED.
 
----
-
-## Dialect verification (trino.io/docs/467, multi-source, WebFetch 2026-06-10)
-
-- **functions/list.html**: `median` ABSENT, `percentile_cont` ABSENT, `percentile_disc` ABSENT, `approx_percentile` PRESENT. P-section lists only `approx_percentile` as percentile-related; `percent_rank` is a window fn (rank-of-row, not value-at-percentile).
-- **functions/aggregate.html**: `approx_percentile` has exactly 4 overloads — `(x, percentage)`, `(x, percentages array)`, `(x, w, percentage)`, `(x, w, percentages)`; percentage in [0,1], constant. `median`/`percentile_cont`/`percentile_disc` ABSENT.
-- **functions/datetime.html**: `date_format(timestamp, fmt)` uses MySQL-style specifiers (`%Y`, `%m`); `format_datetime(timestamp, fmt)` uses JodaTime patterns (`yyyy`, `MM`). DATE→VARCHAR not explicitly enumerated on the page, but ISO 'YYYY-MM-DD' is the established Trino conversion (to_iso8601 / from_iso8601_date both use YYYY-MM-DD).
-
-**EXPLICIT: Trino 467 has NO exact-median function and NO percentile_cont / percentile_disc / median(). approx_percentile (T-Digest) is the standard median/percentile approach.** The responder's "no exact median" claim is ACCURATE.
+All four questions are pure Trino 467 SQL/dialect; none touch permissions/auth, so prod_info.md (on-prem k8s, MinIO, Trino 467 Iceberg, JWT+OPA) imposes no additional constraint here. Every dialect claim was verified against trino.io/docs/467 via WebFetch on 2026-06-10.
 
 ---
 
-## Per-question scores
+## Q1 — Highest-ticket-count department NAME (no ORDER BY/LIMIT hack)
 
-### Q1 — median of a numeric column — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
-`approx_percentile(amount, 0.5) AS median_amount` returns the approximate median — CORRECT. Multi-percentile array form `approx_percentile(x, ARRAY[0.5,0.95,0.99])` — CORRECT (overload #2). The CLAIM "Trino has no exact median / no PERCENTILE_CONT, approx_percentile is the standard accepted choice" — VERIFIED ACCURATE vs list.html + aggregate.html. No defect.
+Responder: `max_by(department, cnt)` over an inner `SELECT department, COUNT(*) AS cnt ... GROUP BY department`. Returns the department name paired with the max count, one row, no sort.
 
-### Q2 — custom sort order urgent→normal→low — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
-`ORDER BY CASE status WHEN 'urgent' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END` is valid Trino and sorts ascending by the mapped priority. Secondary ORDER BY for ties is a correct, helpful nuance.
+VERIFIED vs trino.io/docs/467 functions/aggregate.html: `max_by(x, y)` returns "the value of `x` associated with the maximum value of `y` over all input values." This is exactly the argmax-name pattern — correct. It avoids the ORDER BY ... LIMIT 1 hack as the question demanded, and `max_by` is one of the documented ignore-null EXCEPTIONS so it behaves cleanly. Ties: docs do not specify tie-breaking; `max_by` returns one arbitrary winner on a tie. This is a COMPLETENESS nuance only, not an error — the question asked for "the single highest," and the pattern is the canonical answer.
 
-### Q3 — percent of users with is_churned=true — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
-`SUM(CASE WHEN is_churned THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS percent_churned` — correct proportion idiom. The 100.0 decimal-division explanation is correct: all-integer division truncates; the decimal literal forces non-truncating division. Equivalent alts `count_if(is_churned)*100.0/COUNT(*)` and `AVG(CAST(is_churned AS integer))*100` (count_if verified as a 467 aggregate); omission not a ding for this question.
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+- Note: tie-arbitrariness unmentioned; nuance only, does not justify a ding given the question framing.
 
-### Q4 — group by month, sortable 'YYYY-MM' label — **4.875** (Acc5 / Comp4.5 / Clar5 / Act5)
-`substr(CAST(event_date AS varchar), 1, 7) AS month_label` with matching GROUP BY — VALID. For a DATE, CAST→VARCHAR yields ISO 'YYYY-MM-DD' so chars 1-7 = 'YYYY-MM' and string-sorts chronologically. For a TIMESTAMP, CAST→VARCHAR prefixes 'YYYY-MM-DD' so substr 1-7 still yields 'YYYY-MM'. Correct and robust.
-Minor completeness ding: the intent-explicit forms `date_format(event_date,'%Y-%m')` / `format_datetime(event_date,'yyyy-MM')` were not mentioned. substr is valid but relies on the implicit ISO-string contract; a dedicated formatter would be more self-documenting. Nuance, not an error.
+## Q2 — Extract hour-of-day 0–23 from a plain TIMESTAMP
+
+Responder: `hour(created_at) AS hour_of_day`, `GROUP BY hour(created_at)`; said `hour()` returns a bigint 0–23 from the value as stored.
+
+VERIFIED vs trino.io/docs/467 functions/datetime.html: `hour(timestamp)` "Returns the hour of the day from `x`. The value ranges from `0` to `23`." Return type bigint. Correct on function, range, and type. Grouping by the expression (not a SELECT alias) is also Trino-legal. Fully correct.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+
+## Q3 — Replace LEFT JOIN NULLs with a default ('free')
+
+Responder: `COALESCE(s.plan, 'free') AS plan_type`; explained COALESCE returns the first non-NULL, cleaner than CASE WHEN IS NULL.
+
+VERIFIED vs trino.io/docs/467 functions/conditional.html: COALESCE "Returns the first non-null `value` in the argument list. Like a `CASE` expression, arguments are only evaluated if necessary." Correct, and the "cleaner than CASE" framing is accurate. Textbook.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+
+## Q4 — Filter orders to CURRENT calendar year, auto-updating
+
+Responder: `WHERE year(order_date) = year(current_date)`; explained current_date is evaluated at runtime so it auto-updates.
+
+VERIFIED vs trino.io/docs/467 functions/datetime.html: `year(date)` "Returns the year from `x`" (bigint); `current_date` "Returns the current date as of the start of the query" (date, no parens). The comparison is CORRECT for results and DOES auto-update each calendar year — no hardcoded literal. The responder's runtime/auto-update explanation is accurate.
+
+COMPLETENESS/perf nuance (NOT an accuracy error): wrapping the column in `year(order_date)` applies a function to the partition/predicate column, so Trino cannot use partition pruning or min/max column stats efficiently — it must evaluate `year()` per row. The sargable, pruning-friendly form is a half-open range on the bare column:
+
+```
+WHERE order_date >= date_trunc('year', current_date)
+  AND order_date <  date_trunc('year', current_date) + INTERVAL '1' YEAR
+```
+
+This is equivalent in results, still auto-updating, and lets the Iceberg connector prune partitions / use min-max stats. On the production stack (Trino 467 + Iceberg, large fact tables) this matters for scan cost. The given form is fully correct for correctness; the omission of the sargable alternative is the only gap.
+
+- Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 → **avg 4.75**
+- The Completeness ding is for not mentioning the sargable/partition-pruning rewrite — a genuinely valuable nuance for this audience and stack, but a soft ding, not a defect (the answer is correct and runnable).
 
 ---
 
-## iter869 recommendation: DEFAULT NO-OP / durability sweep — teacher ZERO edits
+## Topic mapping (rubric)
 
-All 4 answers clean; no defect; no FIX-A warranted. Do NOT add a "substr is wrong / must use date_format" card — substr is valid. Optional only (if Q4 ever under-scores): a one-line cross-ref that `date_format('%Y-%m')` / `format_datetime('yyyy-MM')` are intent-explicit alternatives to the substr trick.
+Touched topic: **SQL query best practices for OLAP** (Q1/Q2/Q3 core SQL; Q4 sargable-predicate angle is the partition-column-in-WHERE / pushdown-breaking-pattern facet of this row). Already PASSED (4.4600 / 153). This iteration is consistent with passing; no status change.
 
-HOLD all iter534-866 locks (approx_percentile 4-overload family + value-vs-rank clarifier iter842/843, no-median/percentile_cont pin, per-row CAST-sum flag-count §3.1E iter866, count_if SHAPE-ROUTER, harmonic/geometric/weighted mean §3.1B family, at_timezone column-zone §Fact 3b iter857, NTILE direction §C3 iter862, GREATEST-NULL). PIN Trino 467. NO federation edits (row stays 4.49944/310, still FAIL). DO NOT bump training/state.json (already 868/passed).
+Federation (FAIL, 4.49944/310): NOT probed — row UNCHANGED.
 
-Optional fresh adjacents for iter869: approx_percentile weighted overload / median 2nd phrasing ("50th percentile value") / multi-key custom CASE sort with NULLS handling / date_trunc('month') vs substr label / percent-of-total with window SUM() OVER().
+## iter870 Recommendation: DEFAULT NO-OP (durability sweep)
+
+All four answers are dialect-correct and verified. The only soft gap is Q4's missing sargable-rewrite nuance.
+
+- **No FIX-A required.** The Q4 `year(col)=year(current_date)` form is CORRECT for results; this is a completeness nuance, not a defect. Do NOT add a "year(order_date) is WRONG" card — that would be inaccurate.
+- OPTIONAL low-priority (only if a future Q4-style answer under-scores on perf): a one-line cross-ref near the current-year/date-filter content noting the sargable half-open `order_date >= date_trunc('year', current_date) AND order_date < ... + INTERVAL '1' YEAR` form for partition pruning. Do NOT churn existing pins to add it; place only at a keyword-findable date-filter landing.
+- HOLD all iter534–866 locks. PIN Trino 467. NO federation edits (r22 §13.x ZERO). DO NOT bump training/state.json (already 869/passed).
+- Optional fresh adjacents for iter870: sargable date-range vs function-on-column (2nd phrasing) / max_by ties + arbitrary-winner handling / COALESCE empty-string-vs-NULL / hour() on TIMESTAMP WITH TIME ZONE vs plain.
