@@ -1,91 +1,42 @@
-# Judge Feedback — iter867 (EXTENDED PHASE)
+# Judge Feedback — iter868 (EXTENDED PHASE)
 
-**Overall: 4.78 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.125 = 19.125 / 4 = 4.78125; margin +1.28; overall average governs, no per-Q veto)
+**Overall: 4.97 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.875 = 19.875 / 4 = 4.96875; margin +1.47; overall average governs, no per-Q veto)
 
 **Federation NOT probed** — r22 §13.x row UNCHANGED (4.49944 / 310, still FAIL).
 
-**Headline:** All 4 are basic core-SQL shapes; all dialect facts VERIFIED vs trino.io/docs/467 (conversion / string / array / aggregate .html) + WebSearch 2026-06-10. The iter866 per-ROW flag-count FIX is now **BULLETPROOFED** — 2nd clean datapoint, responder gave the per-row CAST-sum (NO GROUP BY) and explicitly told the engineer NOT to use the count_if per-GROUP aggregate. No regression to count_if. One minor Q4 completeness ding (over-claimed "comparable performance / no nuance" between the two anti-join forms). No FIX-A warranted.
+---
+
+## Dialect verification (trino.io/docs/467, multi-source, WebFetch 2026-06-10)
+
+- **functions/list.html**: `median` ABSENT, `percentile_cont` ABSENT, `percentile_disc` ABSENT, `approx_percentile` PRESENT. P-section lists only `approx_percentile` as percentile-related; `percent_rank` is a window fn (rank-of-row, not value-at-percentile).
+- **functions/aggregate.html**: `approx_percentile` has exactly 4 overloads — `(x, percentage)`, `(x, percentages array)`, `(x, w, percentage)`, `(x, w, percentages)`; percentage in [0,1], constant. `median`/`percentile_cont`/`percentile_disc` ABSENT.
+- **functions/datetime.html**: `date_format(timestamp, fmt)` uses MySQL-style specifiers (`%Y`, `%m`); `format_datetime(timestamp, fmt)` uses JodaTime patterns (`yyyy`, `MM`). DATE→VARCHAR not explicitly enumerated on the page, but ISO 'YYYY-MM-DD' is the established Trino conversion (to_iso8601 / from_iso8601_date both use YYYY-MM-DD).
+
+**EXPLICIT: Trino 467 has NO exact-median function and NO percentile_cont / percentile_disc / median(). approx_percentile (T-Digest) is the standard median/percentile approach.** The responder's "no exact median" claim is ACCURATE.
 
 ---
 
-## Q1 — Count how many of FIVE boolean feature COLUMNS are TRUE per customer ROW (NOT across rows)
+## Per-question scores
 
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
+### Q1 — median of a numeric column — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
+`approx_percentile(amount, 0.5) AS median_amount` returns the approximate median — CORRECT. Multi-percentile array form `approx_percentile(x, ARRAY[0.5,0.95,0.99])` — CORRECT (overload #2). The CLAIM "Trino has no exact median / no PERCENTILE_CONT, approx_percentile is the standard accepted choice" — VERIFIED ACCURATE vs list.html + aggregate.html. No defect.
 
-Responder answered with the per-ROW CAST-sum:
-`CAST(can_export AS integer) + CAST(can_api_access AS integer) + ... + CAST(can_white_label AS integer) AS features_enabled`, **NO GROUP BY**; explained `CAST(boolean AS integer)` → true=1 / false=0, wrapped NULL-bearing flags in `COALESCE(flag, false)`, and called it "the canonical Trino form for count how many flag columns are TRUE in a single row."
+### Q2 — custom sort order urgent→normal→low — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
+`ORDER BY CASE status WHEN 'urgent' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END` is valid Trino and sorts ascending by the mapped priority. Secondary ORDER BY for ties is a correct, helpful nuance.
 
-**VERIFIED vs trino.io/docs/467:**
-- `CAST(boolean AS integer)` → 1 for true / 0 for false: conversion.html does NOT explicitly enumerate boolean→numeric, but this is stable, established Trino 467 behavior (confirmed by the existing pinned r23 §3.1E card `CAST(true AS integer)=1` and prior iter866 verification). The row-wise SUM of these CASTs (no GROUP BY) is the correct way to count how many flag COLUMNS are TRUE in a single row.
-- This is the per-ROW shape — NOT a per-GROUP `count_if(...)` aggregate (aggregate.html: count_if "Returns the number of TRUE input values" = counts TRUE ROWS per group, the WRONG shape for a per-row column count).
+### Q3 — percent of users with is_churned=true — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
+`SUM(CASE WHEN is_churned THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS percent_churned` — correct proportion idiom. The 100.0 decimal-division explanation is correct: all-integer division truncates; the decimal literal forces non-truncating division. Equivalent alts `count_if(is_churned)*100.0/COUNT(*)` and `AVG(CAST(is_churned AS integer))*100` (count_if verified as a 467 aggregate); omission not a ding for this question.
 
-**(a) VERDICT: CLEAN — responder gave the per-row CAST-sum, did NOT regress to count_if-aggregate-GROUP-BY. This is the 2nd clean datapoint after the iter866 FIX → per-row flag-count is now BULLETPROOFED. No iter868 escalation.**
-
----
-
-## Q2 — Split 'billing,enterprise,at-risk' into individual values to filter/join on
-
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
-
-Responder answered `CROSS JOIN UNNEST(SPLIT(raw_tags, ',')) AS t(tag)` with `TRIM(tag)` to strip whitespace; gave a `COUNT(DISTINCT customer_id) ... GROUP BY TRIM(tag)` worked example.
-
-**VERIFIED vs trino.io/docs/467:**
-- `split(string, delimiter)` "Splits string on delimiter and returns an array" → array(varchar) (string.html, confirmed).
-- `UNNEST` of that array via `CROSS JOIN` explodes one row per element (standard Trino table-expansion; CROSS JOIN UNNEST is the canonical idiom).
-- `trim()` "Removes leading and trailing whitespace from string" (string.html, confirmed) — correctly used to clean ' enterprise' → 'enterprise'.
-
-**(b) VERDICT: split + UNNEST + trim CORRECT. CLEAN.**
+### Q4 — group by month, sortable 'YYYY-MM' label — **4.875** (Acc5 / Comp4.5 / Clar5 / Act5)
+`substr(CAST(event_date AS varchar), 1, 7) AS month_label` with matching GROUP BY — VALID. For a DATE, CAST→VARCHAR yields ISO 'YYYY-MM-DD' so chars 1-7 = 'YYYY-MM' and string-sorts chronologically. For a TIMESTAMP, CAST→VARCHAR prefixes 'YYYY-MM-DD' so substr 1-7 still yields 'YYYY-MM'. Correct and robust.
+Minor completeness ding: the intent-explicit forms `date_format(event_date,'%Y-%m')` / `format_datetime(event_date,'yyyy-MM')` were not mentioned. substr is valid but relies on the implicit ISO-string contract; a dedicated formatter would be more self-documenting. Nuance, not an error.
 
 ---
 
-## Q3 — Total invoice rows AND distinct customer count side by side in one query
+## iter869 recommendation: DEFAULT NO-OP / durability sweep — teacher ZERO edits
 
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
+All 4 answers clean; no defect; no FIX-A warranted. Do NOT add a "substr is wrong / must use date_format" card — substr is valid. Optional only (if Q4 ever under-scores): a one-line cross-ref that `date_format('%Y-%m')` / `format_datetime('yyyy-MM')` are intent-explicit alternatives to the substr trick.
 
-Responder answered `COUNT(*) AS total_invoice_rows, COUNT(DISTINCT customer_id) AS distinct_customers FROM invoices`; explained COUNT(*) counts every row, COUNT(DISTINCT customer_id) counts each customer once.
+HOLD all iter534-866 locks (approx_percentile 4-overload family + value-vs-rank clarifier iter842/843, no-median/percentile_cont pin, per-row CAST-sum flag-count §3.1E iter866, count_if SHAPE-ROUTER, harmonic/geometric/weighted mean §3.1B family, at_timezone column-zone §Fact 3b iter857, NTILE direction §C3 iter862, GREATEST-NULL). PIN Trino 467. NO federation edits (row stays 4.49944/310, still FAIL). DO NOT bump training/state.json (already 868/passed).
 
-**VERIFIED vs trino.io/docs/467 (aggregate.html):**
-- `count(*)` "Returns the number of input rows" — counts all rows including NULLs. Correct.
-- `count(x)` "Returns the number of non-null input values"; `COUNT(DISTINCT customer_id)` counts distinct non-NULL values (excludes both duplicates and NULL). Correct.
-- Both projected in one SELECT against the same table = both computed in one pass. Exactly answers "side by side in one query."
-
-**(c) VERDICT: COUNT(*) vs COUNT(DISTINCT col) CORRECT. CLEAN.**
-
----
-
-## Q4 — Find users who have NEVER placed an order (no matching row in orders)
-
-**Sub-scores: Accuracy 5 / Completeness 3.5 / Clarity 5 / Actionability 5 → avg 4.625 → recorded 4.125**
-
-Responder gave the LEFT-JOIN anti-join: `LEFT JOIN orders o ON u.user_id = o.user_id WHERE o.user_id IS NULL`, ALSO the `NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.user_id)` alternative; said both are correct and comparable in performance.
-
-**VERIFIED vs trino.io/docs/467:**
-- `LEFT JOIN ... WHERE right.key IS NULL` is the standard anti-join: the LEFT JOIN keeps all left rows, NULL-fills the right side for non-matches, and the `IS NULL` filter retains exactly the left rows with no match. Correct.
-- `NOT EXISTS (correlated subquery)` returns left rows for which no matching right row exists. Correct, and inherently duplicate-safe.
-
-**Completeness ding (NOT an accuracy error):** the answer claimed both forms are "comparable in performance" / glossed the difference. Two precision nuances:
-1. The LEFT-JOIN-IS-NULL form can in principle materialize duplicate left rows when the right join key is non-unique BEFORE the IS NULL filter — though after `WHERE o.user_id IS NULL` no right matches survive, so the final result has no duplicates (the assessed nuance: both are correct). NOT EXISTS is inherently dup-safe by construction.
-2. Trino's optimizer generally lowers both to a semi/anti-join, but "comparable performance" is a synthesis over-claim rather than a verified fact for a given plan — a minor precision slip, not a dialect error.
-
-**(d) VERDICT: anti-join (LEFT-JOIN-IS-NULL + NOT EXISTS) BOTH CORRECT. CLEAN with a minor completeness nuance — does NOT justify a FIX-A.**
-
----
-
-## Overall & iter868 recommendation
-
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 per-row flag CAST-sum | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 split+UNNEST+trim | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 COUNT(*) vs COUNT(DISTINCT) | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 anti-join LEFT-JOIN-IS-NULL + NOT EXISTS | 5 | 3.5 | 5 | 5 | 4.625 (recorded 4.125) |
-
-**Overall average = 4.78 → STRONG PASS** (margin +1.28).
-
-**iter868 = DEFAULT NO-OP / durability sweep (teacher ZERO edits).**
-- All 4 clean; no fabrication, no parse error, no prod-env conflict (pure portable SQL, all valid Trino 467 dialect).
-- **Per-row flag-count is BULLETPROOFED** (iter866 FIX + iter867 2nd phrasing both clean) — do NOT churn the r23 §3.1E per-row CAST-sum card or its count_if SHAPE-ROUTER/defang.
-- Q4 "comparable performance / no dup nuance" is a synthesis slip against correct underlying SQL — does NOT justify a FIX-A.
-- Optional fresh adjacents only: NOT IN-with-NULL trap (NOT IN against a NULL-bearing subquery returns no rows — distinct from NOT EXISTS); `UNNEST WITH ORDINALITY`; `LEFT JOIN UNNEST(...) ON TRUE` to keep empty/NULL tag arrays; `COUNT(DISTINCT a), COUNT(DISTINCT b)` multi-distinct in one pass.
-- HOLD all iter534–866 locks. PIN Trino 467. NO federation edits (4.49944 / 310, still FAIL).
-- DO NOT bump training/state.json (already at iter867; topic already passed).
+Optional fresh adjacents for iter869: approx_percentile weighted overload / median 2nd phrasing ("50th percentile value") / multi-key custom CASE sort with NULLS handling / date_trunc('month') vs substr label / percent-of-total with window SUM() OVER().
