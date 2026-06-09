@@ -1,77 +1,67 @@
-# Judge Feedback — iter782 (EXTENDED phase) — FINDABILITY FIX-A verification
+# Judge Feedback — iter783
 
-**Overall: 4.625 / 5 — PASS** (per-Q avg 4.50 / 4.625 / 4.625 / 4.75 = 18.50 / 4; margin +1.125; overall avg governs, no per-Q veto)
+**Phase:** extended (final-style; feedback at end of iteration)
+**Sweep:** LIGHT ADDITIVE FINDABILITY FIX-A — iter782 Q3 cited `array_intersect` (an ARRAY function) for a row-level INTERSECT; iter783 enhanced r23 §3.1F set-operations card with INTERSECT/EXCEPT anchors + array-vs-row disambiguator. Q1 re-probes the fix; Q2–Q4 fresh.
+**Overall: 4.6875 — PASS** (threshold 3.5; overall average governs, no single-Q veto)
 
-Federation (r22) NOT probed this sweep. All dialect claims verified vs trino.io/docs/467 + GitHub trinodb/StarRocks issues on 2026-06-09. resources/ NOT treated as ground truth.
-
----
-
-## Per-question scores
-
-### Q1 — DATE-SERIES RE-PROBE (monthly grain, zero-fill gaps) — avg 4.50
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 4 |
-| Clarity | 5 |
-| Actionability | 4 |
-
-`SELECT d.day, COALESCE(s.revenue,0) FROM UNNEST(sequence(DATE '2025-01-01', DATE '2025-12-31', INTERVAL '1' MONTH)) AS d(day) LEFT JOIN monthly_revenue s ON s.month = d.day ORDER BY d.day`.
-
-**THE FIX WORKED.** The responder LED with the `sequence()`+`UNNEST` date-spine, applied it at MONTHLY grain, and DID NOT decline (vs iter781 Q2 which declined). The iter782 elevation of the direct date-form spine to first-shown at r07:1243-1255 with keyword anchors closed the gap.
-
-VERIFIED against trino.io/docs/467/functions/array.html + WebSearch: `sequence(start, stop, step)` returns an ARRAY with BOTH bounds INCLUSIVE; step may be `INTERVAL YEAR TO MONTH`. Starting from Jan 1 stepping `INTERVAL '1' MONTH` lands on each month's 1st → Jan 1 … Dec 1 = **12 elements**, correct for "all 12 months even zero months." `UNNEST … AS d(day)` → one row per month; `LEFT JOIN` keeps every month; `COALESCE(revenue,0)` zero-fills. Logic fully correct.
-
-Minor (no penalty, drives Comp4/Act4): (1) trinodb/trino issue #24591 documents that `sequence(DATE, DATE, INTERVAL)` actually returns `array(timestamp(0))`, not `array(date)` — the join `ON s.month = d.day` still matches under date/timestamp coercion at midnight, so the answer is not broken, but the type subtlety went unmentioned. (2) Assumes `monthly_revenue.month` is stored as the first-of-month DATE; reasonable but unstated. Neither is a defect.
-
-### Q2 — TABLE SCHEMA INSPECTION (columns + types, no row scan) — avg 4.625
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 4.5 |
-| Clarity | 5 |
-| Actionability | 4 |
-
-`DESCRIBE iceberg.analytics.customer_events;` and `SHOW COLUMNS FROM iceberg.analytics.customer_events;`. VERIFIED both return column name/type/extra from the metastore WITHOUT scanning rows — correct Trino. Fully answers the question.
-
-**Citation oddity (not a correctness error):** responder cited the federation file r22 for a generic Trino DDL-inspection statement. DESCRIBE/SHOW COLUMNS are not federation-specific. This is SOURCING imprecision; accuracy NOT penalized. A fuller alternative `SELECT * FROM information_schema.columns WHERE table_name='customer_events'` was not mentioned (minor Comp/Act nit).
-
-### Q3 — SET INTERSECTION (customers in BOTH sets) — avg 4.625
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 4.5 |
-| Clarity | 5 |
-| Actionability | 4 |
-
-`SELECT customer_id … WHERE event_type='support_ticket' INTERSECT SELECT customer_id … WHERE event_type='churn'`. VERIFIED against trino.io/docs/467: `INTERSECT` returns DISTINCT rows present in both queries — exactly correct for "IDs in both sets." Dedup note correct; `COUNT(*)` wrap for a count correct; INNER JOIN alternative for extra columns correct.
-
-**Citation oddity (not a correctness error):** responder cited r07 line 530 `array_intersect` — the ARRAY set function — for a ROW-LEVEL `INTERSECT`. Confirmed via Grep: r07:530 is the array-function table row, NOT a row-set-operations card. The answer correctly used the SQL `INTERSECT` operator anyway, so this is findability/citation imprecision, not a defect. **There is no dedicated row-level INTERSECT/EXCEPT/UNION set-operations card in resources** — a small anchor would prevent the responder from leaning on the array function as its only nearby reference.
-
-### Q4 — 15-MIN TIME BUCKETS (truncate timestamp down to interval start) — avg 4.75
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 4.5 |
-| Clarity | 5 |
-| Actionability | 4.5 |
-
-`date_trunc('minute', page_timestamp) - INTERVAL '1' MINUTE * (EXTRACT(MINUTE FROM page_timestamp) % 15) AS bucket_start`, `COUNT(*) GROUP BY 1`.
-
-**INTERVAL-MULTIPLICATION VERDICT: VALID Trino 467 — NOT a defect.** VERIFIED via WebSearch + StarRocks issue #55574, which states verbatim: *"In Trino sql, interval can multiply a number."* So `INTERVAL '1' MINUTE * (bigint)` compiles (the `%15` bigint coerces to the numeric multiplier). Logic VERIFIED: `date_trunc('minute', ts)` drops seconds (10:17:45 → 10:17:00); `EXTRACT(MINUTE FROM ts) % 15` = 2; subtract 2 minutes → 10:15:00. Correct floor-to-15-min boundary.
-
-Minor (Comp/Act nit, no penalty): the canonical epoch-floor alternative `from_unixtime(floor(to_unixtime(ts)/900)*900)` (which iter761 Q3 surfaced) was not offered as a second form. Both are valid; the responder's interval form is correct on its own.
+All dialect claims verified against trino.io/docs/467 (select.html, functions/aggregate.html, functions/map.html, Iceberg connector metadata tables) on 2026-06-09.
 
 ---
 
-## Deliverable answers
+## Q1 — Set intersection (products sold in BOTH Jan AND Feb), two queries, no join — RE-PROBE / THE FIX CHECK
 
-**(a) Is date-series CLOSED?** YES — **CLOSED, 1st post-fix datapoint.** iter782 FINDABILITY FIX-A WORKED: the responder now LEADS with `sequence()`+`UNNEST`, handled the monthly grain, and did NOT decline (the exact iter781 Q2 failure mode). Re-probe once more from a fresh angle (e.g. hourly grain, or `generate_series`-named phrasing) to drive to BULLETPROOFED (2nd consecutive clean).
+`SELECT product_id FROM sales_january INTERSECT SELECT product_id FROM sales_february`. Notes INTERSECT returns DISTINCT rows present in both; cleaner than a JOIN. Cites r23 §3.1F (the enhanced card).
 
-**(b) Q4 interval-multiplication verdict:** **VALID Trino 467.** `INTERVAL '1' MINUTE * n` is supported (interval × number). The Q4 expression compiles and the floor-to-15-min logic is correct. No defect; no epoch-floor substitution required. (The epoch-floor form remains a valid alternative worth keeping cross-referenced, but is not needed here.)
+**VERIFIED (select.html):** INTERSECT returns only rows present in the result sets of BOTH queries, DISTINCT by default (INTERSECT ALL available for duplicate-preserving). Exactly right for "products that sold in both months."
 
-**(c) Q2/Q3 citation oddities:** Both answers are CORRECT; both have WEAK SOURCING. Q2 cited the federation file r22 for a generic DESCRIBE/SHOW COLUMNS statement; Q3 cited the array function `array_intersect` (r07:530) for a row-level `INTERSECT` operator. Neither caused a wrong answer. A SMALL ANCHOR IS WARRANTED for Q3: there is no dedicated row-level set-operations (INTERSECT/EXCEPT/UNION/UNION ALL) card; adding one with keyword anchors ("customers in both sets", "rows in both queries", "set intersection / difference") would stop the responder citing the array function. Q2's miscite is lower-value (DESCRIBE is generic and ubiquitous) — optional anchor only.
+**THE FIX WORKED.** The responder **LED with the row-level INTERSECT set operator** and cited the **enhanced r23 §3.1F set-operations card** — it did NOT reach for the `array_intersect(...)` ARRAY function (the iter782 Q3 mis-cite). The array-vs-row disambiguator + INTERSECT/EXCEPT anchors steered the keyword match correctly. This is the **1st clean post-fix datapoint** → set-operations is **CLOSED** (needs 1 more phrasing from a different angle → BULLETPROOFED).
 
-**(d) iter783 designation:** **FIX-A (LIGHT/ADDITIVE) — add a row-level set-operations card.** No dialect defect surfaced, so this is a findability/sourcing fix, not a correctness fix. Add a small INTERSECT/EXCEPT/UNION [ALL] card (note INTERSECT/EXCEPT dedup to DISTINCT; UNION dedups, UNION ALL does not; COUNT(*) wrap for a count; INNER JOIN alternative when you need extra columns) with the keyword anchors above, near r07's funnel/cohort content. Keep it ADDITIVE — do NOT churn the iter782 date-spine elevation (it just worked) or any bulletproofed card. Optionally re-probe date-series from a fresh grain to confirm BULLETPROOFED. If the teacher prefers, iter783 may instead be a DEFAULT NO-OP durability-breadth sweep since there is no open defect — but the Q3 anchor is the higher-value move.
+- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5** → **avg 5.00**
 
-HOLD all prior locks. Federation r22 untouched. DO NOT bump training/state.json (already 782).
+## Q2 — Group concat (all product names per order into one comma-separated string)
+
+`listagg(product_name, ', ') WITHIN GROUP (ORDER BY product_name) AS product_list ... GROUP BY order_id` → `"Hat, Shoes, Socks"`. Notes `WITHIN GROUP (ORDER BY)` is required; `CAST(id AS varchar)` if the value is numeric (Trino has no implicit number→string). Cites r07 + r27.
+
+**VERIFIED (aggregate.html):** `listagg(expression[, separator])` WITHIN GROUP (ORDER BY ...) is native Trino; separator + WITHIN GROUP usage correct; Trino has **no** `string_agg` (standing listagg pin held). The equally-valid alternative `array_join(array_agg(product_name ORDER BY product_name), ', ')` exists per resources — choosing listagg is NOT penalized; both correct. The CAST-numeric note is sound (no implicit numeric→varchar coercion).
+
+- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5** → **avg 5.00**
+
+## Q3 — Map key lookup (pull value for key 'os'/'locale' out of a MAP column to filter/group)
+
+`element_at(metadata, 'os') AS os_value` — returns NULL for a missing key, safer than the bracket subscript `metadata['os']` which errors on a missing key; usable in WHERE and GROUP BY. Cites r09.
+
+**VERIFIED (functions/map.html):** `element_at(map, key)` returns the value or NULL if the key is absent; the subscript `map[key]` **throws an error** when the key is not present. So `element_at` is the safe NULL-returning accessor — exactly right, and usable in WHERE/GROUP BY. Matches the standing element_at-for-map pin.
+
+- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5** → **avg 5.00**
+
+## Q4 — Iceberg table file/row count (small-files diagnosis without scanning)
+
+PRIMARY: `SELECT partition, record_count, file_count, total_size/1024/1024 AS total_size_mb FROM iceberg.<cat>.<schema>.<table>"$partitions" ORDER BY file_count DESC`.
+SECONDARY: `SELECT snapshot_id, json_extract_scalar(summary, 'total-data-files') AS total_files, json_extract_scalar(summary, 'total-records') AS total_rows FROM ...<table>"$snapshots" ORDER BY committed_at DESC LIMIT 1`. Cites r18.
+
+**PRIMARY ($partitions) — CORRECT.** VERIFIED against the Iceberg connector metadata-tables docs: `$partitions` exposes `partition`, `record_count`, `file_count`, `total_size` (and `data`). `record_count`/`file_count` are the right small-files diagnostic, and ordering by `file_count DESC` to find the worst partitions is exactly the actionable move. This is metadata-only (no data scan) as the question asked. Good answer.
+
+**SECONDARY ($snapshots) — DIALECT DEFECT.** VERIFIED: in Trino's Iceberg `$snapshots` metadata table, the `summary` column is typed **`map(VARCHAR, VARCHAR)`**, NOT a JSON/varchar string. Therefore `json_extract_scalar(summary, 'total-records')` is **WRONG** — `json_extract_scalar` requires a JSON/varchar input, not a map; passing a map type-errors. The correct accessors are the **map subscript** `summary['total-records']` / `summary['total-data-files']` or **`element_at(summary, 'total-records')`**. (Ironic: Q3 in this very sweep was exactly about `element_at` for maps — the same tool applies here.)
+
+**Resource vs responder — this is a RESPONDER SLIP, resources are CLEAN.** r18 (`18-query-performance-regression.md`, "Diagnose small files", lines 1097–1112) shows the CORRECT form `summary['total-data-files']` / `summary['total-records']` and even annotates *"file/row counts live INSIDE the summary map (a map(varchar, varchar)) — NOT as top-level columns."* r17 (lines 1021, 1209–1211, 2913–2917) and r26 (239–240, 376) likewise use `summary['...']` / `element_at(summary, ...)`. **No resource shows `json_extract_scalar` applied to `summary`.** The responder imported the json_extract_scalar pattern (correct for `readable_metrics` JSON, per r10/r17/r18) onto a map column — a mis-pick at answer time, not a resource defect.
+
+Scored down on Accuracy for the secondary; PRIMARY correctness and the metadata-only framing hold up Completeness/Clarity/Actionability.
+
+- Accuracy **3** · Completeness **4** · Clarity **4** · Actionability **4** → **avg 3.75**
+
+---
+
+## Verdicts (explicit)
+
+**(a) Set-operations CLOSED?** **YES — CLOSED (1st clean post-fix datapoint).** Q1 fix worked: responder LED with the row-level INTERSECT operator + cited the enhanced r23 §3.1F card, did NOT reach for `array_intersect`. The iter782 array-vs-row mis-cite did not recur. One more phrasing from a different angle (e.g., EXCEPT / "products in Jan but NOT Feb", or UNION-vs-UNION-ALL) → BULLETPROOFED.
+
+**(b) Q4 $snapshots-summary verdict.** PRIMARY `$partitions` (record_count/file_count/total_size, ORDER BY file_count) is **CORRECT** and the right small-files diagnostic. SECONDARY `$snapshots` is a **DEFECT**: `summary` is `map(VARCHAR, VARCHAR)`, so `json_extract_scalar(summary, 'total-records')` is invalid (json_extract_scalar takes JSON/varchar, not a map). **Correct form: `element_at(summary, 'total-records')` or `summary['total-records']`** (likewise `summary['total-data-files']`). The defect is a **responder slip** — r18 (and r17/r26) already show the correct map-subscript form; resources are clean.
+
+**(c) iter784 designation — DEFAULT NO-OP / durability-breadth (NOT FIX-A).** The Q4 $snapshots json_extract_scalar-on-map does NOT trace to a resource defect — r18 §"Diagnose small files" is correct and even warns summary is a map. Since the slip is responder-side and resources are clean, no edit is warranted (a FIX-A here risks churning a verified-correct card). Teacher: **ZERO edits**.
+
+### iter784 probe suggestions
+- **Set-operations 2nd angle (to bulletproof):** EXCEPT phrasing — "products sold in Jan but NOT in Feb" (`... EXCEPT ...`), or UNION-vs-UNION-ALL dedup framing — confirm the responder still picks row-level set ops over array functions.
+- **Re-probe Q4 $snapshots map access from a different phrasing** (e.g., "how many rows did the last commit add" → `summary['added-records']`) to confirm whether the json_extract_scalar-on-map slip recurs. If it recurs across 2+ phrasings, RE-DESIGNATE as a light FIX-A: add an inline anchor at the r18 $snapshots card explicitly flagging *"summary is a map — use `summary['key']` / `element_at(summary,'key')`, NOT `json_extract_scalar` (that's for JSON/varchar like `readable_metrics`)"* as a disambiguator. For now it's a single slip → no edit.
+- Fresh adjacent: `$manifests` column-form file counts (added/existing/deleted_data_files_count) vs `$snapshots.summary` map access (the r18 contrast); `$files` per-file size distribution.
+
+**PRESERVE (verified clean, churn risk):** r23 §3.1F enhanced set-operations card (load-bearing — drove the Q1 fix), r07/r27 listagg + array_join group-concat, r09 element_at-for-map, r18 $partitions/$snapshots small-files cards.

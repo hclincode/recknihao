@@ -1152,37 +1152,58 @@ FROM orders;
 
 ---
 
-## 3.1F. `UNION` vs `UNION ALL` — the dedupe-vs-concatenate canonical (default to `UNION ALL` for analytics)
+## 3.1F. Row-level set operators — `INTERSECT` (rows in BOTH) / `EXCEPT` (rows in A not B) / `UNION` vs `UNION ALL`
 
-### LEADING CANONICAL — UNION vs UNION ALL (UNION dedupes = expensive; default to UNION ALL for analytics)
+### LEADING CANONICAL — combine two queries / find rows in both / rows in A not in B (INTERSECT, EXCEPT, UNION, UNION ALL)
 
-> **READ THIS FIRST if your question contains any of these keywords: `UNION vs UNION ALL`, `combine result sets Trino`, `UNION dedupe`, `UNION ALL performance`, `default union analytics`, `INTERSECT`, `EXCEPT`, `merge two SELECTs`, `stack queries`.** Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) on 2026-06-06.
+> **READ THIS FIRST if your question contains any of these keywords: `customers in both queries`, `customer IDs in both sets`, `intersection of two queries`, `rows present in both result sets`, `set overlap`, `in A and B`, `rows in A but not in B`, `rows in first query not the second`, `set difference`, `combine two result sets`, `merge two queries`, `stack two queries`, `INTERSECT`, `EXCEPT`, `UNION vs UNION ALL`, `union dedupe`, `deduplicate combined results`, `combine result sets Trino`, `default union analytics`, `merge two SELECTs`.** Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-09.
 
-**The one-fact summary.** Trino's bare `UNION` is `UNION DISTINCT` — it removes duplicates via an **implicit global DISTINCT** over the combined result (a sort or hash-aggregate over every output row). `UNION ALL` concatenates the two inputs **streaming, no dedupe** — orders of magnitude cheaper on large analytical sets. Trino docs verbatim: *"If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included in the combined result set. If neither is specified, the behavior defaults to `DISTINCT`."*
+**These are ROW-level set operators — they take two whole QUERIES / RESULT SETS (one column or several, same types positionally) and combine them.** This is the right tool when you have **two separate `SELECT`s** and you want "the customers in BOTH", "the ones in the first but not the second", or "stack them into one list". (Do NOT confuse with the ARRAY functions `array_intersect` / `array_except` / `array_union`, which operate on two array VALUES inside a SINGLE row — see the disambiguator at the end of this card.)
 
-**Worked example + perf note:**
+#### ✅ COPY THIS — the three row-level set operators
 
 ```sql
--- BARE UNION — full-result DISTINCT, equivalent to UNION ALL + DISTINCT (EXPENSIVE):
+-- Rows in BOTH queries (set INTERSECTION) — "customers who BOTH opened a ticket AND churned":
+SELECT customer_id FROM ticket_openers
+INTERSECT
+SELECT customer_id FROM churned;          -- DISTINCT customer_ids present in BOTH queries
+
+-- Rows in the FIRST query but NOT the second (set DIFFERENCE) — "in trial, not yet paid":
+SELECT customer_id FROM trial_users
+EXCEPT
+SELECT customer_id FROM paid_users;       -- in trial_users, not in paid_users
+
+-- COMBINE / STACK two result sets into one list:
 SELECT user_id FROM events_2026_q1
-UNION                              -- = UNION DISTINCT (default) → silent global DISTINCT over all rows
+UNION ALL                                 -- UNION ALL = keep duplicates (cheap, no dedup pass) — DEFAULT for analytics
 SELECT user_id FROM events_2026_q2;
 
--- UNION ALL — streaming concatenation, cheap (DEFAULT for analytics):
 SELECT user_id FROM events_2026_q1
-UNION ALL
+UNION                                      -- bare UNION = drop duplicates (= UNION DISTINCT, runs a global DISTINCT)
 SELECT user_id FROM events_2026_q2;
 ```
 
-**Default to `UNION ALL`.** Only use bare `UNION` when (a) you specifically need dedupe across the combined result AND (b) the inputs can produce overlapping rows. If the inputs are already disjoint (e.g., partitioned by date), bare `UNION` does a full-result sort/hash-aggregate for **zero benefit** — it's a silent perf killer.
+**The dedup rule (Trino docs verbatim).** *"If the argument `ALL` is specified all rows are included even if the rows are identical. If the argument `DISTINCT` is specified only unique rows are included in the combined result set. If neither is specified, the behavior defaults to `DISTINCT`."* So **`INTERSECT`, `EXCEPT`, and bare `UNION` ALL return DISTINCT rows by default** (they run a dedup pass). **`UNION ALL` keeps duplicates** — no dedup pass, so it is the cheap one. (Multiset variants `INTERSECT ALL` / `EXCEPT ALL` exist if you genuinely need bag semantics.)
 
-**`INTERSECT` / `EXCEPT` always dedupe** by default (same rule: `DISTINCT` is the default when neither `ALL` nor `DISTINCT` is specified). Semantically: `INTERSECT` = semi-join (rows in both); `EXCEPT` = anti-join (rows in left but not right). See [§10 SemiJoin / NOT IN gotcha](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the join-form rewrites and the `NOT IN` + NULL trap — do not rewrite that section.
+**Default to `UNION ALL` for combining.** Only use bare `UNION` when (a) you specifically need dedupe across the combined result AND (b) the inputs can produce overlapping rows. If the inputs are already disjoint (e.g., partitioned by date), bare `UNION` does a full-result sort/hash-aggregate for **zero benefit** — it's a silent perf killer. (Bare `UNION` IS `UNION ALL` + an implicit global DISTINCT; the planner produces the same shape.)
+
+**Precedence (Trino docs verbatim).** *"Multiple set operations are processed left to right, unless the order is explicitly specified via parentheses. Additionally, `INTERSECT` binds more tightly than `EXCEPT` and `UNION`."* So `A UNION B INTERSECT C EXCEPT D` means `A UNION (B INTERSECT C) EXCEPT D`. When mixing operators, **add parentheses** to make intent explicit.
+
+**Column rule.** Set operators are **positional** — both sides must have the same number of columns in the same type order (matched by position, NOT by name). Project the same explicit column list on both sides; don't `SELECT *` unless both inputs have identical column sets in the same order.
+
+**Semantics / plan shape.** `INTERSECT` = semi-join (rows in both); `EXCEPT` = anti-join (rows in left but not right). Trino plans both via a `SemiJoin`-style operator — seeing a `SemiJoin` node in `EXPLAIN` of an `INTERSECT`/`EXCEPT` is EXPECTED, not a bug. See [§10 SemiJoin / NOT IN gotcha](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the join-form rewrites and the `NOT IN` + NULL trap — do not rewrite that section. Unlike `NOT IN`, `EXCEPT` is NULL-safe.
+
+> **ROW set operators vs ARRAY functions — the crystal-clear rule (do not conflate these two families):**
+> - **Two RESULT SETS / two queries → `INTERSECT` / `EXCEPT` / `UNION`** (the row-level operators on THIS card). Each side is a full `SELECT`. Use these for "customer IDs in both queries", "rows in A not in B", "combine two queries".
+> - **Two ARRAY columns in ONE row → `array_intersect(a, b)` / `array_except(a, b)` / `array_union(a, b)`** ([resource 07 § 1a.3](07-analytical-query-patterns.md#1a3-trino-array-function-quick-reference--contains--cardinality--array_distinct--element_at--array_join--array_position-do-not-claim-trino-lacks-a-contains)). These take two array VALUES and return an array — they operate WITHIN a single row, not across queries.
+> If you have **two queries**, you want the bare-keyword operators (`INTERSECT`/`EXCEPT`/`UNION`), NOT the `array_*` functions.
 
 > **DO NOT WRITE.**
-> 1. **Bare `UNION` "just to combine" two tables** when you don't need dedupe. The implicit global DISTINCT is a silent full-result sort/hash-aggregate — accidental perf killer on multi-billion-row analytics. Default to `UNION ALL`.
-> 2. **"`UNION` preserves the order of the input queries"** — **FALSE.** Neither `UNION` nor `UNION ALL` guarantees row order. If you need order, wrap the union in an outer `ORDER BY`.
-> 3. **"`UNION ALL` and then `DISTINCT` is slower than bare `UNION`"** — **FALSE.** They are equivalent operations; bare `UNION` IS `UNION ALL` + an implicit global DISTINCT. The planner produces the same shape.
-> 4. **`UNION` to dedupe rows from a SINGLE table** — wrong tool. Use `SELECT DISTINCT` (single scan) instead of `SELECT ... UNION SELECT ...` (two scans + DISTINCT).
+> 1. **Using `array_intersect` / `array_except` / `array_union` to compare two QUERIES / result sets** — wrong family. Those are ARRAY-value functions for one row. For "customer IDs in both queries" use the row operator `INTERSECT`; for "in A not in B" use `EXCEPT`. (See disambiguator above.)
+> 2. **Bare `UNION` "just to combine" two tables** when you don't need dedupe. The implicit global DISTINCT is a silent full-result sort/hash-aggregate — accidental perf killer on multi-billion-row analytics. Default to `UNION ALL`.
+> 3. **"`UNION` preserves the order of the input queries"** — **FALSE.** Neither `UNION` nor `UNION ALL` guarantees row order. If you need order, wrap the union in an outer `ORDER BY`.
+> 4. **"`UNION ALL` and then `DISTINCT` is slower than bare `UNION`"** — **FALSE.** They are equivalent operations; bare `UNION` IS `UNION ALL` + an implicit global DISTINCT. The planner produces the same shape.
+> 5. **`UNION` to dedupe rows from a SINGLE table** — wrong tool. Use `SELECT DISTINCT` (single scan) instead of `SELECT ... UNION SELECT ...` (two scans + DISTINCT).
 
 **Cross-references.** [§10](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the `INTERSECT` = semi-join and `EXCEPT` = anti-join rewrites, the `NOT IN` + NULL gotcha, and the SemiJoin canonical. [Trino 467 release notes — UNION ALL parallel write optimization](https://trino.io/docs/current/admin/properties-optimizer.html) note that the optimizer has special parallelization paths for `UNION ALL` writes that bare `UNION` does not get.
 
