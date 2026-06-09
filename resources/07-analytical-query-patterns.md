@@ -1236,7 +1236,25 @@ ORDER BY 1;
 
 **The gotcha:** if no one signed up on Jan 14, that day is *missing from the result* — not zero. Dashboards then show a deceiving line that "skips" days.
 
-**Fix: generate a calendar and LEFT JOIN.**
+**Fix: generate a date series and LEFT JOIN, then zero-fill the gaps.**
+
+To **generate a date series** — **every calendar day between two dates** — **fill in missing dates**, show a **continuous date range** with **no rows on zero days** turned into explicit zeros (**zero-fill missing days**, **no manual placeholder rows**), build a **date spine** (a virtual **calendar table**) with `sequence(...)` + `UNNEST`, `LEFT JOIN` your daily aggregate onto it, and wrap the metric in `COALESCE(..., 0)`. This is the Trino **`generate_series` equivalent** (Trino has no `generate_series` — see the note below).
+
+✅ **COPY THIS — direct date-form date spine (every calendar day between two dates), LEFT JOIN, zero-fill:**
+
+```sql
+-- Generate every calendar day between two dates (a "date spine"), then LEFT JOIN your data and zero-fill the gaps:
+SELECT d.day, COALESCE(s.signup_count, 0) AS signup_count
+FROM UNNEST(sequence(DATE '2026-01-01', current_date, INTERVAL '1' DAY)) AS d(day)
+LEFT JOIN daily_signups s ON s.day = d.day
+ORDER BY d.day;
+```
+
+`sequence(DATE '2026-01-01', current_date, INTERVAL '1' DAY)` returns an ARRAY of one DATE per calendar day from the start through today (both bounds INCLUSIVE); `UNNEST(...) AS d(day)` turns that array into one row per day. Every day between the two dates appears — including days `daily_signups` has no row for — and `COALESCE(s.signup_count, 0)` shows `0` instead of NULL on those empty days. (If your `daily_signups` is itself a per-day aggregate of raw events, swap it for the `signups` CTE shown in the alternative below.)
+
+> **Trino has NO `generate_series` (the Postgres name).** Use **`sequence(start, stop, step)`**, which returns an **ARRAY** (both bounds **INCLUSIVE**), then **`UNNEST(...) AS t(col)`** (or **`CROSS JOIN UNNEST(...)`**) to turn the array into rows. Per [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html): `sequence(DATE '2026-01-01', DATE '2026-01-05', INTERVAL '1' DAY)` = `[2026-01-01, 2026-01-02, 2026-01-03, 2026-01-04, 2026-01-05]` — 5 elements, both ends included. Step forms: `INTERVAL '1' DAY` for **daily**; `INTERVAL '1' MONTH` for **monthly** (`sequence(DATE d1, DATE d2, INTERVAL '1' MONTH)`); `sequence(timestamp1, timestamp2, INTERVAL '1' HOUR)` for **hourly**.
+
+**Alternative — integer-sequence + `date_add` form (use when you want N days back from today rather than a fixed start date):**
 
 ```sql
 WITH calendar AS (

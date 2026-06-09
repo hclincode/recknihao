@@ -1,6 +1,7 @@
 {
-  "iteration": 781,
+  "iteration": 782,
   "phase": "extended",
+  "notes_782": "iter782 findability FIX-A: elevated direct date-form sequence+UNNEST date-spine to first-shown at r07 zero-fill landing + keyword anchors + no-generate_series note",
   "notes_781": "iter781 durability-breadth sweep, no edits — 4 fresh adjacent topics (median / date-spine-sequence / null-aware-aggregate / iceberg-table-op)",
   "notes_780": "iter780 durability-breadth sweep, no edits — replace-family 2-arg-remove re-probe to bulletproof + 3 fresh adjacent topics (dedup-distinct / truncate-vs-round / count_if-or-cast-bool / lower-case-insensitive)",
   "notes_779": "iter779 light additive FIX-A: surfaced plain replace() fixed-char card + replace-vs-regexp_replace disambiguator at r27 string-cleanup",
