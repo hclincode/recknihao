@@ -1,64 +1,60 @@
-# Judge Feedback — iter860
+# Judge Feedback — iter861
 
-**Verdict: overall 5.00 — STRONG PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 5.00)
+**Phase:** extended (final-style). **Verdict: PASS** — overall average **4.0625** (>= 3.5 threshold).
+All dialect claims verified against trino.io/docs/467 (window.html, aggregate.html, functions/list.html, sql/select.html) + WebSearch on trino.io, 2026-06-10. Trino 467 PINNED. Multi-source used for every existence/capability claim. Prod env (on-prem Trino 467 + Iceberg + MinIO, JWT/OPA) unaffected — all four answers are pure ANSI/Trino SQL with no stack conflict.
 
-Type: DEFAULT NO-OP durability sweep (teacher ZERO resource edits). All four dialect claims docs-verified vs trino.io/docs/467 (functions/list.html + aggregate.html + math.html + window.html) via WebFetch 2026-06-10. Trino 467 PINNED. Multi-source used for every existence/capability claim.
+| Q | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
+|---|---|---|---|---|---|
+| Q1 running total SUM(COUNT(*)) OVER | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 concat distinct tags array_join(array_agg) | 5 | 3 | 5 | 4 | **4.25** |
+| Q3 NTILE(4) quartile bands | 1.5 | 3 | 4 | 2.5 | **2.75** |
+| Q4 first signup source FIRST_VALUE | 4.5 | 4 | 5 | 4.5 | **4.50** |
 
----
-
-## Q1 — "overall transfer speed" across equal-size MB/s chunks (harmonic mean) — RE-PROBE of iter859 fix
-
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
-
-Responder gave the HARMONIC mean `1.0 / AVG(1.0 / NULLIF(transfer_speed_mbps, 0))`, explained that equal-weight rates require harmonic (not arithmetic) so plain AVG overstates, NULLIF guards 1/0, worked the 10/50 -> 16.67 MB/s example, and gave a per-job GROUP BY variant.
-
-VERIFIED: harmonic mean = 1/AVG(1/x) = n/SUM(1/x) is the correct equal-weight average of rates/ratios with a common numerator (statistics fact). trino.io/docs/467 functions/list.html H-section = bar, hamming_distance, hash_counts, histogram, hmac_md5/sha1/sha256/sha512, hour, human_readable_seconds — **NO harmonic_mean**; aggregate.html documents NO harmonic_mean aggregate. So the manual formula is the correct (and only) path. NULLIF(rate,0) guard and worked example both correct.
-
-**iter859 harmonic-fix 2nd-datapoint RE-PROBE = CLEAN. Responder gave HARMONIC (not geometric) for rates -> 2nd consecutive clean datapoint -> BULLETPROOFED.** No regression to geometric. §3.1B-HM card and the §3.1B-GM fenced inline-defang are both holding under rephrase.
+**Overall = (5.00 + 4.25 + 2.75 + 4.50) / 4 = 4.0625 → PASS** (overall average governs; no per-question veto).
 
 ---
 
-## Q2 — average annual GROWTH FACTOR compounding over 5 years (geometric mean)
+## Per-question notes
 
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
+### Q1 — running/cumulative sum of daily signups — 5.00 CLEAN
+Answer: `SUM(COUNT(*)) OVER (ORDER BY signup_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` with `GROUP BY signup_date`, plus `PARTITION BY tenant_id` note for multi-tenant.
+- VERIFIED window.html: `sum()` is usable as a window function; the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is a correct, canonical running-total frame.
+- VERIFIED the window-over-aggregate layering is legal in Trino: `COUNT(*)` is evaluated by `GROUP BY signup_date`, then `SUM(...) OVER (...)` runs over the grouped rows in the same query level. Correct.
+- Multi-tenant `PARTITION BY tenant_id` advice is right (resets the cumulative per tenant). No defect.
 
-Responder LED with the built-in `geometric_mean(growth_factor)`, gave the explicit `EXP(AVG(LN(x))) WHERE x>0` equivalent, worked the compounding example, and noted plain AVG overstates the compounded result.
+### Q2 — concatenate DISTINCT tags into one delimited string — 4.25 (completeness nuance)
+Answer: `array_join(array_agg(tag ORDER BY tag), ', ')` with `FILTER (WHERE tag IS NOT NULL)`; explicitly states Trino has NO `string_agg`.
+- VERIFIED functions/list.html S-section: NO `string_agg` (S-entries: second, sequence, sha*, shuffle, sign, ..., split*, sqrt, starts_with, stddev*, strpos, substr, substring, sum — no string_agg). The "Trino does not have string_agg" claim is correct.
+- VERIFIED aggregate.html: `array_agg`, `array_agg(x ORDER BY y)`, and `FILTER (WHERE ...)` on aggregates all exist and behave as described. `array_join(array, delimiter)` confirmed in list.html.
+- **COMPLETENESS GAP (the −1.0 on completeness, −1.0 on actionability):** the question explicitly asked for **DISTINCT** tags. The responder's `array_agg(tag ORDER BY tag)` does **NOT** dedupe — duplicate tags will appear multiple times in the output string. The correct dedup forms are `array_join(array_distinct(array_agg(tag)), ', ')` (array_distinct verified present) or `array_join(array_agg(DISTINCT tag), ', ')` (Trino documents DISTINCT applies to aggregations generally). Neither was mentioned. This is a real, on-point miss of the asked requirement, not a stylistic nit. Not a fabrication/dialect error — the SQL given is valid, it just answers "all tags" rather than "distinct tags."
 
-VERIFIED: aggregate.html quotes verbatim "geometric_mean(x) -> double — Returns the geometric mean of all input values"; functions/list.html G-section indexes geometric_mean. Geometric mean IS correct for multiplicative/compounding data (the mean whose nth power equals the product). EXP(AVG(LN(x))) fallback is mathematically identical and the x>0 caveat is right (LN undefined for <=0).
+### Q3 — split 0-100 score into 4 quartile bands — 2.75 (REAL ACCURACY DEFECT: NTILE labels INVERTED)
+Answer: `NTILE(4) OVER (ORDER BY performance_score) AS quartile`, then CLAIMS "1 = top 25% (highest), 2 = 25-50%, 3 = 50-75%, 4 = bottom 25% (lowest)" and labels quartile 1 'elite', quartile 4 'at-risk'.
+- **VERIFIED window.html ntile:** "Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`." With `ORDER BY x` ASC, **bucket 1 = the LOWEST values; bucket n = the HIGHEST.** Confirmed via WebFetch.
+- **THE RESPONDER INVERTED THE BANDS.** With `ORDER BY performance_score` (default ASC), quartile **1 = the LOWEST 25% of scores** and quartile **4 = the HIGHEST 25%**. The responder claimed the exact opposite ("1 = top 25% highest", "4 = bottom 25% lowest") and then attached the **wrong human labels**: it tags the lowest-scoring group as 'elite' and the highest-scoring group as 'at-risk'. This is semantically backwards and would mislabel every row in a real product. The `NTILE(4)` mechanic and the CASE scaffold are correct; the ORDERING SEMANTICS and the resulting labels are wrong.
+- The fix the responder should have given: either `ORDER BY performance_score DESC` (so bucket 1 = highest = 'elite'), OR keep ASC and relabel (1='at-risk' lowest ... 4='elite' highest). It did neither and asserted the inverted mapping confidently.
+- **DIAGNOSIS — resource gap, not just a synthesis slip.** This is the recurring confident-wrong-direction class of defect. The NTILE coverage in resources/ does not pin the ASC-direction semantics with a copy-attractive, label-explicit canonical. Recommend FIX-A (below). Scored Accuracy 1.5 (core mechanic right, the load-bearing semantic claim and ALL derived labels wrong), Actionability 2.5 (an engineer copying this ships inverted dashboards), Completeness 3, Clarity 4 (well-written but confidently wrong).
 
-**2nd datapoint confirming the iter859 defang stayed SURGICAL: responder still correctly uses geometric_mean for compounding/multiplicative data and did NOT over-correct to harmonic.** The §3.1B-GM card is durable; the rate-only defang did not bleed into legitimate multiplicative use.
-
----
-
-## Q3 — filter NaN/Infinity from a computed ratio DOUBLE before aggregation
-
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
-
-Responder used `WHERE NOT is_finite(computed_ratio)` to find bad rows, `IF(is_finite(x), x, NULL)` to clean inline, distinguished is_finite (neither Inf nor NaN) vs is_nan (NaN only) vs is_infinite (±Inf), and added the caveat that DOUBLE/REAL div-by-zero yields Inf/NaN per IEEE-754 while INTEGER/DECIMAL div-by-zero ERRORS (guard upstream with NULLIF/try).
-
-VERIFIED vs math.html: is_finite(x)->boolean "Determine if x is finite", is_nan(x)->boolean "Determine if x is not-a-number", is_infinite(x)->boolean "Determine if x is infinite" — all exist with the stated semantics. The IEEE-754-vs-integer/decimal-throws caveat matches the standing source-verified fact (notes_847: DoubleOperators.divide / RealOperators.divide have no zero-check -> Infinity/NaN, no throw; BigintOperators.divide throws DIVISION_BY_ZERO). math.html itself is silent on div-by-zero (only states integer division truncates), so the caveat correctly draws on the verified operator semantics, not on docs prose. **No inaccuracy. The §4.4H float-state card and the IEEE-754 caveat are holding.**
-
----
-
-## Q4 — delta of each row vs previous row, per user (LAG)
-
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
-
-Responder used `LAG(page_views, 1) OVER (PARTITION BY user_id ORDER BY session_number)` for the prior value and `page_views - LAG(...)` for the delta; explained the offset arg, PARTITION BY (per-user reset), ORDER BY (sequence), NULL on the first row; gave LAG(col,2) and the LEAD mirror.
-
-VERIFIED vs window.html: `lag(x[, offset[, default_value]]) -> [same as input]` "Returns the value at offset rows before the current row in the window partition"; "If the offset refers to a row that is not within the partition, the default_value is returned, or if it is not specified null is returned" — so NULL on the first row is correct. lead() mirror confirmed (value at offset rows AFTER). Window ordering required (correct), frame must not be specified (responder did not add a frame — correct). Findability and correctness both clean.
+### Q4 — each user's FIRST signup source by earliest timestamp — 4.50 (completeness nuance)
+Answer: `SELECT DISTINCT user_id, FIRST_VALUE(signup_source) OVER (PARTITION BY user_id ORDER BY signup_timestamp)`; notes adding columns to ORDER BY for tie-breaks.
+- VERIFIED sql/select.html: when ORDER BY is present and no frame is given, the default frame is `RANGE UNBOUNDED PRECEDING` (= `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`). For `first_value()` this still yields the partition's FIRST row by the ORDER BY — so the result is correct (the responder's pattern is NOT bitten by the default-frame trap that breaks `last_value`).
+- VERIFIED window.html: `first_value()` is a valid window value function; `SELECT DISTINCT` over the window collapses the repeated per-partition value to one row per user. Pattern works.
+- **COMPLETENESS NUANCE (the −0.5):** the cleaner Trino idiom is `min_by(signup_source, signup_timestamp) ... GROUP BY user_id` — one row per user with no DISTINCT-over-window and no window machinery (VERIFIED min_by in aggregate.html: "Returns the value of x associated with the minimum value of y"). Worth mentioning as the more efficient/idiomatic form. The tie-break note is correct. Not a defect — both approaches are correct; min_by is just leaner.
 
 ---
 
-## iter861 RECOMMENDATION: DEFAULT NO-OP (durability sweep)
+## iter862 RECOMMENDATION — **FIX-A (Q3 NTILE label inversion is a REAL defect)**
 
-All 4 clean at 5.00. NO defect, NO fabrication, NO parse-error risk, NO crossed-family error, NO findability slip, NO prod-env conflict (pure SQL; on-prem Trino 467 + Iceberg + MinIO + Hive Metastore unaffected). iter860 is NOT a FIX-A.
+Add/repair an **NTILE direction card** in the resource that owns window-function ranking (analytical-query-patterns / SQL-best-practices NTILE coverage). As a copy-attractive FENCED canonical:
+- PIN the semantic: `NTILE(n) OVER (ORDER BY x)` with **default ASC ⇒ bucket 1 = LOWEST values, bucket n = HIGHEST values.**
+- Give BOTH labeled canonicals so the responder picks by intent:
+  - "top tier = bucket 1" → `NTILE(4) OVER (ORDER BY score DESC)` (highest in bucket 1).
+  - "ASC default" → state plainly bucket 1 = lowest, label accordingly (bucket 1 = worst/'at-risk', bucket 4 = best/'elite').
+- Inline-DEFANG, on its own un-copyable fenced line, the exact iter861 misconception: `NTILE(4) OVER (ORDER BY score) labeling bucket 1 as 'top 25% / elite' -- WRONG: ASC puts the LOWEST scores in bucket 1`.
+- Keyword anchors: quartile, quartiles, NTILE, top 25%, bottom 25%, percentile bands, equal-size buckets, tiers, elite/at-risk labeling, score bands.
 
-- (a) **Q1 harmonic-mean = 2nd clean datapoint = BULLETPROOFED** (no geometric regression).
-- (b) **Q2 geometric_mean still correct, no over-correction to harmonic = 2nd datapoint, neighbor durable** (iter859 defang stayed surgical).
-- (c) **Q3 is_finite/is_nan/is_infinite semantics + IEEE-754-vs-integer/decimal-throws caveat = accurate per 467** (math.html + source-verified operators).
-- (d) **Q4 lag/lead delta = correct + findable.**
+This is a true accuracy/findability defect (a confident inverted directional claim) — warrants a LIGHT FIX-A, not a NO-OP.
 
-iter861 = re-probe fresh adjacent 2nd angles (e.g. harmonic vs weighted-rate phrasing; geometric_mean over product-of-ratios; is_finite cleanup in HAVING/CASE; LAG with default_value arg vs COALESCE; LEAD running-delta). PRESERVE §3.1B-HM (harmonic) + §3.1B-GM (geometric) + §3.1B-WA (weighted) + §4.4H float-state + r07 §Fact 3/3b at_timezone + §1a.3-SUBSET + iter843 approx_percentile + iter842 value-vs-rank + iter837 string->DATE + full iter534-859 pin inventory. NO federation edits (federation 4.49944/310).
+Secondary (NON-BLOCKING, do NOT force): Q2 DISTINCT-dedup miss (`array_agg(DISTINCT tag)` / `array_distinct(array_agg(...))`) and Q4 `min_by` leaner-idiom note. Single-datapoint completeness nuances; fold a one-line cross-ref only if cheap while editing the relevant cards — do NOT churn pins for them this iteration.
 
-**DO NOT bump training/state.json (already 860).**
+PRESERVE all iter534-860 pins; NO federation edits (federation row stays 4.49944/310). DO NOT bump training/state.json (already 861).
