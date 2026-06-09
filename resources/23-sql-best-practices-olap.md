@@ -925,6 +925,40 @@ FROM reviews;
 
 ---
 
+## 3.1B-GM. Geometric mean — `geometric_mean(x)` is a BUILT-IN Trino 467 aggregate (do NOT hand-roll)
+
+> **Use this when you need to:** compute a **geometric mean** — the "average" you use for ratios, growth rates, multiplicative factors, rates of return, normalized index scores, or anything where you want the *product-then-nth-root* mean rather than the additive arithmetic mean. *(Keyword anchors so the responder lands here: **geometric mean, geometric_mean Trino, product-then-nth-root mean, nth root of product, average growth rate, average ratio, compound rate mean, exp(avg(ln)) fallback, does Trino have geometric mean**.)*
+
+**Trino 467 HAS a built-in geometric-mean aggregate — `geometric_mean(x) -> double`.** Do NOT claim Trino lacks one and do NOT hand-roll it by default. Verified verbatim at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "`geometric_mean(x) -> double` — Returns the geometric mean of all input values." (Also indexed in the G section of [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html).)
+
+```sql
+-- ✅ COPY THIS — built-in geometric mean of a column:
+SELECT geometric_mean(growth_factor) AS geo_mean_growth
+FROM   monthly_returns;
+
+-- ✅ per group:
+SELECT product_id, geometric_mean(price_ratio) AS geo_mean_ratio
+FROM   price_changes
+GROUP BY product_id;
+```
+
+```text
+❌ "Trino has no geometric-mean function" -- WRONG: geometric_mean(x) IS a built-in aggregate (aggregate.html) — DO NOT COPY
+```
+
+**Equivalent manual fallback** (only needed on an older engine that lacks `geometric_mean`, or when you want to *explicitly exclude* non-positive rows): `EXP(AVG(LN(x)))` — but ONLY over rows where `x > 0`, because `LN` is undefined for `x <= 0` (`LN(0)` → error/`-Infinity`, `LN(negative)` → `NaN`). On Trino 467 prefer the built-in; reach for the fallback only with a deliberate `WHERE x > 0`.
+
+```sql
+-- ✅ manual fallback (older engines, or to deliberately drop non-positive values):
+SELECT EXP(AVG(LN(x))) AS geo_mean
+FROM   t
+WHERE  x > 0;            -- LN is undefined for x <= 0
+```
+
+**Note:** `geometric_mean` is the *multiplicative* mean (nth root of the product). For the ordinary additive average use `AVG(x)` (§3.1B family); for a weighted average use `SUM(value*weight)/SUM(weight)` (§3.1B-WA above). All three are distinct.
+
+---
+
 ## 3.1C. `CAST(DOUBLE/REAL AS DECIMAL)` uses **HALF_UP** rounding (NOT banker's / NOT HALF_EVEN) — billing-critical canonical
 
 **Keyword anchors:** Trino DECIMAL cast rounding, banker's rounding Trino, round half to even Trino, round half up Trino, Trino billing decimal rounding, HALF_UP vs HALF_EVEN, cast double to decimal rounding, RoundingMode.HALF_UP Trino, cast real to decimal rounding.

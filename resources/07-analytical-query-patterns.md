@@ -630,6 +630,34 @@ GROUP BY customer_id;
 
 > **Note on MAPs.** `contains` does NOT work on MAPs — for "does this map have key K?" use `element_at(map, key) IS NOT NULL` (see [resource 09 § MAP existence check](09-lakehouse-schema-design.md#critical--use-element_at-not--for-map-access-in-trino)) or `contains(map_keys(map), key)` (note `map_keys` returns an `ARRAY`, then `contains` on that array works).
 
+#### 1a.3-SUBSET — Does array A contain ALL elements of a required set B? (subset / "has all of" test — ONE expression, no UNNEST, no join)
+
+**Keyword anchor (READ THIS FIRST if your question contains any of these phrases):** array subset test, does array contain ALL elements, has all of, array contains every required value, check a user has all required flags/permissions/tags, does this array include all of these values, set containment, is B a subset of A, array_except subset test, all_match array, every element present, contains every item in a list.
+
+This is the "ALL of" cousin of `contains` (which tests ONE element). To check that array `A` (e.g. a user's flags) holds **every** element of a required set `B`, use **either** of these one-liners — both are single expressions, no `UNNEST`, no join:
+
+```sql
+-- ✅ COPY THIS — array_except subset test: "B minus A is empty" => every element of B is in A.
+--    (array_except(B, A) returns the elements of B that are NOT in A; cardinality = 0 means none missing.)
+SELECT user_id
+FROM   users
+WHERE  cardinality(array_except(ARRAY['billing','export','admin'], user_flags)) = 0;
+
+-- ✅ equivalent — all_match: the predicate must hold for EVERY element of the required set B.
+SELECT user_id
+FROM   users
+WHERE  all_match(ARRAY['billing','export','admin'], x -> contains(user_flags, x));
+```
+
+**Why each works.** `cardinality(array_except(B, A)) = 0` reads literally as "B minus A is empty" — `array_except(B, A)` returns the required elements that are MISSING from `A`, so a count of `0` means none are missing, i.e. `A` contains all of `B` (`B ⊆ A`). `all_match(B, x -> contains(A, x))` returns `true` iff `contains(A, x)` is `true` for every `x` in `B` (per [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html), `all_match` returns `true` when all elements match — including the empty-array case). Both `array_except` and `all_match` are verified built-ins on [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html). Pick whichever reads clearer; the `cardinality(array_except(...)) = 0` form is usually the shortest.
+
+```text
+❌ FROM users u, CROSS JOIN UNNEST(req) AS t(f) -- SYNTAX ERROR: cannot put a comma AND CROSS JOIN between the same relations; write FROM users u CROSS JOIN UNNEST(req) AS t(f) (no comma). And you do NOT need UNNEST at all here — prefer the cardinality(array_except(B, A)) = 0 one-liner — DO NOT COPY
+❌ "Trino has no array-subset / contains-all function, you must loop / UNNEST and count matches" -- WRONG: cardinality(array_except(B, A)) = 0 and all_match(B, x -> contains(A, x)) both do it in one expression — DO NOT COPY
+```
+
+**Related membership shapes:** ONE element present → `contains(A, x)` (§1a.3 above). ANY of several present (at least one) → `any_match(B, x -> contains(A, x))` or `cardinality(array_intersect(A, B)) > 0` (§1a.4 HOFs). NONE present → `none_match(B, x -> contains(A, x))` or `cardinality(array_intersect(A, B)) = 0`. ALL present (subset) → THIS card.
+
 ### 1a.4 Trino ARRAY higher-order functions — `transform` / `filter` / `reduce` / `any_match` / `array_sort` apply a lambda IN-ARRAY (no UNNEST)
 
 **Keyword anchor:** Trino array transform filter reduce, apply function to each array element, lambda array Trino, higher-order array function, map over array without unnest, transform array Trino, filter array by condition, reduce array to scalar, any_match all_match none_match array, array_sort comparator, zip_with two arrays, array HOF.
