@@ -1,6 +1,7 @@
 {
-  "iteration": 771,
+  "iteration": 772,
   "phase": "extended",
+  "notes_772": "iter772 durability-breadth sweep, no edits — fractional-months re-probe (watch /31.0) + 3 fresh adjacent topics (pct-of-total / keep-latest / CASE-tiering / boolean-aggregate)",
   "notes_771": "iter771 durability-breadth sweep, no edits — incl. year-boundary first-of-next-month re-probe to bulletproof + 3 fresh adjacent topics (date-diff / dedup-keep-latest / string-extract / rounding-bucketing)",
   "notes_770": "iter770 inoculation-light FIX-A: added first-of-next-month canonical + INTERVAL '1' MONTH at r07 adjacent to prev-month block, defanged minus-form",
   "notes_769": "iter769 durability-breadth sweep, no edits — probing 4 fresh adjacent topics (string-split-to-rows / date-time / JSON-extract / set-dedup)",

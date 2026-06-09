@@ -1,49 +1,65 @@
-# Judge Feedback — iter771
+# Judge Feedback — iter772 (DEFAULT NO-OP / durability-breadth sweep)
 
-**Mode**: DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits). Q1 re-probes first-of-next-month at the YEAR BOUNDARY (Dec 12 2026 → Jan 1 2027) to bulletproof it; Q2–Q4 fresh adjacent topics. All four answers docs-verified against trino.io/docs/467 (datetime/string/math .html) on 2026-06-09.
+**Designation in:** durability-breadth sweep, teacher made ZERO resource edits.
+**Verification:** Every dialect claim cross-checked against trino.io/docs/467 (datetime, window, conditional, aggregate, sql/select) via WebFetch on 2026-06-09. Not relying on resources/ as ground truth.
 
 ---
 
-## Per-question scores
+## Q1 — LTV: fractional months active (signup → cancel/today), 45 days ≠ 31 days
 
-### Q1 — First-of-next-month, YEAR BOUNDARY (Dec 12 2026 → Jan 1 2027)
-Answer: `SELECT date_trunc('month', date_add('month', 1, signup_date)) AS renewal_date`
+Answer: `date_diff('day', signup_date, COALESCE(cancelled_date, current_date)) / 30.44 AS months_with_customer`. Explains whole-day count, /30.44 avg days/month, 45 days → ~1.48 months, COALESCE for still-active. Cites r23 days-between canonical.
 
-- **Accuracy: 5** — Verified vs datetime.html. The responder used **trunc-AFTER-add** (`date_trunc('month', date_add('month',1,x))`), which differs from the taught canonical **trunc-BEFORE-add** (`date_add('month',1,date_trunc('month',x))`) but is **mathematically equivalent** for first-of-next-month:
-  - trunc-before-add: Dec 12 → Dec 1 → +1mo → **Jan 1 2027**
-  - trunc-after-add: Dec 12 → +1mo → Jan 12 2027 → trunc → **Jan 1 2027**
-  - Both yield `2027-01-01` with correct year rollover. `date_add('month',1,date)` and `date_trunc('month',x)` are both valid Trino 467 and roll Dec→Jan automatically. CRITICALLY, the responder did **NOT** use the minus form (the iter769 synthesis-slip) and produced the correct year rollover.
-- **Completeness: 5** — Explicitly walks the year-rollover step (Dec 2026 + 1 month = Jan 2027, then truncate).
-- **Clarity: 5** — "add one month then truncate to month start" is clear, zero assumed knowledge, with a worked Dec→Jan example.
-- **Actionability: 5** — Copy-paste ready single expression.
-- **Q1 avg: 5.00**
+**Verification:** `date_diff('day', date, date)` confirmed → BIGINT day count (docs example `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` = 1). `current_date` confirmed SQL-standard (no parens). COALESCE valid. `/30.44` = 365.25/12 = 30.4375 — the standard average-days-per-month convention for fractional months. 45/30.44 = 1.478 ✓. The decimal divisor forces double division (date_diff returns BIGINT, so `/ 30.44` yields a double — no integer truncation). Directly satisfies "fractional, not calendar-month count."
 
-### Q2 — Duration between two dates (days + whole months active)
-Answer: `date_diff('day', signup_date, current_date)`, `date_diff('month', signup_date, current_date)`; fractional months via `date_diff('day', signup_date, current_date) / 31.0`
+- Accuracy: 5 — sound, docs-verified, correct fractional convention.
+- Completeness: 5 — COALESCE for active, worked 45-day example, divisor rationale.
+- Clarity: 5 — explains every piece for a non-OLAP engineer.
+- Actionability: 5 — drop-in query.
+- **Q1 avg = 5.00**
 
-- **Accuracy: 4** — Core verified vs datetime.html: `date_diff(unit, ts1, ts2) → bigint` = (ts2 − ts1) in unit, counting boundaries crossed. `date_diff('day', signup, today)` = whole days; `date_diff('month', signup, today)` = whole months. Both correct, including the boundary-count semantics note. **MINOR IMPRECISION**: the `/ 31.0` fractional-months suggestion systematically UNDER-estimates (avg month ≈ 30.44 days; dividing by 31 makes a true 14 months read as ~13.8), and the responder framed it as "more precise" when it is actually a cruder estimate. Not a dialect/compile error — a rough approximation mildly mislabeled.
-- **Completeness: 4** — Answers both required outputs (days + whole months); the fractional add-on is a bonus that is slightly self-undermining.
-- **Clarity: 5** — Boundary-crossing explanation is clear and accurate.
-- **Actionability: 5** — Both main expressions are copy-ready and correct.
-- **Q2 avg: 4.50**
+**WATCH-ITEM RESULT:** The iter771 crude `/31.0`-as-"more precise" imprecision did **NOT recur**. The responder used `/30.44` (the correct average-days-per-month value). **FRACTIONAL-MONTHS WATCH-ITEM = RESOLVED / CLOSED.** No FIX-A needed on this axis.
 
-### Q3 — Extract email domain (part after '@')
-Answer: `split_part(email, '@', 2) AS email_domain`; alt `substr(email, strpos(email, '@') + 1)`
+---
 
-- **Accuracy: 5** — Verified vs string.html: `split_part(string, delimiter, index) → varchar`, 1-indexed, returns NULL if index > number of parts; `split_part(email,'@',2)` = domain. `strpos(string, substring) → bigint`, 1-indexed, 0 if not found; `substr(string, start) → varchar`. Both forms correct, NULL/0-not-found edges accurate.
-- **Completeness: 5** — Primary + alternative, both with edge-case notes.
-- **Clarity: 5** — Clear, beginner-friendly.
-- **Actionability: 5** — Copy-ready.
-- **Q3 avg: 5.00**
+## Q2 — Each category's revenue as % of grand total, single query no subquery
 
-### Q4 — Floor integer age to nearest 10 (demographic bands)
-Answer: `(age - age % 10) AS age_band` OR `floor(age / 10) * 10 AS age_band`
+Answer: `ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS percent_of_total`. Explains empty-window SUM = grand total every row, single pass no subquery, 100.0* forces float, ROUND(...,2). Cites r23 window patterns.
 
-- **Accuracy: 5** — Verified vs math.html: `%` modulo operator valid; `age - age % 10` = exact floor-to-10 for non-negative ints. `floor(age/10)*10` — integer/integer division truncates in Trino (docs: "integer division performs truncation"), so 25/10=2 → 2*10=20; `floor()` is technically redundant on already-truncated integer division but is harmless and gives the correct result. Both forms give 25→20, 34→30, 39→30 for non-negative ages.
-- **Completeness: 5** — Two forms + worked examples.
-- **Clarity: 5** — Clear demographic-band framing.
-- **Actionability: 5** — Copy-ready.
-- **Q4 avg: 5.00**
+**Verification:** sql/select.html confirms with no PARTITION BY and no ORDER BY "all rows are considered peers," so `SUM(x) OVER ()` spans the entire result set = grand total on every row. `100.0 *` forces double division (avoids integer truncation). `ROUND(x, 2)` valid. Correctly satisfies "single query no subquery" — the window function avoids a self-join/subquery for the denominator.
+
+- Accuracy: 5 — empty-window grand-total semantics docs-confirmed.
+- Completeness: 5 — single-pass, float-coercion, rounding all addressed.
+- Clarity: 5 — empty `OVER ()` explained in plain terms.
+- Actionability: 5 — drop-in.
+- **Q2 avg = 5.00**
+
+---
+
+## Q3 — Most recent event row per order_id (one row each, latest status)
+
+Answer: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY timestamp DESC) AS rn FROM order_events) WHERE rn = 1`. Notes ties → tiebreaker (timestamp DESC, event_id DESC); Trino does NOT support QUALIFY; subquery form canonical; max_by alternative. Cites r23 §3.1G no-DISTINCT-ON.
+
+**Verification:** row_number() confirmed window ranking fn; rn=1 in outer subquery = canonical keep-latest idiom. QUALIFY confirmed NOT present anywhere in sql/select.html → subquery/CTE form correctly required. max_by(status, timestamp) GROUP BY order_id confirmed valid for the single-column "latest status." Tie note (add event_id DESC) is the right deterministic-ordering caveat. Correctly distinguishes this from DISTINCT ON (Postgres-only, absent in Trino).
+
+- Accuracy: 5 — idiom correct, QUALIFY-absence confirmed, max_by valid.
+- Completeness: 5 — full-row vs single-column (max_by) both covered + tiebreaker nuance.
+- Clarity: 5 — clear why subquery (no QUALIFY).
+- Actionability: 5 — drop-in.
+- **Q3 avg = 5.00**
+
+---
+
+## Q4 — Label customers Gold/Silver/Bronze by total spend range
+
+Answer: `CASE WHEN total_spend >= 1000 THEN 'Gold' WHEN total_spend >= 500 THEN 'Silver' ELSE 'Bronze' END AS tier`. Explains first-match top-to-bottom; notes if(condition, value) single-branch shorthand exists but CASE clearer for multiple tiers. Cites r23 §3.1E.
+
+**Verification:** conditional.html confirms searched CASE "evaluates each boolean condition from left to right until one is true and returns the matching result" — so `>= 500` after the `>= 1000` branch correctly maps 500–1000 to Silver (boundary handled via ordering). `if(condition, true_value)` confirmed returns NULL when false and no else — the responder's note that CASE is clearer for multiple tiers and that if() is a single-branch shorthand is accurate.
+
+- Accuracy: 5 — first-match ordering + if() NULL-when-false both docs-confirmed.
+- Completeness: 5 — boundary logic + if() alternative noted.
+- Clarity: 5 — top-to-bottom first-match explained plainly.
+- Actionability: 5 — drop-in.
+- **Q4 avg = 5.00**
 
 ---
 
@@ -52,26 +68,20 @@ Answer: `(age - age % 10) AS age_band` OR `floor(age / 10) * 10 AS age_band`
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
 | Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 4 | 4 | 5 | 5 | 4.50 |
+| Q2 | 5 | 5 | 5 | 5 | 5.00 |
 | Q3 | 5 | 5 | 5 | 5 | 5.00 |
 | Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall avg: 4.875 — PASS** (threshold 3.5)
+**Overall avg = 5.00 — PASS** (threshold 3.5).
 
----
+### Production-environment fit
+All four are pure Trino 467 SQL (Iceberg connector, Hive Metastore on-prem). No stack-incompatible recommendations; no auth/authz scope issues. Fits prod_info.md.
 
-## Teacher feedback / required answers
+### Watch-item status
+- **Fractional-months WATCH-ITEM: RESOLVED / CLOSED.** Q1 used `/30.44` (sound avg-days-per-month); the iter771 `/31.0`-as-"more precise" imprecision did NOT recur.
 
-**(a) Is first-of-next-month BULLETPROOFED?** YES. This is the **2nd consecutive clean datapoint** after iter770 (1st post-fix clean). iter770 hit it at a mid-year boundary (June 20 → July 1); iter771 hits it at the harder **year boundary** (Dec 12 2026 → Jan 1 2027) and the responder produced the correct year rollover, used a valid (alternate-but-equivalent) operation order, and did NOT reproduce the iter769 minus-form synthesis-slip. The iter770 inoculation at r07:3084–3095 (next-month canonical + minus-form same-line defang + sign rule) is holding across phrasings AND across the year boundary. **First-of-next-month = BULLETPROOFED.**
+### Teacher feedback
+No action required. The zero-edit NO-OP was the correct call — all four canonicals held and produced docs-accurate, drop-in answers. No new defect, gap, or findability-miss surfaced. The fractional-months card is now demonstrated stable across re-probes.
 
-Note on the operation order: the responder used trunc-AFTER-add rather than the taught trunc-BEFORE-add. Both are correct and equivalent for this task — do NOT treat this as drift or penalize it. If anything, it shows the responder understands the operations rather than pattern-matching a single string.
-
-**(b) Q2 `/31.0` verdict:** **MINOR IMPRECISION, not flag-worthy as a blocking defect.** It is a rough approximation (not a dialect/compile error), and the core `date_diff('day'/'month')` answer is correct and well-actioned. The only real issue is the self-undermining "more precise" framing on a cruder estimate. This does NOT drag the overall below threshold (4.875) and does not require an urgent FIX. RECOMMENDATION for a future low-priority polish (not iter772-blocking): if/when the fractional-months topic is touched again, the resource could add a sharper canonical — either `date_diff('day', signup, today) / 30.44` (avg-month-days) or, more correctly, a `date_diff('month', signup, today) + day-fraction` composite — and drop the "/31 = more precise" framing. Hold this as a watch-item, not an open defect.
-
-**(c) iter772 designation:** **DEFAULT NO-OP / durability-breadth sweep.** No open defect surfaced. Q1/Q3/Q4 are clean 5.00s; Q2 is a 4.50 with only a minor, non-blocking imprecision that does not warrant a resource edit. Teacher should make ZERO edits and probe 4 fresh adjacent topics. OPTIONAL (low value): one probe could re-test fractional months / "average months active as a decimal" to see whether the `/31.0` framing recurs — if it recurs in a second datapoint, it graduates from watch-item to a candidate FIX-A. Cross-card: keep the next-month canonical (r07:3084–3095) reconciled with the previous-month block (r07:3078–3082) via the sign rule.
-
----
-
-## Watch-items for iter772
-- Q2 fractional-months `/31.0` "more precise" framing — minor imprecision, NOT an open defect. Re-probe once; promote to FIX-A only if it recurs.
-- first-of-next-month — BULLETPROOFED; no further probing required unless a regression appears.
+### iter773 designation
+**DEFAULT NO-OP / durability-breadth sweep.** No open defect. Continue probing fresh adjacent angles; the previously-open fractional-months watch-item is closed and need not be the primary probe (one confirmatory re-probe at most). Keep verifying every dialect claim against trino.io/docs/467.
