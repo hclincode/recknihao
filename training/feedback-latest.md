@@ -1,69 +1,82 @@
-# Judge Feedback — iter878
+# Judge Feedback — iter879
 
-Production stack: Trino 467 + Iceberg connector (HMS), Spark/Iceberg 1.5.2 ingestion, on-prem k8s, MinIO/S3, dbt permitted. All dialect facts verified against trino.io/docs/467 (json.html, url.html, array.html, string.html, conversion.html). PIN Trino 467.
+**Verdict: PASS** — overall average **4.31** (>= 3.5). Per-Q averages: Q1 5.00, Q2 3.25, Q3 5.00, Q4 4.00.
 
-Overall average: **4.13 / 5 → PASS** (threshold 3.5; overall average governs, no per-Q veto).
-
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 json_object type-preserving | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 URL query-param extract | 4 | 3 | 4 | 4 | **3.75** |
-| Q3 date-spine gap-fill | 5 | 5 | 5 | 5 | **5.00** |
-| Q4 HH:MM:SS duration format | 3 | 3 | 3 | 3 | **3.00** |
-
-Overall = (5.00 + 3.75 + 5.00 + 3.00) / 4 = **4.13 PASS**
+All dialect facts verified against trino.io/docs/467 (PINNED 467). No state.json bump.
 
 ---
 
-## Q1 — JSON object per row, numeric types preserved (5.00)
+## Q1 — Format integer seconds as H:MM:SS; do numbers need conversion before `||`?
 
-**The iter878 json_object FIX LANDED.** Responder LEADS with `json_object('quantity' VALUE quantity, 'unit_price' VALUE unit_price)` → `{"quantity":5,"unit_price":29.99}` (unquoted numbers), notes the colon form `json_object('quantity':quantity)` works in 467, and gives `json_format(...)` for a VARCHAR string. It did NOT regress to the iter877 all-VARCHAR `MAP(...) AS JSON` form that stringifies numbers.
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
 
-VERIFIED trino.io/docs/467/functions/json.html: doc verbatim `SELECT json_object('x' : true, 'y' : 12e-1, 'z' : 'text') --> '{"x":true,"y":1.2,"z":"text"}'` — `1.2` is an UNQUOTED JSON number, confirming type preservation. Both the colon form and KEY/VALUE form are documented. json_format serializes a JSON value to VARCHAR. Fully accurate, complete, type-correct. No escalation.
+VERIFIED (trino.io/docs/467):
+- functions/conversion.html — CAST "can be used to cast a varchar to a numeric value type and vice versa" → `CAST(integer AS varchar)` yields a VARCHAR.
+- functions/string.html — "The `||` operator performs concatenation" (VARCHAR operands), "equivalent to `concat()`".
+- functions/conversion.html — `format('%03d', 8)` → `'008'`; Java Formatter syntax, so `%02d`/`%d` zero-pad correctly.
 
-## Q2 — Extract query parameter from a URL (3.75)
+The responder correctly states explicit conversion is required (no implicit number→string coercion), and presents **CAST(s/3600 AS varchar) || ':' || ... as a VALID Approach 2**, alongside `format('%d:%02d:%02d', ...)` as the terser preferred form. Zero-padding caveat (wrap in `lpad(...,2,'0')`) is correct. Takeaway "Always CAST(number AS varchar) explicitly before ||" is right; Trino rejects ONLY a bare `int || ':'` (implicit coercion).
 
-Both forms the responder gave WORK: nested `split_part(split_part(url,'?',2),'&',1)` and the more robust `element_at(split_to_map(split_part(url,'?',2), '&', '='), 'account_id')`. split_to_map + element_at is valid and returns the param value. Accuracy is good (4).
-
-**COMPLETENESS MISS (3): the responder missed the canonical one-call answer `url_extract_parameter(page_url, 'account_id')`.** VERIFIED trino.io/docs/467/functions/url.html: `url_extract_parameter(url, name) → varchar` — "Returns the value of the first query string parameter named `name` from `url`." The full url_extract_* family exists (fragment/host/parameter/path/port/protocol/query). The split_to_map approach is correct but fragile: it does not URL-decode percent-encoded values, mishandles repeated keys and value-less params, and is far more verbose than the purpose-built builtin. This is a findable-but-missing completeness gap, not a correctness error.
-
-## Q3 — Fill missing dates over a 90-day range (5.00)
-
-`UNNEST(sequence(DATE start, current_date, INTERVAL '1' DAY)) AS d(day) LEFT JOIN daily_revenue r ON r.day=d.day` with `COALESCE(r.revenue,0)`, plus the last-90-days `UNNEST(sequence(0,89))` + `date_add` variant. VERIFIED trino.io/docs/467/functions/array.html: `sequence(start, stop, step)` with `step` an `INTERVAL DAY TO SECOND` or `INTERVAL YEAR TO MONTH` generates the date array; UNNEST + LEFT JOIN + COALESCE is the correct date-spine gap-fill, and there is no generate_series in Trino (sequence is the equivalent). Correctly framed as the Postgres generate_series equivalent. Fully accurate and complete.
-
-## Q4 — Format duration_seconds as HH:MM:SS (3.00) — DEFECT
-
-Two problems:
-
-1. **Minor inconsistency (flagged):** `format('%02d:%02d:%02d', duration_seconds/3600, (duration_seconds%3600)/60, duration_seconds%60)` is correct (VERIFIED conversion.html: `format('%03d', 8) → '008'`, so `%02d` zero-pads to 2 digits). But for 5025 this yields **'01:23:45'**, NOT the '1:23:45' the responder stated. The stated output is inconsistent with the `%02d` width specifier the responder itself used.
-
-2. **REAL DEFECT — FALSE rejection claim:** The responder claimed "In Trino there is no implicit number-to-string coercion. This does NOT work — Trino rejects this with a type error: `CAST(hours AS varchar) || ':' || CAST(minutes AS varchar) || ':' || CAST(seconds AS varchar)`."
-
-**This claim is FALSE.** VERIFIED trino.io/docs/467/functions/string.html (`||` performs concatenation on VARCHAR operands; `||` is sugar for `concat()`) and conversion.html (`CAST(int AS varchar)` produces a VARCHAR, e.g. `CAST(123 AS varchar) → '123'`). Since each `CAST(... AS varchar)` explicitly produces a VARCHAR, `CAST(h AS varchar) || ':' || CAST(m AS varchar) || ':' || CAST(s AS varchar)` is a VARCHAR-to-VARCHAR concatenation that **IS VALID and works** — it is just more verbose than `format()`. Trino only disallows IMPLICIT coercion (`int || ':'` WITHOUT a CAST). The responder conflated "no implicit coercion" with "explicit CAST+concat is rejected." Same family as the iter871 over-cautious-CAST `format_datetime` defect.
-
-**Diagnosis: RESPONDER SYNTHESIS SLIP, not a resource defect.** The resource (r23 § "no implicit coercion" duration/concat table, ~L857-862) is CORRECT and teaches the OPPOSITE of the responder's claim:
-- L857 RIGHT column: `... OR CAST(date_diff('hour',a,b) AS varchar) || 'h ' || CAST(date_diff('minute',a,b)%60 AS varchar) || 'm'`
-- L859 RIGHT column: `'$' || CAST(total_amount AS varchar)`
-- L862 one-line rule: "**Second choice: explicit `CAST(... AS varchar)` on every numeric piece before `||` or `concat()`.**"
-
-The resource explicitly presents `CAST(... AS varchar) || ...` as a WORKING second-choice form. The responder mis-synthesized the "never rely on implicit coercion" rule into "explicit CAST + || is rejected," dropping the word "implicit." The card is accurate; the responder over-generalized.
+**(a) CAST+|| INOCULATION TOOK.** The responder now presents CAST+|| as VALID — it no longer claims it throws a type error. The iter878 Q4 regression is corrected. No escalation to iter880 on this axis.
 
 ---
 
-## iter879 recommendation: LIGHT FIX-A (defang the false "CAST+|| rejected" framing) + optional Q2 completeness add
+## Q2 — Unpack a ROW column `properties` (fields plan/region/account_tier) into separate columns WITHOUT listing every field
 
-This is a responder synthesis slip against a CORRECT resource, so a defect REPAIR is not strictly needed (the resource already says the right thing). But because this is the SECOND instance of the over-cautious-CAST family (iter871 format_datetime was the first) and the responder's findability keys on the duration/HH:MM:SS phrasing, recommend a **targeted reinforcement** so the right path wins on this exact question shape:
+**Sub-scores: Accuracy 3 / Completeness 3 / Clarity 4 / Actionability 3 → avg 3.25 (DEFECT)**
 
-**FIX-A (primary, r23 duration/concat card ~L857-862):** Add a short, copy-attractive POSITIVE anchor next to the existing rule that states explicitly: "`CAST(int AS varchar) || ':' || CAST(int AS varchar)` IS VALID Trino — both operands are VARCHAR after the explicit CAST; `||` concatenates VARCHARs. Only the form WITHOUT a CAST (`int || ':'`) errors." Add a FENCED inline-defang on its own un-copyable line of the false "CAST + || is rejected / type error" misconception, plus an HH:MM:SS keyword anchor (`format HH:MM:SS`, `duration to time string`, `seconds to HH:MM:SS`) routing to the `format('%02d:%02d:%02d', ...)` canonical AND the equivalent CAST+|| form. Keep the existing correct L857-862 content; do not churn it.
+VERIFIED (trino.io/docs/467):
+- language/types.html — "Named row fields are accessed with field reference operator (.)." Example `CAST(ROW(1, 2.0) AS ROW(x BIGINT, y DOUBLE)).x`. So `properties.plan` dot access is CORRECT. NULL-row dot access returning NULL and COALESCE fallback are reasonable.
+- **sql/select.html — Trino 467 DOES support `row_expression.*` expansion**: verbatim "In the case of `row_expression.* [ AS ( column_alias [, ...] ) ]`, the `row_expression` is an arbitrary expression of type `ROW`. All fields of the row define output columns to be included in the result set." Example: `SELECT (CAST(ROW(1, true) AS ROW(field1 bigint, field2 boolean))).*;`. This is the ACTUAL answer to "expand all fields without listing each" — `SELECT (properties).* FROM events` (parentheses required around the row expression).
+- **sql/select.html — UNNEST expands ARRAY or MAP into a relation** (arrays → one column, maps → key/value columns). The docs do NOT support UNNEST taking a single ROW and expanding its fields to columns.
 
-**FIX-A (secondary, optional — r07 or r23 URL card):** Add `url_extract_parameter(url, name)` as the LEADING canonical for "extract a query parameter from a URL," with the split_to_map form demoted to a fallback (note it does not URL-decode). Keyword anchors: `extract query parameter from URL`, `get account_id from page_url`, `parse query string`. VERIFIED `url_extract_parameter` exists in 467.
+**Two problems:**
+1. **WRONG claim (Accuracy hit):** The responder's "you could use CROSS JOIN UNNEST on the ROW's fields" is incorrect. UNNEST operates on ARRAY/MAP, not on a bare ROW's fields. Recommending it (even as a hedged "more verbose") is misleading and would produce a parse/type error if attempted.
+2. **MISSED the real answer (Completeness hit):** The engineer EXPLICITLY asked to unpack all fields WITHOUT listing each. The correct Trino 467 mechanism is `(properties).*` row-wildcard expansion. The responder never mentioned it — it led with per-field dot notation (fine, but still requires listing each) and then offered the wrong UNNEST alternative instead of the actual `row.*` answer.
 
-Both are additive/reinforcing; no existing pin needs reversal. NO federation edits.
+The dot-notation lead is correct and useful, which keeps this from being a hard fail, but the question's specific ask was missed and a wrong alternative was given.
+
+**(b) ANSWERS TO THE TWO VERIFICATION QUESTIONS:**
+- **Can UNNEST expand a ROW's fields to columns? NO.** UNNEST expands ARRAY or MAP into rows; it does not expand a single ROW's fields into columns. The responder's CROSS-JOIN-UNNEST-on-a-ROW suggestion is WRONG.
+- **Is `properties.*` row-expansion supported in Trino 467? YES.** `SELECT (properties).* FROM events` (parens around the row expression, optional `AS (alias, ...)`) is the documented unpack-all mechanism the responder missed.
 
 ---
 
-## Explicit answers requested
+## Q3 — Year-over-year: this month's revenue beside same month last year
 
-**(b) Does `url_extract_parameter` exist in Trino 467?** YES. `url_extract_parameter(url, name) → varchar` is documented on trino.io/docs/467/functions/url.html ("Returns the value of the first query string parameter named `name` from `url`"), alongside the full url_extract_* family (fragment/host/parameter/path/port/protocol/query). The responder MISSED it — a findable-but-missing completeness gap (the split approach works but is fragile and does not URL-decode).
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
 
-**(d) Is `CAST(int AS varchar) || ':' || ...` valid Trino?** YES, it is valid and works. `||` concatenates VARCHAR operands and `CAST(int AS varchar)` produces a VARCHAR, so the fully-CAST expression is a legal VARCHAR concatenation. The responder's claim that it "does NOT work / Trino rejects with a type error" is **FALSE** — a real defect. Trino only rejects IMPLICIT coercion (a bare `int || ':'` without CAST). Source of the false claim: a RESPONDER SYNTHESIS SLIP (the r23 resource correctly teaches CAST+|| as a working second-choice form at L857-862), in the same over-cautious-CAST family as iter871.
+VERIFIED (trino.io/docs/467):
+- functions/window.html — lag: "Returns the value at `offset` rows before the current row in the window partition." So `LAG(revenue, 12) OVER (ORDER BY month)` returns the value 12 rows back — correct for a contiguous monthly series.
+- functions/datetime.html — interval arithmetic confirmed: `date '2012-08-08' - interval '2' day`, `timestamp + interval '1' month`. So `cur.month - INTERVAL '1' YEAR` self-join is valid.
+
+The responder's contiguity caveat (LAG(,12) miscounts if months are missing) is CORRECT and important, and the robust self-join on `prev.month = cur.month - INTERVAL '1' YEAR` is the right fallback for sparse data. `NULLIF` guard + `100.0` for the growth_pct (float division) is correct. Excellent, complete answer.
+
+---
+
+## Q4 — Pad short strings to fixed width OR truncate long strings with '...'
+
+**Sub-scores: Accuracy 4 / Completeness 4 / Clarity 4 / Actionability 4 → avg 4.00**
+
+VERIFIED (trino.io/docs/467):
+- functions/string.html — lpad/rpad: "If `size` is less than the length of `string`, the result is truncated to `size` characters." Confirms the standing lpad/rpad pad-OR-truncate fact. The responder's note that `rpad(s,50,' ')` on a 100-char string keeps only the first 50 is CORRECT.
+- functions/string.html — `length()` "Returns the length of `string` in characters." Correct.
+- functions/string.html — `substr` positions start at 1; `||` concatenation. So `CASE WHEN length(s) > 50 THEN substr(s,1,47) || '...' ELSE s END` is correct (47 + 3 = 50).
+
+All correct. Held just under a 5 because the answer doesn't flag that `rpad(s,50,' ')` and the ellipsis-truncate produce different results for over-width input (rpad silently truncates with no ellipsis), and the combined form's interaction (truncate-then-pad is a no-op for over-width) is left implicit — minor completeness/clarity polish, not a defect.
+
+---
+
+## Overall
+
+Overall average **4.31 → PASS**. The standout is the Q2 defect: a WRONG UNNEST-on-a-ROW suggestion plus a MISSED `(properties).*` row-expansion answer (the literal thing the engineer asked for). Q1 confirms the CAST+|| inoculation held. Q3 and Q4 are clean.
+
+### iter880 recommendation: **FIX-A (Q2)**
+
+Q2 has a real, verifiable defect. Recommended LIGHT FIX-A (additive + one inline-defang), no churn to correct cards:
+- **ADD** a leading canonical for ROW unpack-all: `SELECT (properties).* FROM events` (parens around the row expression required) with optional `AS (plan, region, account_tier)` column aliases — verified verbatim from sql/select.html `row_expression.*`. Keyword anchors: "unpack all ROW fields", "expand row into columns without listing each", "row.* / row dereference all", "flatten a ROW column", "select all struct fields".
+- **KEEP** the per-field dot-notation card (`properties.plan`) as the correct access-what-you-need path; cross-link it to the new unpack-all card.
+- **INLINE-DEFANG** (own un-copyable FENCED line) the "CROSS JOIN UNNEST on a ROW's fields" suggestion: UNNEST expands ARRAY/MAP into ROWS, it does NOT expand a single ROW's fields into columns — DO NOT COPY. Route ROW-fields-to-columns to `(row).*`.
+- All SQL FENCED (pipe-escape trap). PIN Trino 467. No federation edits.
+
+If the teacher disagrees the UNNEST line + missing row.* rise to a defect, the floor is the missing `(properties).*` card (a genuine completeness gap on the exact asked question) — so at minimum the additive card is warranted.

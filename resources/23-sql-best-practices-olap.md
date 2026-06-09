@@ -446,6 +446,9 @@ FROM iceberg.analytics.users;
 --   element_at(split(path, '/'), -1)   -- '/var/log/app.log' -> 'app.log'
 
 -- 3. split_to_map: parse a 'k1=v1;k2=v2' string and read a key.
+--    NOTE: to pull a query param out of a FULL URL ('https://.../p?account_id=42'),
+--    prefer url_extract_parameter(url, 'account_id') -- see the url_extract_* family
+--    canonical below (§"pull the host/domain/path/query from a FULL URL").
 --    "Pull the 'utm_source' value out of a semicolon-separated query-string blob."
 SELECT
   element_at(split_to_map(qs, ';', '='), 'utm_source') AS utm_source,
@@ -570,6 +573,26 @@ FROM events;
 | `url_extract_fragment(url)` | `varchar` | the fragment (after `#`) — `'top'` |
 | `url_extract_parameter(url, 'name')` | `varchar` | the value of one query param — `url_extract_parameter(page_url, 'ref')` → `'email'` |
 | `url_extract_port(url)` | `bigint` | the port number (NOTE: returns **`bigint`**, not varchar) — `url_extract_host('https://host:8080/x')` is `'host'`, `url_extract_port(...)` is `8080` |
+
+> **Leading canonical — extract ONE query-string parameter VALUE from a URL — use `url_extract_parameter`, NOT a `split_to_map` chain.**
+> **Keyword anchors:** extract URL query parameter, get a query string param value, pull a query parameter out of a URL, get the value of a URL param, url_extract_parameter, parse a URL query param, read account_id from a page_url, grab utm_source from a URL, query string parameter value.
+>
+> ```sql
+> -- CANONICAL — pull one query-string parameter's value straight out of a full URL:
+> url_extract_parameter(page_url, 'account_id')
+> -- 'https://app.acme.io/dashboard?account_id=42&ref=email' -> '42'
+> -- ('account_id' returns the value of the FIRST query param of that name, per RFC 1866 §8.2.1)
+> ```
+>
+> **Prefer `url_extract_parameter` over a hand-rolled split.** It is one call and understands the full URL grammar (scheme, host, path, `?query`, `#fragment`). The fallback below works but is fragile: you must first peel the query string off the URL yourself (`split_part(url, '?', 2)`), then parse it. Use the fallback only if you cannot use `url_extract_parameter` — e.g. you already have a bare query-string blob (no scheme/host) and want **all** params as a map.
+>
+> ```sql
+> -- FALLBACK (valid, but parses the query string by hand — query string MUST already be isolated):
+> element_at(split_to_map(split_part(page_url, '?', 2), '&', '='), 'account_id')
+> -- '...?account_id=42&ref=email' -> split_part takes 'account_id=42&ref=email', split_to_map -> MAP{'account_id':'42','ref':'email'}
+> ```
+>
+> Note on decoding: the Trino 467 docs describe `url_extract_parameter` as returning the parameter value (RFC 1866 §8.2.1) and do **not** document automatic percent-decoding. If a value may contain percent-escapes (`%20`, `%26`, …) and you need the raw text, wrap the result in `url_decode(...)` explicitly — the same `url_decode` documented in the §`url_encode`/`url_decode` card below. The `split_to_map` fallback does no decoding either. For the **whole** `url_extract_*` family (host / path / query / fragment / protocol / port / parameter) see the table just above.
 
 > **Co-located note — the `split_part` URL chain is FRAGILE; use `url_extract_*` for URL parts.** You *can* approximate the host with `split_part(split_part(page_url, '://', 2), '/', 1)` (split off the scheme, then take the part before the first `/`), and it works on a *simple* `https://host/path` URL. But it **breaks** the moment the URL has a **port** (`host:8080` comes back glued to the host), a **query string** (no `?` handling), a **fragment** (`#...` leaks into the host on schemeless inputs), or a **missing scheme** (the first `split_part` on `'://'` returns the whole string). For anything that is a real URL, reach for the `url_extract_*` family first — it is one call, scheme/port/query/fragment-aware, and reads as intent. The `split_part` chain stays in your toolbox only for **arbitrary delimited strings that are not URLs** (see the email-domain idiom above).
 
@@ -860,6 +883,33 @@ FROM tickets;
 | `concat(date_diff('hour', a, b)::varchar, 'h')` (Postgres-style `::` cast as a workaround) | Trino does NOT parse `::` as a cast — raises `mismatched input ':'` at parse time. Use ANSI `CAST(... AS varchar)`. | `concat(CAST(date_diff('hour', a, b) AS varchar), 'h')` OR `format('%dh', date_diff('hour', a, b))`. |
 
 **One-line rule.** Building a `'2h 15m'` / `'3 orders'` / `'$450.00 total'` style display string from a number column or a `date_diff` result? **First choice: `format(fmt, args...)`** — it takes typed args (`%d` for `bigint`, `%.2f` / `%,.2f` for decimals, `%s` for strings) and is the printf-style canonical above. **Second choice: explicit `CAST(... AS varchar)` on every numeric piece before `||` or `concat()`.** **Never** rely on implicit coercion — Trino has none for number-to-string.
+
+##### HH:MM:SS clock string from an integer-seconds column — BOTH forms are valid
+
+> **Keyword anchors:** HH:MM:SS, format seconds as a clock, format a duration as HH:MM:SS, turn seconds into hours:minutes:seconds, total seconds to a clock string, render duration_seconds as HH:MM:SS, zero-padded clock string, concatenate numbers with a colon/separator, CAST int to varchar concat, glue numbers together with a separator, build a time string from seconds, elapsed seconds to clock.
+
+**The one fact.** To render an integer-seconds column (e.g. `duration_seconds = 5025`) as a zero-padded `HH:MM:SS` clock string, you have **two equally valid Trino 467 forms**. Both work — `format()` is just terser.
+
+```sql
+-- PREFERRED — format() with %02d gives zero-padding for free:
+format('%02d:%02d:%02d',
+       duration_seconds / 3600,            -- hours
+       (duration_seconds % 3600) / 60,     -- minutes
+       duration_seconds % 60)              -- seconds
+-- 5025 -> '01:23:45'
+
+-- ALSO VALID — explicit CAST + || (both operands are VARCHAR AFTER the CAST, so || concatenates fine):
+CAST(duration_seconds / 3600 AS varchar) || ':'
+  || CAST((duration_seconds % 3600) / 60 AS varchar) || ':'
+  || CAST(duration_seconds % 60 AS varchar)
+-- 5025 -> '1:23:45'   (note: || form is NOT zero-padded — use lpad(..., 2, '0') per piece, or use format() for padding)
+```
+
+**The RULE.** Concatenating numbers with `||` requires an **explicit `CAST(... AS varchar)` on each numeric piece** — once cast, `||` is **valid** because both operands are VARCHAR. Trino rejects **only IMPLICIT coercion**: a **bare `int || ':'` (no CAST)** errors with `Unexpected parameters` / `Cannot apply operator: ... || varchar`. So `CAST(int AS varchar) || ':' || ...` **WORKS** — `format('%02d:%02d:%02d', ...)` is just terser and zero-pads automatically. (`||` is sugar for `concat()`, which is VARCHAR-only — see the parent card above.)
+
+```sql
+-- ❌ 'CAST(h AS varchar) || ':' || CAST(m AS varchar) is rejected / Trino throws a type error' -- WRONG: after the explicit CAST both operands are VARCHAR so || is VALID; only a BARE int || ':' (no CAST, implicit coercion) errors — DO NOT COPY
+```
 
 ---
 
