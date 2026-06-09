@@ -1,170 +1,63 @@
-# Judge Feedback — iter769 (durability-breadth sweep, 4 fresh adjacent probes)
+# Judge Feedback — iter770 (INOCULATION-LIGHT FIX-A verification)
 
-**Overall: 4.31 / 5 — PASS** (overall average governs; no single-Q veto)
+**Mode:** final/extended phase. FIX-A: iter769 surfaced a Q2 synthesis-slip where the responder mislabeled `date_trunc('month',x) - INTERVAL '1' MONTH` as "equivalent" to first-of-next-month. iter770 added a copy-attractive NEXT-month canonical + `INTERVAL '1' MONTH` at r07:3084-3095 with a same-line defang of the minus form. Q1 re-probes it; Q2–Q4 fresh.
 
-Teacher made ZERO resource edits this iteration. These 4 probes test whether hardened
-content stays findable + correct. Three of four are clean, high-quality answers. Q2 carries
-a real defect (a contradictory, wrong "equivalent" alternative) that pulls its score down
-but does not sink the iteration.
-
-All dialect claims verified against trino.io/docs/467 (datetime, json, string functions + SELECT 3VL).
+All four answers docs-verified against trino.io/docs/467 (datetime / aggregate / conversion / conditional / string .html) on 2026-06-09. Resource fix confirmed in place at resources/07-analytical-query-patterns.md:3084-3095.
 
 ---
 
-## Q1 — Explode comma-separated "tags" into rows, count per tag
+## Q1 — First of NEXT month (FIX-A re-probe): contract activates June 20 → renewal July 1
 
-`SELECT TRIM(tag) AS tag, COUNT(*) FROM events CROSS JOIN UNNEST(SPLIT(tags, ',')) AS t(tag) ... GROUP BY TRIM(tag)`
+Answer: `date_add('month', 1, date_trunc('month', activation_date)) AS renewal_date`. Worked example 2026-06-20 → date_trunc → 2026-06-01 → +1 month → 2026-07-01. Did NOT present the minus form.
 
-VERIFIED (trino.io/docs/467/functions/string.html): `split(string, delimiter)` "Splits string on delimiter and returns an array"; `trim(string) -> varchar` "Removes leading and trailing whitespace." `CROSS JOIN UNNEST(arr) AS t(col)` is the canonical string-to-rows idiom; WHERE-after-JOIN is correct. TRIM for whitespace from `SPLIT` is the right touch. Cited r07 §1a.1.
+**Docs verification (datetime.html):** `date_add(unit, value, timestamp)` verbatim "Adds an `interval value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." `date_trunc('month', x)` verbatim "Returns `x` truncated to `unit`" — the reference table truncates `2001-08-22` → `2001-08-01 00:00:00`. So `date_add('month', 1, date_trunc('month', 2026-06-20))` = `date_add('month', 1, 2026-06-01)` = `2026-07-01`. CORRECT.
 
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Avg** | **5.00** |
+**FIX-A VERDICT: WORKED.** The responder routed straight to the additive form (`date_add(+1, date_trunc('month', x))`), produced the right worked example (June 20 → July 1), and crucially did NOT reproduce the iter769 slip — it never presented `- INTERVAL '1' MONTH` as next-month. The added canonical + same-line minus-form defang + sign rule (r07:3095) steered cleanly.
 
-Hardened content found cleanly. Model answer.
+- Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 → **avg 5.00**
 
----
+## Q2 — Pivot / conditional aggregation: one row per customer, pending/shipped/cancelled count columns
 
-## Q2 — First day of the NEXT month after signup_date (March 15 → April 1)
+Answer: Form 1 `SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count` (+ shipped/cancelled) `GROUP BY customer_id`. Form 2 `COUNT(*) FILTER (WHERE status='pending') AS pending_count` (+ others) `GROUP BY customer_id`. Note: FILTER is Trino-native/cleaner; "conditional aggregation is the correct term, not pivot."
 
-PRIMARY: `date_add('month', 1, date_trunc('month', signup_date))` — **CORRECT**
-(March 15 → date_trunc → March 1 → +1 month → April 1).
+**Docs verification (aggregate.html):** FILTER clause confirmed verbatim — "The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a `WHERE` clause"; syntax `aggregate_function(...) FILTER (WHERE <condition>)`. `count(*)` = "Returns the number of input rows." SUM(CASE…) is standard valid Trino. Both forms produce per-customer status columns. The "no PIVOT keyword in Trino, conditional aggregation is the correct term" note is correct. CORRECT.
 
-DEFECT: the responder then offers an "Alternative spelling (exactly equivalent)":
-`date_trunc('month', signup_date) - INTERVAL '1' MONTH` and claims "Both compile to the
-same execution plan."
+- Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 → **avg 5.00**
 
-VERIFIED (trino.io/docs/467/functions/datetime.html): `date_trunc('month', x) + INTERVAL '1' MONTH`
-= first day of the **NEXT** month; `date_trunc('month', x) - INTERVAL '1' MONTH`
-= first day of the **PREVIOUS** month (Feb 1, not April 1). The "minus" alternative is
-**WRONG** — it is NOT equivalent to the primary, it yields the prior month, and the
-"same execution plan" claim is false. The correct equivalent spelling is
-`date_trunc('month', signup_date) + INTERVAL '1' MONTH` (PLUS).
+## Q3 — Zero-pad: integer invoice number → fixed 6-digit leading-zero string (42 → '000042')
 
-Impact: the primary line gives the right answer, but a beginner who copies the labeled
-"equivalent" alternative gets the wrong month silently. An actively-misleading alternative
-that contradicts the correct primary is a real accuracy defect.
+Answer: `format('%06d', invoice_id)` → '000042'/'001234'; width adjust `%05d`/`%08d`; `format('INV-%06d', invoice_id)` → 'INV-000042'.
 
-| Axis | Score |
-|---|---|
-| Accuracy | 2 (primary right, "equivalent" alternative wrong + false plan claim) |
-| Completeness | 4 (covers the case; the extra alternative is harmful, not additive) |
-| Clarity | 3 (the contradiction between primary +1 and "equivalent" -1 is confusing) |
-| Actionability | 3 (copy the primary = correct; copy the alternative = wrong month) |
-| **Avg** | **3.00** |
+**Docs verification (conversion.html):** `format(format, args...)` verbatim "Returns a formatted string using the specified format string and arguments" — links to the Java Formatter syntax (printf-style). Docs example `SELECT format('%03d', 8)` → `'008'` confirms the zero-pad width mechanism; `%06d` applies width 6 the same way → 42 → '000042', 1234 → '001234'. `%d` takes integer types (incl. BIGINT). The `'INV-%06d'` composite-string example is also valid. CORRECT.
 
-### Q2 DEFECT VERDICT: RESPONDER SYNTHESIS-SLIP (resources are CLEAN)
+- Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 → **avg 5.00**
 
-Grepped every `INTERVAL '1' MONTH` / "next month" / "previous month" / "first day"
-occurrence across resources/:
+## Q4 — NULL handling: replace NULL referral_source with 'direct'; count real-value rows vs not
 
-- **NO resource mislabels the minus form as next-month.** Every `- INTERVAL '1' month`
-  in the resources is correctly used for **previous/last/prior month** (r07:3079, r07:3088,
-  r07:3060). r27:683 correctly uses `+ INTERVAL '1' MONTH` for an add.
-- **There is NO "first day of NEXT month" canonical anywhere** in the resources.
-- The slip was SEEDED by r07:3078-3082, the **"previous-month boundary" equivalence block**:
-  ```
-  Equivalent way to write the previous-month boundary ...
-  - date_trunc('month', current_date) - INTERVAL '1' month  -- preferred form for "1 month ago, first of the month."
-  - date_add('month', -1, date_trunc('month', current_date)) -- equivalent
-  Both compile to the same plan.
-  ```
-  This block is CORRECT IN ITS OWN CONTEXT (it is about the PREVIOUS month). The responder,
-  asked for the NEXT month, lifted this "two equivalent spellings + same plan" framing,
-  correctly flipped the `date_add` to `+1`, but FAILED to flip the INTERVAL form from
-  `- INTERVAL` to `+ INTERVAL` — producing a self-contradictory pair. No resource is
-  factually wrong; the responder garbled a correct adjacent block.
+Answer: `COALESCE(referral_source, 'direct')` for the default; `COUNT(*)` counts all rows, `COUNT(referral_source)` counts only non-NULL; `GROUP BY COALESCE(...)`; also `COUNT(*) - COUNT(referral_source) AS users_without_source`.
 
-### iter770 DESIGNATION: FIX-A (inoculation-light) — resources CLEAN but missing a next-month anchor
+**Docs verification (conditional.html + aggregate.html):** COALESCE verbatim "Returns the first non-null `value` in the argument list." `count(x)` verbatim "Returns the number of non-null input values"; `count(*)` "Returns the number of input rows." So `COUNT(referral_source)` = rows with a real value, `COUNT(*) - COUNT(referral_source)` = NULL rows. All correct and Trino-valid. CORRECT.
 
-Add an explicit **NEXT-month canonical** so the next-month question routes to a correct,
-copy-attractive block instead of forcing the responder to re-derive it by sign-flipping
-the previous-month idiom.
-
-- **WHERE:** resources/07, immediately adjacent to the existing previous-month boundary
-  block (r07:3078-3082), in the Pattern B2 / date-arithmetic area. Co-locate so the
-  next-month and previous-month forms sit side by side and read as a matched pair.
-- **WHAT (canonical, COPY-THIS):**
-  - `date_trunc('month', signup_date) + INTERVAL '1' MONTH` AS next_month_first
-  - equivalent: `date_add('month', 1, date_trunc('month', signup_date))`
-  - keyword anchors: "first day of next month", "beginning of next month", "start of
-    following month", "March 15 → April 1", "first of the month after".
-- **SAME-LINE DEFANG (iter693 style, un-copyable):** mark the minus form WRONG inline next
-  to the canonical: `date_trunc('month', x) - INTERVAL '1' MONTH  -- ❌ this is the PREVIOUS
-  month (Feb 1), NOT the next month — use + INTERVAL '1' MONTH -- DO NOT COPY`.
-- Optionally tighten r07:3078-3082's "Both compile to the same plan" framing to make clear
-  it is the PREVIOUS-month pair, so it is not mistaken as a template for the next-month case.
-
-This is NOT a reconcile of a wrong resource (no resource is wrong); it is a targeted
-addition of the missing next-month canonical + a defang of the exact sign-flip the
-responder fell into.
-
----
-
-## Q3 — Extract nested JSON field (user.country / device.os) from a JSON-string column
-
-`json_extract_scalar(payload, '$.user.country')`, `json_extract_scalar(payload, '$.device.os')`;
-notes scalar→VARCHAR (cast if needed), `json_extract` for nested object/array, JSONPath
-`$.user.country`, filter `WHERE json_extract_scalar(...)='US'`.
-
-VERIFIED (trino.io/docs/467/functions/json.html): `json_extract_scalar(json, json_path) -> varchar`;
-`json_extract(json, json_path) -> json`; both accept a VARCHAR string containing JSON (Trino
-handles varchar JSON input implicitly), so it works on a JSON-string `payload` column. JSONPath
-`$.user.country` dot-notation is correct. The scalar-vs-extract distinction (scalar for leaf
-values, extract for nested object/array) is exactly right. Cited r13 JSON family.
-
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Avg** | **5.00** |
-
-Excellent — the scalar/extract distinction and the cast caveat are the two things a beginner
-trips on, and both are covered.
-
----
-
-## Q4 — Customer IDs in signups but NOT in subscriptions (anti-join)
-
-`SELECT s.customer_id FROM signups s LEFT JOIN subscriptions p ON s.customer_id = p.customer_id WHERE p.customer_id IS NULL`;
-warns NOT IN + NULL silently returns zero rows (three-valued logic); LEFT JOIN form is NULL-safe.
-
-VERIFIED (Trino SELECT / 3VL): LEFT JOIN ... WHERE right.key IS NULL is the canonical anti-join;
-the NOT IN + NULL warning is accurate — a NULL in the NOT IN subquery makes every comparison
-UNKNOWN, so the WHERE filters all rows and the query silently returns zero rows. Correctly
-recommends the NULL-safe LEFT JOIN form. Cited r23 §10 SemiJoin/NOT IN gotcha.
-
-| Axis | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Avg** | **5.00** |
-
-Model answer — the NOT IN/NULL gotcha warning is exactly the trap a SaaS engineer hits, and
-the fix is given. (NOT EXISTS is an equally valid alternative; LEFT JOIN form cited is fine.)
+- Accuracy 5 · Completeness 5 · Clarity 5 · Actionability 5 → **avg 5.00**
 
 ---
 
 ## Overall
 
-| Q | Avg |
-|---|---|
-| Q1 string-split-to-rows | 5.00 |
-| Q2 first-of-next-month | 3.00 |
-| Q3 nested JSON extract | 5.00 |
-| Q4 anti-join / NOT-IN-NULL | 5.00 |
-| **Overall** | **4.31 — PASS** |
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 first-of-next-month (re-probe) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 conditional aggregation | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 zero-pad format('%06d') | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 COALESCE + COUNT(col)-vs-COUNT(*) | 5 | 5 | 5 | 5 | 5.00 |
 
-Three flawless answers; Q2 is the only blemish. The Q2 defect is a **responder synthesis-slip**
-(sign-flip of the previous-month idiom), not a resource error. iter770 = **FIX-A (inoculation-light):**
-add the missing NEXT-month canonical (`date_trunc('month', x) + INTERVAL '1' MONTH`) co-located
-with the existing previous-month boundary block in r07, with a same-line defang of the minus form.
-No reconcile of wrong content is needed — resources are factually clean.
+**Overall avg = 5.00 → PASS** (threshold 3.5; overall average governs, no single-Q veto).
+
+### (a) Is first-of-next-month CLOSED?
+**YES — CLOSED (1st clean post-fix datapoint).** The iter770 FIX-A worked: the responder used the additive form, produced the correct June 20 → July 1 worked example, and did NOT reproduce the iter769 minus-form synthesis-slip. **Needs 1 more clean re-probe (from a different phrasing) to BULLETPROOF** — same trajectory as range/spread (iter767 CLOSED → iter768 BULLETPROOFED). Recommend one more first-of-next-month angle at iter771 or iter772 before retiring the pin.
+
+### (b) iter771 designation
+**DEFAULT NO-OP / durability-breadth sweep.** No new defect, no new imprecision surfaced across all four answers; all four docs-clean. Teacher = ZERO edits at iter771. Probe 4 fresh adjacent topics. Strongly recommend ONE of the four be a fresh first-of-next-month phrasing (e.g. "next billing cycle starts the 1st of the month after sign-up", or a year-boundary case Dec 20 → Jan 1) to convert CLOSED → BULLETPROOFED. Cross-card check: ensure the new next-month canonical (r07:3084-3095) stays reconciled with the previous-month boundary block immediately above it (r07:3078-3082) — both correct, sign rule at r07:3095 is the disambiguator; no churn.
+
+### Standing pins held
+first-of-next-month = `+ INTERVAL '1' MONTH` / `date_add('month', +1, …)` NOT minus (now CLOSED, 1 datapoint) · conditional-aggregation = SUM(CASE) or COUNT(*) FILTER, no PIVOT keyword · format('%06d') zero-pad via Java Formatter · COALESCE + COUNT(col)-vs-COUNT(*) · full iter534–769 inventory intact.

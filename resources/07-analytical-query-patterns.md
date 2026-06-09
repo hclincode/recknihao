@@ -3081,6 +3081,19 @@ The phrases you would type into a search bar for this pattern: **year over year*
 >
 > Both compile to the same plan. Both correctly handle year boundaries (Jan → previous Dec).
 
+> **First day of NEXT month** (keyword anchors: *first day of next month, beginning of next month, next month first day, start of following month, next billing month, renewal first of following month, March 15 -> April 1*). To get the **first of the month AFTER** a date — the opposite direction from the previous-month boundary above — **ADD** one month to the month-truncated date. ✅ **COPY THIS:**
+> ```sql
+> -- First day of NEXT month after a date
+> date_trunc('month', signup_date) + INTERVAL '1' MONTH        -- e.g. 2026-03-15 -> 2026-04-01
+> -- equivalently:
+> date_add('month', 1, date_trunc('month', signup_date))       -- 2026-03-15 -> 2026-04-01
+> ```
+> Both forms are verified valid Trino 467 ([trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)): `date_trunc(unit, x)` truncates `2026-03-15` to `2026-03-01`, then `+ INTERVAL '1' MONTH` lands on `2026-04-01`; `date_add('month', 1, x)` is the same arithmetic. Year boundary works automatically (Dec 15 -> Jan 1 of next year).
+>
+> ❌ `date_trunc('month', x) - INTERVAL '1' MONTH`   -- this is the PREVIOUS month (e.g. 2026-02-01), NOT next — DO NOT COPY for "next month"
+>
+> **Sign rule (memorize):** `+ INTERVAL '1' MONTH` = **NEXT** month; `- INTERVAL '1' MONTH` = **PREVIOUS** month. Same rule for `date_add('month', +1/-1, date_trunc('month', x))` — positive value = forward (next), negative value = backward (previous). The minus form is correct for the previous-month boundary block immediately above; it is **wrong** if the question asks for *next* month.
+
 > **MoM vs YoY — pick the right one (this is the iter697 Q2 miss):**
 >
 > | The question says | The answer is | Why |
