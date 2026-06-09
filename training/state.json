@@ -1,6 +1,7 @@
 {
-  "iteration": 799,
+  "iteration": 800,
   "phase": "extended",
+  "notes_800": "iter800 durability-breadth sweep, no edits — numeric JSON-array-string re-probe to bulletproof + 3 fresh adjacent topics (transform / array-sum-reduce / array_position-or-overlap / CUBE-or-RANGE)",
   "notes_799": "iter799 additive findability FIX-A: added JSON-array-STRING explode branch UNNEST(CAST(json_parse(col) AS ARRAY(VARCHAR))) + native-vs-JSON disambiguator + UNNEST(varchar)-type-error defang at r07 §1a",
   "notes_798": "iter798 durability-breadth sweep, no edits — 4 fresh adjacent topics (nth-highest / above-group-avg / json-array-explode / date-boundary-or-mixed-order)",
   "notes_797": "iter797 durability-breadth sweep, no edits — regexp_extract re-probe to bulletproof + alias-in-WHERE watch + 2 fresh adjacent topics",
