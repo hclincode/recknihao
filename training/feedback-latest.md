@@ -1,84 +1,58 @@
-# Judge Feedback — iter862
+# Judge Feedback — iter863 (EXTENDED PHASE)
 
-**Overall: 4.78125 — STRONG PASS** (Q1 5.00 / Q2 4.625 / Q3 5.00 / Q4 4.50)
+**Overall: 4.84 STRONG PASS** (per-Q 4.875 / 5.00 / 4.875 / 4.625 = 19.375/4 = 4.84375; margin +1.34; overall avg governs, no per-Q veto)
+**Federation NOT probed** — r22 §13.x untouched, federation row UNCHANGED (4.49944/310, still FAIL).
+**iter864 recommendation: DEFAULT NO-OP / durability sweep** — all 4 clean, no defect, no resource edit.
 
-Phase: extended. LIGHT FIX-A verification of the iter861 Q3 NTILE-inversion defect.
-All four answers are pure-SQL, dialect-only; on-prem Trino 467 + Iceberg + MinIO (JWT/OPA) unaffected.
-All dialect claims docs-verified vs trino.io/docs/467 (window / datetime / math / conditional .html) + WebFetch 2026-06-10, Trino 467 pinned, multi-source.
-
-**HEADLINE: the iter861 Q3 NTILE-direction FIX LANDED.**
+All dialect facts verified against trino.io/docs/467 (comparison.html, window.html, aggregate.html, functions/list.html) + WebSearch, multi-source, PIN 467, 2026-06-10.
 
 ---
 
-## Q1 — Split customers into 5 equal groups by lifetime spend, group 1 = HIGHEST (VIP tier)
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00 CLEAN**
+## HEADLINE
 
-This is the iter861 Q3 NTILE-inversion fix RE-PROBE, and the **fix LANDED**.
-
-Responder answered `NTILE(5) OVER (ORDER BY total_spend DESC) AS tier`, and — critically — explicitly stated that **the SORT DIRECTION determines which bucket is tier 1**: you want highest, so sort `DESC`, which makes **tier 1 = top 20% / biggest spenders** and tier 5 = bottom 20%. Also noted remainder rows go to the earliest buckets.
-
-VERIFIED vs trino.io/docs/467 functions/window.html (verbatim):
-- "Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."
-- Uneven division verbatim: "the remainder values are distributed one per bucket, starting with the first bucket."
-- Example: "with `6` rows and `4` buckets, the bucket values would be as follows: `1` `1` `2` `2` `3` `4`" (larger buckets first, in ORDER BY order).
-
-Buckets are numbered 1..n in ORDER BY order. `ORDER BY total_spend DESC` => the highest values sort first => land in bucket 1. The responder's direction is now CORRECT and the explanation is label-explicit (it ties the DESC choice directly to "tier 1 = top"). This is the exact inverse of the iter861 Q3 error ("bucket 1 = top under ASC"), which is now gone. The remainder-to-earliest-buckets note also matches the docs. **Fix CONFIRMED LANDED.**
+- **Q1 NTILE direction BULLETPROOFED BOTH WAYS.** iter862 proved DESC → bucket 1 = highest; iter863 (this) proves **ASC → bucket 1 = lowest**. 2nd clean datapoint, opposite direction. The iter862 §C3 label-explicit card is durable — no regression.
+- **Q3 GREATEST NULL claim is CORRECT for Trino 467** (this was the critical check). The responder's "GREATEST() returns NULL if ANY argument is NULL" is **verbatim accurate** per comparison.html. My standing memory prior (historical Presto "doesn't accept NULL / throws") is OUTDATED for documented 467 behavior — see below. No defect, no FIX-A.
 
 ---
 
-## Q2 — Duration between started_at and finished_at as plain minutes/hours
-**Sub-scores: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4.5 — avg 4.625**
+## Per-question scoring
 
-Responder answered `date_diff('minute', started_at, finished_at) AS duration_minutes` and `date_diff('hour', started_at, finished_at) AS duration_hours`; result is BIGINT; put the earlier timestamp first or you get a negative.
+### Q1 — NTILE(10) at-risk decile (ASC → bucket 1 = lowest)
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5 → **4.875**
+- `NTILE(10) OVER (ORDER BY health_score ASC) AS risk_bucket`, explicitly ASC → bucket 1 = LOWEST scorers = at-risk. CORRECT.
+- VERIFIED window.html: ntile divides ordered rows into n buckets 1..n; buckets numbered in ORDER BY order; example `1 1 2 2 3 4` (larger buckets first). ASC ⇒ lowest rows land in bucket 1. iter862 verbatim-verified this; opposite-direction datapoint now confirms both ways.
+- Remainder-rows-to-earliest-buckets note CORRECT; NTILE-takes-no-frame-clause note CORRECT; window-fn-needs-CTE-to-filter (no QUALIFY in 467) CORRECT.
+- **NTILE direction = BULLETPROOFED both ways. NO iter864 escalation.**
 
-VERIFIED vs trino.io/docs/467 functions/datetime.html:
-- Signature `date_diff(unit, timestamp1, timestamp2)`, returns **bigint**.
-- "Returns `timestamp2 - timestamp1` expressed in terms of `unit`" => timestamp1 earlier yields a positive result. Responder's earlier-first guidance is correct.
-- `'minute'` and `'hour'` are valid units (millisecond/second/minute/hour/day/week/month/quarter/year).
+### Q2 — long→wide pivot (count per status as columns per day)
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5 → **4.875**
+- Both forms valid in 467: `SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END)` conditional aggregation, and `COUNT(*) FILTER (WHERE status='completed')`.
+- VERIFIED aggregate.html: FILTER clause documented — "The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause", syntax `aggregate_function(...) FILTER (WHERE <condition>)`. FILTER is genuinely Trino-native; the "more readable" framing is fair.
+- `SUM(metric) FILTER (...)` for summing a value (not just counting) CORRECT. GROUP BY event_date correct.
 
-CORE CORRECT. **Non-blocking completeness gap (the truncation nuance):** `date_diff` counts whole-unit boundaries and **truncates** — a 90-minute gap in `'hour'` returns **1, not 1.5**. The responder did not flag this. A SaaS engineer expecting a fractional "1.5 hours" duration would be silently surprised. The clean fractional-hours path is `date_diff('second', started_at, finished_at) / 3600.0` (or `/ 60.0` for fractional minutes). Minor deductions on Completeness/Actionability only; the integer-boundary core is correct and is what most callers want.
+### Q3 — GREATEST across columns + NULL behavior (CRITICAL CHECK)
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5 → **4.875**
+- `GREATEST(price_usd, price_eur, price_gbp)` for the largest value across columns in a row. CORRECT.
+- **NULL claim CORRECT.** VERIFIED comparison.html (greatest/least live there, NOT conditional.html/math.html): "Returns the largest of the provided values" / "Like most other functions in Trino, they return null if any argument is null", explicitly contrasted with PostgreSQL ("they only return null if all arguments are null"). list.html indexes greatest/least → comparison.html. WebSearch corroborated.
+- So the responder's "if ANY argument is NULL, GREATEST() returns NULL" is exactly right, and the COALESCE(col,0)-wrap suggestion to ignore NULLs is the correct mitigation.
+- GREATEST (across columns) vs MAX (down rows) vs array_max (within an array) distinction CORRECT; array_max EXISTS (array.html, verified via list.html).
+- **NOTE for the loop owner:** my MEMORY/standing prior held that "Trino/Presto GREATEST/LEAST do NOT support NULL the way Postgres does" (historical Presto threw on NULL). That prior is OUTDATED vs documented Trino 467 behavior — 467 docs explicitly say GREATEST/LEAST RETURN NULL on any NULL arg. The run-prompt's suspicion that the responder might be wrong is itself refuted by the docs. NO FIX-A; do not add a "GREATEST throws on NULL" correction card (that would be wrong).
 
----
-
-## Q3 — Each row's value as a percent of the overall total, in one query
-**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00 CLEAN**
-
-Responder answered `ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS pct_of_total`; explained that the empty `OVER ()` computes the grand total repeated on every row, and that `100.0` (not `100`) forces decimal division else integer division truncates.
-
-VERIFIED vs trino.io/docs/467:
-- window.html: "All Aggregate functions can be used as window functions by adding the `OVER` clause." Empty `OVER ()` (no PARTITION BY / no ORDER BY / no frame) => the frame is all rows => `SUM(revenue) OVER ()` is the grand total repeated on every row. Valid window usage, correct.
-- math.html: "Division (integer division performs truncation)" — confirms all-integer operands (`100 * revenue / SUM(...)`) would truncate. Promoting one operand to decimal/double (`100.0`) makes the whole division non-integer. The `100.0`-not-`100` caveat is correct and well-explained.
-
-Clean, well-reasoned, no gaps.
-
----
-
-## Q4 — First non-null of preferred_email, backup_email, work_email in one expression
-**Sub-scores: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4 — avg 4.50**
-
-Responder answered `COALESCE(preferred_email, backup_email, work_email) AS contact_email`; returns the first non-null, NULL if all null; cleaner than nested IF.
-
-VERIFIED vs trino.io/docs/467 functions/conditional.html (verbatim):
-- "Returns the first non-null `value` in the argument list. Like a `CASE` expression, arguments are only evaluated if necessary." Variadic (`value1, value2[, ...]`). Returns NULL if all are NULL.
-
-CORE CORRECT. **Non-blocking completeness gap (empty-string vs NULL):** the question said "some rows have preferred_email filled in, some don't." If "don't" means an **empty string `''`** rather than NULL, COALESCE will NOT skip it — `COALESCE('', backup_email)` returns `''`, not the backup. COALESCE only treats NULL as absent. A short note ("if blank fields are `''` not NULL, wrap each with `NULLIF(preferred_email,'')`") would have made this bulletproof against real-world data where empty strings are common. COALESCE is the correct core answer; minor Completeness/Actionability deductions only.
+### Q4 — duplicate emails + counts (dedup detection)
+Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4.5 → **4.625**
+- `SELECT email, COUNT(*) AS occurrence_count FROM leads GROUP BY email HAVING COUNT(*) > 1 ORDER BY occurrence_count DESC`. Textbook, correct in Trino 467 (HAVING filters post-aggregate; COUNT(*) in HAVING valid).
+- Minor completeness ding only: no note on NULL emails (grouped as one bucket) or case/whitespace normalization (LOWER(TRIM(email))) which real dedup often needs — nuance, not an error. Core dedup-detection pattern fully correct and findable.
 
 ---
 
-## Verdict & iter863 recommendation
+## iter864 recommendation: DEFAULT NO-OP / durability sweep
 
-**Overall 4.78125 = STRONG PASS** (threshold 3.5; no per-question veto). Every dialect fact verified accurate against trino.io/docs/467.
+No defect surfaced. **Teacher: ZERO resource edits.**
+- NTILE direction is BULLETPROOFED both ways (iter862 DESC, iter863 ASC) — do NOT churn the §C3 label-explicit card.
+- Q3 GREATEST-NULL is correct per 467 docs — **do NOT add a "GREATEST throws on NULL" card** (the historical-Presto prior is wrong for 467).
+- FILTER + CASE-WHEN pivot both valid — no edit.
+- Optional fresh adjacents to probe (only durability, not fixes): GREATEST/LEAST mixed-type coercion; COALESCE-wrap to make GREATEST ignore NULL (2nd phrasing); pivot with multiple metrics per status; dedup with LOWER(TRIM()) normalization; HAVING vs WHERE on aggregates.
+- Do NOT churn any iter534-862 lock. PIN 467. NO federation edits (federation 4.49944/310 row stays FAIL).
+- DO NOT bump training/state.json (already 863).
 
-- (a) **Q1 NTILE direction fix LANDED** — responder now uses `ORDER BY ... DESC` for bucket 1 = highest and explains the direction-to-label tie explicitly. The iter861 Q3 inversion is fixed (1st post-fix datapoint on the VIP/quintile/highest phrasing; needs 1 more angle — e.g. an ASC "bottom decile / lowest-N" phrasing, or a label-mismatch trap — to fully bulletproof the C3 direction card).
-- (b) **Q2 date_diff correct**; whole-unit truncation IS worth a one-line note (90 min in hours = 1 not 1.5) — minor completeness only, not a defect.
-- (c) **Q3 SUM() OVER () percent-of-total + integer-division caveat fully correct** — clean.
-- (d) **Q4 COALESCE correct**; empty-string-vs-NULL (`NULLIF(x,'')`) was a reasonable completeness note given the "some don't have it" phrasing — minor only, not a defect.
-
-**No defect surfaced. No fabrication, no wrong signature, no crossed-family error, no findability slip, no prod-env conflict.**
-
-**iter863 = DEFAULT NO-OP / durability sweep.** No resource edit warranted. Recommended probes:
-- Re-probe NTILE direction from a 2nd angle (ASC "bottom/lowest band" or a deliberately-mislabeled trap) to bulletproof the iter862 label-explicit C3 card.
-- Optional fresh adjacents only: `date_diff` fractional-duration phrasing (does the responder reach for `/3600.0`?); COALESCE-with-empty-string phrasing (does it reach for `NULLIF`?). Escalate to a LIGHT FIX-A ONLY if either dings below threshold on a 2nd datapoint — neither is warranted now (single clean datapoints).
-- PRESERVE iter862 label-explicit NTILE-direction C3 card + full iter534-861 pin inventory; NO federation edits (federation stays 4.49944/310).
-
-DO NOT bump training/state.json (already 862).
+**What the Trino 467 docs say about GREATEST NULL handling (explicit):** comparison.html — "Returns the largest of the provided values. Like most other functions in Trino, they return null if any argument is null." Explicitly contrasted with PostgreSQL, which returns null only if ALL arguments are null. The responder is CORRECT.
