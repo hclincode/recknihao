@@ -1624,6 +1624,41 @@ SELECT user_id FROM events_2026_q2;
 
 **Precedence (Trino docs verbatim).** *"Multiple set operations are processed left to right, unless the order is explicitly specified via parentheses. Additionally, `INTERSECT` binds more tightly than `EXCEPT` and `UNION`."* So `A UNION B INTERSECT C EXCEPT D` means `A UNION (B INTERSECT C) EXCEPT D`. When mixing operators, **add parentheses** to make intent explicit.
 
+> **⚠️ THE PRECEDENCE TRAP THAT CORRUPTS RECONCILIATIONS — `EXCEPT` and `UNION` have EQUAL precedence and evaluate LEFT-TO-RIGHT.** Only `INTERSECT` binds tighter; `EXCEPT` and `UNION` do NOT. So when you write a both-directions diff by chaining two `EXCEPT`s with a `UNION ALL` between them, **you MUST parenthesize each `EXCEPT` arm.** An unparenthesized `A EXCEPT B UNION ALL C EXCEPT D` parses as `((A EXCEPT B) UNION ALL C) EXCEPT D` — the trailing `EXCEPT D` subtracts from the whole combined result and returns **WRONG numbers**. See the "reconcile two tables" card immediately below for the correct parenthesized form (and the preferred one-pass `FULL OUTER JOIN`).
+
+### LEADING CANONICAL — reconcile two tables / rows present in one side but NOT the other (BOTH directions / which side is a row missing from)
+
+> **READ THIS if your question contains any of these keywords: `reconcile two tables`, `rows in one table but not the other`, `compare two tables both directions`, `which side is a row missing from`, `find mismatched rows between two tables`, `rows present in only one table`, `full outer join missing rows`, `EXCEPT UNION parentheses`, `set operator precedence`, `diff two tables`, `audit two tables for missing keys`, `rows in A only and rows in B only`.** Verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) on 2026-06-10.
+
+**The task:** "give me every row that is in `users` but not in `enrichment`, AND every row that is in `enrichment` but not in `users` — and tell me which side each missing row came from." There are two correct forms. **Prefer PART 1** (one pass, labels the side).
+
+#### ✅ COPY THIS — PART 1 (PREFERRED): one-pass `FULL OUTER JOIN` that labels which side is missing
+
+```sql
+-- Rows present on only ONE side, in a single pass, with a label for which side:
+SELECT COALESCE(a.user_id, b.user_id) AS user_id,
+       CASE WHEN a.user_id IS NULL THEN 'missing_from_users'
+            WHEN b.user_id IS NULL THEN 'missing_from_enrichment' END AS diff_side
+FROM users a
+FULL OUTER JOIN enrichment b ON a.user_id = b.user_id
+WHERE a.user_id IS NULL OR b.user_id IS NULL;   -- keep only rows that did NOT match on both sides
+```
+
+A `FULL OUTER JOIN` keeps matched rows AND unmatched rows from both sides; the unmatched side's columns come back `NULL`. The `WHERE a.user_id IS NULL OR b.user_id IS NULL` filter then keeps only rows that exist on exactly one side, and the `CASE` tags which side each came from. **One scan of each table, one join — this is the idiomatic both-directions reconciliation.**
+
+#### ✅ COPY THIS — PART 2 (alternative): two `EXCEPT`s, each arm PARENTHESIZED
+
+```sql
+-- Same both-directions diff with set operators — NOTE the parentheses around EACH EXCEPT arm:
+(SELECT user_id FROM users      EXCEPT SELECT user_id FROM enrichment)   -- in users, not in enrichment
+UNION ALL
+(SELECT user_id FROM enrichment EXCEPT SELECT user_id FROM users);       -- in enrichment, not in users
+```
+
+**THE RULE (load-bearing):** When mixing `EXCEPT` with `UNION`/`UNION ALL` you **MUST parenthesize each `EXCEPT` arm**. Trino gives `UNION` and `EXCEPT` **EQUAL** precedence and evaluates them **left-to-right** (only `INTERSECT` binds tighter). So an unparenthesized `A EXCEPT B UNION ALL C EXCEPT D` parses as `((A EXCEPT B) UNION ALL C) EXCEPT D` and returns **WRONG results** — the trailing `EXCEPT D` removes `D`'s rows from the entire combined set. For a both-sides reconciliation, **prefer the one-pass `FULL OUTER JOIN ... WHERE a.key IS NULL OR b.key IS NULL` (PART 1)** — it avoids the precedence trap entirely and labels which side each row is missing from. (PART 2's `EXCEPT` also dedups each arm; if you need to preserve duplicate keys, the `FULL OUTER JOIN` form is the safer choice.)
+
+> ❌ `A EXCEPT B UNION ALL C EXCEPT D` (no parens) -- WRONG: Trino parses ((A EXCEPT B) UNION ALL C) EXCEPT D (EXCEPT/UNION equal precedence, left-to-right; only INTERSECT binds tighter); parenthesize each EXCEPT arm — DO NOT COPY
+
 **Column rule.** Set operators are **positional** — both sides must have the same number of columns in the same type order (matched by position, NOT by name). Project the same explicit column list on both sides; don't `SELECT *` unless both inputs have identical column sets in the same order.
 
 **Semantics / plan shape.** `INTERSECT` = semi-join (rows in both); `EXCEPT` = anti-join (rows in left but not right). Trino plans both via a `SemiJoin`-style operator — seeing a `SemiJoin` node in `EXPLAIN` of an `INTERSECT`/`EXCEPT` is EXPECTED, not a bug. See [§10 SemiJoin / NOT IN gotcha](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the join-form rewrites and the `NOT IN` + NULL trap — do not rewrite that section. Unlike `NOT IN`, `EXCEPT` is NULL-safe.
@@ -1640,7 +1675,7 @@ SELECT user_id FROM events_2026_q2;
 > 4. **"`UNION ALL` and then `DISTINCT` is slower than bare `UNION`"** — **FALSE.** They are equivalent operations; bare `UNION` IS `UNION ALL` + an implicit global DISTINCT. The planner produces the same shape.
 > 5. **`UNION` to dedupe rows from a SINGLE table** — wrong tool. Use `SELECT DISTINCT` (single scan) instead of `SELECT ... UNION SELECT ...` (two scans + DISTINCT).
 
-**Cross-references.** [§10](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the `INTERSECT` = semi-join and `EXCEPT` = anti-join rewrites, the `NOT IN` + NULL gotcha, and the SemiJoin canonical. [Trino 467 release notes — UNION ALL parallel write optimization](https://trino.io/docs/current/admin/properties-optimizer.html) note that the optimizer has special parallelization paths for `UNION ALL` writes that bare `UNION` does not get.
+**Cross-references.** [§10](#10-in-subqueries-vs-joins--let-trinos-optimizer-decide) for the `INTERSECT` = semi-join and `EXCEPT` = anti-join rewrites, the `NOT IN` + NULL gotcha, and the SemiJoin canonical. For a **both-directions reconciliation** ("rows in one table but not the other, both sides, which side is missing") see the **LEADING CANONICAL — reconcile two tables** card above (prefer the one-pass `FULL OUTER JOIN`; if using two `EXCEPT`s you MUST parenthesize each arm — `EXCEPT`/`UNION` are equal precedence and parse left-to-right). [Trino 467 release notes — UNION ALL parallel write optimization](https://trino.io/docs/current/admin/properties-optimizer.html) note that the optimizer has special parallelization paths for `UNION ALL` writes that bare `UNION` does not get.
 
 ---
 
