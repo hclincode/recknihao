@@ -1,58 +1,54 @@
-# iter802 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
+# Judge Feedback — iter803 (DEFAULT NO-OP / durability-breadth sweep)
 
 **Date:** 2026-06-09
-**Teacher edits this iteration:** ZERO (expected — durability-breadth sweep). Four fresh adjacent probes over well-covered window/aggregate/map fundamentals.
-**Verification:** Every dialect claim verified against trino.io/docs/467 (functions/aggregate.html, functions/window.html, sql/select.html) via WebSearch/WebFetch — not relying on resources/ as ground truth.
+**Teacher edits this iteration:** ZERO (expected — durability-breadth sweep). Four probes: Q1 LAST_VALUE default-frame trap, Q2 percent_rank, Q3 count-char-via-length-diff, Q4 row-wise GREATEST over dates.
+**Verification:** Every dialect claim verified against trino.io/docs/467 (functions/window.html, functions/comparison.html) + WebSearch 2026-06-09 — not relying on resources/ as ground truth.
 
----
+## Q1 — LAST_VALUE: most-recent status stamped on every ticket row
 
-## Per-question scores
+`LAST_VALUE(status) OVER (PARTITION BY ticket_id ORDER BY event_time ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`. Explicitly explained that WITHOUT the full frame, LAST_VALUE defaults to a frame ending at the CURRENT row and returns the current row's value; the full frame returns the partition's final value. Cites r07.
 
-### Q1 — approx_distinct for daily unique visitors (~2% error ok)
-- **Accuracy: 5** — `approx_distinct(visitor_id)` uses HyperLogLog; default standard error 2.3% (docs: "should produce a standard error of 2.3%"). approx_distinct(x,e) for custom error (e in [0.0040625, 0.26]). "~2.3% default" matches the ~2% tolerance ask. Verified.
-- **Completeness: 5** — Covers the GROUP BY event_date shape, cheaper-than-COUNT(DISTINCT) rationale, the daily-HLL-sketch pre-agg note for rolling windows, and the do-not-use-for-billing caveat.
-- **Clarity: 5** — Plainly maps "approximate" → "~2% error" and explains why it's cheaper. No unexplained jargon.
-- **Actionability: 5** — Drop-in query; engineer knows exactly what to run.
-- **Q1 avg: 5.00**
+VERIFIED: Trino default frame with ORDER BY = RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW → bare `LAST_VALUE(x)` returns the current-row (peer) value, NOT the partition last. The explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame correctly extends to the partition's final row. The responder used the correct full frame AND correctly explained the trap. **Trap AVOIDED — CLEAN.** (Alternatives `max_by(status,event_time)` / `FIRST_VALUE(... ORDER BY event_time DESC)` also valid; not required.)
 
-### Q2 — FIRST_VALUE landing_page repeated on every user row
-- **Accuracy: 5** — `FIRST_VALUE(page) OVER (PARTITION BY user_id ORDER BY event_time ASC)`. CRITICAL nuance handled correctly: the default frame for an ORDER BY window is RANGE UNBOUNDED PRECEDING (= BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW); frame start = UNBOUNDED PRECEDING, so FIRST_VALUE returns the partition's first row on every row. Verified against docs ("contains all rows from the start of the partition up to the last peer of the current row"). The responder's default-frame claim is accurate. (Note: it correctly did NOT need the LAST_VALUE-default-frame trap here.)
-- **Completeness: 5** — Explains the carry-onto-every-row behavior and why the default frame yields the first row.
-- **Clarity: 5** — "first page per user, repeated on every row" framed clearly.
-- **Actionability: 5** — Drop-in.
-- **Q2 avg: 5.00**
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
-### Q3 — UNNEST native MAP into one row per (key, value)
-- **Accuracy: 5** — `CROSS JOIN UNNEST(attributes) AS t(key_name, key_value)`. Verified against docs: "Maps are expanded into two columns (key, value)" → TWO aliases required; a single alias is an error. `LEFT JOIN UNNEST(...) ON TRUE` to retain rows with empty/NULL map — correct.
-- **Completeness: 5** — Two-alias requirement, single-alias-error warning, and the LEFT JOIN ON TRUE preservation pattern all covered.
-- **Clarity: 5** — "maps expand to TWO columns so TWO aliases" is unambiguous.
-- **Actionability: 5** — Drop-in.
-- **Q3 avg: 5.00**
+## Q2 — percent_rank: "scored better than X% of people"
 
-### Q4 — NTILE(4) quartiles by lifetime_spend
-- **Accuracy: 5** — `NTILE(4) OVER (ORDER BY lifetime_spend ASC)`. Verified: ntile divides BY ROW COUNT (not value ranges); remainder distributed one-per-bucket starting at the first bucket → 101 rows = 26,26,25,24 (first buckets get the extra). Matches docs exactly. NULLS LAST default → NULL spend lands in the top (4th) quartile for ASC; filter-first advice correct. Window-runs-after-WHERE → can't filter NTILE in same WHERE → subquery wrap — correct. ASC → quartile 1 = lowest spenders mapping confirmed.
-- **Completeness: 5** — by-count-not-value, leftover distribution, NULL handling, and window-after-WHERE subquery nuance all present.
-- **Clarity: 5** — "roughly equal-sized buckets" → row-count division explained with the concrete 101-row split.
-- **Actionability: 5** — Drop-in plus the subquery-wrap gotcha.
-- **Q4 avg: 5.00**
+`PERCENT_RANK() OVER (ORDER BY score ASC) AS fraction_below` — 0.0..1.0, lowest=0, highest=1. Cites r07 Pattern C2.
 
----
+VERIFIED: percent_rank = (r-1)/(n-1), range 0..1; ASC ⇒ lowest=0, highest=1, value = fraction strictly below (ties share rank). This is the conventional metric for "better than X%". Responder did NOT confuse it with cume_dist (fraction at-or-below, range 1/n..1). CORRECT pick. Minor: could have named the percent_rank-vs-cume_dist distinction explicitly for completeness, but the chosen function is right and well-explained.
+
+- Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 — **avg 4.875**
+
+## Q3 — count commas in csv_line (+1 = field count)
+
+`LENGTH(csv_line) - LENGTH(REPLACE(csv_line, ',', '')) AS comma_count`; +1 = field count; worked example 'north,east,pending,3' → 4 commas → 5 fields. Cites r27 + r23.
+
+VERIFIED: replace removes all commas; the length drop = comma count. length() and 2-arg replace(s,search) both valid Trino. Trino has no direct char-count function, so the length-diff is the canonical idiom. Worked example correct. (cardinality(split(s,',')) is an equally valid alternative; not required.) CLEAN.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
+
+## Q4 — row-wise max of 3 date columns
+
+`GREATEST(last_login_date, last_purchase_date, last_support_date) AS last_activity_date`; notes GREATEST returns NULL if ANY arg is NULL in Trino (unlike Postgres), wrap `COALESCE(col, DATE '1900-01-01')` if nulls possible. Cites r23 + r27.
+
+VERIFIED: greatest() supports DATE (also DOUBLE/BIGINT/VARCHAR/TIMESTAMP/TIMESTAMP WITH TIME ZONE) and returns NULL if any argument is NULL — Trino docs explicitly contrast Postgres. The COALESCE-sentinel workaround is apt and correctly flagged. CLEAN.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — **avg 5.00**
 
 ## Overall
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+| Q | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+| Q1 LAST_VALUE | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 percent_rank | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q3 count-char | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 GREATEST dates | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall avg: 5.00 — PASS** (threshold 3.5; overall average governs, no single-Q veto).
+**Overall avg = 4.97 — PASS** (threshold 3.5).
 
----
+### Explicit verdicts
+- **(a) LAST_VALUE default-frame trap (Q1): AVOIDED.** Responder used the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame and correctly explained that the bare/default frame returns the current row's value. The standing LAST_VALUE-default-frame-trap pin is reconfirmed CLEAN by this datapoint.
+- **(b) iter804 designation: DEFAULT NO-OP / durability-breadth.** No open defect, no FIX-A needed. All four standing pins held (LAST_VALUE-default-frame-trap, percent_rank-vs-cume_dist, count-char-length-diff-replace, greatest-least-NULL-if-any-null). Teacher should make ZERO edits; suggested fresh probes for iter804: cume_dist-vs-percent_rank direct contrast / NTH_VALUE-with-frame / array_agg-DISTINCT-ORDER-BY / date_diff-week-or-quarter / regexp_replace-capture-group-backref.
 
-## Teacher feedback
-
-No defects found. All four answers are dialect-accurate against Trino 467, fit the prod stack (Trino 467 + Iceberg + Hive Metastore on-prem), and carry the right gotchas (HLL not-for-billing, FIRST_VALUE default frame = UNBOUNDED PRECEDING, UNNEST-map-2-aliases, NTILE by-count + window-after-WHERE subquery wrap). No resource edits warranted. All standing pins (approx_distinct-HLL / first_value-default-frame-UNBOUNDED-PRECEDING / UNNEST-map-2-aliases / NTILE-by-count-window-after-WHERE) reconfirmed.
-
-**iter803 designation: DEFAULT NO-OP / durability-breadth sweep.** No open defect — continue fresh adjacent probing over window/aggregate/map/array fundamentals. Suggested fresh angles for iter803: LAST_VALUE default-frame trap (the contrast Q2 deliberately avoided — confirm responder knows it needs an explicit `ROWS/RANGE BETWEEN ... UNBOUNDED FOLLOWING` frame to get the partition's actual last value), LEAD/LAG with default/offset, percent_rank vs cume_dist, or array_agg ORDER BY collapse-to-array. No FIX-A required.
+PRESERVE r07 window cards (LAST_VALUE full-frame, percent_rank), r23/r27 length/replace + greatest cards — verified clean, churn risk. DO NOT bump training/state.json (already 803).
