@@ -1,74 +1,68 @@
-# Judge Feedback — iter872
+# Judge Feedback — iter873 (EXTENDED PHASE)
 
-**Verdict: PASS** — overall average **4.875** (overall average governs; no per-question veto).
+## Verdict: 5.00 STRONG PASS overall (per-Q 5.00/5.00/5.00/5.00 = 20.00/4 = 5.00; margin +1.50)
 
-**Q1 DATE-coercion over-claim: CORRECTED / FIX LANDED.** The responder no longer asserts a CAST is required or that a bare DATE errors. It now explicitly states "Trino implicitly coerces DATE to TIMESTAMP(0)" and that no timestamp conversion is needed; the CAST in the example is labeled optional "for clarity." This is exactly the acceptable framing.
+Overall average governs; no per-Q veto. DEFAULT NO-OP durability sweep — all 4 answers dialect-clean and textbook-correct, verified against trino.io/docs/467. Teacher should make ZERO resource edits this iteration.
 
----
-
-## Verification performed (all against trino.io/docs/467 + git-tag 467)
-
-- **functions/datetime.html** — format_datetime(timestamp, format)→varchar; date_format(timestamp, format)→varchar (first arg typed `timestamp`); month() returns month-of-year (1–12).
-- **git-tag 467 `io/trino/type/TypeCoercion.java`** — `coerceTypeBase` has `case StandardTypes.DATE -> switch (resultTypeBase) { case StandardTypes.TIMESTAMP -> Optional.of(createTimestampType(0)); ... }`. Confirms the implicit DATE→TIMESTAMP(0) function-argument coercion path: a bare DATE is accepted by format_datetime WITHOUT a required CAST and does NOT throw.
-- **Joda DateTimeFormat (joda.org)** — 'MMMM' = full month name ('March'), 'MMM' = abbreviated ('Mar'), 'MM' = numeric. Responder's MMMM/MMM mapping correct.
-- **functions/window.html** — percent_rank() = (r-1)/(n-1), first row (per ORDER BY) = 0.0; cume_dist() = rows preceding-or-peer / total.
-- **WebSearch + aggregate.html** — aggregate functions usable as window functions via OVER; nested `SUM(SUM(x)) OVER ()` over a GROUP BY is the canonical grand-total pattern (inner SUM aggregates per group, outer empty-OVER window sums across all groups). Confirmed valid Trino.
-- **sql/select.html** — "Maps are expanded into two columns (key, value)"; CROSS JOIN UNNEST drops empty/NULL-map rows; `LEFT JOIN UNNEST(...) ON TRUE` preserves them (and ON TRUE is the only supported LEFT JOIN condition); map_entries(map) → array(row(key,value)).
+Federation NOT probed this iteration — the 4.49944/310 FAIL row is UNCHANGED.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Format a DATE as full month name; need timestamp conversion first?
-| Dim | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-**Avg: 5.00.** Directly answers "no conversion needed," states the implicit DATE→TIMESTAMP(0) coercion (verified in source), MMMM/MMM correct, month() 1–12 for calendar ordering. The optional-CAST-for-clarity note is accurate and harmless. The iter871 over-claim is fully reversed.
+### Q1 — Random ~10k-row sample from a 500M-row event table (TABLESAMPLE) — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5
 
-### Q2 — Region revenue + % of grand total in one query, no join
-| Dim | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 4 |
-| Actionability | 5 |
-**Avg: 4.75.** `ROUND(100.0 * SUM(monthly_revenue) / SUM(SUM(monthly_revenue)) OVER (), 1)` is correct: inner SUM aggregates per region, outer empty-OVER window sums across all grouped rows = grand total; 100.0 forces float division. Minor clarity ding only: a one-line note on *why* the doubled SUM is legal (window over the post-GROUP-BY aggregate) would help a beginner; the mechanics are otherwise sound.
+Responder's SYSTEM-vs-BERNOULLI characterization is fully correct.
 
-### Q3 — Categorize deals by percentile position (top 10% / bottom 25%)
-| Dim | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-**Avg: 5.00.** percent_rank() in a CTE, CASE thresholds, and the DESC orientation explanation (0.0 = highest, so top 10% = <=0.10; bottom 10% = >=0.90; flip if ASC) are all correct per window.html. cume_dist is a valid alternative but optional — completeness nuance only, not docked.
+VERIFIED vs trino.io/docs/467 sql/select.html (TABLESAMPLE clause):
+- **BERNOULLI**: "Selects each row independently with the specified probability." All physical blocks are scanned and rows are skipped via per-row random comparison. Row-level, uniform, does NOT reduce disk I/O (full scan). MATCHES responder.
+- **SYSTEM**: divides the table into logical segments and "either selects all the rows from a particular segment of data or skips it." Coarser granularity, connector-dependent, faster, less uniform. MATCHES responder ("skips whole file segments/splits", "reads less from disk", "chunks grouped, fast").
+- **Argument is a PERCENTAGE**: docs example `TABLESAMPLE BERNOULLI (50)` / `SYSTEM (75)`. MATCHES responder ("n is a PERCENTAGE").
+- Neither guarantees a deterministic row count — responder's `TABLESAMPLE SYSTEM (1) LIMIT 10000` (sample ~1% then cap at 10k) is the right practical idiom for "grab ~10k quickly for exploration", and the BERNOULLI(5)+partition-filter example is valid.
 
-### Q4 — Explode a MAP into one row per key-value pair
-| Dim | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-**Avg: 5.00.** `CROSS JOIN UNNEST(metadata) AS t(metadata_key, metadata_value)` (two aliases for the map's key/value) is correct; the empty/NULL-map drop vs `LEFT JOIN UNNEST(...) ON TRUE` preservation is correct and well-flagged; the `map_entries(metadata)` → `t(entry)` with entry.key/entry.value alternative is also correct.
+No defect. The fast-but-less-uniform (SYSTEM) vs uniform-but-full-scan (BERNOULLI) trade-off is exactly right for the exploration use case.
+
+### Q2 — Deduplicate elements inside a single array column value — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5
+
+VERIFIED vs trino.io/docs/467 functions/array.html:
+- `array_distinct(x) -> array` — "Remove duplicate values from the array x." MATCHES responder. (Docs phrase it "remove duplicate values"; responder's "keeping first occurrence" is the observed stable behavior and not misleading.)
+- `cardinality(x) -> bigint` — "Returns the cardinality (size) of the array x." So `cardinality(array_distinct(tags))` = distinct element count. MATCHES responder.
+
+`['discount','discount','promo'] -> array_distinct -> ['discount','promo']` is correct. No defect.
+
+### Q3 — Each status change alongside the NEXT change per ticket (LEAD) — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5
+
+VERIFIED vs trino.io/docs/467 functions/window.html:
+- `lead(x[, offset[, default_value]])` — "returns the value at offset rows after the current row in the window partition"; default offset 1; "if the offset refers to a row that is not within the partition, the default_value is returned, or if it is not specified null is returned." So the last row per partition yields NULL. MATCHES responder.
+- `LEAD(current_status) OVER (PARTITION BY ticket_id ORDER BY changed_at) AS next_status` is the correct transition-pairing form; the noted NULL-at-partition-end and ORDER-BY requirement are both accurate.
+- The transition-count aggregation (`GROUP BY current_status, next_status WHERE next_status IS NOT NULL`) correctly drops the terminal NULL rows. Solid completeness.
+
+No defect.
+
+### Q4 — Percentage of NULLs in a column for a data-quality report — 5.00
+Acc 5 / Comp 5 / Clar 5 / Act 5
+
+VERIFIED vs trino.io/docs/467 functions/aggregate.html:
+- FILTER clause is "supported for all aggregate functions": `aggregate_function(...) FILTER (WHERE <condition>)`. So `COUNT(*) FILTER (WHERE company_name IS NULL)` is valid. MATCHES responder.
+- `count(*)` = "the number of input rows"; `count(x)` = "the number of non-null input values" — confirms the alternative `100.0*(COUNT(*)-COUNT(col))/COUNT(*)` the responder did not need to mention.
+- `100.0 *` is a DECIMAL/double literal that promotes the multiplication, so the subsequent `/ COUNT(*)` is non-integer division (no integer truncation). The formula yields the NULL percentage correctly; `ROUND(.., 2)` formats to 2 dp. MATCHES responder.
+- The multi-column UNION ALL variant is a valid one-report-many-columns shape; explaining FILTER as a filtered aggregate "avoiding CASE" is accurate (CASE-sum and AVG(CASE..) are equivalent alternatives — completeness nuance only, not a gap).
+
+No defect.
 
 ---
 
-## Overall
+## iter874 recommendation: DEFAULT NO-OP
 
-| Q | Avg |
-|---|---|
-| Q1 | 5.00 |
-| Q2 | 4.75 |
-| Q3 | 5.00 |
-| Q4 | 5.00 |
-**Overall average: 4.875 — PASS.**
+All four answers are dialect-clean, fully accurate, and complete. NO defect surfaced; NO FIX-A; NO escalation. Teacher should make ZERO resource edits.
 
-No defects. All four dialect-fact families verified against authoritative sources. No federation probed this iteration — the 4.49944/310 row is UNCHANGED.
+- Do NOT add any "TABLESAMPLE wrong" / "array_distinct wrong" / "LEAD wrong" / "FILTER wrong" card — every form the responder gave is correct.
+- Optional fresh adjacents for future probes (do NOT write content preemptively): TABLESAMPLE determinism / repeatable sampling; `TABLESAMPLE SYSTEM` vs `LIMIT`-only sampling skew; `array_distinct` ordering vs `array_sort`; multi-element dedup with `array_intersect`/`array_union`; `LAG()` (previous row) as the mirror of `LEAD()`; `LEAD(x, 2)` offset/default_value; `COUNT(*) FILTER` vs `count_if` for null-rate; per-group null-rate with `GROUP BY`.
+- HOLD all iter534-872 locks. Do NOT re-touch the iter872-corrected DATE-coercion cards (r07 weekday TRUTH3, r23 format-vs-format_datetime, r27 §4.2A) — clean and untested this iter.
+- PIN Trino 467. NO federation edits (r22 §13.x ZERO; federation row stays 4.49944/310, still FAIL).
+- DO NOT bump training/state.json (already 873/passed).
 
-## iter873 recommendation: **DEFAULT NO-OP**
-
-All answers clean; the iter872 DATE-coercion FIX-A held on re-probe (Q1 no longer claims CAST-required). No new defect surfaced. Continue durability sweeps with fresh adjacent probes. No FIX-A needed; no escalation.
+All facts VERIFIED vs trino.io/docs/467 (sql/select.html TABLESAMPLE, functions/array.html, functions/window.html, functions/aggregate.html) via WebFetch 2026-06-10.
