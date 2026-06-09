@@ -2353,6 +2353,8 @@ WHERE event_date = DATE '2026-05-26'
 
 **Why**: Most functions applied to a column in WHERE block Iceberg from using that column for partition pruning or Parquet min/max statistics — the predicate cannot be **pushed down**. There are important exceptions in Trino 467, but the safe habit is to filter the raw column directly.
 
+> **To filter a date column to a period (this year / this month / last N days), use a half-open BARE-COLUMN range** (`col >= date_trunc('year', current_date) AND col < date_trunc('year', current_date) + INTERVAL '1' YEAR`) — never wrap the column in `year(col)=...` / `date_trunc('year',col)=...` (correct results but no pruning). See the sargable date-filter card at [resource 07 §1 — Filter a date column to a period](07-analytical-query-patterns.md#filter-a-datetimestamp-column-to-a-period-this-year--this-month--last-n-days--keep-the-column-bare-so-partition-pruning-works).
+
 **Important nuance for Trino 467**: Trino ships **two** optimizer rules that unwrap common timestamp/date predicates so partition pruning still works:
 
 - **`UnwrapCastInComparison`** (Trino PR #13567, 2022): rewrites simple casts on the column side back to typed literals on the value side. So `WHERE CAST(event_ts AS DATE) = DATE '2026-05-26'` (and its alias `WHERE DATE(event_ts) = DATE '2026-05-26'`) is rewritten to a timestamp range predicate on `event_ts` and **does** prune partitions correctly.

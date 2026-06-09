@@ -1015,6 +1015,8 @@ SELECT * FROM e;
 
 Trino's Iceberg connector can push partition predicates into the metadata layer, skipping entire partitions without reading their data files. This is the single biggest performance lever on a partitioned Iceberg table. It's also the easiest one to accidentally defeat.
 
+> **For relative-period filters (this year / this month / last N days), use a half-open BARE-COLUMN range** — `col >= date_trunc('year', current_date) AND col < date_trunc('year', current_date) + INTERVAL '1' YEAR` — not `year(col)=year(current_date)` (correct results, but the wrapped column defeats pruning -> full scan). Full sargable card: [resource 07 §1 — Filter a date column to a period](07-analytical-query-patterns.md#filter-a-datetimestamp-column-to-a-period-this-year--this-month--last-n-days--keep-the-column-bare-so-partition-pruning-works).
+
 ### 4.1 What works (predicate pushes, partitions prune)
 
 ```sql

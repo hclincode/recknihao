@@ -36,6 +36,36 @@ ORDER BY signups DESC;
 
 **What to watch for:** if `GROUP BY` has high cardinality (e.g., `GROUP BY user_id` across 50M users), the engine has to keep all distinct groups in memory. Add a `HAVING COUNT(*) > N` to trim, or pre-aggregate.
 
+### Filter a date/timestamp column to a period (this year / this month / last N days) — keep the COLUMN BARE so partition pruning works
+
+**Keyword anchor (READ THIS if your question contains any of these):** filter to current year, filter to this year, this month, this quarter, last 30 days, last 7 days, date range filter, WHERE on a date column, filter by date, sargable date predicate, partition pruning, min-max file skipping, slow date filter, query scans everything / full scan on a date filter, only this year's rows.
+
+**The SaaS question:** "Show me only this year's orders" / "filter to the current month" / "last 30 days of events."
+
+```sql
+-- SARGABLE: bare column in a half-open range -> Iceberg partition pruning + min-max file skipping WORK.
+-- THIS YEAR (auto-updating — no hardcoded year literal):
+WHERE order_date >= date_trunc('year', current_date)
+  AND order_date <  date_trunc('year', current_date) + INTERVAL '1' YEAR
+
+-- THIS MONTH:
+WHERE order_date >= date_trunc('month', current_date)
+  AND order_date <  date_trunc('month', current_date) + INTERVAL '1' MONTH
+
+-- LAST 30 DAYS:
+WHERE order_date >= current_date - INTERVAL '30' DAY
+```
+
+**The RULE:** To filter a date/timestamp column to a period, use a **half-open BARE-COLUMN range** — `col >= start AND col < start + INTERVAL`. Keep the column itself bare; put every function on the **constant** side. Wrapping the COLUMN in a function — `year(order_date) = year(current_date)`, `date_trunc('year', order_date) = ...`, `CAST(order_date AS date) = ...` — returns **CORRECT results** but **DEFEATS** Iceberg partition pruning and Parquet min-max file skipping, so Trino does a **full table scan**. The column must be bare for the engine to compare it against the partition boundaries and per-file min/max statistics.
+
+Why `date_trunc('year', current_date)` is the start of the year: verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — `date_trunc('year', TIMESTAMP '2022-10-20 05:10:00')` returns `2022-01-01 00:00:00.000`; `current_date` "Returns the current date as of the start of the query"; and `date + INTERVAL '1' YEAR` is valid date+interval arithmetic (`date '2012-08-08' + interval '2' day` -> `2012-08-10`). The half-open range (`>= start AND < start + INTERVAL`) is the standard sargable form: it captures the whole period without an off-by-one on the boundary and never wraps the column.
+
+```sql
+⚠ WHERE year(order_date) = year(current_date) -- correct RESULTS but wraps the column -> NO partition pruning (full scan); prefer the bare-column half-open range above
+```
+
+(See also [resource 23 §6 — Always include the partition column in WHERE](23-sql-best-practices-olap.md) and [resource 28 §4 — predicate pushdown / partition-prune predicate shape](28-complex-sql-performance-trino-dbt.md) for the partition-transform fragility nuances.)
+
 ---
 
 ## 1a. Exploding an array column to one row per element (UNNEST / array to rows / LEFT JOIN UNNEST)
