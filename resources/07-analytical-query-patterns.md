@@ -1229,6 +1229,25 @@ The SUM form counts *event rows*, not users. If a user fires 5 events in the 7-d
 >
 > **Alias-must-match-function rule.** Each output column's alias must reflect the function actually used. `SUM(revenue) FILTER (...) AS q1_revenue` is correct (SUM produces a total). If you instead want the per-quarter **average** order value, switch the function — `AVG(revenue) FILTER (WHERE quarter = 'Q1') AS q1_avg_order_value` — do NOT keep `SUM(...)` and rename the alias to `avg_*` (that ships a wrong-by-a-factor-of-row-count number under an average label). The FILTER (WHERE ...) clause is supported on every Trino aggregate function: `SUM`, `AVG`, `COUNT`, `MIN`, `MAX`, `array_agg`, `approx_distinct`, `approx_percentile`, etc. — pick the function that matches the metric, then use the alias that matches the function.
 
+> **BOOLEAN-FLAG pivot — per-group YES/NO `true/false` columns (NOT a metric pivot, NOT a count).** When the ask is *"per-order `has_X` flags / did this group **ever** have event X / a `true/false` column per entity / pivot event types into yes/no columns / ever-happened flag"* — i.e. you want a real **boolean** column per group, not a number — the canonical idiom is **`bool_or(predicate)`**, NOT the metric FILTER form above. `bool_or(pred)` returns `TRUE` if any row in the group matched the predicate, `FALSE` if none did (over a non-empty group). Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): *bool_or(boolean) → boolean — "Returns `TRUE` if any input value is `TRUE`, otherwise `FALSE`."* (`bool_and` is the all-true companion.)
+>
+> ```sql
+> -- Per-group YES/NO flags: did each group EVER have event X? (boolean true/false)
+> SELECT order_id,
+>        bool_or(event_type = 'placed')    AS has_placed,
+>        bool_or(event_type = 'shipped')   AS has_shipped,
+>        bool_or(event_type = 'delivered') AS has_delivered
+> FROM order_events
+> GROUP BY order_id;
+> ```
+>
+> **Disambiguator — pick by the OUTPUT shape:**
+> - Per-group **did-it-ever-happen FLAG** (`true`/`false`) → **`bool_or(predicate)`**. (See [resource 23 § 3.1 `bool_or` / `bool_and`](23-sql-best-practices-olap.md#bool_or--bool_and--did-any-or-did-all-rows-in-the-group-satisfy-x-roll-up-a-boolean-per-group) — prefer `bool_or` over `MAX(bool)`.)
+> - Per-group **COUNT / SUM of matching rows** (a *number*) → `count_if(pred)` / `SUM(CASE WHEN pred THEN x END)` / the metric `FILTER` form shown above.
+>
+> **❌ DO NOT COPY** — this redundant-and-buggy form was emitted as a "cleaner alternative" and is WRONG:
+> `MAX(CASE WHEN event_type='placed' THEN 1 ELSE 0 END) FILTER (WHERE event_type='placed')`  — REDUNDANT (the `CASE` and the `FILTER` gate the **same** predicate) and WRONG: for a group with **no** matching row the empty `FILTER` makes `MAX` return **`NULL`**, not `0`/`false`. Use `bool_or(event_type='placed')` instead. (Note: plain `MAX(CASE WHEN pred THEN 1 ELSE 0 END)` with **no** FILTER is acceptable — it yields `1`/`0` and correctly emits `0` for absent — but `bool_or(pred)` is the clean `true`/`false` form.)
+
 The query above returns the cohort grid in **long format** (one row per cohort_week × week_offset). That's fine for some BI tools, but stakeholders usually want the **wide format** with one column per week, showing percentage retention (week_N / week_0 × 100). Pivot it with `CASE WHEN` (conditional aggregation) and divide by the cohort size:
 
 ```sql
