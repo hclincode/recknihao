@@ -1,6 +1,7 @@
 {
-  "iteration": 787,
+  "iteration": 788,
   "phase": "extended",
+  "notes_788": "iter788 durability-breadth sweep, no edits — lpad zero-pad re-probe to bulletproof + 3 fresh adjacent topics (concat-|| / IN-list-or-BETWEEN / bool-to-label)",
   "notes_787": "iter787 additive findability FIX-A: surfaced fixed-width-STRING-padding rpad/lpad canonical at r23 §3.1A + no-LEFT and %-20s-doesnt-truncate defangs + keyword anchors",
   "notes_786": "iter786 durability-breadth sweep, no edits — 4 fresh adjacent topics (weighted-avg / ORDER-BY-CASE-or-NULLS / lpad-rpad-repeat / ROW-dot-access)",
   "notes_785": "iter785 durability-breadth sweep, no edits — iceberg-summary-key re-probe + 3 fresh adjacent topics (CTE / self-join / format-thousands / IN-subquery-or-EXISTS)",
