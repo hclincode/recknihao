@@ -1,84 +1,94 @@
-# Judge Feedback — iter775 (FIX-A verification: LAG-by-N dense-series re-probe)
+# Judge Feedback — iter776
 
-**Overall: 4.94 — STRONG PASS** (threshold 3.5). All 4 answers docs-verified against trino.io/docs/467 on 2026-06-09. resources/ NOT treated as ground truth.
-
-This was a FIX-A iteration. iter774 Q1 surfaced a resource emphasis/findability defect: the responder REFUSED `LAG` for a dense series and pushed the user-rejected self-join. iter775 added a LAG-FIRST ROUTER + dense-vs-sparse disambiguator at r07:2802-2839 and defanged the "never use LAG" blanket. **Q1 re-probes the fix on an explicitly dense series.**
-
----
-
-## Q1 — LAG-by-N on an explicitly DENSE daily series (FIX-A RE-PROBE, CRITICAL)
-
-**User ask:** daily_active_users, exactly one row per day no gaps, want each day's count next to the count 7 rows back (week-over-week), explicitly NOT a self-join.
-
-**Answer:** `LAG(dau_count, 7) OVER (ORDER BY day_date) AS count_7_days_ago`. Explicitly: "exactly one row per day no gaps → LAG(metric, 7) counts exactly 7 rows backward = 7 calendar days; offset is ROWS not periods; no self-join needed." Cites r07 LAG-FIRST ROUTER (2802-2839). LED with LAG, did NOT refuse it, did NOT push self-join.
-
-**Verification (window.html):** `lag(x, offset)` = "Returns the value at offset rows before the current row in the window partition." Default offset 1; requires ORDER BY. On a dense gapless one-row-per-day table, `LAG(dau_count, 7) OVER (ORDER BY day_date)` = the value exactly 7 days back. The offset-is-ROWS-not-calendar-periods caveat is correctly stated, and the dense-series precondition that makes 7-rows == 7-days is correctly flagged.
-
-**THE FIX WORKED.** The iter774 defect (refuse LAG / force self-join) did NOT recur. Responder routed straight to the LAG-FIRST canonical, led with LAG, gave the literal docs answer the user asked for, and correctly stated the rows-vs-periods precondition.
-
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+**Mode:** DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits). Q1 = LAG-by-N partitioned-dense BULLETPROOF re-probe; Q2–Q4 fresh adjacent topics.
+**Verification date:** 2026-06-09 against trino.io/docs/467 (window.html, string.html). resources/ NOT treated as ground truth.
 
 ---
 
-## Q2 — ARRAY membership (filter tags containing 'vip')
+## Q1 — LAG-by-N, PARTITIONED dense series (day-over-day, NOT self-join)
 
-**Answer:** `contains(tags, 'vip')` in WHERE. Notes Postgres `ANY()` is not the translation; `contains()` is the Trino array-membership function. Cites r07 §1a.3 array quick reference.
+**Answer:** `LAG(units_sold) OVER (PARTITION BY product_id ORDER BY day) AS prev_day_units` — explains LAG returns the previous row's value within each product partition, ordered by day; explicitly no self-join. Cites r07 window section.
 
-**Verification (array.html):** `contains(x, element) → boolean` — "true if the array x contains the element." Array-only (not varchar substring — that's strpos/LIKE). `contains(tags, 'vip')` is correct for an `array(varchar)` column. The Postgres ANY()/@> note is accurate. The standing contains-is-ARRAY-ONLY pin is correctly applied here (genuine array column).
+**Docs verification:** trino.io/docs/467/functions/window.html — `lag(x)` default offset = 1, returns "the value at offset rows before the current row in the window partition"; operates WITHIN the partition ordered by ORDER BY. With one row per product per day and no gaps, the previous row in `PARTITION BY product_id ORDER BY day` IS the same product's previous calendar day. CORRECT.
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+**Critical behavior:** Responder LED with the partitioned LAG, did NOT refuse it, did NOT push a self-join. This is the **2nd consecutive clean LAG-by-N datapoint** (after iter775 `LAG(dau_count,7)`). The iter774 refuse-LAG/force-self-join defect did NOT recur, and it stayed clean when a partition dimension was added.
 
----
-
-## Q3 — Divide-by-zero guard (conversions/visits)
-
-**Answer:** `conversions * 1.0 / NULLIF(visits, 0)` → NULL when visits=0; `COALESCE(..., 0)` if you want 0 instead. Cites r07 divide-by-zero guard.
-
-**Verification (conditional.html):** `NULLIF(value1, value2)` = "Returns null if value1 equals value2, otherwise returns value1." So `NULLIF(visits, 0)` → NULL when visits=0, and `x / NULL` → NULL (no divide-by-zero error). `conversions * 1.0` forces non-integer (double) division. `COALESCE(..., 0)` to coerce the NULL to 0. All correct, standard guard.
-
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q1 avg** | **5.00** |
 
 ---
 
-## Q4 — Year-month label ('YYYY-MM' for monthly grouping)
+## Q2 — Running / cumulative total
 
-**Answer:** `substr(CAST(CAST(event_timestamp AS DATE) AS varchar), 1, 7) AS month_label`; OR `format_datetime(event_timestamp, 'yyyy-MM')`. Warns Joda lowercase `mm` = MINUTE not month ('yyyy-mm' silently yields year-minute). Cites r23 YYYY-MM label section.
+**Answer:** `SUM(amount) OVER (ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS balance_to_date`, with running-frame explanation. Cites r07 Pattern A.
 
-**Verification (datetime.html):** (1) `CAST(date AS varchar)` yields 'YYYY-MM-DD'; `substr(...,1,7)` = 'YYYY-MM' — valid. (2) `format_datetime(timestamp, format)` uses Joda-Time DateTimeFormat: `yyyy`=four-digit year, uppercase `MM`=month, lowercase `mm`=MINUTE. The critical warning that `'yyyy-mm'` is a year-minute bug is ACCURATE for Joda/format_datetime. Both forms produce '2026-03'. (date_format(ts, '%Y-%m') is the MySQL-style alternative — not needed, would also work.)
+**Docs verification:** Valid Trino 467 window aggregate with an explicit ROWS frame; `UNBOUNDED PRECEDING … CURRENT ROW` = sum from the first row through the current row = running balance. CORRECT. Minor note (not a defect): with unique dates ROWS is exact; if dates tie, ROWS counts physical rows while RANGE would sum all peer rows — but ROWS is the standard running-balance answer and the responder did not misstate this.
 
-This is a high-value answer: the lowercase-mm=minute gotcha is the single most common silent bug in this pattern, and the responder surfaced it unprompted.
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 4 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q2 avg** | **4.75** |
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+---
+
+## Q3 — Rank with ties (rank value AFTER a tie)
+
+**Answer:** Table — `ROW_NUMBER()` = unique 1,2,3,4 (ties arbitrary); `RANK()` = ties share rank, next SKIPS (1,2,2,4); `DENSE_RANK()` = ties share rank, no gap (1,2,2,3). All three in one query `ORDER BY total_revenue DESC`. Cites r07 Pattern C.
+
+**Docs verification:** trino.io/docs/467/functions/window.html — `rank()` "tie values produce gaps in the sequence" (1,2,2,4 after a tie at 2); `dense_rank()` "tie values do not produce gaps" (1,2,2,3); `row_number()` unique sequential regardless of ties. The responder's tie-behavior table is **EXACTLY correct**. For the user's "ties share a rank" requirement, both RANK and DENSE_RANK share; the responder correctly frames the difference as the post-tie gap. Standing RANK/DENSE_RANK/ROW_NUMBER pin held.
+
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q3 avg** | **5.00** |
+
+---
+
+## Q4 — VARCHAR substring search (description contains 'refund')
+
+**Answer:** `strpos(description, 'refund') > 0` — 1-based position, 0 if not found, so `>0` = contains-anywhere. Notes it's cleaner than `LIKE '%refund%'`. Cites r23 substring-test section.
+
+**Docs verification:** trino.io/docs/467/functions/string.html — `strpos(string, substring)` returns the 1-based starting position of the first instance, 0 if not found; `strpos(...) > 0` = contains-anywhere. CORRECT. Standing pin held: `contains()` is ARRAY-ONLY in Trino (not a varchar function — not listed among string functions) — the responder correctly used `strpos>0` and did NOT reach for `contains` on a varchar. The `LIKE '%refund%'` alternative is equally valid.
+
+**Minor (not penalized):** "cleaner/more efficient than LIKE" is a stylistic claim; both are valid and `LIKE '%refund%'` is equally correct. The responder did not assert anything false (e.g., did not claim an index advantage), so no deduction.
+
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q4 avg** | **5.00** |
 
 ---
 
 ## Overall
 
-| Q | Topic | Avg |
-|---|---|---|
-| Q1 | LAG-by-N dense series (FIX-A re-probe) | 5.00 |
-| Q2 | array membership (contains) | 5.00 |
-| Q3 | divide-by-zero guard (NULLIF) | 5.00 |
-| Q4 | year-month label (format_datetime Joda) | 5.00 |
+| Q | Avg |
+|---|---|
+| Q1 (LAG-by-N partitioned dense) | 5.00 |
+| Q2 (running total) | 4.75 |
+| Q3 (rank ties) | 5.00 |
+| Q4 (varchar substring) | 5.00 |
+| **Overall** | **4.9375** |
 
-**Overall avg = 5.00 — STRONG PASS.** No imprecision found on any axis across all four answers.
+**Result: PASS** (overall 4.9375 ≥ 3.5; no single-Q veto, lowest Q = 4.75).
 
----
+### (a) Is LAG-by-N BULLETPROOFED?
+**YES.** iter776 Q1 is the 2nd consecutive clean LAG-by-N datapoint and the first to add a partition dimension. Sequence: iter774 = REAL DEFECT (refused LAG, forced self-join) → iter775 FIX-A → iter775 = CLOSED (1st clean, `LAG(x,7)` dense daily) → iter776 = **BULLETPROOFED** (2nd clean, partitioned dense `LAG(units_sold) OVER (PARTITION BY product_id ORDER BY day)`, LED with LAG, no self-join push). The iter775 LAG-FIRST ROUTER + dense-vs-sparse disambiguator (r07:2802-2839) is doing its job across both bare-ORDER-BY and PARTITION-BY phrasings. LAG-by-N moves CLOSED → BULLETPROOFED.
 
-## Teacher feedback
+### (b) iter777 designation
+**DEFAULT NO-OP / durability-breadth sweep.** No open defect surfaced. No new imprecision in any of the 4 answers. Teacher should make ZERO edits and probe 4 fresh adjacent topics. LAG-by-N is now BULLETPROOFED — it need not be a primary re-probe item (at most one occasional confirmatory phrasing, e.g., LEAD-by-N forward-looking, to keep coverage warm). PRESERVE the LAG-FIRST ROUTER + dense-vs-sparse disambiguator (r07:2802-2839) and the Q2/Q3/Q4 cards — all verified clean, churn risk.
 
-1. **(a) Is LAG-by-N CLOSED?** YES — Q1 is the **1st clean post-fix datapoint**. The iter775 FIX-A (LAG-FIRST ROUTER at r07:2802-2839 + dense-vs-sparse disambiguator + defanged "never use LAG" blanket) WORKED. The responder led with LAG on the explicitly-dense series, did not refuse it, did not push the self-join, and correctly stated the offset-is-rows / dense-series precondition. **LAG-by-N is CLOSED but NOT YET BULLETPROOFED** — per the two-datapoint rule, it needs ONE more clean datapoint from a different phrasing before promotion to BULLETPROOFED.
-
-2. **iter776 designation — DEFAULT NO-OP / durability-breadth sweep.** No open defect, no new imprecision surfaced. Teacher should make ZERO edits. RECOMMEND ONE of the 4 fresh probes be a **fresh LAG-by-N phrasing** (e.g. day-over-day `LAG(x,1)` on a dense daily table, or LEAD-by-N for a forward look on a dense series, or a partitioned dense series `LAG(x,N) OVER (PARTITION BY series_id ORDER BY t)`) to convert LAG-by-N from CLOSED → BULLETPROOFED. The other 3 should be fresh adjacent angles.
-
-3. **PRESERVE (churn risk):** the LAG-FIRST ROUTER and dense-vs-sparse disambiguator (r07:2802-2839) are verified clean and load-bearing — do NOT rewrite. Keep the self-join FORM A scoped to SPARSE series and the inline "never use LAG" defang at r07:2822. The contains-ARRAY-ONLY pin, NULLIF divide-guard, and format_datetime-Joda-yyyy-MM-lowercase-mm-is-minute card are all verified clean — leave them be.
-
-4. **Standing pins all held:** LAG-dense-vs-self-join-sparse (now CLOSED), contains-ARRAY-ONLY, NULLIF-divide-guard, format_datetime-yyyy-MM-lowercase-mm-is-minute, plus the full iter534-774 inventory. No regressions observed.
+**Standing pins all held this iteration:** LAG-partitioned-dense (now BULLETPROOFED), running-total-ROWS-UNBOUNDED-PRECEDING, RANK-vs-DENSE_RANK-vs-ROW_NUMBER tie table, strpos-for-varchar-contains (contains is array-only).
