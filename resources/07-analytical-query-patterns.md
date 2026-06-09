@@ -2396,6 +2396,38 @@ ORDER BY local_day_et;
 
 If you really must use `CAST` (e.g., in legacy SQL you can't restructure), first verify the session is UTC: `SELECT current_timezone();` — and pin it explicitly with `SET TIME ZONE 'UTC';` at the top of the session. But that pinning is fragile (forgotten across sessions, broken by a `SET TIME ZONE` elsewhere in a multi-statement script, or overridden by client defaults) — the two-step / `with_timezone` forms above are the production-safe defaults. See **resource 22 §2A.3 (line ~2179)** for the federation companion to this same trap: the MySQL `DATETIME`-naive → `TIMESTAMP WITH TIME ZONE` cross-catalog join case has identical semantics — the `CAST` attaches the SESSION zone, `with_timezone(naive_ts, 'UTC')` and `naive_ts AT TIME ZONE 'UTC'` are the session-independent fixes.
 
+**Fact 3b — convert a UTC timestamp to a per-row timezone whose NAME is stored in a COLUMN (DYNAMIC / per-row).** *(iter857 PIN — landing point for "each row has its own user timezone; convert UTC to that row's local time".)* **Keyword anchors (read THIS card if your question contains any of these):** convert timestamp to timezone from a column · convert UTC to timezone stored in a column · dynamic timezone per row · per-row timezone conversion · `at_timezone` column zone · `at_timezone` with a column · user timezone column · variable time zone conversion · timezone name in a column · each user has a different timezone · timezone-aware per user · convert to user's local time · zone column not literal.
+
+The `AT TIME ZONE 'literal'` clause and `with_timezone(ts, 'literal')` shown above take a FIXED zone written in the SQL. When the zone is **different for every row** — e.g. an `events` table joined to a `users` table that has a `user_tz` column like `'Europe/Berlin'`, `'America/New_York'`, `'Asia/Tokyo'` — use the scalar function **`at_timezone(ts_with_tz, zone)`**, whose `zone` argument is a `varchar` **expression evaluated per row**. It CAN be a COLUMN. You do NOT need a constant literal, and you do NOT need a `CASE`-per-timezone hack.
+
+Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): the signature is `at_timezone(timestamp(p) with time zone, zone) → timestamp(p) with time zone` — the `zone` parameter is an ordinary `varchar` argument with **no `(constant)` / literal-only annotation** (Trino annotates constant-required arguments explicitly; the absence of any such note means a column or expression is accepted and evaluated per row).
+
+```sql
+-- Convert a UTC timestamp to a per-row timezone NAME held in a column:
+SELECT at_timezone(with_timezone(occurred_at, 'UTC'), user_tz) AS local_ts
+FROM iceberg.analytics.events e
+JOIN iceberg.analytics.users u ON u.id = e.user_id;
+-- occurred_at is a plain TIMESTAMP assumed UTC; with_timezone tags it UTC, then
+-- at_timezone shifts it to the column's zone (user_tz e.g. 'Europe/Berlin', evaluated per row).
+
+-- If occurred_at is ALREADY timestamp WITH TIME ZONE, skip the with_timezone step:
+SELECT at_timezone(occurred_at, user_tz) AS local_ts
+FROM iceberg.analytics.events e
+JOIN iceberg.analytics.users u ON u.id = e.user_id;
+
+-- Bucket each user's events by THEIR OWN local day:
+SELECT u.id,
+       date_trunc('day', at_timezone(with_timezone(e.occurred_at, 'UTC'), u.user_tz)) AS local_day,
+       COUNT(*) AS events
+FROM iceberg.analytics.events e
+JOIN iceberg.analytics.users u ON u.id = e.user_id
+GROUP BY u.id, date_trunc('day', at_timezone(with_timezone(e.occurred_at, 'UTC'), u.user_tz));
+```
+
+**RULE:** `at_timezone(ts_with_tz, zone)` takes a `varchar` zone that CAN be a COLUMN or expression (evaluated per row) — you do NOT need a constant, and you do NOT need a `CASE`-per-timezone. The `AT TIME ZONE 'literal'` clause and `with_timezone(ts, 'literal')` (the literal cards above, lines ~2351–2397) are the **fixed-zone** forms; **`at_timezone()` is the dynamic-column path.** (Both `at_timezone(x, z)` and `x AT TIME ZONE z`-with-a-literal CONVERT a `timestamp with time zone`; `at_timezone` is just the function spelling that also accepts a per-row varchar zone.)
+
+❌ `'AT TIME ZONE / with_timezone only take literals, so you must CASE per timezone for a column zone'` -- WRONG: `at_timezone(ts_with_tz, zone_column)` accepts a per-row COLUMN zone; no CASE needed — DO NOT COPY
+
 **DO-NOT-WRITE (the load-bearing fab claims to ban):**
 - *"Trino has no `now()` function / `now()` is a parse error / function-not-found in Trino."* **FALSE.** `now()` is a documented Trino alias for `current_timestamp`; both work; both return the same value and type.
 - *"Iceberg / Trino never normalizes timestamps to UTC on storage — you get back exactly what you stored."* **FALSE for `timestamp with time zone` (timestamptz)** — those values ARE UTC-normalized on disk per the Iceberg spec. The "no normalization" rule applies ONLY to bare `timestamp` (without time zone).

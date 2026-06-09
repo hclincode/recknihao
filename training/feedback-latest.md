@@ -1,69 +1,97 @@
-# Judge Feedback — Iter 856 (EXTENDED PHASE)
+# Judge Feedback — iter857
 
-**Mode:** DEFAULT NO-OP durability sweep + 2 bulletproofing re-probes (Q1 geometric_mean, Q2 array-subset). Teacher made ZERO resource edits this iteration.
+**Verdict: PASS — overall average 4.875** (Q1 5.00 / Q2 4.75 / Q3 5.00 / Q4 4.75)
 
-**Overall: 4.34 PASS** (per-Q 5.00 / 5.00 / 2.375 / 5.00 = 17.375 / 4 = 4.34375; margin +0.84 above the 3.5 floor; overall avg governs, no per-Q veto).
-
-Federation NOT probed this iter — r22 §13.x row UNCHANGED at 4.49944/310 (still FAIL).
-
-All dialect claims verified against trino.io/docs/467 (aggregate.html, array.html, datetime.html, list.html, conditional.html) + WebSearch, 2026-06-10. Trino 467 pinned.
+LIGHT FIX-A verification of the iter856 Q3 defect (per-row timezone-name-in-a-column). The fix LANDED. All four dialect claims verified against trino.io/docs/467 using multiple sources (category page + functions/list.html) plus WebSearch/WebFetch 2026-06-10. DO NOT bump training/state.json.
 
 ---
 
-## Per-question scores
+## Q1 — Convert UTC timestamp to a per-row timezone NAME held in a COLUMN (iter856 FIX RE-PROBE)
 
-### Q1 — geometric mean for compounding growth (2nd-angle re-probe) — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
-Responder LED with the built-in: `SELECT geometric_mean(growth_multiplier) AS average_compound_growth`, and correctly framed `EXP(AVG(LN(x)))` as a fallback for older engines / deliberate non-positive exclusion. VERIFIED vs aggregate.html: `geometric_mean(x) -> double` IS a built-in Trino 467 aggregate ("Returns the geometric mean of all input values"); list.html G-section indexes it. The arithmetic-overstates-compounding framing is sound (geometric mean is the correct compounding average). CLEAN.
+**Responder answer:** Led with `at_timezone(with_timezone(event_ts,'UTC'), user_tz)` for plain-UTC `timestamp` and `at_timezone(event_ts, user_tz)` for already-tz-aware `timestamp with time zone`. Explicitly stated `at_timezone`'s zone accepts a per-row varchar COLUMN and that you do NOT need a CASE-per-timezone.
 
-### Q2 — array contains ALL required scopes (2nd-angle re-probe) — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
-Responder gave both one-liners with no UNNEST/CROSS-JOIN loop:
-- `WHERE cardinality(array_except(ARRAY['read','write','delete'], granted_scopes)) = 0`
-- `WHERE all_match(ARRAY['read','write','delete'], x -> contains(granted_scopes, x))`
-VERIFIED vs array.html: `array_except(x,y)` returns elements in x but not in y (so empty => all required present => subset test); `all_match(array(T), function(T,boolean))` true iff all elements match (empty => true); `contains(x,element)` true iff array x contains element. Both forms correct; "cardinality(array_except)=0 usually shorter" is a fair tiebreak. CLEAN.
+**Verification (trino.io/docs/467 datetime.html + functions/list.html):**
+- `at_timezone(timestamp(p) with time zone, zone) -> timestamp(p) with time zone` — the `zone` parameter is an ordinary varchar argument with NO `(constant)`/literal-only annotation. Trino explicitly annotates constant-required args; the absence of any such annotation means a column/expression is accepted and evaluated PER ROW.
+- `with_timezone(timestamp(p), zone) -> timestamp(p) with time zone` — likewise a plain varchar zone, no constant restriction. Tagging a plain (zone-less) timestamp as UTC first via `with_timezone(ts,'UTC')` is exactly the right two-step before re-projecting with `at_timezone`.
+- Docs show only literal examples (`'America/Los_Angeles'`) but state NO literal-only rule.
 
-### Q3 — convert UTC timestamp using a timezone NAME stored in a COLUMN — 2.375 (Acc 1 / Comp 3 / Clar 3.5 / Act 2) — DEFECT
-**Responder claim is WRONG.** It asserted: "Trino's AT TIME ZONE operator and with_timezone() accept hardcoded string LITERALS ONLY, not column values — you cannot write `ts AT TIME ZONE current_timezone_col` directly," and prescribed a CASE-per-timezone workaround.
+**Scores:** Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**
 
-**Verified truth (trino.io/docs/467 datetime.html + list.html, multi-source):** `at_timezone(timestamp(p) with time zone, zone) -> timestamp(p) with time zone` is a **regular scalar function**. Its `zone` is a plain varchar argument evaluated **per row** — there is NO documented constant-literal restriction. A COLUMN works:
-```
-SELECT at_timezone(with_timezone(occurred_at, 'UTC'), current_timezone) FROM session_events
-```
-(or `at_timezone(occurred_at_tz, current_timezone)` if the column is already timestamptz). This is exactly the user's ask — dynamic per-row zone from a column — and it is fully supported. The responder denied a real, simple capability and replaced it with an unmaintainable CASE-per-zone hack that breaks the moment a new timezone string appears in the data.
-
-Nuance the responder got partly right: the bare `AT TIME ZONE` *operator/clause* and `with_timezone()` are typically used with literals, and the operator grammar is where the "constant" intuition comes from. But the `at_timezone()` *function* is precisely the dynamic-column path — and the responder never even mentioned `at_timezone()` as a function. That omission is the root miss.
-
-Acc held to 1: the load-bearing claim ("you cannot do this, must hardcode/CASE") is false and would actively misdirect the engineer. The schema-normalize / TIMESTAMP WITH TIME ZONE side-note is harmless but doesn't redeem the false denial.
-
-### Q4 — sentinel -1 -> NULL inline without CASE — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
-`NULLIF(raw_value, -1)` returns NULL when `raw_value = -1`, else the value; SUM/AVG/COUNT skip NULLs automatically; cleaner than the CASE equivalent. VERIFIED vs conditional.html: `nullif(value1, value2)` returns null if value1 equals value2, otherwise value1. Aggregate NULL-skipping is standard. CLEAN.
+**FIX CONFIRMATION: LANDED.** The iter856 "AT TIME ZONE / with_timezone take literal zones only, a column cannot be used, must CASE-per-timezone" defect is GONE. Responder now correctly leads with `at_timezone(...,column)`, distinguishes the plain-UTC two-step (`with_timezone` first) from the already-tz path, and explicitly rejects the CASE hack. 1st post-fix datapoint clean; needs 1 more phrasing angle to bulletproof.
 
 ---
 
-## Bulletproofing verdicts
+## Q2 — Average of rates (harmonic mean)
 
-- **Q1 geometric_mean — BULLETPROOFED.** 2nd clean datapoint after iter855 (led with built-in `geometric_mean(x)` + EXP(AVG(LN(x))) fallback note, both correct). Arc closed.
-- **Q2 array-subset — BULLETPROOFED.** 2nd clean datapoint after iter855 (both `cardinality(array_except(B,A))=0` and `all_match(B, x->contains(A,x))`, no loop). Arc closed.
+**Responder answer:** DECLINED a built-in, affirmed the harmonic-mean principle is real, offered the manual formula `1/AVG(1/rate)`.
 
-## Q3 at_timezone-with-column-zone VERDICT
-- **Does at_timezone() accept a COLUMN zone? YES.** It is a scalar function; the varchar `zone` is evaluated per row, so `at_timezone(ts, tz_column)` works. Verified multi-source (datetime.html signature + description, list.html index, WebSearch corroboration).
-- **Responder: WRONG** — over-restrictive denial of an existing capability; recommended an unnecessary CASE-per-timezone workaround; never mentioned the `at_timezone()` function at all.
-- **Resource coverage (grep finding):** resources document ONLY literal-zone forms — `AT TIME ZONE 'America/New_York'` and `with_timezone(ts, 'UTC')` (r07 timezone cards ~L2356-2394, r27 §4.x ~L812-970, r22 §13.x ~L2184-2201), plus a single `at_timezone(ts, 'UTC')` literal mention at r23:3083. NONE document the dynamic `at_timezone(ts, tz_column)` column-zone form. The responder had **no findable card** for the column-zone case. This is a **coverage/findability GAP**, not merely a responder slip.
+**Verification (trino.io/docs/467 aggregate.html + functions/list.html H-section):**
+- NO `harmonic_mean` aggregate exists. list.html H-section = hamming_distance, hash_counts, histogram, hmac_md5/sha1/sha256/sha512, hour, human_readable_seconds — no harmonic mean. aggregate.html confirms only `geometric_mean` among the "*_mean" family.
+- `1/AVG(1/rate)` is the correct harmonic-mean formula (HM = n / Σ(1/x) = 1 / (mean of reciprocals)).
+
+**Scores:** Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 4.5 = **4.75**
+
+**HONEST-DECLINE-CORRECT — scored well, NOT as a defect.** There is genuinely no built-in, so declining and giving the correct manual formula is DESIRED behavior. Minor completeness/actionability ding only: an integer-division/divide-by-zero guard would harden it (if `rate` is integer, `1/rate` truncates to 0; a zero rate makes the inner term undefined) — `1.0/AVG(1.0/NULLIF(rate,0))` is the bulletproof form. Not a fabrication, not wrong.
+
+**GAP NOTE for iter858:** harmonic-mean has NO dedicated card in resources/. This is a findable-but-missing gap (like iter854 geometric_mean): the responder answered correctly from principle, but a §3.1B-HM card (canonical `1.0/AVG(1.0/NULLIF(rate,0))`, "no harmonic_mean built-in" stated, anchors: harmonic mean / average of rates / average of speeds / reciprocal mean) would lock it. Eligible for a LIGHT FIX-A only if a 2nd harmonic-mean datapoint also dings.
 
 ---
 
-## iter857 directive — LIGHT FIX-A (Q3 dynamic-timezone gap)
+## Q3 — Slice the middle of an array (items 3-7, no UNNEST)
 
-Q3 is a real defect AND the resource lacks the dynamic form, so escalate from DEFAULT NO-OP:
+**Responder answer:** `slice(steps_array, 3, 5)` — 1-based, length=count, negative-start-from-end, short-array clamping; defanged `array_slice()` and Python `arr[3:7]`.
 
-**LIGHT FIX-A:** Add a keyword-anchored "convert a UTC timestamp using a timezone NAME stored in a COLUMN" card (best home: r07 timezone section near L2356-2394, or r27 §4.x timezone block) that:
-1. LEADS with the canonical dynamic form: `at_timezone(with_timezone(occurred_at, 'UTC'), current_timezone)` (and `at_timezone(occurred_at_tz, current_timezone)` when the column is already timestamptz) — emphasize the `zone` arg is a per-row varchar, so a COLUMN works.
-2. States explicitly that `at_timezone()` is the dynamic/column path; the bare `AT TIME ZONE 'literal'` operator and `with_timezone(ts, 'literal')` are the literal-zone forms.
-3. FENCED inline-DEFANG on its own un-copyable line of the misconception "you must hardcode the zone / must CASE per timezone -- WRONG" and of the CASE-per-zone workaround.
-4. Keyword anchors: convert timezone from column, timezone name in a column, per-row timezone, dynamic timezone, at_timezone column, user local time from stored zone.
-5. PIN Trino 467; all pipe-bearing content FENCED (pipe-escape trap).
+**Verification (trino.io/docs/467 array.html + functions/list.html):**
+- `slice(x, start, length) -> array` — "Subsets array x starting from index start (or starting from the end if start is negative) with a length of length." 1-based indexing (consistent with `element_at`/`array_position`; Trino arrays are indexed from one). `slice(steps_array, 3, 5)` = 5 elements from index 3 = items 3,4,5,6,7. Correct.
+- `array_slice` does NOT appear in list.html — correctly defanged as non-Trino.
+- `arr[3:7]` Python-style range subscript is invalid in Trino 467 (`array[i]` subscript takes a single index only) — correctly defanged.
 
-Do NOT churn the existing literal-zone timezone cards (r07/r27/r22 are correct for their literal use case) — cross-link, don't rewrite. Do NOT touch the iter855 geometric_mean §3.1B-GM card or the array-subset §1a.3-SUBSET card (both bulletproofed). HOLD all iter534-855 locks. NO federation edits (4.49944/310 stays FAIL). DO NOT bump training/state.json (already 856).
+**Scores:** Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**
 
-## Flags
-- DEFECT: Q3 — false denial of `at_timezone(ts, tz_column)` dynamic-column capability + unnecessary CASE workaround.
-- GAP: resources document only literal-zone timezone conversion; missing the dynamic column-zone `at_timezone()` card -> iter857 LIGHT FIX-A above.
+CLEAN. Signature, 1-based, negative-start, clamping, and both defangs all docs-accurate. Cites §1a.4A slice card.
+
+---
+
+## Q4 — Map key lookup with a default instead of NULL
+
+**Responder answer:** `COALESCE(element_at(feature_flags, key), default)`; explained `element_at` returns NULL for a missing key while bracket `map['key']` THROWS.
+
+**Verification (trino.io/docs/467 map.html + functions/list.html):**
+- `element_at(map(K,V), key) -> V` — "Returns value for given key, or NULL if the key is not contained in the map." Returns NULL, does NOT throw. Correct.
+- Subscript operator `map[key]` — "This operator throws an error if the key is not contained in the map" (the "Key not present in map" error). Correct.
+- `COALESCE(element_at(...), default)` is the right NULL→default substitution.
+
+**Scores:** Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 4.5 = **4.75**
+
+CLEAN. The element_at-NULL-vs-subscript-throws distinction is exactly right and is the load-bearing nuance. Minor ding only: no note that the default must be type-compatible with element_at's value type for COALESCE — negligible.
+
+---
+
+## Overall
+
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 4.5 | 5 | 4.5 | 4.75 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | 5 | 4.5 | 5 | 4.5 | 4.75 |
+
+**Overall average = 4.875 → PASS** (threshold 3.5; overall average governs, no per-Q veto).
+
+**(a) Q1 FIX LANDED** — responder gives `at_timezone(with_timezone(ts,'UTC'), user_tz)` / `at_timezone(ts, user_tz)` with explicit per-row-column zone, no CASE-per-timezone. iter856 defect closed (1st post-fix datapoint; 1 more angle to bulletproof).
+
+**(b) Q2-Q4 docs-correct + findable.** No fabrication, no parse-error risk, no crossed-family error, no findability slip. All pure SQL → no conflict with on-prem Trino 467 + Iceberg + MinIO prod stack.
+
+**ONE GAP (non-blocking):** harmonic mean has no dedicated resource card. Responder answered correctly from principle, so this is not a current defect — but it parallels the iter854 geometric_mean gap.
+
+---
+
+## iter858 recommendation
+
+**DEFAULT NO-OP / durability sweep** (NOT a FIX-A — no defect surfaced this iteration).
+
+- Re-probe Q1 per-row timezone-column 2nd angle (e.g. "store users in their own tz then bucket by local day" phrasing) to bulletproof the iter857 fix — confirm responder still leads `at_timezone(...,column)` and never reaches for CASE-per-timezone.
+- Re-probe harmonic mean 2nd angle (average of speeds / average of P/E ratios). IF it lands clean again from principle, hold. IF a 2nd harmonic-mean datapoint dings on findability/integer-guard, ESCALATE to a LIGHT FIX-A adding a §3.1B-HM card (`1.0/AVG(1.0/NULLIF(rate,0))`, "no harmonic_mean built-in", anchors harmonic mean / average of rates / reciprocal mean) — verify vs trino.io/docs/467 before writing.
+- Fresh adjacent: `at_timezone` vs `AT TIME ZONE` literal form / `slice` vs `element_at`+range / `element_at` on arrays-vs-maps (NULL-vs-throw difference by container).
+
+PRESERVE iter855 §3.1B-GM + §1a.3-SUBSET, §1a.4A slice card, iter843 approx_percentile accuracy, iter842 value-vs-rank, iter840 weighted-avg §3.1B-WA, iter837 string→DATE, iter836 lpad/format, iter831 month-name, the §Fact 3/3b at_timezone/with_timezone tz-conversion cards (r07), and full iter534-856 pin inventory. NO federation edits (federation row stays 4.49944/310). DO NOT bump training/state.json (already 857).
