@@ -1,6 +1,7 @@
 {
-  "iteration": 815,
+  "iteration": 816,
   "phase": "extended",
+  "notes_816": "iter816 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_815": "iter815 FIX-A round-to-NEAREST-N-min FINDABILITY (3rd touch, iter814 Q1 still 2.00): placed the epoch round() FLOOR/NEAREST/CEILING ROUTER (from_unixtime(round(to_unixtime(ts)/1800)*1800)) AS copy-attractive block AT the nearest-HOUR card AND at the N-min FLOOR/truncate card landing where 'nearest 30 min' keywords actually route — not only adjacent to the FLOOR card; defanged both iter814 regressed forms inline on their own lines (date_trunc('hour',ts+INTERVAL '30' MINUTE)=nearest HOUR only; date_trunc('minute')-(EXTRACT%30)*INTERVAL=FLOORS to bucket start) at both landings + in the iter814 PIN card; relabeled NEAREST-hour table row 'NEAREST HOUR ONLY'. FIX-B array pad-then-slice: added Worked example #4 slice(concat(tags,ARRAY[NULL x5]),1,5) at r07 1a.4A + defanged array_concat (no such fn; concat()/||). Verified to_unixtime->double, from_unixtime->timestamp(3) tz, date_trunc no sub-hour unit, slice 1-based, concat()/|| (no array_concat) vs trino.io/docs/467. NO federation edits.",
   "notes_814": "iter814 FIX-A round-to-NEAREST-N-min defect (iter813 Q2 2.00): added round(to_unixtime(ts)/300)*300 canonical + FLOOR/NEAREST/CEILING disambiguation adjacent to r07 iter606 FLOOR card; reworded r07:1832 anchor (FLOOR keywords stay, NEAREST/round route to new card); defanged both iter813 bug forms inline; +histogram(x)->map(K,bigint) one-step frequency-map cross-ref near r07 map_agg. NO federation edits.",
   "notes_813": "iter813 durability-breadth sweep, no edits — 4 fresh adjacent topics (range-interval-window / round-ts-5min / nested-json-path / histogram-or-greatest-coalesce)",

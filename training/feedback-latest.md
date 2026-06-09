@@ -1,60 +1,58 @@
-# iter815 Judge Feedback — FIX-A verification (round-to-NEAREST-N-min + array pad-then-slice)
+# Judge Feedback — iter816 (EXTENDED PHASE)
 
-**Verification basis:** all 4 dialect claims checked against trino.io/docs/467 (datetime / array / window) via WebFetch + WebSearch on 2026-06-09. PIN: Trino 467.
+## Headline
+
+**ALL 4 QUESTIONS DECLINED by the responder — but ALL 4 answers PROVABLY EXIST in `resources/`, docs-correct for Trino 467.** This is a **RESPONDER RETRIEVAL SLIP across the board**, NOT a content gap. iter816 made ZERO resource edits (DEFAULT NO-OP), and Q1+Q2 were answered CLEANLY at iter815 (Q1=5.00, Q2=4.875) from the very same files/lines — so the content is provably still present and was retrievable. The decline is a findability/retrieval failure in the responder, not a resource defect.
+
+An honest decline on covered-and-retrievable content scores LOW (the content exists, was just answered last iteration, and the keyword anchors are in place). All four questions score 1.00.
 
 ## Per-question scores
 
-### Q1 — round timestamp to NEAREST 5-min mark (10:02→10:00, 10:03→10:05)
-RESPONDER: `from_unixtime(round(to_unixtime(reading_time)/300)*300)` + N=900/1800 scaling + full GROUP BY.
-- **Accuracy 5** — VERIFIED. `to_unixtime`→double epoch seconds, `/300`, `round()` is half-up = nearest (NOT floor), `*300`, `from_unixtime`→timestamp. Genuinely rounds to NEAREST: 10:02 (epoch%300=120s) → round(.4)→down→10:00; 10:03 (180s) → round(.6)→up→10:05. Matches engineer's explicit "nearest mark not floor" requirement exactly.
-- **Completeness 5** — gives the 5-min canonical, the N-scaling rule (900=15min, 1800=30min), AND the full GROUP BY/ORDER BY for the dashboard use case.
-- **Clarity 5** — step-by-step epoch walkthrough, concrete 10:02/10:03 trace.
-- **Actionability 5** — copy-paste-ready, engineer knows exactly what to run.
-- **Per-Q avg: 5.00**
-- **FIX LANDED — round-to-NEAREST-N-min FINALLY CLOSED (1st post-fix clean datapoint).** Responder LED with the `round()` epoch form and did NOT regress to either iter814 defanged form (`date_trunc('hour',ts+INTERVAL '30' MINUTE)` = nearest-HOUR-only, or the `%30`-EXTRACT form = FLOOR-only). 4th-touch fix worked.
+| Q | Topic | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | round timestamp to NEAREST 15-min | 1 | 1 | 1 | 1 | 1.00 |
+| Q2 | array slice + null-pad to fixed width | 1 | 1 | 1 | 1 | 1.00 |
+| Q3 | safe MAP lookup with fallback default | 1 | 1 | 1 | 1 | 1.00 |
+| Q4 | safe numeric cast (TRY_CAST / try) | 1 | 1 | 1 | 1 | 1.00 |
 
-### Q2 — slice + NULL-pad to exactly first 3
-RESPONDER: `slice(concat(recent_actions, ARRAY[NULL,NULL,NULL]),1,3)`.
-- **Accuracy 5** — VERIFIED. `concat()` accepts multiple arrays (array.html "Concatenates the arrays array1, array2, …, arrayN"); `slice(x,start,length)` is 1-based; `array_concat` correctly NOT used (does not exist in Trino 467 — confirmed array.html + WebSearch). Explicitly told the engineer "slice() NOT array_slice".
-- **Completeness 4.5** — semantics correct (≥3 elements → first 3 via slice; <3 → NULL pad fills). Minor: did not flag the NULL-typing caveat (`ARRAY[NULL,NULL,NULL]` is `array(unknown)` and may need a CAST in strict-typing contexts); pad-3 guarantees ≥3 only because source max is 10 — fine here.
-- **Clarity 5** — clear "concatenate NULLs first then slice" framing + worked 2-item example.
-- **Actionability 5** — drop-in for the fixed-width CSV export.
-- **Per-Q avg: 4.875**
-- **FIX LANDED — array_concat fabrication closed (1st post-fix clean datapoint).** Used `concat` correctly, named the array_concat trap.
+**Overall avg = 4.00/4 = 1.00 → FAIL** (threshold 3.5). A blanket decline on fully-covered content is a hard fail regardless of root cause.
 
-### Q3 — access field in array-of-ROW structs
-RESPONDER: `UNNEST(properties) AS t(elem)` + `elem.value` dot-notation + `WHERE elem.key=...`; one-row alt `element_at(array_agg(elem.value) FILTER (WHERE elem.key=...),1)`.
-- **Accuracy 5** — VERIFIED. ROW fields accessed by dot/field-name notation; `element_at` is for MAP/ARRAY subscripts (responder states this correctly). UNNEST of ARRAY(ROW) into `t(elem)` then `elem.value`/`elem.key` is docs-correct. `array_agg(...) FILTER` + `element_at(...,1)` one-row extraction is valid.
-- **Completeness 5** — gives both explode-to-rows and one-row-per-event forms.
-- **Clarity 5** — declares the assumed schema, explains dot vs element_at distinction.
-- **Actionability 5** — both patterns runnable.
-- **Per-Q avg: 5.00**
+## Findability verdicts (per question)
 
-### Q4 — LAG with default for first row (no COALESCE)
-RESPONDER: `LAG(metric_value, 1, 0) OVER (PARTITION BY user_id ORDER BY event_date)` + change expression.
-- **Accuracy 5** — VERIFIED. `lag(x[, offset[, default_value]])` — third arg returned when offset row is outside the partition (window.html). First row → returns 0 → change = value − 0.
-- **Completeness 5** — full signature explained + the change-from-prior derivation.
-- **Clarity 5** — explicitly addresses "no COALESCE after the fact".
-- **Actionability 5** — copy-paste-ready window query.
-- **Per-Q avg: 5.00**
+### Q1 — round to NEAREST 15-min: CONTENT EXISTS (responder slip)
+- **Location:** `resources/07-analytical-query-patterns.md:1909` — "LEADING CANONICAL — round a timestamp to the NEAREST N minutes" (iter814 PIN), with copy-attractive block at `r07:1918`: `from_unixtime(round(to_unixtime(reading_time) / 300) * 300)` and inline note `nearest 15 min -> /900*900`. FLOOR/NEAREST/CEILING router at `r07:1922-1928`. Keyword anchors at `r07:1911` include "round to the nearest 5/15/30 minutes", "snap a timestamp to the closest mark".
+- **Docs-correct Trino 467 form:** `from_unixtime(round(to_unixtime(ts) / 900) * 900)` (nearest 15 min = 900 s). Verified: `to_unixtime`/`from_unixtime` exist; `round(x)` rounds to nearest integer; casting timestamp to lower precision rounds (not truncates). The resource form matches exactly.
+- The responder SAID it found `date_trunc` "but no canonical for nearest-N-min" — false; the nearest-N-min LEADING CANONICAL is right there with explicit `/900*900` for 15-min. Retrieval slip.
 
-## Overall
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+### Q2 — array slice + null-pad: CONTENT EXISTS (responder slip)
+- **Location:** `resources/07-analytical-query-patterns.md:738-747` — "Worked example #4 — first N elements, PADDED with NULLs". Copy-attractive block at `r07:741`: `slice(concat(tags, ARRAY[NULL, NULL, NULL, NULL, NULL]), 1, 5)` plus the `||` operator variant and the `array_concat` defang. (Added iter815; matches the run-prompt's expected line.)
+- **Docs-correct Trino 467 form:** `slice(concat(arr, ARRAY[NULL,NULL,NULL,NULL]), 1, 4)` — pad-then-slice (slice is 1-based; concat()/|| concatenate arrays; no `array_concat`). Resource form is correct; just adjust the pad count to 4 for this question.
+- The responder said it found `element_at` and `array_*` "but no pad-to-fixed-width canonical" — false; Worked example #4 IS exactly that. Retrieval slip.
 
-**OVERALL AVG = 4.969 → PASS** (threshold 3.5; overall average governs, no per-Q veto).
+### Q3 — safe MAP lookup with fallback default: CONTENT EXISTS (responder slip)
+- **Location:** `resources/09-lakehouse-schema-design.md:707` — H3 "`COALESCE(element_at(map_col, key), <default>)` — MAP lookup with a fallback value when the key is missing". Worked example at `r09:715-720`: `COALESCE(element_at(settings, 'theme'), 'default_theme')`. Keyword anchors at `r09:709` include "map lookup with default", "fall back when key missing", "return default when key not in map". Also reinforced at `r07:210/213` (element_at NULL-safe) and `r09:711` (no 3-arg overload — compose with COALESCE).
+- **Docs-correct Trino 467 form:** `COALESCE(element_at(metadata, 'campaign_id'), 'default')`. Verified: `element_at(map, key)` returns NULL on a missing key (does NOT error — the `[]` subscript errors, `element_at` is the NULL-safe accessor); `COALESCE` returns first non-NULL. Resource form is correct.
+- The responder said it found `element_at(map,key)` returns null "but no fallback-default canonical" — false; the COALESCE-element_at canonical with full keyword anchors is exactly that. Retrieval slip.
 
-## Fix-landing verdict
-- **Q1 round-to-NEAREST-N-min: FINALLY LANDED / CLOSED** (4th touch). Responder led with `round(to_unixtime/N)*N`, no date_trunc regression. Needs 1 more phrasing angle (e.g. nearest-15-min, or "snap to nearest") to fully BULLETPROOF.
-- **Q2 array_concat: FIXED / LANDED.** Used `concat` + named array_concat as nonexistent. Needs 1 more angle (pad-to-N with N≠source-max, or NULL-CAST caveat) to BULLETPROOF.
+### Q4 — safe numeric cast: CONTENT EXISTS (responder slip)
+- **Location:** `resources/27-oracle-plsql-to-dbt-trino.md:1402` (TRY_CAST returns NULL on failure / "bad input becomes NULL instead of failing the query"); `r27:1426` (`TRY_CAST(col AS BIGINT)` for "bad rows should become NULL"); `r27:1513` (`TRY_CAST(order_total AS DECIMAL(18,2))` — "bad rows become NULL instead of failing the query"); `r27:1522` §4.4E full `try(expression)` CANONICAL. Also `resources/23-sql-best-practices-olap.md:837` (`TRY_CAST(col AS BIGINT)` if a bad row should become NULL).
+- **Docs-correct Trino 467 form:** `TRY_CAST(raw_amount AS DECIMAL(18,2))` returns NULL on parse failure (vs `CAST` which errors). Verified at conversion.html: "TRY_CAST(value AS type) — like cast(), but returns null if the cast fails." Resource form is correct.
+- The responder said it found CAST "but no try_cast/safe_cast canonical" — false; TRY_CAST appears in BOTH r27 and r23 with the exact "bad rows become NULL instead of failing the query" framing the question asks for. Retrieval slip.
 
-## iter816 directive
-**DEFAULT NO-OP / durability-breadth sweep** — no open defect this iteration. Teacher makes ZERO edits.
-- Re-probe round-to-NEAREST 2nd angle (nearest-15-min "snap" phrasing) + pad-then-slice 2nd angle (pad to N≠source-max, or surface the `ARRAY[NULL...]` unknown-type CAST caveat) to convert both fresh fixes from LANDED→BULLETPROOFED.
-- PRESERVE: r07 timestamp-rounding FLOOR/NEAREST/CEILING router + both defangs; r07 pad-then-slice canonical + array_concat defang; UNNEST(ARRAY(ROW)) dot-notation + array_agg-FILTER surfaces; lag 3-arg-default.
-- 2 fresh adjacent topics of teacher's choice. NO federation edits.
-- DO NOT bump training/state.json (already 815).
+## Root-cause classification (for iter817)
+
+- **(a) Covered + responder slipped (ALL FOUR):** Q1 (r07:1909), Q2 (r07:738), Q3 (r09:707), Q4 (r27:1402/§4.4E + r23:837). Content is present, docs-correct, and (for Q1/Q2) was successfully retrieved and answered at iter815. **The resources are SOUND. This is a pure responder retrieval failure across all four.**
+- **(b) Genuinely absent:** NONE. No real content gap this iteration.
+
+## iter817 directive
+
+**This is NOT a FIX-A content emergency.** The resources are correct and complete for all four topics. Do the following:
+
+1. **RE-PROBE all four topics** (Q1 nearest-N-min, Q2 array pad-then-slice, Q3 map-lookup-with-default, Q4 TRY_CAST/try) to confirm the content is findable again. A single blanket-decline iteration immediately after a clean iter815 strongly suggests a transient responder retrieval failure (e.g., the responder failed to actually search resources/ this cycle, or short-circuited to a global decline). Confirm it does not recur.
+2. **DO NOT churn** the four canonical cards — they are docs-verified and copy-attractive. Editing them risks regressing content that just scored 5.00/4.875.
+3. **OPTIONAL light anchor reinforcement ONLY IF** a re-probe shows a specific keyword still under-routing:
+   - Q3: the question phrasing "Map column of arbitrary key-value metadata… fallback DEFAULT value… safe key lookup with fallback" — confirm the `r09:709` anchor list covers "metadata", "campaign_id-style key", "safe key lookup with fallback". If "safe key lookup" / "metadata map" are weak routes, add those two phrases to the `r09:709` anchor line (no structural change).
+   - Q4: confirm "raw_amount text junk n/a blank cast to numeric" routes to TRY_CAST. If the dominant landing for "cast text to numeric, null on bad value" is weak, ensure a TRY_CAST(... AS DECIMAL) copy-attractive line sits at the keyword landing in r23 (the cast-fix landing), not only inside the Postgres-`::`-migration framing of r27.
+4. **If the re-probe answers all four cleanly, this confirms iter816 was a transient responder slip — note it and return to DEFAULT NO-OP / durability-breadth.** Do NOT treat a one-off blanket decline as a resource defect.
+
+HOLD all iter534-815 locks. DO NOT bump training/state.json (already 816).
