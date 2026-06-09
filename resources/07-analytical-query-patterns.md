@@ -3150,7 +3150,84 @@ GROUP BY user_id;
 - **Session boundary based on a different signal (not time-gap, but event_type = 'logout').** Replace the `is_new_session` CASE with `CASE WHEN LAG(event_type) OVER (...) = 'logout' OR LAG(event_type) OVER (...) IS NULL THEN 1 ELSE 0 END` — same running-SUM `session_id` trick, different boundary rule.
 - **Time-to-first-response per ticket.** Same pattern, no sessionization: `SELECT ticket_id, date_diff('minute', created_at, first_reply_at) AS response_minutes FROM tickets`. Pair with `format('%dh %dm', d / 60, d % 60)` if you want a `'2h 15m'` display string (see [r23 §3.1A `format` vs `concat` with `date_diff`](23-sql-best-practices-olap.md)).
 
-**Cross-references.** The [r23 §temporal-minus-temporal banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it) cites the Trino 467 operator table verbatim and lists every `date - date` / `timestamp - timestamp` DO-NOT-WRITE form with the `date_diff` fix. The [r07 §Pattern B (LAG/LEAD)](#pattern-b-lag--lead-compare-to-previous-or-next-row) above is the parent LAG canonical. The [r07 §Pattern B2 (YoY/MoM with LAG)](#pattern-b2-leading-canonical--period-over-period-yoy-vs-mom-with-window-functions-year-over-year--same-month-last-year--month-over-month--compare-to-last-year--lag-12-months--growth-vs-last-year--period-over-period) below uses LAG over calendar buckets (rows-vs-periods nuance is different — there, gaps in the series silently shift the comparison; here, gaps in event_time are exactly what we want to detect). The [r23 §completed-age date_diff canonical](23-sql-best-practices-olap.md#leading-canonical--days-between-two-dates-and-the-column-scope-discipline-that-goes-with-it) covers the date-units side of the same family (years for age, days for tenure).
+**Cross-references.** The [r23 §temporal-minus-temporal banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it) cites the Trino 467 operator table verbatim and lists every `date - date` / `timestamp - timestamp` DO-NOT-WRITE form with the `date_diff` fix. The [r07 §Pattern B (LAG/LEAD)](#pattern-b-lag--lead-compare-to-previous-or-next-row) above is the parent LAG canonical. The [r07 §Pattern B2 (YoY/MoM with LAG)](#pattern-b2-leading-canonical--period-over-period-yoy-vs-mom-with-window-functions-year-over-year--same-month-last-year--month-over-month--compare-to-last-year--lag-12-months--growth-vs-last-year--period-over-period) below uses LAG over calendar buckets (rows-vs-periods nuance is different — there, gaps in the series silently shift the comparison; here, gaps in event_time are exactly what we want to detect). The [r23 §completed-age date_diff canonical](23-sql-best-practices-olap.md#leading-canonical--days-between-two-dates-and-the-column-scope-discipline-that-goes-with-it) covers the date-units side of the same family (years for age, days for tenure). The **[Pattern B-Streak card immediately below](#pattern-b-streak-leading-canonical--longest-streak-of-consecutive-active-days-per-user-gaps-and-islands)** is the *day-granularity* sibling of this session card: same LAG → flag → running-SUM-`streak_id` skeleton, but the gap test is `date_diff('day', ...) <> 1` (consecutive calendar days) instead of a minute-gap threshold.
+
+### Pattern B-Streak: LEADING CANONICAL — Longest streak of consecutive active days per user (gaps-and-islands) (iter876 PIN — FIX-A: 3-layer form, NESTED_WINDOW is illegal)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** **longest streak**, **consecutive days**, **gaps and islands**, **streak of active days**, **islands of consecutive dates**, **running streak id**, **best streak**, **consecutive-day run**, longest run of consecutive active days, max consecutive days active, longest login streak, streak of consecutive logins, longest stretch of active days, daily-active streak per user. Verified against the Trino 467 source [`ExpressionAnalyzer.java` NESTED_WINDOW check](https://raw.githubusercontent.com/trinodb/trino/467/core/trino-main/src/main/java/io/trino/sql/analyzer/ExpressionAnalyzer.java) and [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) on 2026-06-10.
+
+**THE QUESTION:** "What is each user's longest streak of consecutive active days?" — i.e. the longest run of calendar dates with no gap, per user. This is the classic **gaps-and-islands** shape at *day* granularity. The session card above is the same shape at *minute-gap* granularity; the only real difference is the gap test (`date_diff('day', ...) <> 1` here vs a 30-minute threshold there).
+
+**THE PREFERRED CANONICAL — THREE layers. Each window expression lives in its OWN layer; you do NOT nest one window inside another.**
+
+```sql
+-- Trino 467 — longest streak of consecutive active days per user (gaps-and-islands).
+WITH flagged AS (   -- Layer 1: mark the START of each new streak
+  SELECT
+    user_id,
+    active_date,
+    CASE
+      WHEN date_diff(
+             'day',
+             LAG(active_date) OVER (PARTITION BY user_id ORDER BY active_date),
+             active_date
+           ) = 1
+        THEN 0   -- exactly 1 day after the prior active day -> same streak continues
+        ELSE 1   -- gap (>1 day) OR first row (LAG is NULL -> date_diff NULL -> not =1) -> new streak
+    END AS is_new_streak
+  FROM (SELECT DISTINCT user_id, active_date FROM events)   -- dedup if a day can repeat
+),
+streaks AS (        -- Layer 2: running SUM of the flag = streak id, in its OWN CTE
+  SELECT
+    user_id,
+    active_date,
+    SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY active_date) AS streak_id
+  FROM flagged
+)
+SELECT                                                       -- Layer 3: count per streak, then MAX per user
+  user_id,
+  MAX(streak_len) AS longest_streak_days
+FROM (
+  SELECT user_id, streak_id, COUNT(*) AS streak_len
+  FROM streaks
+  GROUP BY user_id, streak_id
+) t
+GROUP BY user_id;
+```
+
+**THE RULE — gaps-and-islands needs THREE layers, and you CANNOT collapse them by nesting windows:**
+
+1. **Layer 1 — LAG gap-flag.** A new streak starts when the prior active_date is NOT exactly 1 day back: `date_diff('day', LAG(active_date) OVER (...), active_date) <> 1`. `date_diff('day', earlier, later)` returns a **`bigint`** day count. On the **first row** of each user, `LAG(active_date)` is NULL, so `date_diff('day', NULL, active_date)` returns **NULL**, and `NULL = 1` is UNKNOWN (not true) → it falls to ELSE → flagged as a new streak (`1`). That is exactly what you want: every user's first active day begins streak 1.
+2. **Layer 2 — running SUM(flag) = streak id, in its OWN CTE.** `SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY active_date)` is the classic "give each island a unique id" trick: contiguous days share one `streak_id`; the first day after a gap bumps the running sum, starting a new id. This MUST be a separate layer from Layer 1 (you cannot put a window over a column that is itself a window result in the same SELECT *only* if you tried to nest them — keep each window in its own SELECT layer and reference prior windows as plain columns).
+3. **Layer 3 — count each streak, then MAX per user.** Inner subquery: `GROUP BY user_id, streak_id` → `COUNT(*) AS streak_len` (length of each island). Outer: `GROUP BY user_id` → `MAX(streak_len)` (the longest island per user). Note these are **two separate GROUP BY clauses in two separate query layers** — a single query has exactly ONE GROUP BY.
+
+**Why you cannot fold the layers together (the iter875 Q3 defect — two distinct illegal forms):**
+
+```sql
+-- ❌ WRONG #1 — window nested inside another window's PARTITION BY:
+COUNT(*) OVER (PARTITION BY user_id, SUM(flag) OVER (...))
+-- Trino throws NESTED_WINDOW: a window function cannot appear inside another window's
+-- PARTITION BY / ORDER BY / frame. Compute streak_id = SUM(flag) OVER (...) in a PRIOR
+-- CTE first, then reference it as a plain column. -- DO NOT COPY
+```
+
+```sql
+-- ❌ WRONG #2 — two GROUP BY clauses stapled onto ONE query:
+SELECT user_id, MAX(...) FROM streaks GROUP BY user_id, streak_id GROUP BY user_id
+-- A single query has exactly ONE GROUP BY and this is a parse error. Count per streak in a
+-- subquery layer (GROUP BY user_id, streak_id), THEN GROUP BY user_id in the OUTER. -- DO NOT COPY
+```
+
+The Trino 467 analyzer source confirms WRONG #1: `ExpressionAnalyzer.java` extracts the child expressions of a window's PARTITION BY / ORDER BY / frame and, if any of them is itself a window expression, throws `NESTED_WINDOW` with the message *"Cannot nest window functions or row pattern measures inside window specification"*. There is no way around it — the streak_id window must be materialized in its own SELECT layer (a CTE or subquery) and then consumed as an ordinary column by Layer 3.
+
+**Variants.**
+
+- **Streak as of a target date / current streak.** After Layer 2, filter to the streak that contains the latest `active_date` per user: find each user's max `active_date`, take its `streak_id`, and `COUNT(*)` the rows in that `(user_id, streak_id)` island.
+- **Longest streak meeting a condition (e.g. consecutive days with revenue > 0).** Build the `events`-equivalent base as `SELECT DISTINCT user_id, active_date FROM daily WHERE revenue > 0`, then the three layers are unchanged.
+- **Consecutive WEEKS / MONTHS instead of days.** Change the gap unit and the "1" accordingly: for months, derive a month index and test `month_index - LAG(month_index) <> 1` (calendar-month arithmetic, not `date_diff('month', ...)` on raw dates which can mis-count partial months). Keep the same 3-layer skeleton.
+- **Return the streak's start/end dates too.** In Layer 3's inner subquery add `MIN(active_date) AS streak_start, MAX(active_date) AS streak_end`; in the outer, pick the row with the max length per user via `ROW_NUMBER()` instead of `MAX()` if you need the dates alongside the length.
+
+**Cross-references.** This is the day-granularity sibling of [Pattern B-Session](#pattern-b-session-leading-canonical--sessionization--30-minute-gap--gaps-and-islands--new-session-when-gap-exceeds-threshold-iter671-pin) above (same LAG → flag → running-SUM-id skeleton; minute-gap threshold there, `date_diff('day', ...) <> 1` here). The NESTED_WINDOW rule applies to EVERY window-function pattern in this resource: any time you need a window over the result of another window (rank of a running total, count within a SUM-OVER partition, etc.), materialize the inner window in a prior CTE first. See also the [r23 §temporal-minus-temporal banner](23-sql-best-practices-olap.md#leading-canonical--days--minutes--seconds-between-two-dates-or-timestamps-and-the-column-scope-discipline-that-goes-with-it) for why `active_date - LAG(active_date)` does NOT parse in Trino (use `date_diff('day', ...)`).
 
 ### Pattern B2: LEADING CANONICAL — Period-over-period: YoY vs MoM with window functions (year over year / same month last year / month over month / compare to last year / LAG 12 months / growth vs last year / period over period)
 
