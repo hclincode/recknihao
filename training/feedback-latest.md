@@ -1,67 +1,77 @@
-# Judge Feedback — iter845 (EXTENDED PHASE, DEFAULT NO-OP durability sweep)
+# Judge Feedback — Iter 846 (EXTENDED PHASE)
 
-**Date:** 2026-06-09
-**Result:** PASS overall (overall avg 4.50; per-Q 5.00 / 3.50 / 5.00 / 4.50 = 18.00/4; margin +1.00; overall avg governs, no per-Q veto)
-**Federation:** NOT probed this iteration.
-**Teacher edits this iteration:** ZERO (declared DEFAULT NO-OP durability sweep).
-**state.json:** NOT bumped (already 845).
+**Overall: 4.4375 / 5.00 — PASS** (per-Q 5.00 / 5.00 / 2.75 / 5.00 = 17.75/4; margin +0.9375; overall avg governs, no per-Q veto)
 
-All four dialect families verified against trino.io/docs/467 (datetime.html, string.html, aggregate.html, sql/select.html). PIN Trino 467.
+Federation NOT probed (row stays 4.49944/310, still FAIL). Teacher made ZERO edits this iteration (DEFAULT NO-OP durability sweep).
+
+All dialect claims verified against trino.io/docs/467 (math/array/conversion/sql-select) plus WebSearch on division-by-zero behavior, 2026-06-09.
 
 ---
 
 ## Per-question scores
 
-### Q1 — map column → JSON string for an API — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
-`json_format(CAST(metadata AS JSON))` is the canonical correct form.
-- VERIFIED: `CAST(map AS JSON)` → JSON object; `json_format(json)` → varchar. Correct two-step route.
-- The DEBUG-FORMAT trap warning is the high-value part and is accurate: `CAST(map AS VARCHAR)` produces Trino's internal map render `{plan=enterprise, region=us-east}` (unquoted keys/values, `=` separators) which is NOT valid JSON. Telling the engineer to route through JSON first is exactly right for an API payload.
-- Fresh-clean. No defects.
+### Q1 — alias-in-WHERE RE-PROBE — 5.00 (Acc5 / Comp5 / Clar5 / Act5)
+`final_price` computed in SELECT, `WHERE final_price > 100` errors "column does not exist".
 
-### Q2 — build a DATE from year/month/day INTEGER columns, filter last 90 days — **3.50** (Acc3 / Comp4 / Clar4 / Act3)
-Two distinct things to grade:
+Responder CORRECTLY:
+- Explained WHERE is evaluated BEFORE the SELECT projection, so the alias is not yet computed / does not exist when WHERE runs.
+- Marked `WHERE final_price > 100` with ❌ (did NOT reproduce the anti-pattern as runnable copy-bait).
+- Gave the CTE fix and filtered the outer query.
+- Correctly noted the alias IS allowed in ORDER BY (runs after projection) but NOT in WHERE/GROUP BY/HAVING.
 
-(1) **Date-construction expression — CORRECT.** `CAST(date_parse(CONCAT(CAST(event_year AS VARCHAR),'-',LPAD(CAST(event_month AS VARCHAR),2,'0'),'-',LPAD(CAST(event_day AS VARCHAR),2,'0')), '%Y-%m-%d') AS DATE)`:
-   - VERIFIED `date_parse` uses MySQL `%`-specifiers (`%Y`/`%m`/`%d`), NOT Joda — correct family, no cross-family bug.
-   - `LPAD(..,2,'0')` zero-pads single-digit month/day to two chars — correct.
-   - `date_parse` returns `timestamp(3)`; `CAST(... AS DATE)` narrows to DATE — correct, and the responder correctly stated the return type.
-   - The "Trino has no construct-DATE-from-components function; ISO-concat-then-parse is the clean form" framing is accurate (no `make_date`/`date_from_parts` in Trino 467).
+Verified vs sql/select.html eval-order semantics. Clean.
 
-(2) **THE BUG — SELECT alias referenced in WHERE.** The example writes `... AS event_date FROM events WHERE event_date >= CURRENT_DATE - INTERVAL '90' DAY`. `event_date` is the SELECT-list alias. **VERIFIED against Trino 467 (sql/select.html): WHERE is evaluated BEFORE the SELECT projection, so output-column aliases do not exist when WHERE runs.** The query as written FAILS with `Column 'event_date' cannot be resolved`. This is a copy-and-break correctness bug: an engineer who copies it gets a parse/analysis error, not a working filter.
-   - Correct fixes: repeat the full `CAST(date_parse(...) AS DATE)` expression in WHERE, OR wrap the SELECT in a CTE/subquery and filter the outer query. The `INTERVAL '90' DAY` arithmetic itself is fine.
+### Q2 — array set ops on two ARRAY columns, one row — 5.00 (Acc5 / Comp5 / Clar5 / Act5)
+- `array_intersect(prev,curr)` = overlap, `array_except(curr,prev)` = new, `array_except(prev,curr)` = lost.
+- Correctly stated these operate within one row, no UNNEST needed.
+- Correctly distinguished from row-level INTERSECT/EXCEPT/UNION operators (which compare two queries).
 
-**Verdict on the bug — RESPONDER-SLIP, NOT a findability gap.** The "no SELECT alias in WHERE" rule is documented AND findable, in multiple places, including one that is almost this exact scenario:
-- `resources/27-oracle-plsql-to-dbt-trino.md:767` — "GOTCHA — filtering on a parsed timestamp (do NOT reference the SELECT output alias in WHERE)" — states WHERE-runs-before-SELECT, gives the precise `Column '<alias>' cannot be resolved` error, shows the WRONG form (alias-in-WHERE on a parsed time column), and gives BOTH fixes (CTE-preferred + repeat-expression). This is the parse-then-filter case, identical in shape to Q2.
-- `resources/07-analytical-query-patterns.md:2702`, `:2716`, `:3222` — alias-not-visible-before-projection rule (GROUP BY / WHERE / HAVING / OVER ORDER BY), with a parse-error matrix row.
-- `resources/23-sql-best-practices-olap.md:484` — GROUP BY alias asymmetry (ORDER BY can, WHERE/GROUP BY cannot).
+Verified vs array.html: all three functions exist, each takes two arrays and returns an array (dedup'd). Mapping correct. Clean.
 
-The content exists and is keyword-rich ("filter", "parsed", "WHERE", "alias", "cannot be resolved"). The responder reproduced the exact anti-pattern the resource warns against. This is a synthesis slip — the responder correctly built the date expression but then dropped it behind an alias and filtered on the alias, the precise mistake r27 §4.2 inoculates against. No resource defect.
+### Q3 — NaN/Infinity cause + detection — 2.75 (Acc2 / Comp3 / Clar4 / Act2)
+**REAL ACCURACY DEFECT on the load-bearing claim.**
 
-### Q3 — filter file paths ending '.pdf' — **5.00** (Acc5 / Comp5 / Clar5 / Act5)
-- VERIFIED: Trino 467 has `starts_with()` but NO `ends_with()` (pinned fact, confirmed again on string.html). Correctly stated, with the right rationale (commonly fabricated when porting from Spark/Snowflake).
-- `WHERE file_path LIKE '%.pdf'` is the canonical form; `regexp_like(file_path, '\.pdf$')` offered as the regex alternative (correct — literal-dot-anchored-end). The "LIKE pushes down better" note is a sound applicability tip.
-- Fresh-clean. No defects.
+Correct parts:
+- `is_nan(x)`, `is_infinite(x)`, `is_finite(x)` all exist with correct semantics (verified math.html).
+- INTEGER/DECIMAL division by zero FAILS the query — correct.
+- NaN/Infinity only come from floating-point types — correct.
 
-### Q4 — population vs sample standard deviation — **4.50** (Acc5 / Comp5 / Clar4 / Act4)
-- VERIFIED against aggregate.html: `stddev_samp` (sample, divides by n-1), `stddev_pop` (population, divides by n); `stddev` IS an alias for `stddev_samp`; `variance`/`var_samp` (n-1) and `var_pop` (n) analogues all present. Every characterization correct.
-- Correctly told the Postgres user that `stddev()` is the same default (n-1 sample) in both Trino and Postgres — directly resolves the migration concern. The sample-vs-population guidance (unbiased estimate vs entire-population) is correct and useful.
-- Minor: no runnable SELECT snippet (formula prose only), and no note on small-n behavior (`stddev_samp` over n=1 → NULL since n-1=0). Cosmetic completeness/actionability nits only; no inaccuracy.
+WRONG parts (the central CAUSE the question asked about):
+- "DOUBLE division by zero SUCCEEDS but produces bad values ... returns Infinity (not error)" — **FALSE**. Trino 467 throws `DIVISION_BY_ZERO` for DOUBLE/REAL `/ 0` as well; it does NOT follow IEEE-754. Verified via WebSearch: scientific-notation literals are DOUBLE, and `1.0e0 / 0.0e0` errors rather than returning Infinity. This matches `DoubleOperators.divide` throwing `DIVISION_BY_ZERO`.
+- Therefore `CAST(msgs AS double) / sessions` where `sessions = 0` ERRORS — it does NOT return Infinity.
+- "`0e0 / 0e0` returns NaN" — **FALSE**, that errors too.
+- The summarizing rule "int/decimal → guard BEFORE with NULLIF; double → detect AFTER with is_finite" is **MISLEADING**: double-div-by-zero must ALSO be guarded BEFORE with `NULLIF(denom, 0)`. Detection AFTER does not help because the query has already failed.
+
+The detection functions are valid and NaN/Infinity DO genuinely arise — but from `nan()`, `infinity()`, overflow casts, `sqrt(-1)`, infinity arithmetic, etc. — NOT from double division by zero. The answer mis-attributed the cause.
+
+Root note: this incorrect framing traces back to the resource itself (r23 §4.4H). The iter739/iter740 score-history entries encoded "double/real div-by-zero → inf/nan, detect AFTER" — that resource content is itself docs-wrong. The responder faithfully reproduced a wrong resource. It is still an accuracy defect in the answer, AND it is a resource defect that needs fixing.
+
+### Q4 — graceful cast of messy string — 5.00 (Acc5 / Comp5 / Clar5 / Act5)
+- `TRY_CAST(raw_score AS INTEGER)` returns NULL on failure (vs CAST erroring) — correct.
+- `COALESCE(TRY_CAST(...), 0)` to default bad rows — correct.
+- Postgres-style `expr::type` does not work in Trino — correct.
+
+Verified vs conversion.html (`try_cast` = "Like cast(), but returns null if the cast fails"). Durability re-probe of bulletproofed TRY_CAST — clean.
 
 ---
 
-## Patterns / observations
+## Key verdicts
 
-- 3 of 4 questions fresh-clean and fully docs-correct. The one ding (Q2) is a synthesis slip against already-correct, well-placed content — not a content gap.
-- No dialect fabrication. `ends_with`-absence (Q3) and `stddev=stddev_samp` (Q4) both held; `date_parse` MySQL-specifier family (Q2) was correct — none of the recurring "import foreign priors into Trino" failure modes fired at the function level.
-- The Q2 failure is at the QUERY-COMPOSITION level (alias scoping), not the function level — a different class than the function-name slips logged in MEMORY.md.
+**(a) Q1 alias-in-WHERE — CONFIRMED ONE-OFF.** The iter845 Q2 alias-in-WHERE issue was a responder slip, not a durable findability gap. The re-probe from a fresh (price/discount) angle was handled perfectly. Rule is durable and findable (r27 §4.2). NO FIX-A needed for alias-in-WHERE.
 
-## iter846 directive — **DEFAULT NO-OP durability sweep** (no FIX-A warranted)
+**(b) Q3 double-div-by-zero-returns-Infinity — DEFECT (docs-WRONG).** Trino 467 throws `DIVISION_BY_ZERO` for DOUBLE/REAL division by zero just like integer/decimal; it does NOT return Infinity/NaN. The responder's claim is factually incorrect on the load-bearing point, and it originates from incorrect resource content in r23 §4.4H.
 
-The Q2 alias-in-WHERE bug is a responder-slip against content that is already correct, prominent, and findable (r27 §4.2 line 767 is nearly this exact case). Per the reconcile-don't-churn discipline and the "one-off slip vs already-correct resource ⇒ do not edit" guard used in iter838/iter784, this does NOT justify a resource edit.
+---
 
-**Recommended for iter846:**
-1. DEFAULT NO-OP durability sweep. HOLD all iter534–844 locks. Federation r22 untouched (row stays 4.49944/310).
-2. RE-PROBE the alias-in-WHERE rule from the date-construction angle once more (e.g. "build a timestamp from parts then filter recent" or "compute a derived column then filter on it") to confirm whether the Q2 slip recurs. If it recurs on a 2nd independent date/derived-column phrasing, THEN escalate to a LIGHT FIX-A: add a keyword-anchored cross-link from the r23/r07 date-construction & string→DATE cards (where date-build questions land) to the r27 §4.2 alias-in-WHERE GOTCHA, so a responder building a date column is routed to filter-it-correctly guidance co-located. Do NOT edit r27 §4.2 itself (it is correct and complete) and do NOT churn any verified canonical.
-3. If the re-probe is clean, leave everything as-is.
+## iter847 directive — FIX-A (a real defect surfaced)
 
-DO NOT bump training/state.json (already 845).
+Not a NO-OP this iteration. Reconcile the r23 §4.4H float-state card IN PLACE:
+
+1. CORRECT the "double/real div-by-zero returns Infinity/NaN, detect AFTER" framing. The truth: **Trino 467 throws `DIVISION_BY_ZERO` for ALL numeric types including DOUBLE/REAL** — guard division-by-zero BEFORE with `NULLIF(denom, 0)` regardless of operand type. Trino does NOT follow IEEE-754 for the `/` operator.
+2. DEFANG the "double division by zero returns Infinity (not an error)" claim on its own un-copyable line (do not leave it as copy-bait — see the defang-DO-NOT-WRITE memory lesson).
+3. KEEP the (correct) `is_nan`/`is_infinite`/`is_finite` detection canonical, but RE-ANCHOR it to the REAL causes of NaN/Infinity: `nan()`, `infinity()`, overflow CASTs (e.g. casting an out-of-range or 'Infinity' string to double), `sqrt(-1)`, and infinity arithmetic — NOT double-division-by-zero.
+4. VERIFY against trino.io/docs/467 (math.html + a direct div-by-zero check) BEFORE writing. PIN Trino 467.
+
+Do NOT churn the Q1 alias-in-WHERE content (r27 §4.2, durable), the Q2 array set-ops card, or the Q4 try_cast card. Reconcile-don't-append: fix the stale §4.4H framing in place rather than adding a contradicting block.
+
+HOLD all iter534-845 locks. Federation r22 untouched (row stays 4.49944/310, still FAIL). DO NOT bump training/state.json (already 846).
