@@ -1,81 +1,69 @@
-# Judge Feedback — iter877 (EXTENDED PHASE)
+# Judge Feedback — iter878
 
-**Overall: 4.84 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.375 = 19.375 / 4 = 4.84375; margin +1.34 over the 3.5 bar; overall average governs — no per-Q veto.)
+Production stack: Trino 467 + Iceberg connector (HMS), Spark/Iceberg 1.5.2 ingestion, on-prem k8s, MinIO/S3, dbt permitted. All dialect facts verified against trino.io/docs/467 (json.html, url.html, array.html, string.html, conversion.html). PIN Trino 467.
 
-**FEDERATION NOT PROBED** — the 4.49944/310 federation row is UNCHANGED this iter (all 4 questions are analytical-SQL / Trino-dialect, no cross-source connector content).
+Overall average: **4.13 / 5 → PASS** (threshold 3.5; overall average governs, no per-Q veto).
 
-All dialect facts VERIFIED against trino.io/docs/467 (sql/select.html, functions/json.html, functions/window.html, functions/conversion.html) + the Trino "Introducing new window features" blog + WebSearch (Athena/Trino recursion-depth error text) on 2026-06-10. Trino 467 PINNED throughout.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 json_object type-preserving | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 URL query-param extract | 4 | 3 | 4 | 4 | **3.75** |
+| Q3 date-spine gap-fill | 5 | 5 | 5 | 5 | **5.00** |
+| Q4 HH:MM:SS duration format | 3 | 3 | 3 | 3 | **3.00** |
 
----
-
-## Q1 — Longest run of consecutive SUBSCRIBED MONTHS per customer (gaps-and-islands) — 5.00
-
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-The responder emitted the correct **3-LAYER** gaps-and-islands form:
-- **Layer 1** — `CASE WHEN date_diff('month', LAG(subscription_month) OVER (PARTITION BY customer_id ORDER BY subscription_month), subscription_month) = 1 THEN 0 ELSE 1 END AS is_new_streak` over a `SELECT DISTINCT customer_id, subscription_month` dedup.
-- **Layer 2** — `SUM(is_new_streak) OVER (PARTITION BY customer_id ORDER BY subscription_month) AS streak_id` in its OWN layer.
-- **Layer 3** — inner `COUNT(*) AS streak_len GROUP BY customer_id, streak_id`, outer `MAX(streak_len) GROUP BY customer_id`.
-
-And it explicitly stated Trino does NOT allow nesting window functions, so each window goes in its own layer.
-
-VERIFIED: (1) No nested window function (NESTED_WINDOW would throw — git-tag 467 `ExpressionAnalyzer.analyzeWindow`/`extractWindowExpressions`, pinned iter875/876). (2) Exactly one GROUP BY per query level (no double-GROUP-BY parse error). (3) `date_diff('month', earlier, later) = 1` is the correct month-granularity gap flag (`date_diff(unit, ts1, ts2) -> bigint`, NULL on the first row's LAG so the first month flags as a new streak — datetime.html, pinned iter876). The month-granularity variant behaves identically to the day variant validated at iter876.
-
-**This is the 2nd CLEAN datapoint for the gaps-and-islands FIX-A (iter876 day-granularity, iter877 month-granularity). The fix is BULLETPROOFED — no regression, no escalation needed.**
-
-## Q2 — 7-day moving average of daily events per user, one pass — 5.00
-
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-Responder: pre-aggregate to one-row-per-day-per-user in a CTE (`COUNT(*) AS daily_events GROUP BY user_id, event_date`), then `AVG(daily_events) OVER (PARTITION BY user_id ORDER BY event_date RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)`.
-
-VERIFIED:
-- **Trino 467 SUPPORTS `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`** over a date/timestamp ORDER BY column. RANGE-with-offset was added in Trino 346 (issue #609, "Introducing new window features" blog shows `RANGE BETWEEN INTERVAL '1' MONTH PRECEDING AND CURRENT ROW`); present and stable in 467. The sort key must be a single sortable (numeric/datetime) column and the offset an interval that can be added/subtracted from it — exactly the responder's shape.
-- The **ROWS-vs-RANGE distinction is accurate**: `ROWS BETWEEN 6 PRECEDING` counts physical rows and would (a) count 6 EVENTS not 6 days if applied to raw per-event rows, and (b) shift the window when calendar days are missing; `RANGE … INTERVAL '6' DAY` is calendar-value-aware and includes all rows within 6 days regardless of how many physical rows exist.
-- The **pre-aggregate-first reasoning is correct** — collapsing to daily grain before windowing is the right (and necessary) move to get a day-based moving average.
-
-No defect.
-
-## Q3 — Recursive traversal of a product-category parent-child tree — 5.00
-
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-Responder: `WITH RECURSIVE category_tree` (base `WHERE category_id = ?`; recursive `JOIN categories c ON c.parent_category_id = t.category_id WHERE t.depth < 50`) then join products. Claimed (1) WITH RECURSIVE is EXPERIMENTAL in Trino 467, (2) `max_recursion_depth` defaults to 10 and ERRORS when exceeded, settable via `SET SESSION max_recursion_depth = 50`, (3) the base UNION ALL recursive form.
-
-VERIFIED — **all three claims ACCURATE, NOT over-cautious**:
-- **(c) WITH RECURSIVE IS experimental in Trino 467.** sql/select.html states verbatim: *"This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload."* The responder's "experimental / not yet production-stable" framing is CORRECT, not over-cautious.
-- **max_recursion_depth DEFAULT IS 10.** Docs verbatim: *"recursion depth is fixed, defaults to 10, and doesn't depend on the actual query results"* and *"You can adjust the recursion depth with the session property max_recursion_depth."*
-- **Exceeding the depth ERRORS — it does NOT silently truncate.** The Trino/Athena (Trino-engine) error confirmed via WebSearch: `NOT_SUPPORTED: Recursion depth limit exceeded (10). Use 'max_recursion_depth'`. The responder's "errors when exceeded" is CORRECT.
-- The recursive-CTE syntax (anchor SELECT `UNION ALL` recursive SELECT referencing the CTE) is correct Trino. The `WHERE t.depth < 50` guard plus `SET SESSION max_recursion_depth = 50` is exactly the right safety pairing.
-
-No defect.
-
-## Q4 — One JSON object per customer (total_orders / total_spend / avg_order_value) for a downstream API — 4.375
-
-Sub-scores: Accuracy 5 / **Completeness 3.5** / Clarity 4.5 / Actionability 4.5.
-
-Responder: `CAST(MAP(ARRAY['total_orders','total_spend','average_order_value'], ARRAY[CAST(COUNT(DISTINCT order_id) AS VARCHAR), CAST(SUM(amount) AS VARCHAR), CAST(AVG(amount) AS VARCHAR)]) AS JSON) AS customer_stats`; `json_format(CAST(... AS JSON))` for a VARCHAR string; warned that `CAST(map AS VARCHAR)` gives the non-JSON debug form `{k=v}` and not to hand-roll JSON.
-
-VERIFIED:
-- **MAP→JSON object is CORRECT.** json.html verbatim: `CAST(MAP(ARRAY['k1','k2','k3'], ARRAY[1,23,456]) AS JSON)` -> `JSON '{"k1":1,"k2":23,"k3":456}'`. MAP→JSON requires VARCHAR keys (satisfied). `json_format(...)` for the VARCHAR string and the `{k=v}` debug-form trap are both correct (matches the r09 LEADING CANONICAL card at L757-786).
-- **(d) json_object / json_array DO EXIST in Trino 467** as SQL/JSON constructors — `JSON_OBJECT(key VALUE value [, ...] [NULL ON NULL | ABSENT ON NULL] [RETURNING type])` and `JSON_ARRAY(...)` (functions/json.html). `json_object('total_orders' VALUE count(...), 'total_spend' VALUE sum(...), 'avg_order_value' VALUE avg(...))` builds the SAME object WHILE PRESERVING NUMERIC TYPES.
-
-**COMPLETENESS NUANCE (the only ding):** the responder's all-VARCHAR MAP forces every value through `CAST(... AS VARCHAR)`, so the downstream API receives `"total_spend":"1250.50"` (quoted string) instead of numeric `"total_spend":1250.50`. Because MAP requires a SINGLE homogeneous value type, you genuinely cannot mix INT + DECIMAL + DOUBLE in one MAP→JSON — so stringifying is an inherent MAP limitation. BUT `json_object(... VALUE ...)` has no homogeneity constraint and preserves each value's native JSON type. Since json_object EXISTS in 467 and is the type-preserving idiom an API consumer usually wants, NOT mentioning it is a real (minor) completeness miss — hence Completeness 3.5. The answer still WORKS (valid JSON, correct keys); the values are just quoted numbers.
-
-**NOTE on the question's ROW→JSON premise:** the prompt asserted `CAST(ROW(...) AS JSON)` "produces a JSON ARRAY (loses field names)." This is OUTDATED for Trino 467. Verified on functions/json.html (467): `CAST(CAST(ROW(123,'abc',true) AS ROW(v1 BIGINT, v2 VARCHAR, v3 BOOLEAN)) AS JSON)` -> `JSON '{"v1":123,"v2":"abc","v3":true}'` — a NAMED ROW casts to a JSON OBJECT with field names; only an ANONYMOUS ROW casts to an array. (Field-name-losing array behavior was true in old Presto/Trino <=~352 — changed since ~370.) This does NOT affect the responder's score (it used MAP and made no ROW→array claim), and the r09 card already documents this correctly (L772-774). Flagged only to keep the run-prompt premise from propagating into a future directive.
+Overall = (5.00 + 3.75 + 5.00 + 3.00) / 4 = **4.13 PASS**
 
 ---
 
-## iter878 recommendation
+## Q1 — JSON object per row, numeric types preserved (5.00)
 
-**DEFAULT NO-OP with an OPTIONAL LIGHT FIX-A.** Three of four answers are flawless (5.00) and the gaps-and-islands FIX is now bulletproofed (2nd clean datapoint). The only blemish is the Q4 completeness nuance.
+**The iter878 json_object FIX LANDED.** Responder LEADS with `json_object('quantity' VALUE quantity, 'unit_price' VALUE unit_price)` → `{"quantity":5,"unit_price":29.99}` (unquoted numbers), notes the colon form `json_object('quantity':quantity)` works in 467, and gives `json_format(...)` for a VARCHAR string. It did NOT regress to the iter877 all-VARCHAR `MAP(...) AS JSON` form that stringifies numbers.
 
-- **OPTIONAL FIX-A (Q4 only):** In the r09 `CAST(map/array/row AS JSON)` LEADING CANONICAL card (resources/09-lakehouse-schema-design.md, L757-786), ADD a short note that for a **type-preserving** JSON object (numbers stay numeric for a downstream API) the SQL/JSON constructor `json_object('total_orders' VALUE count(...), 'total_spend' VALUE sum(...), 'avg_order_value' VALUE avg(...))` is the idiom, and contrast it with the all-VARCHAR MAP→JSON which stringifies values due to MAP's homogeneous-value-type requirement. Keep the existing MAP→JSON canonical (it is correct and the best answer when stringified values are acceptable). FENCE all SQL (pipe-escape trap). Keyword anchors: json_object Trino, type-preserving JSON object, numbers not quoted in JSON, build JSON object per row preserving numeric types, json_object VALUE constructor, SQL/JSON object constructor.
-- **DO NOT** touch the iter876 B-Streak card, the iter875 reconciliation card, or any iter534-876 pin. The Q1/Q2/Q3 forms are all dialect-clean — add no "wrong" cards for them.
-- **NO escalation.** No regression surfaced.
+VERIFIED trino.io/docs/467/functions/json.html: doc verbatim `SELECT json_object('x' : true, 'y' : 12e-1, 'z' : 'text') --> '{"x":true,"y":1.2,"z":"text"}'` — `1.2` is an UNQUOTED JSON number, confirming type preservation. Both the colon form and KEY/VALUE form are documented. json_format serializes a JSON value to VARCHAR. Fully accurate, complete, type-correct. No escalation.
 
-PIN Trino 467. NO federation edits. DO NOT bump training/state.json.
+## Q2 — Extract query parameter from a URL (3.75)
 
-### Explicit answers to (c) and (d)
-- **(c)** WITH RECURSIVE IS experimental in Trino 467 (docs say so verbatim); `max_recursion_depth` DEFAULT IS 10, and exceeding it ERRORS (`Recursion depth limit exceeded (10)`), it does NOT silently truncate. The responder's claims were ALL accurate.
-- **(d)** `json_object` (and `json_array`) DO exist in Trino 467 as SQL/JSON constructors. The responder's all-VARCHAR MAP→JSON works but stringifies numbers; json_object would preserve numeric types — a completeness miss, not an error.
+Both forms the responder gave WORK: nested `split_part(split_part(url,'?',2),'&',1)` and the more robust `element_at(split_to_map(split_part(url,'?',2), '&', '='), 'account_id')`. split_to_map + element_at is valid and returns the param value. Accuracy is good (4).
+
+**COMPLETENESS MISS (3): the responder missed the canonical one-call answer `url_extract_parameter(page_url, 'account_id')`.** VERIFIED trino.io/docs/467/functions/url.html: `url_extract_parameter(url, name) → varchar` — "Returns the value of the first query string parameter named `name` from `url`." The full url_extract_* family exists (fragment/host/parameter/path/port/protocol/query). The split_to_map approach is correct but fragile: it does not URL-decode percent-encoded values, mishandles repeated keys and value-less params, and is far more verbose than the purpose-built builtin. This is a findable-but-missing completeness gap, not a correctness error.
+
+## Q3 — Fill missing dates over a 90-day range (5.00)
+
+`UNNEST(sequence(DATE start, current_date, INTERVAL '1' DAY)) AS d(day) LEFT JOIN daily_revenue r ON r.day=d.day` with `COALESCE(r.revenue,0)`, plus the last-90-days `UNNEST(sequence(0,89))` + `date_add` variant. VERIFIED trino.io/docs/467/functions/array.html: `sequence(start, stop, step)` with `step` an `INTERVAL DAY TO SECOND` or `INTERVAL YEAR TO MONTH` generates the date array; UNNEST + LEFT JOIN + COALESCE is the correct date-spine gap-fill, and there is no generate_series in Trino (sequence is the equivalent). Correctly framed as the Postgres generate_series equivalent. Fully accurate and complete.
+
+## Q4 — Format duration_seconds as HH:MM:SS (3.00) — DEFECT
+
+Two problems:
+
+1. **Minor inconsistency (flagged):** `format('%02d:%02d:%02d', duration_seconds/3600, (duration_seconds%3600)/60, duration_seconds%60)` is correct (VERIFIED conversion.html: `format('%03d', 8) → '008'`, so `%02d` zero-pads to 2 digits). But for 5025 this yields **'01:23:45'**, NOT the '1:23:45' the responder stated. The stated output is inconsistent with the `%02d` width specifier the responder itself used.
+
+2. **REAL DEFECT — FALSE rejection claim:** The responder claimed "In Trino there is no implicit number-to-string coercion. This does NOT work — Trino rejects this with a type error: `CAST(hours AS varchar) || ':' || CAST(minutes AS varchar) || ':' || CAST(seconds AS varchar)`."
+
+**This claim is FALSE.** VERIFIED trino.io/docs/467/functions/string.html (`||` performs concatenation on VARCHAR operands; `||` is sugar for `concat()`) and conversion.html (`CAST(int AS varchar)` produces a VARCHAR, e.g. `CAST(123 AS varchar) → '123'`). Since each `CAST(... AS varchar)` explicitly produces a VARCHAR, `CAST(h AS varchar) || ':' || CAST(m AS varchar) || ':' || CAST(s AS varchar)` is a VARCHAR-to-VARCHAR concatenation that **IS VALID and works** — it is just more verbose than `format()`. Trino only disallows IMPLICIT coercion (`int || ':'` WITHOUT a CAST). The responder conflated "no implicit coercion" with "explicit CAST+concat is rejected." Same family as the iter871 over-cautious-CAST `format_datetime` defect.
+
+**Diagnosis: RESPONDER SYNTHESIS SLIP, not a resource defect.** The resource (r23 § "no implicit coercion" duration/concat table, ~L857-862) is CORRECT and teaches the OPPOSITE of the responder's claim:
+- L857 RIGHT column: `... OR CAST(date_diff('hour',a,b) AS varchar) || 'h ' || CAST(date_diff('minute',a,b)%60 AS varchar) || 'm'`
+- L859 RIGHT column: `'$' || CAST(total_amount AS varchar)`
+- L862 one-line rule: "**Second choice: explicit `CAST(... AS varchar)` on every numeric piece before `||` or `concat()`.**"
+
+The resource explicitly presents `CAST(... AS varchar) || ...` as a WORKING second-choice form. The responder mis-synthesized the "never rely on implicit coercion" rule into "explicit CAST + || is rejected," dropping the word "implicit." The card is accurate; the responder over-generalized.
+
+---
+
+## iter879 recommendation: LIGHT FIX-A (defang the false "CAST+|| rejected" framing) + optional Q2 completeness add
+
+This is a responder synthesis slip against a CORRECT resource, so a defect REPAIR is not strictly needed (the resource already says the right thing). But because this is the SECOND instance of the over-cautious-CAST family (iter871 format_datetime was the first) and the responder's findability keys on the duration/HH:MM:SS phrasing, recommend a **targeted reinforcement** so the right path wins on this exact question shape:
+
+**FIX-A (primary, r23 duration/concat card ~L857-862):** Add a short, copy-attractive POSITIVE anchor next to the existing rule that states explicitly: "`CAST(int AS varchar) || ':' || CAST(int AS varchar)` IS VALID Trino — both operands are VARCHAR after the explicit CAST; `||` concatenates VARCHARs. Only the form WITHOUT a CAST (`int || ':'`) errors." Add a FENCED inline-defang on its own un-copyable line of the false "CAST + || is rejected / type error" misconception, plus an HH:MM:SS keyword anchor (`format HH:MM:SS`, `duration to time string`, `seconds to HH:MM:SS`) routing to the `format('%02d:%02d:%02d', ...)` canonical AND the equivalent CAST+|| form. Keep the existing correct L857-862 content; do not churn it.
+
+**FIX-A (secondary, optional — r07 or r23 URL card):** Add `url_extract_parameter(url, name)` as the LEADING canonical for "extract a query parameter from a URL," with the split_to_map form demoted to a fallback (note it does not URL-decode). Keyword anchors: `extract query parameter from URL`, `get account_id from page_url`, `parse query string`. VERIFIED `url_extract_parameter` exists in 467.
+
+Both are additive/reinforcing; no existing pin needs reversal. NO federation edits.
+
+---
+
+## Explicit answers requested
+
+**(b) Does `url_extract_parameter` exist in Trino 467?** YES. `url_extract_parameter(url, name) → varchar` is documented on trino.io/docs/467/functions/url.html ("Returns the value of the first query string parameter named `name` from `url`"), alongside the full url_extract_* family (fragment/host/parameter/path/port/protocol/query). The responder MISSED it — a findable-but-missing completeness gap (the split approach works but is fragile and does not URL-decode).
+
+**(d) Is `CAST(int AS varchar) || ':' || ...` valid Trino?** YES, it is valid and works. `||` concatenates VARCHAR operands and `CAST(int AS varchar)` produces a VARCHAR, so the fully-CAST expression is a legal VARCHAR concatenation. The responder's claim that it "does NOT work / Trino rejects with a type error" is **FALSE** — a real defect. Trino only rejects IMPLICIT coercion (a bare `int || ':'` without CAST). Source of the false claim: a RESPONDER SYNTHESIS SLIP (the r23 resource correctly teaches CAST+|| as a working second-choice form at L857-862), in the same over-cautious-CAST family as iter871.

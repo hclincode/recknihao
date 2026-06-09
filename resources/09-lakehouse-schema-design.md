@@ -758,7 +758,7 @@ FROM iceberg.analytics.users;
 
 > **Keyword anchors so the responder lands here:** Trino map to json, cast map as json, struct row to json, array to json, json_format, export map column as json string, map to json string API, send MAP to JSON API, Trino map JSON cast, ROW to JSON, ARRAY to JSON, MAP to JSON cast Trino 467, serialize MAP to JSON, MAP to VARCHAR JSON, json_parse map round trip.
 
-**The one rule.** Trino's `CAST(... AS JSON)` is the direct, documented way to convert a MAP, ARRAY, or ROW into a `JSON` value. Per [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html) verbatim: MAP can be cast when "the key type of the map is `VARCHAR` and the value type of the map is a supported type"; ARRAY when "the element type of the array is one of the supported types"; ROW when "every field type of the row is a supported type". **Do NOT believe the claim that Trino has no MAP/ARRAY/ROW → JSON cast — `CAST(... AS JSON)` works directly on all three.**
+**The one rule.** Trino's `CAST(... AS JSON)` is the direct, documented way to convert a MAP, ARRAY, or ROW into a `JSON` value. Per [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html) verbatim: MAP can be cast when "the key type of the map is `VARCHAR` and the value type of the map is a supported type"; ARRAY when "the element type of the array is one of the supported types"; ROW when "every field type of the row is a supported type". **Do NOT believe the claim that Trino has no MAP/ARRAY/ROW → JSON cast — `CAST(... AS JSON)` works directly on all three.** (If the consumer needs a JSON object per row with **real JSON numbers** rather than stringified values, see the type-preserving `json_object(...)` note immediately after this card — a MAP cast forces one homogeneous value type and quotes mixed numerics.)
 
 ```sql
 -- 1. MAP -> JSON object (requires VARCHAR keys + supported value types).
@@ -796,6 +796,37 @@ FROM iceberg.analytics.user_events;
 | `CAST(MAP(ARRAY[1, 2], ARRAY['a','b']) AS JSON)` (INTEGER keys) | Per docs, MAP → JSON cast requires `VARCHAR` keys. INTEGER keys raise a type error. | Cast keys to VARCHAR first: `CAST(MAP(ARRAY[CAST(1 AS VARCHAR), CAST(2 AS VARCHAR)], ARRAY['a','b']) AS JSON)`. |
 
 **Cross-reference.** This is the same data-type family as the MAP/`element_at` content above (use `element_at(map_col, key)` to read individual MAP values; use `CAST(map_col AS JSON)` to export the whole MAP as JSON). For string-aggregation in Trino (which is NOT `string_agg`/`group_concat`), see [resource 27 § 7A.2A — Oracle WINDOWED LISTAGG → Trino](27-oracle-plsql-to-dbt-trino.md) and the inline note immediately below.
+
+#### TYPE-PRESERVING JSON object per row — `json_object('k' VALUE expr, ...)` keeps numbers as real JSON numbers
+
+> **Keyword anchors so the responder lands here:** JSON object per row, row to JSON, build JSON for an API, json_object Trino, numeric JSON not quoted, preserve number types in JSON, one JSON object per customer, emit JSON object per row, type-preserving JSON, json_object vs map to json, unquoted numbers in JSON.
+
+**When the consumer needs REAL JSON numbers (not strings), build the object with `json_object(...)`, not a MAP cast.** Trino 467 has the SQL/JSON constructor `json_object('key' VALUE expr, ...)` (the `KEY`/`VALUE` keywords are optional — `'key' : expr` also works). It builds a JSON OBJECT **preserving each value's type**: numbers stay numeric, booleans stay `true`/`false`, strings get quoted. Per [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html) verbatim, `SELECT json_object('x' : true, 'y' : 12e-1, 'z' : 'text')` returns `'{"x":true,"y":1.2,"z":"text"}'` — note `1.2` is an unquoted JSON number.
+
+```sql
+-- Type-PRESERVING JSON object per row (numbers stay real JSON numbers, NOT quoted strings):
+SELECT customer_id,
+       json_object(
+         'total_orders'    VALUE COUNT(DISTINCT order_id),
+         'total_spend'     VALUE SUM(amount),
+         'avg_order_value' VALUE AVG(amount)
+       ) AS customer_stats
+FROM orders
+GROUP BY customer_id;
+-- -> {"total_orders":42,"total_spend":1250.50,"avg_order_value":29.77}   (unquoted numbers)
+
+-- Equivalent colon form (KEY/VALUE keywords are optional in Trino 467):
+SELECT json_object('total_orders' : COUNT(DISTINCT order_id),
+                   'total_spend'  : SUM(amount)) AS customer_stats
+FROM orders GROUP BY customer_id;
+
+-- json_array(...) is the array equivalent (also type-preserving):
+SELECT json_array(1, 'text', true);   -- -> [1,"text",true]
+```
+
+**THE RULE.** To emit a JSON object per row, **`json_object('k' VALUE expr, ...)` PRESERVES value types** — numbers stay numeric, booleans stay boolean. `CAST(MAP(ARRAY[keys], ARRAY[values]) AS JSON)` also produces a JSON object (it is the LEADING CANONICAL above and remains valid), **but a MAP needs ONE homogeneous value type**, so casting mixed numeric aggregates to VARCHAR first stringifies them (`total_spend` becomes `"1250.50"` — quoted). Use `json_object` when the downstream consumer (e.g. a REST/API client) needs real JSON numbers; use the MAP cast when all values share one type or string values are acceptable. Note also `CAST(ROW(...) AS JSON)` emits a JSON **array** when the ROW is anonymous (it drops the field names) — name the ROW fields, or use `json_object`, when you need a keyed object.
+
+**Cross-reference.** The MAP→JSON cast (still valid for homogeneous values) is the LEADING CANONICAL immediately above; the reverse JSON→typed direction is the `CAST(json_parse(...) AS ROW/MAP/ARRAY)` canonical below.
 
 ### LEADING CANONICAL — get a field out of a native ROW / struct column (dot notation col.field, no CAST needed)
 
