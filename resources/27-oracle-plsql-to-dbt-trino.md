@@ -599,7 +599,7 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 > - **Hour 24-clock**: MySQL `%H`, Joda `HH`. **Hour 12-clock**: MySQL `%h`, Joda `hh` (also need `%p` / `a` for AM/PM).
 > - **WEEKDAY NAME (the day name as a word — "format a date as a custom string", "weekday name from a date", "day name from a DATE column", "get the day of the week as text"):** MySQL `%W` = **FULL** weekday name (`Sunday` .. `Saturday`); MySQL `%a` = **ABBREVIATED** weekday (`Sun` .. `Sat`). Joda equivalents: `'EEEE'` = full, `'EEE'` = abbreviated. **❌ `%A` (capital A) is NOT a valid Trino `date_format` specifier — there is no `%A`. Use `%W` for the full weekday name, `%a` for the abbreviated form — DO NOT COPY `%A`.** (Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): the documented specifiers are `%W` = "Weekday name (`Sunday` .. `Saturday`)" and `%a` = "Abbreviated weekday name (`Sun` .. `Sat`)"; no `%A` exists.) Mirror trap to the month name: `%M` = full MONTH name, `%b` = abbreviated MONTH (`Jan` .. `Dec`).
 >
-> **CRITICAL — `date_format` (and `format_datetime`) REQUIRE a `TIMESTAMP` input; a bare `DATE` column must be CAST first.** Both signatures are typed `date_format(timestamp, format) → varchar` and `format_datetime(timestamp, format) → varchar` (first argument **TIMESTAMP**, not DATE — verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)). Passing a bare `DATE` column raises a function-resolution / signature-mismatch error. If your column is a `DATE`, cast it up first: `date_format(CAST(report_date AS timestamp), '%W')` — **not** `date_format(report_date, '%W')`.
+> **`date_format` and `format_datetime` ACCEPT a bare `DATE` directly — no CAST required, and a bare DATE does NOT error.** Both signatures are documented as `date_format(timestamp, format) → varchar` and `format_datetime(timestamp, format) → varchar` (first argument typed **timestamp** — see [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)), but Trino implicitly coerces `DATE -> TIMESTAMP(0)` at function-argument resolution, so `date_format(report_date, '%W')` and `format_datetime(report_date, 'EEEE')` work on a bare `DATE` column WITHOUT a CAST and do NOT raise a type error. (Verified against the Trino git-tag 467 source `io/trino/type/TypeCoercion.java` `coerceTypeBase`: `case StandardTypes.DATE -> switch (resultTypeBase) { case StandardTypes.TIMESTAMP -> Optional.of(createTimestampType(0)); ... }`, used by `canCoerce` / `compatibility` for implicit argument coercion.) An explicit `CAST(report_date AS timestamp)` is **harmless and equivalent** — write it if you prefer the clarity, but it is not required.
 >
 > **Copy-correct worked examples — custom display string from a DATE column (`report_date = DATE '2026-06-09'`, a Monday):**
 >
@@ -612,8 +612,9 @@ These are the per-expression rewrites you'll do on almost every migrated SELECT.
 > date_format(CAST(report_date AS timestamp), '%a')          -- 'Mon'
 > -- ❌ %A is NOT a valid Trino date_format specifier — use %W (full weekday) / %a (abbrev) — DO NOT COPY:
 > --     date_format(CAST(report_date AS timestamp), '%A')   -- WRONG: %A does not exist
-> -- ❌ a bare DATE is rejected — date_format needs a TIMESTAMP — DO NOT COPY:
-> --     date_format(report_date, '%W')                      -- WRONG: signature mismatch, CAST AS timestamp first
+ -- ✅ A BARE DATE IS FINE — no CAST needed; Trino implicitly coerces DATE -> TIMESTAMP(0):
+> date_format(report_date, '%W')                            -- 'Monday'  (works on a bare DATE, no CAST)
+> -- ❌ 'format_datetime / date_format REQUIRE CAST(date AS timestamp); a bare DATE errors' -- WRONG: Trino implicitly coerces DATE -> TIMESTAMP(0); format_datetime(date_col,'EEEE') / date_format(date_col,'%M') work without a CAST — DO NOT COPY
 >
 > -- Joda (format_datetime) equivalents — same output, different grammar:
 > format_datetime(CAST(report_date AS timestamp), 'MMM dd, yyyy')  -- 'Jun 09, 2026'  (MM=month, mm=MINUTE)

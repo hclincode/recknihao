@@ -737,7 +737,11 @@ rpad(lpad('', 7, '|'), 10, ' ')                   -- -> '|||||||   '  (same resu
 
 For ordinary date-to-string formatting, prefer `date_format` or `format_datetime` (they take a single timestamp and a single pattern — cleaner than `format('%1$tY-%1$tm-%1$td', ts)`). For general-purpose printf-style **multi-arg** string building (a number + a string + a percent + a currency amount in ONE call), `format()` is the right answer.
 
-**Both `date_format(ts, fmt)` and `format_datetime(ts, fmt)` require a TIMESTAMP input — CAST a DATE first.** Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): the signatures are `date_format(timestamp, format) -> varchar` and `format_datetime(timestamp, format) -> varchar` — *"Formats `timestamp` as a string using `format`."* The first argument is typed **TIMESTAMP**, not DATE. Passing a bare `DATE` column raises a function-resolution / signature-mismatch error. If your column is a `DATE`, cast it up first: `format_datetime(CAST(d AS timestamp), 'yyyy-MM')` or `date_format(CAST(d AS timestamp), '%Y-%m')`.
+**Both `date_format(ts, fmt)` and `format_datetime(ts, fmt)` ACCEPT a bare `DATE` directly — no CAST required, and a bare DATE does NOT error.** The signatures are documented as `date_format(timestamp, format) -> varchar` and `format_datetime(timestamp, format) -> varchar` (first argument typed **timestamp** — see [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)), but Trino implicitly coerces `DATE -> TIMESTAMP(0)` at function-argument resolution, so `format_datetime(d, 'yyyy-MM')` and `date_format(d, '%Y-%m')` work on a bare `DATE` column WITHOUT a CAST and do NOT raise a type error. (Verified against the Trino git-tag 467 source `io/trino/type/TypeCoercion.java` `coerceTypeBase`: `case StandardTypes.DATE -> switch (resultTypeBase) { case StandardTypes.TIMESTAMP -> Optional.of(createTimestampType(0)); ... }`, used by `canCoerce` / `compatibility` for implicit argument coercion.) An explicit `CAST(d AS timestamp)` is **harmless and equivalent** — write it if you prefer the clarity, but it is not required.
+
+```sql
+-- ❌ 'format_datetime / date_format REQUIRE CAST(date AS timestamp); a bare DATE errors' -- WRONG: Trino implicitly coerces DATE -> TIMESTAMP(0); format_datetime(date_col,'EEEE') / date_format(date_col,'%M') work without a CAST — DO NOT COPY
+```
 
 **Turn a DATE into a `'YYYY-MM'` month-label string — the cast-free shortcut.** When you just want a `'2026-05'` month bucket label from a DATE column, you do NOT need `format_datetime` / `date_format` at all. A `DATE` casts to text as ISO `'YYYY-MM-DD'`, so characters 1-7 are exactly `'YYYY-MM'`:
 
@@ -746,7 +750,8 @@ For ordinary date-to-string formatting, prefer `date_format` or `format_datetime
 SELECT substr(CAST(order_date AS varchar), 1, 7) AS month_label   -- '2026-05'
 FROM orders;
 
--- Equivalent via the datetime formatter (needs a timestamp input, so CAST the DATE up first):
+-- Equivalent via the datetime formatter (the CAST is OPTIONAL — format_datetime accepts a bare DATE
+-- directly via implicit DATE -> TIMESTAMP(0) coercion; format_datetime(order_date, 'yyyy-MM') also works):
 SELECT format_datetime(CAST(order_date AS timestamp), 'yyyy-MM') AS month_label  -- '2026-05'
 FROM orders;
 ```
@@ -767,11 +772,12 @@ FROM signups;
 
 > **GROUPING GRANULARITY — to group "BY MONTH" with a month-name label, GROUP BY the MONTH BUCKET, not the raw DATE (iter831).** The format expression above turns a single value into `'June 2025'`, but it does NOT change how many rows you get. If you `GROUP BY signup_date` (the raw `DATE`), you get **one row per distinct DAY** — every calendar date in June 2025 becomes its own row, all labeled `'June 2025'`. To get **ONE row per month**, group by the month-truncated value `date_trunc('month', signup_date)` (or by the ordinal `GROUP BY 1` referencing the label in the SELECT list).
 >
-> **Type behavior you must match (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):** `date_trunc('month', x)` **preserves its input type** — a `DATE` in returns a `DATE` out, a `TIMESTAMP` in returns a `TIMESTAMP` out. `format_datetime(...)` **requires a TIMESTAMP** input. So when `signup_date` is a `DATE`, `date_trunc('month', signup_date)` is a `DATE` and you MUST `CAST(... AS timestamp)` before `format_datetime`. When `signup_date` is already a `TIMESTAMP`, `date_trunc('month', signup_date)` is a `TIMESTAMP` and **no cast is needed**.
+> **Type behavior (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):** `date_trunc('month', x)` **preserves its input type** — a `DATE` in returns a `DATE` out, a `TIMESTAMP` in returns a `TIMESTAMP` out. `format_datetime(...)` is documented with a `timestamp` first argument but **accepts a bare `DATE` via Trino's implicit `DATE -> TIMESTAMP(0)` coercion — no CAST is required and it does NOT error**. So when `signup_date` is a `DATE`, `date_trunc('month', signup_date)` is a `DATE` and you may pass it straight to `format_datetime(..., 'MMMM yyyy')` with no CAST; the explicit `CAST(... AS timestamp)` shown below is **harmless and equivalent** (keep it for clarity if you like). When `signup_date` is already a `TIMESTAMP`, no cast is needed either.
 >
 > ```sql
 > -- Group BY MONTH with a 'June 2025' label (ONE row per month, not per day):
-> -- signup_date is a DATE here -> date_trunc('month', signup_date) is a DATE -> CAST to timestamp for format_datetime.
+> -- signup_date is a DATE here -> date_trunc('month', signup_date) is a DATE.
+> -- The CAST AS timestamp below is OPTIONAL (harmless) — format_datetime also accepts a bare DATE directly.
 > SELECT format_datetime(CAST(date_trunc('month', signup_date) AS timestamp), 'MMMM yyyy') AS month_label,
 >        COUNT(*) AS signups
 > FROM signups
