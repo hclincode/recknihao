@@ -1,6 +1,7 @@
 {
-  "iteration": 797,
+  "iteration": 798,
   "phase": "extended",
+  "notes_798": "iter798 durability-breadth sweep, no edits — 4 fresh adjacent topics (nth-highest / above-group-avg / json-array-explode / date-boundary-or-mixed-order)",
   "notes_797": "iter797 durability-breadth sweep, no edits — regexp_extract re-probe to bulletproof + alias-in-WHERE watch + 2 fresh adjacent topics",
   "notes_796": "iter796 findability FIX-A: surfaced fenced first-digit-run regexp_extract canonical at r23 §3.1A/3.2A + capture-group + regexp_extract_all + defanged broken regexp_replace form + false-no-function premise",
   "notes_795": "iter795 durability-breadth sweep, no edits — 2nd regexp-alternation re-probe to bulletproof + 3 fresh adjacent topics (map_agg-or-array_agg / pctile-rank / regexp_extract / COALESCE-SUM-0-or-bool_and)",

@@ -1,72 +1,63 @@
-# iter797 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
+# Judge Feedback — iter798 (DEFAULT NO-OP / durability-breadth sweep; teacher ZERO resource edits)
 
-**Teacher edits this iter:** ZERO (no resource changes). Expected-strong durability sweep.
-**Verification:** every dialect claim checked against trino.io/docs/467 (regexp / aggregate / select / window .html) via WebFetch, 2026-06-09. resources/ NOT treated as ground truth.
-**Production fit:** Trino 467 + Iceberg, on-prem. All four answers are pure SQL within stack constraints. No auth/authz scope.
+**Verdict: overall avg 4.31 — PASS** (threshold 3.5; overall average governs, no single-Q veto).
+All dialect claims verified against trino.io/docs/467 (window / select / json / datetime .html) via WebFetch on 2026-06-09.
 
 ---
 
-## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
+## Per-question scores
 
-### Q1 — EXTRACT NUMBER RE-PROBE (4-digit year from filename → integer) — 2nd regexp_extract datapoint
-Answer: `CAST(regexp_extract(filename, '[0-9]{4}') AS INTEGER) AS year_number`; explained first-match + `{4}` = exactly 4 digits + CAST. Cited r23 §3.2 (lines 2800–2834). LED with regexp_extract.
-- **Accuracy 5** — VERIFIED vs regexp.html: `regexp_extract(string, pattern) → varchar` "Returns the first substring matched". `'report_2026_final.pdf'` → first 4-digit run `'2026'` → `CAST AS INTEGER` = 2026. Correct.
-- **Completeness 5** — pattern, first-match semantics, and CAST all explained. Acceptably flagged that `[0-9]{4}` grabs the FIRST 4-digit run (fine for these filenames).
-- **Clarity 5** — clean, leads with the canonical, no muddled framing.
-- **Actionability 5** — drop-in.
-- **Q1 avg = 5.00**
+### Q1 — 2nd-highest DISTINCT salary (tied top = one tier) — avg **5.00 PASS**
+- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5**
+- Answer: `SELECT DISTINCT salary FROM (SELECT salary, DENSE_RANK() OVER (ORDER BY salary DESC) AS salary_rank FROM employees) WHERE salary_rank = 2`.
+- VERIFIED vs functions/window.html: DENSE_RANK "tie values do not produce gaps in the sequence" → assigns 1,1,2,… so `salary_rank=2` is the 2nd distinct tier; tied top correctly collapses to one tier. Responder correctly chose DENSE_RANK over RANK (RANK would skip after a tie) and noted the empty-result-if-no-2nd-tier edge. Matches the RANK/DENSE_RANK pin. Clean. Cites r23.
 
-### Q2 — FILTER ON COMPUTED VALUE / alias-in-WHERE WATCH
-Answer: "You CANNOT reference a SELECT alias in WHERE — universal SQL rule." Gave subquery form (repeat `discount_amount/order_total > 0.5` in outer WHERE) AND CTE form (`WITH discounts AS (... discount_ratio) SELECT * ... WHERE discount_ratio > 0.5`). Cited r23.
-- **Accuracy 5** — VERIFIED vs select.html: WHERE evaluated before SELECT → output aliases unresolvable in WHERE (valid in GROUP BY/HAVING/ORDER BY only). Rule correctly stated; both workarounds correct.
-- **Completeness 5** — covers the rule + two canonical wrappings (subquery & CTE); subquery form also implicitly shows the "repeat the bare expression" option.
-- **Clarity 5** — explains WHY (evaluation order), not just WHAT.
-- **Actionability 5** — engineer has two ready patterns.
-- **Q2 avg = 5.00**
+### Q2 — flag each sale above its OWN region's average — avg **5.00 PASS**
+- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5**
+- Answer: subquery computes `AVG(sale_amount) OVER (PARTITION BY region) AS region_avg`, outer query `CASE WHEN sale_amount > region_avg THEN true ELSE false END`.
+- VERIFIED vs functions/window.html + select.html: window AVG partitioned per region is per-region mean (not global); wrapping in a subquery is REQUIRED because a window result cannot be referenced by its alias in the same SELECT's CASE (and the WHERE/SELECT alias scoping rule). Comparison `sale_amount > region_avg` is the correct above-group-avg flag. Matches the above-group-avg / standing-deviation pattern. Clean. Cites r07.
 
-### Q3 — LATEST-PER-GROUP COMPANION (price at latest changed_at, not MAX(price))
-Answer: `ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY changed_at DESC)=1` (whole row) OR `max_by(price, changed_at) AS current_price` + `MAX(changed_at) GROUP BY product_id` (cheaper for specific columns). Cited r23 + r07.
-- **Accuracy 5** — VERIFIED vs aggregate.html: `max_by(x, y)` "Returns the value of x associated with the maximum value of y" → `max_by(price, changed_at)` = price at latest changed_at. ROW_NUMBER DESC =1 = latest whole row. Both correct.
-- **Completeness 5** — gives both the whole-row and the cheap-column approach with the right tradeoff guidance.
-- **Clarity 5** — distinguishes "latest row" from MAX(price) misconception explicitly.
-- **Actionability 5** — two drop-in patterns with a clear choice rule.
-- **Q3 avg = 5.00**
+### Q3 — explode a JSON-ARRAY-STRING (varchar `'["vip","beta","trial"]'`) to one row per tag — avg **2.25** (PRIMARY DEFECT)
+- Accuracy **2** · Completeness **2** · Clarity **3** · Actionability **2**
+- Answer used `CROSS JOIN UNNEST(tags) AS t(tag)` directly and reframed the column as a NATIVE array ("tags = ARRAY['vip','beta','trial']"). LEFT JOIN UNNEST … ON TRUE for empty/null noted.
+- **DEFECT — bare `UNNEST(tags)` on a varchar column is a TYPE ERROR.** VERIFIED vs sql/select.html: "UNNEST can be used to expand an ARRAY or MAP into a relation" — UNNEST requires an ARRAY (or MAP) argument. A varchar holding JSON text is NOT an array; `UNNEST(varchar)` fails to type-check ("cannot UNNEST varchar"). The responder skipped the mandatory parse step and mischaracterized the stated JSON-string column as a native array, so the answer does NOT solve the question as asked.
+- **CORRECT CANONICAL (state explicitly to teacher):**
+  ```sql
+  SELECT o.order_id, t.tag
+  FROM iceberg.analytics.orders o
+  CROSS JOIN UNNEST(CAST(json_parse(o.tags) AS ARRAY(VARCHAR))) AS t(tag);
+  ```
+  VERIFIED vs functions/json.html: `json_parse(varchar) -> json` deserializes the JSON text; casting a JSON array value to `ARRAY(VARCHAR)` is supported. Pipeline: varchar → `json_parse` → JSON → `CAST(... AS ARRAY(VARCHAR))` → ARRAY → `UNNEST`. (Use `LEFT JOIN UNNEST(...) ON TRUE` to keep rows whose array is empty/null, as the responder noted for the native case.)
+- **FINDABILITY MISS, not a content gap.** The parse half EXISTS in resources but is unreachable from explode/UNNEST keywords:
+  - `resources/09-lakehouse-schema-design.md:876` — `SELECT CAST(json_parse(tags_raw) AS ARRAY(VARCHAR)) AS tags` (the exact parse-to-array step) — BUT this section (r09 §"CAST(json_col AS … ARRAY(T))" LEADING CANONICAL, lines 849–900) is keyword-anchored to "parse JSON into ROW / JSON to struct / deserialize JSON to typed columns" and does NOT combine the result with UNNEST or anchor on "explode JSON array / one row per tag / flatten JSON array string".
+  - `resources/07-analytical-query-patterns.md:41` (§1a) — the explode/UNNEST landing the responder DID reach — covers ONLY a NATIVE `tags ARRAY(VARCHAR)` column (`UNNEST(u.tags)`, line 54); it has NO branch for a JSON-array-STRING (varchar) column and never mentions json_parse/CAST.
+  - GREP confirms NO occurrence of the combined `UNNEST(CAST(json_parse(...) AS ARRAY(...)))` form anywhere in resources/.
+  - Net: each half is present (explode in r07 §1a; json_parse→array in r09:876) but they are NEVER connected, and the explode landing assumes a native array. **Resource/findability gap, NOT a pure responder slip** — a Haiku responder keying on "explode JSON array column" lands at r07 §1a (native array) and has no signal to insert the parse step.
 
-### Q4 — CUMULATIVE RUNNING % (Pareto down revenue-desc ranking)
-Answer: `SUM(pct_of_total) OVER (ORDER BY revenue DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_pct`; inner `pct_of_total = SUM(amount)*100.0/SUM(SUM(amount)) OVER ()`. Cited r07.
-- **Accuracy 5** — VERIFIED vs window.html: aggregates usable as window fns via OVER; `SUM(SUM(amount)) OVER ()` = window-over-grouped-aggregate = grand total over the grouped result (standard valid Trino); explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` = standard running-total frame. `*100.0` forces double. Correct Pareto.
-- **Completeness 5** — both the per-row %-of-total and the cumulative running % shown.
-- **Clarity 5** — explicit frame removes ambiguity about default framing.
-- **Actionability 5** — complete two-layer query, drop-in.
-- **Q4 avg = 5.00**
+### Q4 — dynamic first-day-of-current-month MTD boundary — avg **5.00 PASS**
+- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5**
+- Answer: `WHERE event_date >= date_trunc('month', current_date)`; auto-rolls each month; `CAST(date_trunc('month', current_date) AS DATE)` for a DATE-typed boundary.
+- VERIFIED vs functions/datetime.html: `date_trunc('month', current_date)` returns the first day of the current month; `current_date` is the start-of-query date (no parens). `event_date >= that` is month-to-date and auto-rolls on the 1st. CAST AS DATE valid. Matches the standing date_trunc pin. Clean. Cites r07.
 
 ---
 
 ## Overall
 
-| Q | Acc | Compl | Clar | Action | avg |
-|---|----|------|------|--------|-----|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+`(5.00 + 5.00 + 2.25 + 5.00) / 4 = 4.31 → PASS`
 
-**Overall avg = 5.00 → PASS** (threshold 3.5).
+Three of four probes (nth-highest-distinct via DENSE_RANK, above-group-avg via window AVG, MTD via date_trunc) are bulletproof and reconfirm standing pins. The lone defect is Q3.
 
----
+## Teacher feedback / iter799 designation
 
-## Standing-item verdicts (teacher directives)
+**iter799 = FIX-A (additive findability).** Findability/content-connection gap, not a pure responder slip — surface a JSON-array-STRING → rows canonical reachable from explode/UNNEST keywords:
 
-**(a) regexp_extract — BULLETPROOFED.** Q1 is the 2nd consecutive clean post-fix datapoint (after iter796). Responder LED with `CAST(regexp_extract(s, '<pattern>') AS INTEGER)`, no false "no digit-extraction function" claim, no broken regexp_replace fallback. The iter795 defect is fully closed and durable across two phrasings. Watch-item RETIRED.
+1. Add a branch in **r07 §1a** (the explode/UNNEST landing, ~lines 41–66) that DISAMBIGUATES native-array vs JSON-array-string columns. For a varchar column holding `'["vip","beta","trial"]'`, the canonical is:
+   ```sql
+   CROSS JOIN UNNEST(CAST(json_parse(tags) AS ARRAY(VARCHAR))) AS t(tag)
+   ```
+   Lead with: "If `tags` is a native `ARRAY(VARCHAR)` column, `UNNEST(tags)` directly. If `tags` is a VARCHAR holding a JSON array string, you MUST first `CAST(json_parse(tags) AS ARRAY(VARCHAR))` — `UNNEST` requires an ARRAY/MAP and **`UNNEST(<varchar>)` is a type error** (verified sql/select.html)."
+2. Keyword-anchor it: "explode JSON array string, UNNEST JSON array column, one row per tag from JSON string, flatten JSON array varchar, json_parse then UNNEST, tags stored as JSON string to rows, CAST json_parse AS ARRAY then UNNEST."
+3. DEFANG the trap inline (un-copyable WRONG mark): `UNNEST(tags)` when `tags` is a varchar JSON string → **WRONG, type error "cannot UNNEST varchar"**; and do NOT reinterpret a JSON-string column as a native `ARRAY[...]` literal.
+4. Cross-ref to r09:876 (`CAST(json_parse(tags_raw) AS ARRAY(VARCHAR))`). Apply Reconcile-Don't-Append: keep r07 §1a's native-array form as-is, add the JSON-string branch so the responder picks the right one.
 
-**(b) alias-in-WHERE watch — CLOSED, slip did NOT recur.** iter796 carried a minor example-only slip (`WHERE order_num > 100` referencing a SELECT alias). In iter797 Q2 — directly probing filter-on-computed-value — the responder did the OPPOSITE of slipping: it correctly TAUGHT the rule ("cannot reference a SELECT alias in WHERE; WHERE runs before SELECT") and supplied correct subquery + CTE workarounds. Confirmed one-off; NO iter798 FIX-A. Watch-item CLOSED.
-
-**(c) Other standing pins all clean:** max_by-latest-per-group (Q3), running-cumulative `SUM() OVER (... ROWS UNBOUNDED PRECEDING)` + pct-of-total `SUM(SUM()) OVER ()` (Q4) — all verified, no regression.
-
----
-
-## iter798 designation: DEFAULT NO-OP / durability-breadth (expected)
-
-No open defect, no new slip. Two watch-items closed this iteration (regexp_extract bulletproofed, alias-in-WHERE confirmed one-off). Recommend a NO-OP sweep of fresh adjacent topics. Suggested probes: `array_agg(DISTINCT ...)` / `from_unixtime` epoch→timestamp / `multimap_agg` vs `map_agg` / NTILE bucketing / `arbitrary()`/`any_value`. Optionally re-probe Q4 Pareto with different phrasing to bank a 2nd cumulative-% datapoint.
-
-**PRESERVE (churn risk — all verified clean):** r23 §3.2 regexp_extract canonical, r23 alias-in-WHERE/subquery-CTE content, r23/r07 max_by + ROW_NUMBER latest-per-group, r07 running-total/pct-of-total window cards. No edits warranted.
+PRESERVE (verified clean this iter, churn risk): r23 DENSE_RANK nth-distinct card, r07 window-AVG above-group-avg card, r07 date_trunc MTD-boundary card.
