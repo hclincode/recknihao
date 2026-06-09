@@ -1169,18 +1169,38 @@ GROUP BY order_id;
 
 `any_late` is `TRUE` for an order if **at least one** of its shipments has `is_late = TRUE`; otherwise `FALSE`. `all_late` is `TRUE` only if **every** shipment has `is_late = TRUE`; otherwise `FALSE`. Predicate form also works: `bool_or(shipped_at > due_at)`, `bool_and(status = 'delivered')` — any boolean expression, not just a stored boolean column.
 
-**NULL semantics — `bool_and` / `bool_or` IGNORE NULL inputs (this is the standard aggregate NULL-skip).** Keyword anchors: *bool_and with nulls, does bool_and ignore null, every() null handling, all true ignoring nulls, treat null as false in bool_and/bool_or, all-null group returns null, all items fulfilled.* Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) on 2026-06-09 — the page's general rule: *"Except for `count()`, `count_if()`, `max_by()`, `min_by()` and `approx_distinct()`, all of these aggregate functions ignore null values and return null for no input rows or when all values are null."* `bool_and` / `bool_or` / `every()` (an alias for `bool_and`) are NOT in that exception list, so they ignore NULLs.
+**NULL semantics — `bool_and` / `bool_or` IGNORE NULL inputs, and an ALL-NULL or EMPTY group returns `NULL` (NOT `FALSE`).** Keyword anchors: *bool_and with nulls, does bool_and ignore null, every() null handling, all true ignoring nulls, treat null as false in bool_and/bool_or, did any row match all null, bool_or all null returns null, any-true with all-null group, force false not null bool_or, COALESCE(bool_or(...), false), empty group boolean aggregate, all-null group returns null, all items fulfilled.* Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) on 2026-06-09 — the page's general rule: *"Except for `count()`, `count_if()`, `max_by()`, `min_by()` and `approx_distinct()`, all of these aggregate functions ignore null values and return null for no input rows or when all values are null."* `bool_and` / `bool_or` / `every()` (an alias for `bool_and`) are NOT in that exception list, so they ignore NULLs.
+
+**READ THIS FIRST — the all-NULL / empty group fact (the one people get wrong):**
 
 ```text
-bool_and(pred) / bool_or(pred) IGNORE NULL inputs (standard aggregate NULL-skip).
-bool_and over [TRUE, NULL] -> TRUE   (the NULL is SKIPPED, NOT treated as FALSE)
-bool_or  over [FALSE, NULL] -> FALSE (the NULL is SKIPPED, NOT treated as TRUE)
-a group of ALL NULLs (or an empty group) -> NULL   (NOT FALSE)
-To treat a NULL flag as not-satisfied (e.g. a NULL is_fulfilled should mean
-"not fulfilled"), wrap it: bool_and(COALESCE(is_fulfilled, false)).
+A BARE bool_or(pred) / bool_and(pred) over a group whose predicate is NULL for
+EVERY row (or an EMPTY group) returns NULL — NOT FALSE and NOT TRUE.
+Why: bool_or / bool_and IGNORE NULL inputs, so if NO row contributes a non-null
+TRUE/FALSE, there is NOTHING to reduce -> the result is NULL.
+Example: bool_or(severity = 'critical') over a group where every severity IS NULL
+         -> NULL  (severity = 'critical' is NULL when severity is NULL, so every
+                   input is NULL, all skipped, nothing left -> NULL).
 ```
 
-**Treat-NULL-as-false canonical (the "are ALL items fulfilled?" shape where a NULL flag must count as not-fulfilled):**
+**GUARANTEED-`FALSE` canonical — "did ANY row match?" where an all-NULL / empty group MUST be `FALSE` (not `NULL`).** This is the form you want for a `has_X` flag that must never be NULL:
+
+```sql
+-- "did ANY row match" -> returns FALSE (not NULL) even when EVERY row is null OR the group is empty.
+-- Form 1 (PREFERRED) — wrap the AGGREGATE so an all-NULL / empty group collapses to false:
+SELECT incident_group,
+       COALESCE(bool_or(severity = 'critical'), false) AS has_critical   -- all-NULL / empty group -> false
+FROM incidents
+GROUP BY incident_group;
+
+-- Form 2 (equivalent) — coalesce the INPUT so null rows compare FALSE (never NULL):
+SELECT incident_group,
+       bool_or(COALESCE(severity, '') = 'critical') AS has_critical      -- null severity -> '' <> 'critical' -> FALSE
+FROM incidents
+GROUP BY incident_group;
+```
+
+**Treat-NULL-as-false ALL-TRUE canonical (iter825 — the "are ALL items fulfilled?" shape where a NULL flag must count as not-fulfilled):**
 
 ```sql
 -- Trino 467 — flag an order as all-items-fulfilled. A NULL is_fulfilled means "not fulfilled".
@@ -1191,9 +1211,21 @@ FROM order_items
 GROUP BY order_id;
 ```
 
-Use the `COALESCE(flag, false)` form whenever an unknown/missing flag must be treated as a failure. Use the raw `bool_and(is_fulfilled)` form only when you genuinely want "every value we DO have is true, ignoring the unknowns" (and you accept an all-NULL group returning `NULL`, not `FALSE`).
+The non-guaranteed (raw) skip behavior for reference:
 
 ```text
+bool_and(pred) / bool_or(pred) IGNORE NULL inputs (standard aggregate NULL-skip).
+bool_and over [TRUE, NULL] -> TRUE   (the NULL is SKIPPED, NOT treated as FALSE)
+bool_or  over [FALSE, NULL] -> FALSE (the NULL is SKIPPED, NOT treated as TRUE)
+bool_or  over [TRUE, NULL]  -> TRUE  (one non-null TRUE is enough)
+a group of ALL NULLs (or an empty group) -> NULL   (NOT FALSE) -- wrap COALESCE(bool_or(pred), false) to force false
+```
+
+Use a `COALESCE(...)` wrap whenever an unknown/missing flag or an all-NULL/empty group must be treated as `FALSE`. Use the raw `bool_or(pred)` / `bool_and(pred)` form only when you genuinely want "ignoring the unknowns" and you accept an all-NULL group returning `NULL`, not `FALSE`.
+
+```text
+❌ bool_or(pred) returns FALSE when every row's pred is NULL  -- WRONG: an all-NULL / empty group -> NULL (bool_or ignores NULLs; with no non-null inputs the result is NULL). Wrap COALESCE(bool_or(pred), false) to force false — DO NOT COPY
+❌ "bool_or skips NULLs so all-NULL -> FALSE"  -- the skip is right, but the result of skipping ALL inputs is NULL, not FALSE — DO NOT COPY
 ❌ bool_and(flag) returns FALSE if any value is NULL  -- WRONG: bool_and IGNORES NULLs (NULL is skipped, not FALSE); an all-NULL group -> NULL. Wrap bool_and(COALESCE(flag, false)) to make NULL count as false — DO NOT COPY
 ```
 

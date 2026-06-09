@@ -1,63 +1,75 @@
-# Judge Feedback — iter826
+# Judge Feedback — iter827 (ESCALATED 2nd-touch FIX-A verification)
 
-RE-PROBE of bool_or/bool_and NULL semantics (2nd-angle bulletproof check after iter825 FIX-A). All dialect claims VERIFIED against trino.io/docs/467 (aggregate.html, datetime.html). PIN Trino 467.
+**Overall: 4.78 — STRONG PASS**
+
+All dialect claims docs-verified vs trino.io/docs/467 (aggregate.html, string.html, datetime.html, math.html) + MEMORY CAST-rounds-half-up reference, WebSearch 2026-06-09. PIN Trino 467.
+
+---
 
 ## Per-question scores
 
-### Q1 — bool_or, all-NULL group must return FALSE not NULL  [DEFECT]
-- **Accuracy: 2** — The PRIMARY recommendation `bool_or(severity='critical')` plus the explicit claim *"If all severities are NULL, bool_or() returns FALSE (not NULL)"* is WRONG. Verified vs trino.io/docs/467/functions/aggregate.html: the general rule states "Except for count(), count_if(), max_by(), min_by() and approx_distinct(), all of these aggregate functions ignore null values and return null for no input rows or when all values are null." bool_or/bool_and are NOT in that exception list. `severity='critical'` yields NULL when severity IS NULL, so an all-NULL group feeds `bool_or` over [NULL, NULL, ...] = **NULL, not FALSE**. The primary form therefore FAILS the engineer's explicit all-NULL edge case. The responder DID offer a correct secondary form `bool_or(COALESCE(severity,'unknown')='critical')` (forces NULL row to compare FALSE, so bool_or over all-FALSE returns FALSE) — but it is buried as "for extra safety" while the headline claim mis-answers the precise requirement that was asked.
-- **Completeness: 3** — Covers TRUE/FALSE/NULL-per-row behavior and offers the COALESCE-input form, but does not state the correct all-NULL/empty-group=NULL rule, nor offer the wrap form COALESCE(bool_or(pred), false).
-- **Clarity: 4** — Readable, concrete, explains NULL=NULL comparison.
-- **Actionability: 3** — An engineer who copies the headline `bool_or(severity='critical')` ships a query that returns NULL on all-NULL groups — the exact bug they asked to avoid. Only by following the "extra safety" aside do they get correct behavior.
-- **Q1 avg: (2+3+4+3)/4 = 3.00**
+### Q1 — per-customer "did ANY ticket = high-priority?"; all-NULL-priority group MUST be FALSE not NULL — **5.00 CLEAN — FIX LANDED**
+| Dimension | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
 
-### Q2 — sum positives and negatives separately, one pass  [CLEAN]
-- **Accuracy: 5** — `SUM(CASE WHEN response_time_ms>0 THEN response_time_ms ELSE 0 END)` / `<0` correct. `SUM(...) FILTER (WHERE ...)` verified as valid Trino 467 single-pass aggregate filter (aggregate.html: "supported for all aggregate functions", evaluated per row before aggregation). count_if note correct.
-- **Completeness: 5** — Both one-pass forms + count_if for counts; notes identical plans.
-- **Clarity: 5** — Clear, single scan emphasized.
-- **Actionability: 5** — Copy-paste ready.
-- **Q2 avg: 5.00**
+**THE iter826 DEFECT IS FIXED.** Responder now:
+1. LEADS with the guaranteed-false canonical `COALESCE(bool_or(priority = 'high'), false) AS any_high_priority ... GROUP BY customer_id` — the copy-attractive headline form directly satisfies the all-NULL→FALSE requirement.
+2. CORRECTLY states "when every row has NULL priority bool_or has no non-null values so it returns NULL" and "bare bool_or(priority='high') without COALESCE still returns NULL for all-NULL groups — wrap it."
 
-### Q3 — bucket events by the hour  [CLEAN]
-- **Accuracy: 5** — `date_trunc('hour', last_updated_at)` verified to floor to hour start (2:47:59 -> 2:00:00), returns same type, session-tz. The GROUP-BY-no-alias rule (repeat the expr or GROUP BY 1; Trino rejects SELECT alias in GROUP BY, GH#16533) is correct — good propagation of the iter824 fix.
-- **Completeness: 5** — Floor semantics, GROUP BY form, ORDER BY, result type/tz all covered.
-- **Clarity: 5** — Worked example clear.
-- **Actionability: 5** — Runnable, avoids the alias trap.
-- **Q3 avg: 5.00**
+This is the EXACT reversal of the iter826 headline "bool_or returns FALSE not NULL" defect. Verified aggregate.html: bool_or/bool_and NOT in the count/count_if/max_by/min_by/approx_distinct exception list → ignore NULLs, return NULL for all-NULL/empty group; COALESCE(...,false) forces false. No regression to the bare form as a headline answer.
 
-### Q4 — treat NULL discount as 0 in arithmetic  [CLEAN]
-- **Accuracy: 5** — `price * (1 - COALESCE(discount_pct, 0)/100.0)` correct. Verified: NULL propagates through arithmetic in Trino 467; COALESCE(discount_pct,0) forces 0 so factor = (1-0) = no discount.
-- **Completeness: 5** — Explains propagation + neutral-element idiom.
-- **Clarity: 5** — Clear.
-- **Actionability: 5** — Copy-paste ready.
-- **Q4 avg: 5.00**
+### Q2 — lowercase a category column — **4.875 CLEAN**
+| Dimension | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 4.5 |
+| Actionability | 5 |
 
-## Overall
+`lower(category_name)` verified (string.html: "Converts string to lowercase"). Correctly REPEATS the expression in GROUP BY (`GROUP BY lower(category_name)`) — NOT a SELECT alias — good propagation of the iter824 GROUP-BY-alias fix. Tiny clarity ding only: `SELECT DISTINCT ... GROUP BY lower(...)` stacks DISTINCT atop an identical-expression GROUP BY (one of the two would suffice); both valid Trino, not an error.
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|-----|------|------|-----|-----|
-| Q1 | 2 | 3 | 4 | 3 | 3.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+### Q3 — current date / timestamp in a dbt model — **5.00 CLEAN**
+| Dimension | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
 
-**Overall avg = (3.00 + 5.00 + 5.00 + 5.00) / 4 = 4.50 — PASS** (overall average governs; no per-Q veto).
+Verified datetime.html: `current_timestamp` (no parens) → timestamp(3) with time zone; `current_date` (no parens) → date; `now()` is an alias for current_timestamp (with parens). The no-paren caveat ("not current_timestamp()") is exactly the right gotcha to flag for a SQL-from-other-dialects engineer. SQL-standard no-paren functions confirmed verbatim.
 
-## Q1 VERDICT — bool_or/bool_and-NULL is NOT bulletproofed; needs another FIX-A
+### Q4 — round DOWN to whole number (tier) — **5.00 CLEAN**
+| Dimension | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
 
-The all-NULL -> FALSE claim IS A REAL DEFECT. Verified vs trino.io/docs/467: bare `bool_or(pred)` over an all-NULL/empty group returns **NULL, not FALSE**. The responder's headline recommendation directly fails the engineer's explicit "all-NULL must be FALSE" requirement, even though it accidentally embedded a correct alternative as an aside. This is the same class of slip iter824/825 targeted (NULL result of a boolean aggregate), now surfacing from the bool_or angle.
+`floor(quality_score)` verified math.html (largest integer ≤ x, toward -inf): 7.83→7, 4.99→4, 9.99→9 correct. Correctly leverages the known CAST-rounds-half-up dialect fact: `CAST(47.89 AS integer)=48`, so `CAST(7.83 AS INTEGER)=8` rounds UP not down → WRONG for round-down. truncate() chops toward zero contrast correctly drawn (differs from floor for negatives). Exactly the right function choice with the right disambiguation.
 
-Note: the iter825 FIX-A r23 §3.1 card content is CORRECT (it states all-NULL/empty -> NULL not FALSE and offers the COALESCE wrap). The defect is FINDABILITY/landing: the Q1 "did any incident was critical" framing landed the responder on the bool_or summary line ("Returns TRUE if any input value is TRUE, otherwise FALSE") and it wrongly extrapolated that an all-FALSE-OR-NULL group returns FALSE, instead of reaching the NULL-semantics block. The fix must put the all-NULL=NULL correction + the two guaranteed-FALSE forms directly where the "any X / did any incident" / bool_or landing routes.
+---
 
-## iter827 DIRECTIVE — FIX-A (bool_or/bool_and all-NULL semantics, 2nd touch)
+## Verdict
 
-At the bool_and/bool_or card (r23 §3.1) AND the r07 boolean-flag-pivot card landing:
-1. Sharpen, in a FENCED block keyword-anchored to "did any X", "any critical", "bool_or all null", "all-null group returns null", that a BARE `bool_or(pred)` / `bool_and(pred)` over an ALL-NULL or EMPTY group returns **NULL — NOT FALSE — NOT TRUE** (cite the aggregate.html exception-list rule: bool_or/bool_and are NOT in {count, count_if, max_by, min_by, approx_distinct}, so they ignore NULLs and return NULL when all inputs are null).
-2. Make the COPY-ATTRACTIVE canonical the guaranteed-FALSE forms — provide BOTH:
-   - wrap the aggregate result: `COALESCE(bool_or(severity='critical'), false) AS has_critical`
-   - coalesce the input to a non-null sentinel: `bool_or(COALESCE(severity,'') = 'critical') AS has_critical`
-   Explain each returns FALSE (not NULL) on an all-NULL group.
-3. INLINE-DEFANG, on its own un-copyable line, the wrong claim: "all NULL -> bool_or returns FALSE" (bare bool_or over all-NULL returns NULL). Do NOT leave a copyable bare `bool_or(severity='critical')` as the headline answer to a "must be FALSE not NULL" framing.
-4. Keep all pipe-bearing/check content in FENCED blocks (pipe-escape trap). PIN Trino 467. NO federation edits (r22 §13.x ZERO edits; federation row stays 4.49944/310). Preserve iter824 GROUP-BY-alias + split_part fixes and iter825 reconciliation text — sharpen/relocate the landing, do not churn the function-choice canonical.
+**Overall average 4.78 — STRONG PASS** (Q1 5.00 / Q2 4.875 / Q3 5.00 / Q4 5.00).
 
-(If a future 2nd-angle probe lands cleanly on the NULL=NULL block and states it correctly in its PRIMARY recommendation, downgrade to a findability-anchor-only touch. Until then the bool_or/bool_and-NULL topic is NOT bulletproofed.)
+### Boolean-aggregate-NULL: BULLETPROOFED
+The iter827 2nd-touch FIX-A **LANDED**. Q1 is now the **2nd post-fix clean datapoint** (after iter825) AND the **1st clean datapoint specifically on the all-NULL→NULL bare-bool_or angle** that defected at iter826. The class has now been answered correctly from multiple angles:
+- iter825: bool_and(COALESCE(flag,false)) all-approved — CLEAN
+- iter827: COALESCE(bool_or(pred),false) any-high + correct bare-bool_or all-NULL→NULL — CLEAN
+
+The escalation is resolved. **boolean-aggregate-NULL is declared BULLETPROOFED.**
+
+### iter828 directive: DEFAULT NO-OP / durability sweep
+No defects surfaced this iteration. iter828 = **DEFAULT NO-OP durability sweep** (teacher ZERO resource edits). Suggested probes:
+- bool_or/bool_and NULL 3rd durability angle (e.g. `every()` alias framing, or empty-group-from-WHERE-filter → NULL) to confirm the fix holds without churn.
+- 3 fresh adjacent topics (e.g. greatest()/least() NULL handling, coalesce-chain, nullif-to-avoid-div-by-zero).
+
+PRESERVE all landed fixes: iter827 r23 §3.1 READ-THIS-FIRST all-NULL→NULL block + COALESCE(bool_or(...),false) dominant canonical + r07 boolean-flag-pivot card; iter825 bool_and(COALESCE) canonical; iter824 split_part GROUP-BY-1 + §8 GROUP-BY-alias asymmetry; iter823 repeat-char card; all iter534-826 pins. **NO federation edits** (federation row stays 4.49944/310, margin thin).
+
+No defect → iter828 is NOT a FIX-A.

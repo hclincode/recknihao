@@ -1261,16 +1261,31 @@ The SUM form counts *event rows*, not users. If a user fires 5 events in the 7-d
 > GROUP BY order_id;
 > ```
 >
-> **NULL inputs — `bool_or` / `bool_and` IGNORE NULLs (not treated as FALSE).** Keyword anchors: *bool_and with nulls, does bool_and ignore null, every() null handling, all true ignoring nulls, treat null as false, all-null group returns null, all items fulfilled.* These follow the standard aggregate NULL-skip rule:
+> **NULL inputs — a BARE `bool_or` / `bool_and` over an ALL-NULL or EMPTY group returns `NULL` (NOT `FALSE`).** Keyword anchors: *bool_and with nulls, does bool_and ignore null, every() null handling, all true ignoring nulls, treat null as false, did any row match all null, bool_or all null returns null, any-true with all-null group, force false not null bool_or, COALESCE(bool_or(...), false), empty group boolean aggregate, all-null group returns null, all items fulfilled.*
 >
 > ```text
+> A BARE bool_or(pred) / bool_and(pred) over a group whose predicate is NULL for
+> EVERY row (or an EMPTY group) returns NULL — NOT FALSE and NOT TRUE.
+> Why: bool_or/bool_and IGNORE NULL inputs; with NO non-null TRUE/FALSE to reduce -> NULL.
+> Example: bool_or(severity = 'critical') over an all-NULL-severity group -> NULL.
 > bool_and over [TRUE, NULL] -> TRUE   (NULL SKIPPED, NOT FALSE)
 > bool_or  over [FALSE, NULL] -> FALSE (NULL SKIPPED, NOT TRUE)
-> an ALL-NULL group (or empty group) -> NULL   (NOT FALSE)
-> To make a NULL flag count as not-satisfied: bool_and(COALESCE(is_fulfilled, false))
+> ```
+>
+> **GUARANTEED-`FALSE` canonical — "did ANY row match?" that must be `false` (never `NULL`) for an all-NULL / empty group:**
+>
+> ```sql
+> -- wrap the AGGREGATE (preferred): all-NULL / empty group -> false
+> COALESCE(bool_or(severity = 'critical'), false) AS has_critical
+> -- equivalent: coalesce the INPUT so null rows compare FALSE (never NULL)
+> bool_or(COALESCE(severity, '') = 'critical')     AS has_critical
+> -- all-true with null-counted-as-false (iter825):
+> bool_and(COALESCE(is_fulfilled, false))          AS all_fulfilled
 > ```
 >
 > ```text
+> ❌ bool_or(pred) returns FALSE when every row's pred is NULL  -- WRONG: an all-NULL / empty group -> NULL (bool_or ignores NULLs; no non-null inputs -> NULL). Wrap COALESCE(bool_or(pred), false) to force false — DO NOT COPY
+> ❌ "bool_or skips NULLs so all-NULL -> FALSE"  -- the skip is right, but skipping ALL inputs leaves NULL, not FALSE — DO NOT COPY
 > ❌ bool_and(flag) returns FALSE if any value is NULL  -- WRONG: bool_and IGNORES NULLs (NULL skipped, not FALSE); all-NULL group -> NULL. Wrap bool_and(COALESCE(flag, false)) to make NULL count as false — DO NOT COPY
 > ```
 >
