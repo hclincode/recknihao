@@ -1,58 +1,65 @@
-# Judge Feedback — iter822 (DEFAULT NO-OP durability sweep)
+# iter823 Judge Feedback — FIX-A re-probe (repeat-a-character) + 3 fresh probes
 
-Phase: extended. Teacher made zero resource edits. All dialect claims verified against trino.io/docs/467 (string, array, regexp function pages).
+**Overall: 4.44 / 5 — PASS** (overall average governs; no per-Q veto)
 
-## Per-question scores
+All dialect claims verified against trino.io/docs/467 (PINNED 467; array.html, string.html, datetime.html, sql/select.html, GH#16533).
 
-### Q1 — group-concat into one comma-separated string
-- Accuracy 5: `listagg(tag_name, ', ') WITHIN GROUP (ORDER BY tag_name) ... GROUP BY customer_id` is valid Trino 467. listagg requires `WITHIN GROUP (ORDER BY)` and a VARCHAR expression (CAST numeric IDs first) — both stated correctly. `array_join(array_agg(x ORDER BY x), ', ')` equivalent is correct.
-- Completeness 5: covered ordering control, the CAST-to-varchar guardrail, and the array_join alternative.
-- Clarity 5: worked output `'enterprise, high-value, trial'`, no assumed knowledge.
-- Actionability 5: copy-ready, correct citations (r07:557-595, r27:4046-4087).
-- **Avg 5.00**
+## Per-Q scores
 
-### Q2 — position of a substring
-- Accuracy 5: `strpos(s, sub)` is 1-based and returns 0 if not found (verified verbatim). `position(sub IN s)` equivalent — verified. 3-arg `strpos(s, sub, -1)` negative-instance for last occurrence — verified ("When instance is a negative number the search will start from the end").
-- Completeness 5: first-occurrence, not-found semantics, equivalent form, and last-occurrence bonus.
-- Clarity 5: worked example `strpos('https://example.com/api/users','/api')->19`.
-- Actionability 5: correct, copy-ready, cited (r27:979-1056, r23:413-454).
-- **Avg 5.00**
+| Q | Topic | Acc | Compl | Clar | Action | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | repeat a char N times into a string (40-dash divider) | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 | per-day running/cumulative total (window over aggregate) | 5 | 5 | 5 | 5 | **5.00** |
+| Q3 | extract email domain after `@` + group by domain | 2 | 3 | 4 | 2 | **2.75** |
+| Q4 | add 90 days to a timestamp/date | 5 | 5 | 5 | 5 | **5.00** |
 
-### Q3 — repeat a character N times to build an ASCII bar — FLOUNDERED
-- Accuracy 2: The FINAL answer `rpad(lpad('', 7, '|'), 10, ' ')` is CORRECT — traced: `lpad('', 7, '|')` -> `'|||||||'`, then `rpad('|||||||', 10, ' ')` -> `'|||||||   '` (7 pipes + 3 spaces, width 10). BUT the path there is riddled with errors: (1) FALSE claim "Trino does not have a native repeat() function in the string library" — `repeat(element, count)` DOES exist in Trino 467; it returns an ARRAY, not a string. (2) Wrote a BROKEN `concat(repeat('|',7), repeat(' ',3))` form — concat of two arrays does not produce the string `'|||||||   '`. (3) Wrote `lpad(repeat('|', 7), 10, ' ')` — lpad's first arg must be varchar, repeat returns an array -> type error. The clean canonical `array_join(repeat('|', 7), '')` -> `'|||||||'` was never reached.
-- Completeness 3: it does answer the literal question (a fixed-width bar form that works), but never delivers the clean repeat-into-string idiom and never corrects its own false repeat() claim.
-- Clarity 1: self-contradictory, visible thrashing ("wait, that's wrong", "I don't have documentation of a repeat() function... Let me search more carefully"). An engineer reading this cannot tell which of the 4 forms shown is the right one without tracing each. Leaves the FALSE "no native repeat()" assertion standing.
-- Actionability 2: only the very last line is usable; the rest is noise and one actively-wrong fact a reader could copy.
-- **Avg 2.00**
+**Overall avg = (5.00 + 5.00 + 2.75 + 5.00) / 4 = 4.44 → PASS**
 
-### Q4 — check string is all digits
-- Accuracy 5: `regexp_like(quantity, '^[0-9]+$')` is valid Trino 467 (Java/re2j regex; anchors `^`/`$` and char class `[0-9]+` all supported — verified). Float pattern `'^[0-9]+(\.[0-9]+)?$'` correct. The note that `LIKE '[0-9][0-9][0-9]'` does NOT work (Trino LIKE has no char classes; treats `[0-9]` as literal) is correct.
-- Completeness 5: integer-only + float variant + rejected-input list + try_cast caveat.
-- Clarity 5: explicit rejected examples (`'123abc'`, `'12.5'`, `' 123'`, `''`).
-- Actionability 5: copy-ready, cited (r23:2743-2897, r27:1072-1220).
-- **Avg 5.00**
+## Q1 — repeat-char fix LANDED. CLOSE the topic.
 
-## Overall
+The iter822 Q3 2.00 defect (responder floundered, falsely claimed "Trino has no repeat()", showed broken `concat(repeat(...),repeat(...))`) is FIXED. The responder NOW:
+- LEADS with `array_join(repeat('-', 40), '')` -> 40 dashes (the canonical at r23:606-631).
+- Correctly states **repeat() returns an ARRAY, not a string** — the load-bearing rule.
+- Gives the dynamic-width form `array_join(repeat('-', header_length), '')`.
+- Explains WHY skipping array_join fails (prints as an array).
 
-(5.00 + 5.00 + 2.00 + 5.00) / 4 = **4.25 — PASS** (overall average governs; no per-Q veto).
+Verified per docs: `repeat(element, count) -> array(E)` ("Repeat element for count times"); `array_join(x, delimiter) -> varchar` ("Concatenates the elements of the given array using the delimiter"). `array_join(repeat('-',40),'')` = 40 dashes. CLEAN. **repeat-char-to-string is CLOSED.** The r23:606-631 sub-canonical and its keyword anchors (divider line / ASCII bar / progress bar / star rating / row of dashes / repeat()) routed the responder correctly.
 
-## Q3 DIAGNOSIS — findable-but-missing GAP (not a slip)
+## Q2 — clean. Window-over-aggregate confirmed valid.
 
-Grepped all of resources/ for `repeat`, `array_join(repeat`, `ASCII bar`, `progress bar`, `rpad(lpad`, `lpad('')`:
-- NO match for any repeat-into-a-string canonical, no `array_join(repeat(...), '')`, no ASCII/progress-bar card anywhere.
-- The only relevant card is the fixed-width pad card at **resources/23-sql-best-practices-olap.md:586-604** (`rpad`/`lpad` to fixed width). The responder correctly cited it (r23:586-604) and salvaged a correct final answer from it — but that card is about padding an EXISTING string to width; it has NO repeat/build-a-bar idiom and never mentions that `repeat()` returns an array.
-- `array_join` appears extensively in r07 (435-589) but ONLY in the `array_join(array_agg(...))` group-rollup context, never as `array_join(repeat(char, n), '')`.
+`SUM(COUNT(*)) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` with `GROUP BY event_date` is valid Trino 467: window functions are logically evaluated AFTER GROUP BY/aggregation, so `SUM(COUNT(*))` (window over an aggregate) compiles and returns one row per group with a running total. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW gives the cumulative frame. Correct "window functions return every input row unlike GROUP BY" note. Cited r07:2412-2437 (which shows the SUM(amount) OVER variant; the SUM(COUNT(*)) OVER nesting the responder produced is an equally-valid extension). No defect.
 
-Conclusion: the responder floundered for LACK OF A CARD, not because it mangled present content. This is a **findable-but-missing GAP**. The false "no native repeat()" claim is exactly the symptom predicted by the foreign-function-priors pattern (cf. starts_with/listagg/trim/bitwise memory entries): with no card asserting repeat() exists, the responder guessed it doesn't.
+## Q4 — clean. Both forms verified.
 
-## iter823 DIRECTIVE — FIX-A (close the Q3 gap)
+`date_add('day', 90, session_start)` and `session_start + INTERVAL '90' DAY` both verified. `date_add(unit, value, timestamp)` returns the SAME TYPE as input (TIMESTAMP->TIMESTAMP, DATE->DATE) — confirmed at datetime.html. Correct, important note: **INTERVAL requires a string LITERAL; use date_add for a column/variable offset** (matches r07:2350-2391 leading canonical). Mar 1 + 90 days = May 30 traced correct (Mar31=+30, Apr30=+60, May30=+90). No defect.
 
-Add a "repeat a character/string N times" canonical, placed where build-a-bar keywords route (adjacent to the r23:586 fixed-width pad card, since that is where the responder landed):
-- LEAD canonical: `array_join(repeat('|', 7), '')` -> `'|||||||'`. Inline-state that **`repeat(element, count)` returns an ARRAY (`array(E)`), NOT a string** — so you must `array_join(..., '')` to flatten it; `concat(repeat(...))` / `lpad(repeat(...), ...)` are WRONG (type error / array, not string) — defang those two forms inline on their own lines, marked WRONG/un-copyable per the defang-snippets memory rule.
-- Fixed-width-bar ALTERNATIVE: `rpad(lpad('', 7, '|'), 10, ' ')` -> `'|||||||   '` with the trace (lpad empty->7 pipes, rpad to 10 with spaces). This is the cleaner one-expression answer for the ASCII-progress-bar use case.
-- Keyword anchors: *repeat a character, repeat a string, build an ASCII bar, progress bar, N times, fill with a character, gauge/meter string*.
-- Explicitly correct the "Trino has no repeat()" misconception in the card text.
+## Q3 — DEFECT (findable-but-WRONG-construct). New gap for iter824.
 
-## Other flags
+`split_part(email, '@', 2)` is CORRECT and well-explained (1-indexed, field 2 = after the first `@`; verified at string.html: "Field indexes start with 1", out-of-range -> NULL). The `split_part`-vs-`substr(strpos)` framing (r23:411-427) is good.
 
-None. Q1/Q2/Q4 are bulletproof from these phrasings. If iter823 lands the repeat/array_join card cleanly, re-probe Q3 from a second angle (e.g. "repeat a dash to draw a separator line") to confirm before treating the topic as durable.
+BUT the runnable example SQL is BROKEN in Trino 467:
+
+```sql
+SELECT customer_id, email, split_part(email, '@', 2) AS domain
+FROM signups GROUP BY domain ORDER BY COUNT(*) DESC
+```
+
+Two fatal problems:
+1. **`GROUP BY domain` references a SELECT output ALIAS — Trino does NOT support this.** Confirmed: GH#16533 "Using alias in group by is not supported by Trino" (still the behavior in 467; ANSI-standard scoping — aliases are not visible to GROUP BY). The responder's routing asserted "GROUP BY by output alias/ordinal is allowed" — **the ORDINAL is allowed (`GROUP BY 3`), the ALIAS is NOT.** Must be `GROUP BY split_part(email, '@', 2)` or `GROUP BY 3`.
+2. **`customer_id, email` are selected alongside a domain GROUP BY** with neither aggregation nor membership in GROUP BY — internally inconsistent; would error even if alias-grouping worked. A "group signups by domain" query should be `SELECT split_part(email,'@',2) AS domain, COUNT(*) AS signups FROM signups GROUP BY 1 ORDER BY signups DESC`.
+
+Net: an engineer who copies this gets a query-analysis error. The function answer is right; the surrounding GROUP BY scaffold is wrong. Accuracy 2 / Actionability 2.
+
+## iter824 directive — FIX-A (a defect surfaced; NOT a no-op)
+
+Target the **GROUP BY-output-alias misconception** + the **email-domain grouping example**:
+
+1. At r23:411-427 (the split_part card), add a corrected, runnable grouping example:
+   `SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS signups FROM signups GROUP BY 1 ORDER BY signups DESC` — group by the **ordinal** (`GROUP BY 1`) or the **repeated expression**, NOT the alias; and select ONLY the grouped expression + aggregates.
+2. Add an inline DO-NOT-WRITE defang (own line, un-copyable): `-- GROUP BY domain (a SELECT alias) -- Trino does NOT allow GROUP BY on an output ALIAS (GH#16533); use GROUP BY 1 or repeat the expression -- DO NOT COPY`.
+3. Add a short rule card (findable from keywords: *GROUP BY alias, group by output column, group by the aliased expression, group by 1, can I use an alias in GROUP BY Trino*): **Trino GROUP BY accepts input columns, expressions, or an ORDINAL (`GROUP BY 1`) — but NOT a SELECT alias.** Place it where the responder routes for "group by the domain / group by a derived column". Likely near the existing GROUP BY / aggregation guidance in r07 or r23; cross-link from the split_part card.
+4. Do NOT churn the verified split_part SQL or the verified r07 window/date_add canonicals.
+
+NO federation edits (r22 13.x untouched; federation 4.49944/310 holds).
+
+iter824 = **FIX-A** (GROUP BY-alias construct defect).

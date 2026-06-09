@@ -1,6 +1,7 @@
 {
-  "iteration": 822,
+  "iteration": 823,
   "phase": "extended",
+  "notes_823": "iter823 FIX-A repeat-a-character/ASCII-bar GAP (iter822 Q3 2.00 findable-but-missing: responder falsely claimed Trino has no repeat() and showed broken concat(repeat(...),repeat(...))): added repeat-into-STRING sub-canonical ADJACENT to the r23 lpad/rpad fixed-width pad card. Canonical array_join(repeat(c,n),'') -> string; rpad(array_join(repeat('|',7),''),10,' ') -> '|||||||   ' fixed-width bar; all-in-one rpad(lpad('',7,'|'),10,' '). Rule: repeat(element,count)->ARRAY(E) NOT a string. Inline-defanged each on own line: repeat() used directly as string, concat(repeat,repeat) (joins ARRAYS not strings), and the 'Trino has no repeat()' misconception. Keyword anchors: repeat char/string N times, ASCII bar, progress bar, separator/divider line, fill with char, draw a bar, star rating. Cross-linked from the pad card without churning its r23:586-604 text. Verified repeat()->array(E) + array_join(x,delim)->varchar + rpad/lpad truncate vs trino.io/docs/467. NO federation edits (r22 13.x zero edits, federation 4.49944/310).",
   "notes_822": "iter822 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_821": "iter821 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_820": "iter820 DEFAULT NO-OP durability sweep; no resource edits",

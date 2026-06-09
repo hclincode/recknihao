@@ -601,7 +601,34 @@ lpad(CAST(id AS VARCHAR), 8, '0')  -- left-pad a number to width 8 with leading 
 -- ❌ format('%-20s', product_code)  -- pads but does NOT truncate a longer string (would need %-20.20s); prefer rpad — DO NOT COPY
 ```
 
-**Cross-reference.** For the Oracle `LPAD` / `RPAD` migration angle and the numeric-zero-pad CAST rule (Trino's `lpad` first arg must be VARCHAR — `lpad(CAST(account_id AS VARCHAR), 10, '0')` — no implicit number coercion), see [resource 27 §7A.3.1 string-function port table, `LPAD`/`RPAD` row](27-oracle-plsql-to-dbt-trino.md).
+**Cross-reference.** For the Oracle `LPAD` / `RPAD` migration angle and the numeric-zero-pad CAST rule (Trino's `lpad` first arg must be VARCHAR — `lpad(CAST(account_id AS VARCHAR), 10, '0')` — no implicit number coercion), see [resource 27 §7A.3.1 string-function port table, `LPAD`/`RPAD` row](27-oracle-plsql-to-dbt-trino.md). For repeating ONE character many times into a string (an ASCII bar / divider line), see the next sub-canonical.
+
+#### SUB-CANONICAL — repeat a CHARACTER (or string) N times into a STRING — `array_join(repeat(c, n), '')`
+
+> **Use this when you need to:** repeat a character/string N times, **build an ASCII bar**, draw a **progress bar** (e.g. `'|||||||   '`), make a **separator / divider line** (a row of `-` or `=`), fill a column with a repeated character, **draw a bar**, build a **star-rating string** (`'★★★☆☆'`-style), or pad a label out with a repeated glyph. (Keyword anchors so the responder lands here: *repeat a character N times, repeat a string N times, build an ASCII bar, ASCII progress bar, progress bar, separator line, divider line, repeat the same character, fill with a character, draw a bar, star rating string, row of dashes, repeat()*.)
+
+**The rule (memorize this).** Trino's `repeat(element, count) -> ARRAY(E)` returns an **ARRAY**, NOT a string. To repeat a CHARACTER **into a STRING**, wrap it: **`array_join(repeat(c, n), '')`**. The `''` (empty) separator joins the array elements with no gap. For a **fixed-width bar** (N filled chars, then pad out to a total width), wrap the joined string in `rpad` / `lpad` — or use the all-in-one `rpad(lpad('', n, c), total, ' ')` form.
+
+```sql
+-- ✅ COPY THIS — repeat a character/string N times into a STRING (repeat() returns an ARRAY, so array_join it):
+array_join(repeat('|', 7), '')                    -- -> '|||||||'   (7 pipes; '' separator = no gap between elements)
+array_join(repeat('-', 20), '')                   -- -> a 20-dash separator / divider line: '--------------------'
+array_join(repeat('★', 3), '') || array_join(repeat('☆', 2), '')  -- -> '★★★☆☆'  (3-of-5 star rating)
+
+-- ✅ Fixed-width ASCII bar — N filled chars, then pad out to a total width with spaces:
+rpad(array_join(repeat('|', 7), ''), 10, ' ')     -- -> '|||||||   '  (7 pipes then 3 spaces, total width 10)
+
+-- ✅ Equivalent all-in-one fixed-width bar (lpad '' with the fill char, then rpad to width):
+rpad(lpad('', 7, '|'), 10, ' ')                   -- -> '|||||||   '  (same result; lpad('',7,'|') makes the 7 pipes)
+```
+
+```sql
+-- ❌ repeat('|', 7) used directly as a string -- repeat(element,count) returns an ARRAY (ARRAY['|','|',...]), NOT a string — wrap in array_join(..., '') — DO NOT COPY
+-- ❌ concat(repeat('|', 7), repeat(' ', 3)) -- concatenates two ARRAYS, not strings; does NOT build '|||||||   ' — DO NOT COPY
+-- ❌ "Trino has no repeat() function" -- FALSE; repeat(element, count) EXISTS and returns an ARRAY — DO NOT COPY this misconception
+```
+
+**Behavior (verified per [trino.io/docs/467/functions/array.html](https://trino.io/docs/current/functions/array.html) and string.html).** `repeat(element, count) -> array(E)` *"Repeats `element` for `count` times"* — the result is an **ARRAY**, e.g. `repeat('|', 3)` is `ARRAY['|', '|', '|']`, not `'|||'`. `array_join(x, delimiter) -> varchar` *"Concatenates the elements of the given array using the delimiter"* — with `''` as the delimiter you get the elements glued together with no separator. So `array_join(repeat('|', 7), '')` is the clean idiom for "7 pipes as a string". For a fixed-width bar, feed that joined string into `rpad`/`lpad` (which pad **and truncate** to the target width — see the pad sub-canonical above).
 
 **Distinguish from related "format" functions — DIFFERENT functions, different uses:**
 
