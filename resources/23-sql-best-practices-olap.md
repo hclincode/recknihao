@@ -604,16 +604,40 @@ FROM customer_summary;
 
 #### SUB-CANONICAL — pad a STRING to a FIXED WIDTH (`rpad` / `lpad`) — the one-function answer for fixed-width flat-file exports
 
-> **Use this when you need to:** pad a string to a fixed width, build a **fixed-width flat-file export**, right-pad with spaces, left-pad, pad to N characters, **truncate if longer**, align text in a fixed field, make every value exactly 20 chars, pad to a fixed-width column. (Keyword anchors so the responder lands here: *pad a string to fixed width, fixed-width flat-file export, right-pad with spaces, left-pad, pad to N characters, truncate if longer, rpad, lpad, fixed-width column, align text in a fixed field, pad product_code to 20 chars*.) **`format()` does NOT do this** — `format('%-20s', s)` left-justifies in a 20-wide field but does NOT TRUNCATE a longer string. The correct tool is **`rpad` / `lpad`**.
+> **Use this when you need to:** pad a string to a fixed width, build a **fixed-width flat-file export**, right-pad with spaces, left-pad, pad to N characters, **truncate if longer**, **zero-pad an id**, align text in a fixed field, make every value exactly 20 chars, pad to a fixed-width column. (Keyword anchors so the responder lands here: *pad a string to fixed width, fixed-width flat-file export, right-pad with spaces, left-pad, pad to N characters, truncate if longer, zero-pad id without losing digits, pad or truncate to exactly N, over-width id, fixed-width truncation hazard, rpad, lpad, fixed-width column, align text in a fixed field, pad product_code to 20 chars, zero-pad order_id to 8 chars*.) **`format()` does NOT do this** — `format('%-20s', s)` left-justifies in a 20-wide field but does NOT TRUNCATE a longer string. The correct tool is **`rpad` / `lpad`**.
+
+```text
+⚠️ READ FIRST — lpad/rpad pad OR TRUNCATE to EXACTLY `size` characters.
+If the input is LONGER than size it is TRUNCATED to the first `size` chars (NOT left unchanged):
+  lpad('123456789', 8, '0')  -> '12345678'   (drops the trailing '9'; keeps the FIRST 8 chars)
+  rpad('123456789', 8, '0')  -> '12345678'   (also keeps the FIRST 8 chars)
+For an ID column that can exceed the width this SILENTLY LOSES digits — a real data-integrity hazard.
+FIX: size the width to the maximum possible length, OR use format('%08d', n) (below)
+     which zero-pads a number AND prints a wider number IN FULL (never truncates).
+```
 
 ```sql
 -- ✅ COPY THIS — pad a string to a FIXED WIDTH (e.g. a fixed-width flat-file export):
-rpad(product_code, 20, ' ')        -- right-pad to 20 chars with spaces; TRUNCATES to 20 if longer
-lpad(product_code, 20, ' ')        -- left-pad to 20 chars with spaces; also truncates to 20 if longer
-lpad(CAST(id AS VARCHAR), 8, '0')  -- left-pad a number to width 8 with leading zeros -> '00000042'
+rpad(product_code, 20, ' ')        -- right-pad to 20 chars with spaces; TRUNCATES to 20 (first 20 chars) if longer
+lpad(product_code, 20, ' ')        -- left-pad to 20 chars with spaces; also truncates to 20 (first 20 chars) if longer
+lpad(CAST(id AS VARCHAR), 8, '0')  -- left-pad a number to width 8 with leading zeros -> '00000042' (CAST number to VARCHAR first)
 ```
 
-**Behavior (verbatim per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html)).** `rpad(string, size, padstring) -> varchar` *"Right pads `string` to `size` characters with `padstring`. If `size` is less than the length of `string`, the result is truncated to `size` characters."* `lpad(string, size, padstring)` is the analogous left-pad — **also truncates** when the input is longer than `size`. Both take a **`padstring`**: `' '` for spaces, `'0'` for leading zeros. This is the ONE-function answer for fixed-width padding: it pads **and** truncates in a single call, so a 25-char `product_code` and a 12-char `product_code` both come out exactly 20 wide.
+```sql
+-- ✅ COPY THIS — zero-pad an INTEGER to a fixed width WITHOUT the truncation hazard:
+format('%08d', order_id)           -- zero-pad an INTEGER to width 8 -> 42 becomes '00000042'
+-- a number WIDER than 8 digits prints IN FULL (never truncated): 1234567890 -> '1234567890'
+-- '%08d' width is a MINIMUM field width (Java Formatter), so it NEVER drops digits.
+-- Prefer this over lpad(CAST(order_id AS VARCHAR), 8, '0') whenever the id may exceed the pad width.
+```
+
+```sql
+-- ❌ lpad(x, 8, '0') leaves a value that is already 8+ chars unchanged -- WRONG: if the input is LONGER than 8 it is TRUNCATED to 8 chars (silently drops the overflow); lpad pads-OR-truncates to EXACTLY size — DO NOT COPY
+```
+
+**Behavior (verbatim per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html)).** `rpad(string, size, padstring) -> varchar` *"Right pads `string` to `size` characters with `padstring`. If `size` is less than the length of `string`, the result is truncated to `size` characters."* `lpad(string, size, padstring)` is the analogous left-pad — *"If `size` is less than the length of `string`, the result is truncated to `size` characters."* Both **truncate to the FIRST `size` characters** (keep the start, drop the overflow) when the input is longer than `size` — they do NOT leave a longer value unchanged. Both take a **`padstring`**: `' '` for spaces, `'0'` for leading zeros. This is the ONE-function answer for fixed-width padding: it pads **and** truncates in a single call, so a 25-char `product_code` and a 12-char `product_code` both come out exactly 20 wide.
+
+**Truncation is a HAZARD on ID columns.** Because lpad/rpad pad-OR-truncate to *exactly* `size`, a value that is *already wider than `size`* loses its trailing characters: `lpad('123456789', 8, '0')` returns `'12345678'`, silently dropping the `'9'`. If you are zero-padding an id that can grow past the width, this corrupts the id. Two safe options: (1) size the width to the maximum possible id length so truncation can never trigger, or (2) for an INTEGER id use **`format('%08d', order_id)`** — the `%08d` width is a *minimum* field width (Java `java.util.Formatter`), so a number wider than 8 digits prints in full and is **never truncated** (`1234567890` -> `'1234567890'`). Use `format('%0Nd', ...)` instead of `lpad(CAST(... AS VARCHAR), N, '0')` whenever the value might exceed the pad width.
 
 ```sql
 -- ❌ LEFT(product_code, 20)         -- Trino has NO left()/right() — use substr(product_code, 1, 20) — DO NOT COPY
