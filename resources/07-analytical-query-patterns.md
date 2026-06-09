@@ -1261,6 +1261,21 @@ The SUM form counts *event rows*, not users. If a user fires 5 events in the 7-d
 > GROUP BY order_id;
 > ```
 >
+> **NULL inputs — `bool_or` / `bool_and` IGNORE NULLs (not treated as FALSE).** Keyword anchors: *bool_and with nulls, does bool_and ignore null, every() null handling, all true ignoring nulls, treat null as false, all-null group returns null, all items fulfilled.* These follow the standard aggregate NULL-skip rule:
+>
+> ```text
+> bool_and over [TRUE, NULL] -> TRUE   (NULL SKIPPED, NOT FALSE)
+> bool_or  over [FALSE, NULL] -> FALSE (NULL SKIPPED, NOT TRUE)
+> an ALL-NULL group (or empty group) -> NULL   (NOT FALSE)
+> To make a NULL flag count as not-satisfied: bool_and(COALESCE(is_fulfilled, false))
+> ```
+>
+> ```text
+> ❌ bool_and(flag) returns FALSE if any value is NULL  -- WRONG: bool_and IGNORES NULLs (NULL skipped, not FALSE); all-NULL group -> NULL. Wrap bool_and(COALESCE(flag, false)) to make NULL count as false — DO NOT COPY
+> ```
+>
+> Full COALESCE-wrap canonical + verified docs quote: [resource 23 § 3.1 `bool_or` / `bool_and`](23-sql-best-practices-olap.md#bool_or--bool_and--did-any-or-did-all-rows-in-the-group-satisfy-x-roll-up-a-boolean-per-group).
+>
 > **Disambiguator — pick by the OUTPUT shape:**
 > - Per-group **did-it-ever-happen FLAG** (`true`/`false`) → **`bool_or(predicate)`**. (See [resource 23 § 3.1 `bool_or` / `bool_and`](23-sql-best-practices-olap.md#bool_or--bool_and--did-any-or-did-all-rows-in-the-group-satisfy-x-roll-up-a-boolean-per-group) — prefer `bool_or` over `MAX(bool)`.)
 > - Per-group **COUNT / SUM of matching rows** (a *number*) → `count_if(pred)` / `SUM(CASE WHEN pred THEN x END)` / the metric `FILTER` form shown above.

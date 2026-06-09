@@ -1,54 +1,46 @@
-# iter824 Judge Feedback — FIX-A verification (GROUP-BY-alias) + bool_and NULL re-probe
+# Judge Feedback — iter825 (FIX-A: bool_and/bool_or NULL-semantics)
 
-**Overall: 4.625 — PASS** (threshold 3.5; overall average governs, no per-Q veto)
+**Overall: 4.91 STRONG PASS** (Accuracy 5.00 / Completeness 4.875 / Clarity 4.875 / Actionability 4.875)
+Pass threshold 3.5. Overall average governs (no per-Q veto). All dialect claims docs-verified vs trino.io/docs/467 (aggregate/string/math .html) + WebSearch 2026-06-09. PIN Trino 467.
 
-All dialect claims docs-verified vs trino.io/docs/467 (aggregate/string/array/math .html) + WebSearch (round half-up) on 2026-06-09.
+---
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg | Verdict |
-|---|---|---|---|---|---|---|---|
-| Q1 | email-domain GROUP + COUNT + sort | 5 | 5 | 5 | 5 | **5.00** | CLEAN — **FIX LANDED** |
-| Q2 | flatten array-of-arrays | 5 | 5 | 5 | 5 | **5.00** | CLEAN |
-| Q3 | round to 2 decimals | 5 | 4.5 | 5 | 5 | **4.875** | CLEAN |
-| Q4 | all-items-fulfilled bool_and | 2.5 | 4 | 4.5 | 3.5 | **3.625** | **DEFECT (NULL-semantics accuracy)** |
+## Per-question scores
 
-## Q1 — GROUP-BY-alias fix LANDED -> CLOSED
+### Q1 — per-group all-approved flag, NULL must count as NOT approved — **avg 5.00** (5/5/5/5)
+**iter824 bool_and-NULL FIX LANDED → CLOSED.**
+- Responder LED with `BOOL_AND(COALESCE(is_approved, FALSE))` — the exact teacher canonical.
+- Correctly stated the semantics: "bool_and IGNORES NULLs entirely — not treated as FALSE, just skipped." This is the precise reversal of the iter824 Q4 2.5-accuracy defect ("FALSE OR NULL → FALSE"). No regression.
+- Correctly explained WHY COALESCE is needed: NULL status → FALSE so that task makes the project ineligible; "After COALESCE no NULLs reach bool_and."
+- VERIFIED vs aggregate.html: bool_and is NOT in the count/count_if/max_by/min_by/approx_distinct exception list → ignores NULL; all-NULL/empty group → NULL (not FALSE). COALESCE(flag,false) forces NULL→false. All correct.
+- Minor: didn't explicitly state the all-NULL-group→NULL edge (a project of all-NULL tasks returns NULL not FALSE), but COALESCE wraps that away here so it's moot for the asked scenario. No ding.
 
-The iter823 Q3 defect (responder emitted `GROUP BY <select-alias>`, which Trino rejects per GH#16533) is **FIXED**. This iteration the responder produced a fully runnable Trino 467 query:
+### Q2 — count distinct plan types per user — **avg 5.00** (5/5/5/5)
+- `COUNT(DISTINCT plan_type)` with GROUP BY user_id; ('starter','starter','pro')→2. Correct.
+- VERIFIED: count(DISTINCT x) = exact distinct count of non-null values; approx_distinct is the approximation (~2.3% std error) for huge sets. Responder's >10M-rows / "exact and fast enough for dashboards" framing is apt and actionable.
 
-- `GROUP BY split_part(email, '@', 2)` — grouped by the **repeated input EXPRESSION**, which IS valid Trino 467 (verified: GROUP BY accepts input col / expression / ordinal). NO alias in GROUP BY.
-- `ORDER BY signup_count DESC` — ORDER BY a **SELECT alias**, which IS allowed in Trino 467 (verified). The responder used the asymmetry correctly: alias forbidden in GROUP BY, allowed in ORDER BY.
-- `split_part(email,'@',2)` verified 1-indexed; field 2 after `@` -> `'jane@gmail.com'` -> `'gmail.com'`. Domain extraction correct.
+### Q3 — first 20 chars of a string — **avg 4.875** (5/5/4.75/4.75)
+- `SUBSTR(display_name, 1, 20)` — 1-based, length 20, returns fewer if shorter. Correct.
+- VERIFIED: substr/substring exist (substr is alias), 1-based, 3-arg length form; **Trino 467 has NO LEFT()/RIGHT()** — confirmed (string.html does not list them). Responder's "NO LEFT() in Trino 467" claim is accurate; substr is the idiom.
+- The RPAD-to-pad-to-20 aside is correct and a nice touch.
+- Trivial: didn't note display width vs codepoint count for multibyte (substr counts characters); irrelevant for the asked truncation use case. Negligible ding.
 
-No regression to the defanged `GROUP BY domain (alias)` form. The fix card at the split_part landing + the §8 GROUP-BY-rules asymmetry card both worked. **CLOSE the GROUP-BY-alias defect** (1st post-fix clean datapoint; one more angle — e.g. `GROUP BY 1` ordinal phrasing or HAVING-on-alias — would bulletproof it).
+### Q4 — round cents/100 UP to whole dollar — **avg 4.75** (5/5/4.75/4.75)
+- `CEIL(amount_cents / 100.0)`; 201→2.01→ceil 3.0. Correct.
+- VERIFIED: ceil = ceiling alias, "rounds up to nearest integer"; integer `/` truncates in Trino → the `.0` on 100 is load-bearing (forces non-integer division, else `201/100=2` truncated before ceil). Responder explicitly called this out: "integer division would truncate before CEIL." Exactly the right warning.
+- Minor type nuance (per directive = minor only): ceil returns same type as input → here `amount_cents/100.0` is a double/decimal so result is `3.0` not integer `3`. Engineer may want CAST(... AS integer) for a clean dollar integer; responder didn't mention. Per directive this is minor-not-error. Slight actionability ding.
 
-## Q2 — flatten CLEAN
+---
 
-`flatten(nested_arrays_column)` verified: array.html "Flattens an array(array(T)) to an array(T) by concatenating the contained arrays." One flat array per row, type array(E), no row multiplication. Correctly steers away from UNNEST+re-aggregate. ARRAY[ARRAY[1,2],ARRAY[3,4]] -> ARRAY[1,2,3,4] confirmed.
+## Verdict
+- **Q1 bool_and-NULL fix LANDED → CLOSED.** This is the 1st post-fix clean datapoint at the bool_and-NULL angle (iter824 Q4 was the defect). Needs ONE more angle (e.g. bool_or-any-true with NULLs, the all-NULL-group→NULL edge, or every() alias) to bulletproof — do not over-claim full lock on a single re-probe.
+- No new defects. Q2/Q3/Q4 all clean, dialect-accurate.
 
-## Q3 — round CLEAN (minor nuance only)
+## iter826 directive — **DEFAULT NO-OP / durability sweep**
+All clean; no open defect; no resource edits required.
+- Re-probe bool_and/bool_or NULL from a 2nd angle to bulletproof the closed fix: `bool_or` over a group with NULLs (any-true ignoring NULL), an all-NULL group returning NULL (not FALSE), or the `every()` alias phrasing. Keyword anchors already seeded at r07:1252 + r23 §3.1.
+- 3 fresh adjacent probes (e.g. distinct-count-with-FILTER, substr negative-start-from-end, ceil-vs-floor-vs-round disambiguation).
+- PRESERVE: r07/r23 bool_and/bool_or IGNORE-NULL cards + `bool_and(COALESCE(flag,false))` canonical + defang (LANDED); iter824 split_part GROUP-BY-1 + §8 GROUP-BY-alias asymmetry cards; r23 substr/no-LEFT idiom; ceil `/100.0` integer-division card; r23:606-631 repeat-char card; full iter534-825 pin inventory.
+- NO federation edits (r22 §13.x ZERO edits; federation row stays 4.49944/310; margin thin).
 
-`round(price, 2)` verified: math.html "Returns x rounded to d decimal places." Rounding mode HALF_UP / half-away-from-zero (confirmed via source/WebSearch). On DECIMAL, round(19.235,2)=19.24 is exact. Minor completeness ding (−0.5): the answer asserts the half-up examples without noting that on a **DOUBLE** column the binary representation can make round(19.235,2) imprecise (exact only on DECIMAL). Per directive this is a minor nuance, not a hard error — the Oracle-ROUND equivalence framing is apt and useful.
-
-## Q4 — bool_and NULL claim is WRONG (accuracy defect)
-
-bool_and is the correct function (vs MAX(CASE)/FILTER) and the SQL skeleton is right and clean. BUT the accuracy claim fails:
-
-> Responder: "If even one is **FALSE OR NULL** -> FALSE."
-
-**This is incorrect for Trino 467.** Verified vs aggregate.html: bool_and/bool_or are NOT in the exception list (count/count_if/max_by/min_by/approx_distinct), so they follow the standard rule — **"all of these aggregate functions ignore null values."** Therefore:
-
-- bool_and over `[TRUE, NULL]` -> **TRUE** (NULL ignored), NOT FALSE.
-- bool_and over `[NULL]` (all null) -> NULL, not FALSE.
-
-Consequence: an order whose only un-fulfilled line item has `is_fulfilled = NULL` would be **wrongly flagged TRUE (all fulfilled)** — a silent wrong-result bug in production. To treat a NULL flag as not-fulfilled the responder must write `bool_and(COALESCE(is_fulfilled, false))`. Accuracy scored 2.5 (function/skeleton correct, NULL semantics materially wrong); actionability 3.5 (engineer who copies it gets a query that runs but mis-handles the realistic NULL-line-item case).
-
-## iter825 directive — FIX-A (inline NULL-semantics clarify at bool_and card)
-
-Make iter825 a **FIX-A** at the r07/r23 bool_and/bool_or card:
-
-1. Inline-clarify that **bool_and / bool_or IGNORE NULL inputs** (standard aggregate NULL-skip): bool_and([TRUE, NULL]) -> TRUE; all-NULL group -> NULL.
-2. Add the canonical for treating NULL-as-not-fulfilled: `bool_and(COALESCE(is_fulfilled, false)) AS all_items_fulfilled`. Lead with this when the question framing is "if even one is not fulfilled / missing -> false."
-3. Inline-defang the WRONG claim on its own line: `-- WRONG: "a NULL flag makes bool_and return FALSE" — NULL is IGNORED, not FALSE`.
-4. Keyword anchors: bool_and null, all true ignore null, treat null as false, all items fulfilled, every row true including nulls.
-
-PRESERVE: the iter824 split_part GROUP-BY-1 / repeated-expression fix card + §8 GROUP-BY-alias asymmetry rule card (both LANDED), flatten/round canonicals, and the full iter534-823 pin inventory. NO federation edits (margin thin, federation 4.49944/310). DO NOT bump state.json (already 824).
+DO NOT bump training/state.json (already 825).

@@ -1169,6 +1169,34 @@ GROUP BY order_id;
 
 `any_late` is `TRUE` for an order if **at least one** of its shipments has `is_late = TRUE`; otherwise `FALSE`. `all_late` is `TRUE` only if **every** shipment has `is_late = TRUE`; otherwise `FALSE`. Predicate form also works: `bool_or(shipped_at > due_at)`, `bool_and(status = 'delivered')` — any boolean expression, not just a stored boolean column.
 
+**NULL semantics — `bool_and` / `bool_or` IGNORE NULL inputs (this is the standard aggregate NULL-skip).** Keyword anchors: *bool_and with nulls, does bool_and ignore null, every() null handling, all true ignoring nulls, treat null as false in bool_and/bool_or, all-null group returns null, all items fulfilled.* Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) on 2026-06-09 — the page's general rule: *"Except for `count()`, `count_if()`, `max_by()`, `min_by()` and `approx_distinct()`, all of these aggregate functions ignore null values and return null for no input rows or when all values are null."* `bool_and` / `bool_or` / `every()` (an alias for `bool_and`) are NOT in that exception list, so they ignore NULLs.
+
+```text
+bool_and(pred) / bool_or(pred) IGNORE NULL inputs (standard aggregate NULL-skip).
+bool_and over [TRUE, NULL] -> TRUE   (the NULL is SKIPPED, NOT treated as FALSE)
+bool_or  over [FALSE, NULL] -> FALSE (the NULL is SKIPPED, NOT treated as TRUE)
+a group of ALL NULLs (or an empty group) -> NULL   (NOT FALSE)
+To treat a NULL flag as not-satisfied (e.g. a NULL is_fulfilled should mean
+"not fulfilled"), wrap it: bool_and(COALESCE(is_fulfilled, false)).
+```
+
+**Treat-NULL-as-false canonical (the "are ALL items fulfilled?" shape where a NULL flag must count as not-fulfilled):**
+
+```sql
+-- Trino 467 — flag an order as all-items-fulfilled. A NULL is_fulfilled means "not fulfilled".
+SELECT order_id,
+       bool_and(COALESCE(is_fulfilled, false)) AS all_items_fulfilled,   -- NULL flag COUNTS AS not-fulfilled (force NULL->false first)
+       bool_and(is_fulfilled)                  AS all_non_null_fulfilled -- raw: NULLs IGNORED (TRUE if every NON-NULL value is true; all-NULL group -> NULL)
+FROM order_items
+GROUP BY order_id;
+```
+
+Use the `COALESCE(flag, false)` form whenever an unknown/missing flag must be treated as a failure. Use the raw `bool_and(is_fulfilled)` form only when you genuinely want "every value we DO have is true, ignoring the unknowns" (and you accept an all-NULL group returning `NULL`, not `FALSE`).
+
+```text
+❌ bool_and(flag) returns FALSE if any value is NULL  -- WRONG: bool_and IGNORES NULLs (NULL is skipped, not FALSE); an all-NULL group -> NULL. Wrap bool_and(COALESCE(flag, false)) to make NULL count as false — DO NOT COPY
+```
+
 **`bool_or` / `bool_and` vs the neighbors — which to pick for "did ANY / did ALL satisfy X per group".** The question shape matters: if you want a **single TRUE/FALSE per group** (not a count, not a string), reach for `bool_or` / `bool_and` directly. They are the docs-canonical aggregates whose signatures explicitly return `boolean`.
 
 | Question shape | Reach for | Why |
