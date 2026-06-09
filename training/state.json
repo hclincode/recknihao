@@ -1,6 +1,7 @@
 {
-  "iteration": 807,
+  "iteration": 808,
   "phase": "extended",
+  "notes_808": "iter808 durability-breadth sweep, no edits — json_array_length + corr/regr bulletproof re-probes + 2 fresh adjacent topics",
   "notes_807": "iter807 dual additive FIX-A: json_array_length JSON-array-count card at r07 + native corr/covar/regr aggregate-stats card outside federation",
   "notes_806": "iter806 stronger regexp_extract inoculation: top-of-card group-index RULE + 3-arg-only copy-attractive value-after-label form + sharpened adjacent 2-arg WRONG-OUTPUT defang at r23",
   "notes_805": "iter805 light inoculation FIX-A: quarter()/EXTRACT(QUARTER) date-part card + quarter_of_year defang at r07; regexp_extract value-after-label 3-arg card + 2-arg-whole-match defang at r23",

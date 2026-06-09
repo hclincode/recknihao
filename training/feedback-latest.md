@@ -1,70 +1,75 @@
-# Judge Feedback — iter807 (DUAL ADDITIVE FIX-A re-check)
+# iter808 — Judge Feedback (DEFAULT NO-OP sweep; Q1/Q2 bulletproof re-probes, Q3 scrutiny, Q4 clean)
 
-**Phase:** extended. **Mode:** end-of-iteration summary (state.json already at 807 — NOT bumped).
-All four answers docs-verified against trino.io/docs/467 (json.html, aggregate.html, string.html) + cross-checked GitHub PR #11236 / issue #11347 for trim char-set semantics, on 2026-06-09.
+**Overall: 4.06 / 5 — PASS** (overall average governs; no single-Q veto)
+
+Verification basis: every dialect claim checked against trino.io/docs/467 (aggregate.html, json.html, string.html, conversion.html) plus WebSearch on Trino concat/`||` numeric coercion. resources/ NOT treated as ground truth.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Count elements in a JSON ARRAY STRING (`tags_json '["urgent","billing","vip","new"]'` → 4, no explode)
-- **Accuracy 5** — `json_array_length(tags_json) AS tag_count` → 4. VERIFIED json.html: `json_array_length(json) -> bigint`, *json* = "a string containing a JSON array"; auto-coerces a VARCHAR JSON-array string, so the bare call works without `json_parse`. `json_array_length('["urgent","billing","vip","new"]') = 4`. Correctly advised AGAINST `cardinality(CAST(...))`.
-- **Completeness 5** — direct count answer, no-explode rationale, the cardinality-CAST anti-pattern called out.
-- **Clarity 5** — leads with the one function; clean COUNT-vs-EXPLODE framing.
-- **Actionability 5** — copy-ready single expression.
-- **Q1 avg = 5.00**
-- **FIX CHECK:** Responder LED with `json_array_length(tags_json)` (NOT the iter806 garbled `cardinality(CAST(col AS JSON)->col)` / bare `cardinality(CAST(col AS ARRAY(JSON)))`) and cited the NEW r07 card (r07:103-113, keyword-anchored on the JSON-array-count path). **json-array-length FIX WORKED.**
+### Q1 — regr_slope(revenue, ad_spend), revenue dependent  →  BULLETPROOF
+`regr_slope(revenue, ad_spend) AS slope`, first arg dependent (y), second independent (x); GROUP BY for per-group. Cites r05 native-stats card.
 
-### Q2 — Correlation between `session_minutes` and `purchase_total`
-- **Accuracy 5** — `corr(purchase_total, session_minutes) AS correlation`. VERIFIED aggregate.html: `corr(y, x) -> double` (correlation coefficient = Pearson), native Trino aggregate; `covar_samp`/`covar_pop`/`regr_slope`/`regr_intercept` all `(y, x) -> double`, all native. `corr` is symmetric so arg order doesn't change the value, but the (y dependent, x independent) note is good practice and matters for covar/regr.
-- **Completeness 5** — gives corr plus the covar/regr family; range -1..1; arg-order note.
-- **Clarity 5** — plain explanation of what correlation means + the result range.
-- **Actionability 5** — drop-in GROUP-BY-able expression.
-- **Q2 avg = 5.00**
-- **FIX CHECK:** Responder LED with NATIVE `corr(...)` — did NOT decline, did NOT call it federation-only (the iter806 Q4 honest-decline gap). Cited the NEW r05 card (r05:2267-2281), which correctly states these are native and run directly on Iceberg, with the r22 native-vs-pushdown cross-ref. **correlation-native FIX WORKED.**
+Verified: trino.io/docs/467/functions/aggregate.html — *"regr_slope(y, x) → double. Returns linear regression slope of input values. y is the dependent value. x is the independent value."* `regr_slope(revenue, ad_spend)` puts revenue=y (dependent), ad_spend=x (independent) → "revenue per dollar of spend". CORRECT (y, x) order, native function.
 
-### Q3 — Products priced >= 90% of the table-wide max price
-- **Accuracy 5** — `MAX(price) OVER ()` computes the table-wide max on every row; window functions are illegal in `WHERE` in every SQL dialect including Trino 467, so the CTE-then-`WHERE price >= 0.9 * max_price` wrap is correct. VERIFIED against window/select semantics. (Scalar-subquery alternative `WHERE price >= 0.9 * (SELECT MAX(price) FROM products)` is equally valid; not required.)
-- **Completeness 5** — covers the empty-OVER() table-wide-max meaning AND the window-not-in-WHERE constraint that forces the CTE.
-- **Clarity 4.5** — clear; could note the scalar-subquery alternative, but not required.
-- **Actionability 5** — full runnable CTE.
-- **Q3 avg = 4.875**
+- Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 → **avg 4.75**
 
-### Q4 — Strip `#`/`*` off both ends of a code (`"##ABC123##"` → `"ABC123"`)
-- **Accuracy 5** — `trim(BOTH '#*' FROM code)` → `'ABC123'` / `'XYZ'`. VERIFIED string.html + r27:1011 rationale: the FROM-form trim character is a **SET**, not a fixed substring — every listed char is stripped individually from the end(s) (`trim(TRAILING 'ER' FROM 'WORKER')` → `'WORK'` strips R then E-is-no-longer-trailing-so-stop, NOT a literal `'ER'` substring match). `LEADING`/`TRAILING` for one end. No 2-arg `ltrim/rtrim(string,chars)` in Trino. All consistent with the standing trim-char-SET pin.
-- **Completeness 5** — char-SET semantics, both-ends vs one-end, two worked inputs.
-- **Clarity 5** — explicit that `'#*'` is a SET.
-- **Actionability 5** — copy-ready.
-- **Q4 avg = 5.00**
+### Q2 — count nested 'items' array  →  BULLETPROOF
+`json_array_length(json_extract(order_payload, '$.items')) AS n_items` → 3; uses `json_extract` (NOT `_scalar`) for the array, notes `json_extract_scalar` returns NULL on a non-scalar. Cites r13.
+
+Verified: trino.io/docs/467/functions/json.html — `json_extract(json, json_path)` returns the nested value as JSON (so the array comes back as JSON); `json_array_length(json)` counts a JSON array's elements; `json_extract_scalar` requires a scalar. Correct nested extract + count → 3.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.0**
+
+### Q3 — format decimal 0.0732 as '7.32%'  →  DEFECT (cast-less concat / wrong citation)
+Responder gave `CONCAT(ROUND(100.0 * conversion_rate, 2), '%')` and `ROUND(100.0 * conversion_rate, 2) || '%'`, claimed result `'7.32%'`. Cites r07:1649.
+
+**VERDICT: TYPE ERROR.** trino.io/docs/467 + WebSearch confirm `concat(...) → varchar` and the `||` operator are **VARCHAR-only**; Trino does **NOT** implicitly coerce double/decimal/bigint to varchar inside concat/`||`. `ROUND(100.0*x, 2)` returns a double/decimal, so both responder forms raise an "Unexpected parameters / cannot be applied to (double, varchar)" type error — they DO NOT compile without an explicit `CAST(... AS varchar)`. The responder's claimed `'7.32%'` output is wrong (the query never runs).
+
+**Correct forms (verified):**
+- Canonical: `format('%.2f%%', conversion_rate * 100)` → `'7.32%'` (docs example `format('%s%%', 123)` → `'123%'`; `%%` = literal percent, `%.2f` = 2-decimal float).
+- Or, if `||` is wanted: `CAST(ROUND(100.0 * conversion_rate, 2) AS varchar) || '%'`.
+
+**Slip vs defect — primarily a RESPONDER SLIP plus a findability gap:**
+- The cited r07:1649 is the integer-division *"Why `100.0 *` and not `100 *`"* note — it is about division, NOT about percent-string formatting. The responder mis-anchored.
+- The CORRECT canonical already exists in resources: **r23:574** shows `format('%.1f%%', 87.5) → '87.5%'`, and **r23:647-681 (§3.1A sub-canonical)** states verbatim that `concat`/`||` are VARCHAR-only and every numeric needs `CAST(... AS varchar)` — including a cast-before-`||` idiom-2. The responder did not find/apply it.
+- Findability gap: that percent-string form is buried inside r23's general `format()` card; it is NOT surfaced under percent-string keywords (`format a decimal as a percent string`, `0.0732 → '7.32%'`, `append % sign to a number`) in r07 where the question's "% string" wording leads.
+
+- Accuracy 1 / Completeness 3 / Clarity 4 / Actionability 2 → **avg 2.5**
+
+### Q4 — month-resetting running total  →  CLEAN
+`SUM(amount) OVER (PARTITION BY DATE_TRUNC('month', txn_date) ORDER BY txn_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`. Cites r07:2476-2493.
+
+Verified: PARTITION BY the month bucket isolates each month (cumulative resets at each month boundary); explicit `ROWS UNBOUNDED PRECEDING → CURRENT ROW` frame gives the per-row running total. Correct and matches the standing running-total + date_trunc pins.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.0**
 
 ---
 
 ## Overall
 
-| Q | Avg |
-|---|---|
-| Q1 json-array-count | 5.00 |
-| Q2 correlation-native | 5.00 |
-| Q3 within-X%-of-max | 4.875 |
-| Q4 trim-char-set both-ends | 5.00 |
+(4.75 + 5.0 + 2.5 + 5.0) / 4 = **4.06 → PASS**
 
-**Overall avg = 4.969 — PASS** (threshold 3.5; no single-Q veto).
+### Bulletproof status
+- **regr-native (Q1): BULLETPROOFED.** 2nd consecutive clean datapoint after iter807 fix; correct (y, x) order and native function.
+- **json-array-length / nested extract (Q2): BULLETPROOFED.** 2nd consecutive clean datapoint after iter807 fix; correct `json_extract`-then-`json_array_length` nested path.
+
+### Q3 the one weak spot
+The percent-string format is a real DEFECT in the answer (cast-less concat = type error) but it is a responder findability/citation slip against an EXISTING correct canonical (r23 §3.1A), not a missing-resource gap. The fix is a light findability inoculation, not new teaching.
 
 ---
 
-## Closure status
+## iter809 designation — FIX-A (light findability inoculation)
 
-- **(a) json-array-length — CLOSED.** Q1 is the 1st post-fix datapoint: responder led with `json_array_length(col)` on the count phrasing and cited the new r07 keyword-path card. The iter806 garbled-cardinality defect did not recur. (One more phrasing — e.g. nested-under-a-key `json_array_length(json_extract(col,'$.items'))`, or a numeric-element array — would BULLETPROOF it.)
-- **(b) correlation-native — CLOSED.** Q2 is the 1st post-fix datapoint: responder gave native `corr(...)` (no decline, no federation-only framing) and cited the new r05 native-stats card. The iter806 Q4 honest-decline gap did not recur. (One more phrasing — e.g. a `regr_slope`/`regr_intercept`-specific ask where arg order is load-bearing — would BULLETPROOF it.)
-- **No NEW defect surfaced.** Q3 and Q4 clean against well-covered resources.
+The Q3 defect is real and recurrable, so this is NOT a no-op. Recommend a **light additive findability FIX-A** (no large new content):
 
-## iter808 designation — **DEFAULT NO-OP / durability-breadth sweep**
+1. **Surface the percent-string canonical under percent-string keywords in r07** (near the existing `100.0 *` percent card around line 1648-1651), as a copy-attractive 1-liner:
+   - `format('%.2f%%', conversion_rate * 100)  -- 0.0732 -> '7.32%'  (%% = literal percent)`
+   - Keyword anchors: *format a decimal as a percent string, 0.0732 to '7.32%', append a % sign to a number, ratio to percent display string, build a percentage label.*
+2. **Defang the cast-less concat inline** (mark it un-copyable WRONG, per the defang-DO-NOT-WRITE memory — make the `format` line the copy-attractive block, not the broken concat):
+   - WRONG: `ROUND(100.0*x,2) || '%'` / `CONCAT(ROUND(...), '%')` → type error: `||`/concat are VARCHAR-only, no implicit numeric cast.
+   - If `||` is required: `CAST(ROUND(100.0*x, 2) AS varchar) || '%'`.
+3. **Cross-link** the new r07 percent-string snippet to r23 §3.1A (the authoritative concat/format coercion guardrail) so the keyword path from r07 → r23 is explicit.
 
-No open defect. Both iter807 fixes confirmed on 1st datapoint. Recommend teacher make ZERO edits and re-probe to bulletproof the two freshly-closed topics from a 2nd angle each, plus fresh adjacent topics:
-1. **json-array-length 2nd angle** — nested-array-under-a-key (`json_array_length(json_extract(col,'$.items'))`) or numeric-element JSON-array-string count.
-2. **correlation/stats 2nd angle** — `regr_slope`/`regr_intercept` where `(y, x)` arg order changes the answer (asymmetric — distinguishes from symmetric `corr`).
-3-4. Two fresh adjacent probes (judge's discretion).
-
-**PRESERVE (churn risk — drove the iter807 fixes):** r07:103-113 json_array_length COUNT card + COUNT-vs-EXPLODE disambiguator + cardinality-CAST defang; r05:2267-2281 native corr/covar/regr stats card + r22 native-vs-pushdown cross-ref; r27:992-1015 trim char-SET FROM-form card (+ the `'ER'`→`'WORK'` SET-not-substring rationale and the no-2-arg-ltrim/rtrim pin); r23 window-not-in-WHERE → CTE/subquery-wrap card.
-
-**Standing pins all held:** json_array_length-for-count / corr-covar-regr-native-not-federation-only / MAX-OVER-empty-window-CTE-to-filter / trim-char-SET-BOTH-chars-FROM (and no 2-arg ltrim/rtrim) / window-illegal-in-WHERE.
+Keep it light — the underlying truth already lives in r23:574 / r23:647-681; this is purely placing the percent-string form where the question's keywords lead and defanging the broken concat the responder reached for.
