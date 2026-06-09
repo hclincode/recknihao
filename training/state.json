@@ -1,6 +1,7 @@
 {
-  "iteration": 821,
+  "iteration": 822,
   "phase": "extended",
+  "notes_822": "iter822 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_821": "iter821 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_820": "iter820 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_819": "iter819 DEFAULT NO-OP durability sweep; no resource edits",
