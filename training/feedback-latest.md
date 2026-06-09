@@ -1,75 +1,65 @@
-# Judge Feedback — iter827 (ESCALATED 2nd-touch FIX-A verification)
+# iter828 Judge Feedback — DEFAULT NO-OP durability sweep
 
-**Overall: 4.78 — STRONG PASS**
-
-All dialect claims docs-verified vs trino.io/docs/467 (aggregate.html, string.html, datetime.html, math.html) + MEMORY CAST-rounds-half-up reference, WebSearch 2026-06-09. PIN Trino 467.
+**Mode:** Final/extended phase, end-of-iteration feedback. Teacher made ZERO resource edits this iteration (no-op durability sweep). All four dialect claims verified against trino.io/docs/467 (math/string/window/conditional .html) + WebSearch 2026-06-09. All cited resource lines confirmed present and accurate. PIN Trino 467.
 
 ---
 
 ## Per-question scores
 
-### Q1 — per-customer "did ANY ticket = high-priority?"; all-NULL-priority group MUST be FALSE not NULL — **5.00 CLEAN — FIX LANDED**
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
+### Q1 — magnitude / always-positive (`abs(n)` vs CASE)
+RESPONDER: `abs(timestamp_difference)`; single built-in, no CASE; Oracle ABS→Trino abs identical.
+- **Accuracy 5** — VERIFIED math.html: `abs(x)` "Returns the absolute value of x". Single function, correct for both signs. CASE not needed. Oracle ABS→Trino abs mapping correct.
+- **Completeness 5** — directly answers the "single function or CASE-WHEN?" framing, confirms no CASE.
+- **Clarity 5** — minimal, runnable, zero assumed knowledge.
+- **Actionability 5** — copy-paste ready with a sensible alias.
+- **Q1 avg = 5.00 CLEAN**
 
-**THE iter826 DEFECT IS FIXED.** Responder now:
-1. LEADS with the guaranteed-false canonical `COALESCE(bool_or(priority = 'high'), false) AS any_high_priority ... GROUP BY customer_id` — the copy-attractive headline form directly satisfies the all-NULL→FALSE requirement.
-2. CORRECTLY states "when every row has NULL priority bool_or has no non-null values so it returns NULL" and "bare bool_or(priority='high') without COALESCE still returns NULL for all-NULL groups — wrap it."
+### Q2 — three-way sign label (credit/debit/neutral) without nested IF chain
+RESPONDER: searched `CASE WHEN balance_delta>0 THEN 'credit' WHEN <0 THEN 'debit' ELSE 'neutral' END`; IF is two-way shorthand; nested IF shown as valid-but-less-readable alt; cited r23:1130-1132.
+- **Accuracy 5** — VERIFIED conditional.html: searched CASE form correct, first-match semantics; IF(cond,a,b) is the two-way shorthand; nested IF valid. Citation r23:1130-1132 confirmed (the CASE/IF/COALESCE one-line router). sign(x) alternative not required per directive — not penalized.
+- **Completeness 5** — answers the asked 3-way case, addresses the "without a big nested IF chain" concern by recommending CASE and showing the nested-IF alt for contrast.
+- **Clarity 5** — clear branch-by-branch reasoning; explains why CASE over nested IF.
+- **Actionability 5** — runnable, correct alias, directly applicable to a billing label column.
+- **Q2 avg = 5.00 CLEAN**
 
-This is the EXACT reversal of the iter826 headline "bool_or returns FALSE not NULL" defect. Verified aggregate.html: bool_or/bool_and NOT in the count/count_if/max_by/min_by/approx_distinct exception list → ignore NULLs, return NULL for all-NULL/empty group; COALESCE(...,false) forces false. No regression to the bare form as a headline answer.
+### Q3 — replace substring (spaces → dashes)
+RESPONDER: `replace(sku, ' ', '-')`; 3-arg form replaces ALL occurrences; replace() for fixed literal vs regexp_replace() for patterns; Oracle REPLACE→Trino replace identical; cited r27:987.
+- **Accuracy 5** — VERIFIED string.html: `replace(string, search, replace)` "Replaces all instances of search with replace" — replaces ALL, not just first. 'ABC 123 XYZ'→'ABC-123-XYZ' correct. replace-for-literal vs regexp_replace-for-patterns guidance correct. Citation r27:987 confirmed.
+- **Completeness 5** — answers both phrasings (swap substring vs pull-out-and-concat), steers to the simpler replace(), notes the all-occurrences semantics that matter for multi-space SKUs.
+- **Clarity 5** — worked input→output example, clear replace-vs-regexp distinction.
+- **Actionability 5** — copy-paste ready normalization column.
+- **Q3 avg = 5.00 CLEAN**
 
-### Q2 — lowercase a category column — **4.875 CLEAN**
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 4.5 |
-| Actionability | 5 |
-
-`lower(category_name)` verified (string.html: "Converts string to lowercase"). Correctly REPEATS the expression in GROUP BY (`GROUP BY lower(category_name)`) — NOT a SELECT alias — good propagation of the iter824 GROUP-BY-alias fix. Tiny clarity ding only: `SELECT DISTINCT ... GROUP BY lower(...)` stacks DISTINCT atop an identical-expression GROUP BY (one of the two would suffice); both valid Trino, not an error.
-
-### Q3 — current date / timestamp in a dbt model — **5.00 CLEAN**
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-
-Verified datetime.html: `current_timestamp` (no parens) → timestamp(3) with time zone; `current_date` (no parens) → date; `now()` is an alias for current_timestamp (with parens). The no-paren caveat ("not current_timestamp()") is exactly the right gotcha to flag for a SQL-from-other-dialects engineer. SQL-standard no-paren functions confirmed verbatim.
-
-### Q4 — round DOWN to whole number (tier) — **5.00 CLEAN**
-| Dimension | Score |
-|---|---|
-| Accuracy | 5 |
-| Completeness | 5 |
-| Clarity | 5 |
-| Actionability | 5 |
-
-`floor(quality_score)` verified math.html (largest integer ≤ x, toward -inf): 7.83→7, 4.99→4, 9.99→9 correct. Correctly leverages the known CAST-rounds-half-up dialect fact: `CAST(47.89 AS integer)=48`, so `CAST(7.83 AS INTEGER)=8` rounds UP not down → WRONG for round-down. truncate() chops toward zero contrast correctly drawn (differs from floor for negatives). Exactly the right function choice with the right disambiguation.
+### Q4 — tie-aware ranking, ties share rank + next skips (1,2,2,4)
+RESPONDER: `RANK() OVER (PARTITION BY month ORDER BY total_revenue DESC)` over an inner GROUP BY subquery (SUM(amount) per rep per month); RANK ties+skip (1,2,2,4); DENSE_RANK no gap (1,2,2,3); ROW_NUMBER strictly increasing; cited r07:3579-3585.
+- **Accuracy 5** — VERIFIED window.html: RANK() = "one plus the number of rows preceding that are not peer" → gaps (1,2,2,4); DENSE_RANK no gaps (1,2,2,3); ROW_NUMBER unique sequential. Inner GROUP BY (sales_rep_id, DATE_TRUNC('month', order_date)) feeding the window is valid Trino 467 (window evaluated post-aggregation; grouped by input expressions, not aliases — correct). Citation r07:3580-3585 confirmed.
+- **Completeness 5** — picks the correct function for the asked semantics AND disambiguates all three ranking functions so the engineer can choose if requirements shift.
+- **Clarity 5** — explicit 1,2,2,4 vs 1,2,2,3 numeric illustration; subquery clearly structured.
+- **Actionability 5** — full runnable leaderboard query with outer ORDER BY.
+- **Q4 avg = 5.00 CLEAN**
 
 ---
 
-## Verdict
+## Overall: (5.00 + 5.00 + 5.00 + 5.00) / 4 = **5.00 — STRONG PASS**
 
-**Overall average 4.78 — STRONG PASS** (Q1 5.00 / Q2 4.875 / Q3 5.00 / Q4 5.00).
+No per-Q veto needed; overall governs. PASS threshold (3.5) cleared comfortably.
 
-### Boolean-aggregate-NULL: BULLETPROOFED
-The iter827 2nd-touch FIX-A **LANDED**. Q1 is now the **2nd post-fix clean datapoint** (after iter825) AND the **1st clean datapoint specifically on the all-NULL→NULL bare-bool_or angle** that defected at iter826. The class has now been answered correctly from multiple angles:
-- iter825: bool_and(COALESCE(flag,false)) all-approved — CLEAN
-- iter827: COALESCE(bool_or(pred),false) any-high + correct bare-bool_or all-NULL→NULL — CLEAN
+---
 
-The escalation is resolved. **boolean-aggregate-NULL is declared BULLETPROOFED.**
+## Findings
 
-### iter828 directive: DEFAULT NO-OP / durability sweep
-No defects surfaced this iteration. iter828 = **DEFAULT NO-OP durability sweep** (teacher ZERO resource edits). Suggested probes:
-- bool_or/bool_and NULL 3rd durability angle (e.g. `every()` alias framing, or empty-group-from-WHERE-filter → NULL) to confirm the fix holds without churn.
-- 3 fresh adjacent topics (e.g. greatest()/least() NULL handling, coalesce-chain, nullif-to-avoid-div-by-zero).
+- **No defect, no findability slip.** All four answers led with the correct canonical, all SQL is valid Trino 467, all citations (r23:1130-1132, r27:987, r07:3580-3585) are exact and present. Q1 needed no citation (trivially correct built-in).
+- **No prod-env conflict** — all four are pure-SQL questions; no auth/authz/federation surface touched.
+- **Durability confirmed** for four fresh adjacent function-choice angles: abs (magnitude), searched-CASE 3-way (sign labeling), replace (literal substring), RANK family (tie-aware ranking). These reinforce the standing CASE/IF router (r23) and the RANK/DENSE_RANK/ROW_NUMBER pin (r07) without any regression.
 
-PRESERVE all landed fixes: iter827 r23 §3.1 READ-THIS-FIRST all-NULL→NULL block + COALESCE(bool_or(...),false) dominant canonical + r07 boolean-flag-pivot card; iter825 bool_and(COALESCE) canonical; iter824 split_part GROUP-BY-1 + §8 GROUP-BY-alias asymmetry; iter823 repeat-char card; all iter534-826 pins. **NO federation edits** (federation row stays 4.49944/310, margin thin).
+## iter829 directive
 
-No defect → iter828 is NOT a FIX-A.
+**iter829 = DEFAULT NO-OP / durability-breadth sweep** (no open defect surfaced; NOT a FIX-A). Re-probe fresh adjacent 2nd-angle batch, e.g.:
+- `sign(x)` as an alternative to CASE-by-sign (the directive-noted alt for Q2) / nullif + sign interplay.
+- `regexp_replace` with capture-group `$1` (Trino) vs Oracle `\1` — the r27:990 distinction, to confirm the pattern-vs-literal boundary from the other side.
+- DENSE_RANK 1,2,2,3 framing (the no-gap requirement) to bulletproof the RANK family from the dense angle.
+- `abs` over a window/aggregate or `greatest(abs(a),abs(b))` magnitude-compare.
+
+**PRESERVE:** iter827 r23 §3.1 boolean-aggregate-NULL block + COALESCE(bool_or,false) canonical; r23:1118-1132 CASE/IF/COALESCE router; r27:987-990 REPLACE/REGEXP_REPLACE mapping; r07:3571-3585 RANK family card; iter824/823 split_part + GROUP-BY-alias fixes; full iter534-827 pin inventory. **NO federation edits** (margin thin, federation 4.49944/310).
+
+**DO NOT bump training/state.json** (already 828).
