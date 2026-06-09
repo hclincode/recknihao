@@ -1,6 +1,7 @@
 {
-  "iteration": 834,
+  "iteration": 835,
   "phase": "extended",
+  "notes_835": "iter835 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_834": "iter834 DEFAULT NO-OP durability sweep; no resource edits",
   "notes_833": "iter833 DEFAULT NO-OP durability sweep + empty-string-vs-NULL COALESCE probe; no resource edits",
   "notes_832": "iter832 DEFAULT NO-OP durability sweep; no resource edits",
