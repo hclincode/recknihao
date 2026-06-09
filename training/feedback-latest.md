@@ -1,66 +1,58 @@
-# Judge Feedback — iter888 (EXTENDED PHASE)
+# Judge Feedback — iter889 (EXTENDED PHASE)
 
-**Overall: 4.95 STRONG PASS** (per-Q 5.00 / 5.00 / 4.8125 / 5.00 = 19.8125/4 = 4.953; margin +1.45 over the 3.5 threshold; overall average governs, no per-Q veto).
+**Verdict: PASS** — overall average **5.00 / 5** (4 questions, all clean). NO defect surfaced.
+**iter890 recommendation: DEFAULT NO-OP** (zero resource edits; all four answers fully correct and dialect-verified).
 
-**FEDERATION NOT PROBED** this iter — the 4.49944/310 federation row is UNCHANGED. All 4 questions were general Trino 467 SQL-function dialect probes (array/string/math). **All 4 dialect-clean → iter889 DEFAULT NO-OP.**
-
-Every responder claim VERIFIED against trino.io/docs/467 (multi-source: the relevant category page + functions/list.html index), WebFetch 2026-06-10, PIN Trino 467. Per the iter882 lesson, I did NOT flag any correct claim as a defect — each was confirmed against the authoritative source first.
-
----
-
-## Q1 — array membership in WHERE without UNNEST — **5.00** (Acc 5 / Comp 5 / Clar 5 / Act 5)
-
-Responder: `WHERE contains(roles, 'admin')` (boolean membership, case-sensitive exact match); case-insensitive via `contains(transform(roles, x -> lower(x)), lower('admin'))`.
-
-VERIFIED vs trino.io/docs/467 functions/array.html (+ list.html C/T index):
-- `contains(x, element) -> boolean` — verbatim "Returns true if the array `x` contains the `element`." Element membership, boolean result — CORRECT.
-- `transform(array(T), function(T,U)) -> array(U)` — verbatim "Returns an array that is the result of applying `function` to each element of `array`." So `transform(roles, x -> lower(x))` lowercases each element, and the outer `contains` then does a case-insensitive membership test — CORRECT and idiomatic.
-
-**(a) CONFIRMED**: `contains()` is the right no-UNNEST membership test (boolean) and the `transform`-based case-fold is valid. No defect. No gap.
-
-## Q2 — first char position of 'error' in a string — **5.00** (Acc 5 / Comp 5 / Clar 5 / Act 5)
-
-Responder: `strpos(notes, 'error')` (1-based, 0 if not found); `WHERE strpos(notes,'error') > 0`; 3-arg `strpos(s, sub, -1)` for the LAST occurrence (negative instance counts from the end).
-
-VERIFIED vs trino.io/docs/467 functions/string.html (+ list.html S index):
-- `strpos(string, substring)` — verbatim "Returns the starting position of the first instance of `substring` in `string`. Positions start with `1`. If not found, `0` is returned." 1-based + 0-absent — CORRECT.
-- `strpos(string, substring, instance)` — verbatim "Returns the position of the N-th `instance` of `substring` in `string`. When `instance` is a negative number the search will start from the end of `string`." So `strpos(s, sub, -1)` = LAST occurrence — CORRECT.
-
-**(b) CONFIRMED**: strpos is 1-based / 0-on-absent, and the 3-arg negative-instance counts-from-the-end (−1 = last) form is correct. No defect.
-
-## Q3 — count items in a comma-separated string -> 4 — **4.8125** (Acc 5 / Comp 4.75 / Clar 4.5 / Act 5)
-
-Responder: `cardinality(split(selected_features, ','))` -> 4; mentioned TRIM for spaces but the TRIM framing was muddled (whole-string TRIM vs per-element).
-
-VERIFIED vs trino.io/docs/467 functions/string.html + array.html (+ list.html S/C index):
-- `split(string, delimiter)` — verbatim "Splits `string` on `delimiter` and returns an array." Delimiter is a LITERAL string (the `split(string, delimiter, limit)` overload also exists). For `'export,sso,api,webhooks'` this yields `['export','sso','api','webhooks']`.
-- `cardinality(x) -> bigint` — array element count.
-- `cardinality(split(s, ','))` correctly counts the items — CORE ANSWER CORRECT (returns 4).
-
-Minor deductions (NOT defects):
-- **Clarity (4.5)**: the TRIM remark is genuinely muddled — a single `TRIM` on the whole string trims only the outer ends, not per-element spaces (e.g. `'a, b, c'` would need a per-element transform like `transform(split(s,','), x -> trim(x))`, not a whole-string TRIM). The core answer is unaffected because the question's input has no spaces, but the aside is loosely worded.
-- **Completeness (4.75)**: edge cases unstated — empty string `''` -> `split` gives `['']` cardinality **1** (not 0); trailing comma `'a,b,'` -> `['a','b','']` cardinality **3**. As the run-prompt directs, these are completeness nuances only; the core answer is correct.
-
-**(c) CONFIRMED**: `cardinality(split(s, ','))` is the correct item-count construction. No defect — only a clarity nit (TRIM aside) and an edge-case completeness nuance.
-
-## Q4 — sign function to tag positive/negative/zero — **5.00** (Acc 5 / Comp 5 / Clar 5 / Act 5)
-
-Responder: `sign(score)` returns 1 (n>0) / -1 (n<0) / 0 (n=0); `CASE sign(score) WHEN 1 THEN 'positive' WHEN -1 THEN 'negative' WHEN 0 THEN 'zero' END`; works on any numeric type.
-
-VERIFIED vs trino.io/docs/467 functions/math.html (+ list.html S index):
-- `sign(x)` EXISTS — "signum function of x": returns **0 if argument is 0, 1 if greater than 0, -1 if less than 0**. CORRECT.
-- Floating-point additional behavior (doc verbatim): "-0 if the argument is -0, NaN if the argument is NaN, 1 if the argument is +Infinity, -1 if the argument is -Infinity." So for a `double` NaN, `sign(NaN) = NaN` — an edge nuance the run-prompt already flagged; not relevant to the integer/normal-value tagging use case.
-- For a double column `sign` returns a double `1.0/-1.0/0.0`; the `CASE ... WHEN 1 ...` integer-literal comparison coerces fine (numeric comparison), so the responder's CASE works on any numeric type — CORRECT.
-
-**(d) EXPLICITLY CONFIRMED: `sign()` EXISTS in Trino 467 and returns 1 / -1 / 0 for positive / negative / zero respectively.** The responder's CASE-on-sign tagging is correct. (Double NaN -> NaN is the only edge nuance, outside the normal-value use case and noted in the prompt.) No defect.
+**FEDERATION NOT PROBED** this iter — the 4.49944/310 federation row is UNCHANGED. All 4 questions were general Trino 467 SQL-pattern probes (date truncation, ROW_NUMBER latest-per-group, EXTRACT/year/month, mode-per-group). State pinned: Trino 467, Iceberg connector, Hive Metastore, on-prem MinIO/k8s (per prod_info.md). No auth/federation/prod-stack fit concerns.
 
 ---
 
-## iter889 RECOMMENDATION: **DEFAULT NO-OP**
+## Verification performed (trino.io/docs/467, multiple sources)
 
-All 4 answers dialect-clean and verified against trino.io/docs/467 (array/string/math .html + functions/list.html index), PIN 467. No defect surfaced; no FIX-A; no escalation; teacher ZERO edits.
+- **datetime.html** — `date_trunc('day', TIMESTAMP '2022-10-20 05:10:00') -> 2022-10-20 00:00:00.000` (truncates to midnight). `extract(field FROM x) -> bigint`, `extract(YEAR FROM ...) -> 2022`. `year(x) -> bigint` "Returns the year from x", `month(x) -> bigint` "Returns the month of the year from x".
+- **aggregate.html** — NO `mode()` aggregate listed (confirmed absent). `max_by(x, y) -> [same as x]` "Returns the value of x associated with the maximum value of y over all input values." (docs annotate no literal-only/const restriction on y).
+- **window.html** — `row_number() -> bigint` "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition." Frame must not be specified.
+- **sql/select.html** — supported clauses: WITH/SELECT/FROM/WHERE/GROUP BY/HAVING/WINDOW/set-ops/ORDER BY/OFFSET/LIMIT. The token **QUALIFY does NOT appear** — confirmed NOT supported in Trino 467; subquery/CTE nesting required to filter on a window result.
+- ROW comparability: types.html does not spell it out, but ROW values are orderable/comparable when all fields are comparable — established Trino behavior; `ROW(cnt, tag)` orders by cnt then tag. Not a defect.
 
-- Do NOT add any "wrong" card for Q1–Q4 — every form (`contains`/`transform`, `strpos` 1-based + negative-instance, `cardinality(split())`, `sign()`) is correct.
-- Do NOT flag the correct Q3 `cardinality(split())` or Q4 `sign()` claims as defects (iter882 lesson — verified against source first).
-- OPTIONAL findability micro-polish only (skip if it churns any pin): a neutral 1-line anchor such as "count CSV items = `cardinality(split(s,','))` (empty string -> 1, trailing comma counts the empty tail); per-element trim needs `transform(split(s,','), x->trim(x))` not a whole-string TRIM" near a string/split card, and "`sign(x)` -> 1/-1/0 (double: NaN->NaN); CASE on sign() to tag positive/negative/zero" near a math card.
-- Do NOT touch any iter534–887 pin. NO federation edits. **DO NOT bump training/state.json (already passed).**
+---
+
+## Per-question scoring (Accuracy / Completeness / Clarity / Actionability)
+
+### Q1 — distinct active calendar days per user per month
+`COUNT(DISTINCT date_trunc('day', created_at))` with a half-open month range and `GROUP BY user_id`.
+- Correct: date_trunc('day') -> midnight, so DISTINCT collapses many same-day events to one day. Warning that `COUNT(DISTINCT created_at)` on raw timestamps counts events not days is accurate and valuable. Half-open `>= DATE '2026-06-01' AND < '2026-07-01'` is the sargable, partition-prunable, boundary-safe idiom.
+- Scores: **5 / 5 / 5 / 5 → 5.00**
+
+### Q2 — most recent contact per customer BEFORE a cutoff (no self-join)
+`ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY last_contacted_at DESC)`, inner `WHERE last_contacted_at < cutoff`, outer `WHERE rn=1`.
+- Correct: filtering pre-cutoff in the inner query then taking rn=1 yields the latest qualifying row per customer. Correctly flags that Trino 467 has NO QUALIFY, so the window must be projected in a subquery/CTE. Verified against the 467 SELECT grammar.
+- Scores: **5 / 5 / 5 / 5 → 5.00**
+
+### Q3 — split a date into year + month integer columns
+`EXTRACT(YEAR FROM created_at)`, `EXTRACT(MONTH FROM created_at)`; equivalently `year()/month()`; both bigint.
+- Correct and complete: both syntaxes verified, both return bigint, month is 1–12, suitable for independent GROUP BY. Offering both forms is helpful.
+- Scores: **5 / 5 / 5 / 5 → 5.00**
+
+### Q4 — single most frequent tag per team (mode per group)
+`max_by(tag, cnt)` over an inner `GROUP BY team_id, tag COUNT(*) AS cnt`, outer `GROUP BY team_id`; tie-break via `max_by(tag, ROW(cnt, tag))`.
+- **CRITICAL CHECK CONFIRMED:** Trino 467 has **NO built-in `mode()` aggregate** — responder did NOT fabricate one and correctly reached for `max_by`. `max_by(x, y)` returns x at the max y (verified). The two-stage count-then-pick-max pattern is the canonical mode-per-group idiom. Honest disclosure that plain `max_by(tag, cnt)` breaks ties arbitrarily, with the deterministic `ROW(cnt, tag)` tie-break, is correct (ROW orders by cnt then tag when fields comparable).
+- Scores: **5 / 5 / 5 / 5 → 5.00**
+
+---
+
+## Overall
+
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+
+**Overall average: 5.00 → PASS** (threshold 3.5).
+
+No defect to fix. Per the iter882 lesson, no correct claim was flagged. **iter890: DEFAULT NO-OP.**
+
+### Explicit answer to (d)
+Trino 467 has **NO `mode()` built-in aggregate** (confirmed via aggregate.html). The responder correctly did NOT claim one exists and used `max_by(tag, cnt)` instead — which **is** the correct mode-per-group pattern (count per group, then `max_by` the tag at the max count). The `max_by(tag, ROW(cnt, tag))` tie-break is valid.
