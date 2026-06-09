@@ -1,57 +1,73 @@
-# Judge Feedback — Iter 886 (EXTENDED PHASE)
+# Judge Feedback — iter887 (EXTENDED PHASE)
 
-**Overall: 4.98 STRONG PASS** (per-Q 5.00 / 5.00 / 4.9375 / 5.00 = 19.9375 / 4 = 4.984; margin +1.48 over the 3.5 threshold; overall average governs, no per-Q veto).
+**Overall: 4.94 STRONG PASS** (per-Q averages 5.00 / 5.00 / 4.75 / 5.00 = 19.75 / 4 = 4.9375; margin +1.44 over 3.5 threshold; overall average governs, no per-Q veto).
 
-**FEDERATION NOT PROBED** this iteration — the r22 §13.x federation row stays UNCHANGED at 4.49944/310.
+Verdict: **PASS**. All 4 answers dialect-clean and verified against trino.io/docs/467 + Trino git-tag 467 source. **iter888 recommendation: DEFAULT NO-OP** (no defect surfaced; teacher ZERO edits).
 
-**EXPLICIT (a) — DID THE iter885 FIRST_VALUE SLIP RECUR? NO. The slip did NOT recur. Q1 is now CORRECT (default-frame-safe).** This was a deliberate re-probe of the exact iter885 Q3 defect and the responder handled it correctly. ONE-OFF confirmed, no escalation.
-
----
-
-## Per-question scoring
-
-### Q1 — change since first/baseline (each row's score minus the agent's FIRST recorded score, no self-join) — 5.00
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-Responder used `FIRST_VALUE(satisfaction_score) OVER (PARTITION BY agent_id ORDER BY week) AS first_score` and `satisfaction_score - FIRST_VALUE(...) AS change_since_start`, and stated: *"The window frame default for FIRST_VALUE() is SAFE here — it looks back to the unbounded start of the partition, so the first row's value is always available on every subsequent row."*
-
-**This is CORRECT.** VERIFIED vs trino.io/docs/467 (functions/window.html + the trino.io window-features reference, WebFetch + WebSearch 2026-06-10): the default window frame when ORDER BY is present and no explicit frame is given is `RANGE UNBOUNDED PRECEDING` = `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — *"all rows from the start of the partition up to the last peer of the current row."* Because the frame **starts at UNBOUNDED PRECEDING (the partition start)**, `first_value()` returns the partition's FIRST value on EVERY row of the partition. No explicit frame is needed, and the responder correctly described this.
-
-**Contrast with iter885:** in iter885 Q3 the responder FALSELY claimed FIRST_VALUE needs an explicit `UNBOUNDED FOLLOWING` frame or it returns the current row — that was the LAST_VALUE trap mis-attributed (LAST_VALUE's frame END is CURRENT ROW, so LAST_VALUE alone returns the current row and DOES need the explicit `UNBOUNDED FOLLOWING`). This iter the responder correctly distinguished the two: FIRST_VALUE reads the frame START (anchored at partition start) and is safe with the default frame. The correct mental model is now in place. **Slip did NOT recur.**
-
-Also correctly satisfied the "no self-join" constraint by using the window function instead of a self-join against MIN(week).
-
-### Q2 — split total minutes into hours + leftover minutes (quotient AND remainder) — 5.00
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-Responder: `minutes / 60 AS hours`, `minutes % 60 AS leftover_minutes`, and `format('%dh %dm', m/60, m%60)` → `'2h 15m'`.
-
-**CORRECT.** VERIFIED vs trino.io/docs/467 functions/math.html: the operators table states `/` is *"Division (integer division performs truncation)"* and `%` is *"Modulus (remainder)"*. For integer operands, `135 / 60 = 2` (quotient) and `135 % 60 = 15` (remainder). `format('%dh %dm', ...)` is the valid Java-Formatter printf-style form (conversion.html / format()). Quotient/remainder both correct.
-
-### Q3 — convert wind degree 0–360 to 8-point compass label (N/NE/E/SE/S/SW/W/NW) — 4.9375
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 4.75 / Actionability 5.
-
-Responder: `CASE WHEN wind_degree >= 337.5 OR wind_degree < 22.5 THEN 'N' WHEN >=22.5 AND <67.5 THEN 'NE' ... WHEN >=292.5 AND <337.5 THEN 'NW' ELSE 'Unknown' END`; noted there is no built-in compass function so a searched CASE is the right approach.
-
-**CORRECT.** This is general ANSI/Trino-valid SQL (searched CASE with numeric range bands; no dialect issue). The 8-point boundary math is sound: 8 sectors × 45° = 360°, each sector centered on its cardinal/intercardinal heading with ±22.5° half-width. N wraps the 0/360 seam (`>= 337.5 OR < 22.5`); the remaining seven sectors are contiguous half-open bands (`[22.5,67.5)` NE, `[67.5,112.5)` E, `[112.5,157.5)` SE, `[157.5,202.5)` S, `[202.5,247.5)` SW, `[247.5,292.5)` W, `[292.5,337.5)` NW). No gaps, no overlaps. Half-open intervals correctly avoid double-classifying boundary values.
-
-Minor clarity nit only (NOT a defect): for a strictly valid 0–360 domain the `ELSE 'Unknown'` arm is unreachable, so it functions as a defensive guard for out-of-range/NULL input — fine to keep, and a one-line note that it only triggers on bad data would have been a small polish. Does not affect correctness.
-
-### Q4 — remove fully-identical duplicate rows (every column matches → keep one) — 5.00
-Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
-
-Responder: `SELECT DISTINCT * FROM events;` explained DISTINCT operates on the entire row; plus a `ROW_NUMBER() OVER (PARTITION BY <all columns> ...)` variant for keeping first/last.
-
-**CORRECT.** VERIFIED vs trino.io/docs/467 sql/select.html: `SELECT DISTINCT *` performs whole-row distinct and removes fully-duplicate rows (each output column must be of a comparable type, which holds for ordinary scalar columns). The `ROW_NUMBER()` partition-by-all-columns dedup variant is the right tool when a deterministic single-survivor with first/last semantics is wanted (and correctly requires a subquery/CTE wrapper since window functions can't go in WHERE and there is no QUALIFY in 467). Both forms accurate.
+Federation NOT probed this iteration — the r22 §13.x federation row (4.49944/310) is UNCHANGED.
 
 ---
 
-## iter887 recommendation: DEFAULT NO-OP
+## Q1 — group events by hour (truncate '2024-03-15 14:37:22' → '2024-03-15 14:00:00')
 
-All four answers are dialect-clean and correct; the targeted FIRST_VALUE default-frame slip did NOT recur (the responder now correctly states FIRST_VALUE is safe with the default frame because the frame starts at UNBOUNDED PRECEDING). The existing resources/07 Pattern B3 card (first_value "Safe with the default frame — frame starts at UNBOUNDED PRECEDING"; last_value "Returns the CURRENT row's value ... MUST set the frame explicitly") is ALREADY CORRECT and was validated in practice this iter — **do NOT churn it, do NOT mark it defective** (per the iter882 lesson: do not flag/repair correct content). NO FIX-A, NO escalation, teacher ZERO edits.
+Responder: `DATE_TRUNC('hour', event_ts) AS hour_bucket ... GROUP BY DATE_TRUNC('hour', event_ts)`; drops minutes/seconds, return type still a timestamp.
 
-Optional micro-polish only (skip if it churns a pin): a 1-line findability anchor on B3's first_value row such as "change since first / baseline delta / FIRST_VALUE default frame is safe" — purely a findability nudge, not required given the responder already answered correctly without it.
+VERIFIED vs trino.io/docs/467/functions/datetime.html: `date_trunc(unit, x) → [same type as input]`, "Returns x truncated to unit"; truncating to `hour` sets minutes/seconds/millis to zero (doc example `2001-08-22 03:04:05.321` → `2001-08-22 03:00:00.000`). Return type = same as input (timestamp). GROUP BY the same expression is valid. CORRECT.
 
-Do NOT touch any iter534–885 pin. PIN Trino 467. NO federation edits. DO NOT bump training/state.json (already passed).
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+- Defect: none.
 
-All facts VERIFIED vs trino.io/docs/467 (functions/window.html, functions/math.html, sql/select.html) + trino.io window-features reference, WebFetch + WebSearch 2026-06-10.
+## Q2 — convert integer 1/0 column to a real boolean (CRITICAL verification)
+
+Responder: `CAST(is_active AS boolean)`; CAST(1 AS boolean)→true, CAST(0 AS boolean)→false, **any other (nonzero) integer → true**; `CAST(COALESCE(is_active,0) AS boolean)` for NULL-as-false.
+
+**(b) EXPLICIT CONFIRMATION: CAST(integer AS boolean) IS VALID in Trino 467, and nonzero → true is CORRECT.**
+The docs page (functions/conversion.html) does not enumerate numeric→boolean, so I verified against the **Trino git-tag 467 source**:
+- `core/trino-main/.../io/trino/type/IntegerOperators.java`: `@ScalarOperator(CAST) @SqlType(BOOLEAN) public static boolean castToBoolean(@SqlType(INTEGER) long value) { return value != 0; }`
+- `core/trino-main/.../io/trino/type/BigintOperators.java`: identical `castToBoolean(... BIGINT ...) { return value != 0; }`
+
+So `CAST(0 AS boolean) = false`, `CAST(1 AS boolean) = true`, and `CAST(5 AS boolean)` (or any nonzero int/bigint) `= true`. The responder's "any other integer → true" claim is **exactly accurate** — NOT a defect; do NOT flag it. The COALESCE(...,0) NULL-as-false idiom is correct (NULL → 0 → false). The "CAST(true AS boolean) is the identity / CAST(false AS boolean) returns false" aside is harmless filler (boolean→boolean is trivially the identity), not a defect.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+- Defect: none.
+
+## Q3 — average length of strings in a text column (data profiling)
+
+Responder: `AVG(length(company_name)) AS avg_name_length`; length() returns bigint char count, AVG produces double; GROUP BY segment variant.
+
+VERIFIED vs trino.io/docs/467/functions/string.html: `length(string) → bigint`, "Returns the length of string in characters" (character count, not bytes). AVG over a bigint yields a double. GROUP BY segment variant valid. CORRECT.
+
+- Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 4.5 → **avg ≈4.75**
+- Minor completeness nit (NOT a defect): NULL names are excluded from AVG's denominator (AVG skips NULLs); `length` counts characters/code points not bytes (use `length(CAST(s AS varbinary))` for bytes). A one-liner on each would round the answer out, but the core profiling answer is fully correct. Tiny incompleteness only; does not affect PASS.
+
+## Q4 — price spread = max minus min per product category
+
+Responder: `MAX(price) AS highest, MIN(price) AS lowest, MAX(price)-MIN(price) AS price_spread ... GROUP BY product_category`; aggregates side-by-side, no subquery, single scan.
+
+VERIFIED vs trino.io/docs/467/functions/aggregate.html: `max(x)` "Returns the maximum value of all input values", `min(x)` "Returns the minimum value of all input values". Both are standard aggregates; inline `MAX(price)-MIN(price)` in the same SELECT with `GROUP BY product_category` is valid (arithmetic on two aggregates over the same group, single scan, no subquery needed). CORRECT.
+
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+- Defect: none.
+
+---
+
+## Summary
+
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|-----|------|------|-----|-----|
+| Q1 date_trunc('hour') | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 CAST(int AS boolean) | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 AVG(length()) | 5 | 4.5 | 5 | 4.5 | 4.75 |
+| Q4 MAX-MIN spread | 5 | 5 | 5 | 5 | 5.00 |
+
+**Overall average = 4.9375 → STRONG PASS.**
+
+## iter888 recommendation: DEFAULT NO-OP
+
+All four answers are correct and verified. No defect, no FIX-A, no escalation. Teacher ZERO edits.
+- Do NOT add any "wrong" card for Q1–Q4. Do NOT defect-mark any existing card (iter882 lesson: do not flag a correct claim).
+- Per iter882, I verified each claim against an authoritative source (docs + git-tag 467) BEFORE concluding clean — the Q2 nonzero→true claim is confirmed by source, not flagged.
+- Optional findability micro-polish only (skip if it churns a pin): a neutral anchor such as "CAST(int/bigint AS boolean): 0=false, any nonzero=true; date_trunc('hour',ts) keeps timestamp type; AVG(length(col)) = avg char count; MAX(price)-MIN(price) = spread per group".
+- PIN Trino 467. NO federation edits. DO NOT bump training/state.json (already passed).
+
+Verification sources: trino.io/docs/467 functions/datetime.html, functions/string.html, functions/aggregate.html, functions/conversion.html; Trino git-tag 467 source io/trino/type/IntegerOperators.java + BigintOperators.java (castToBoolean = `value != 0`). WebFetch+WebSearch 2026-06-10.

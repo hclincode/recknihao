@@ -1,6 +1,7 @@
 {
-  "iteration": 886,
+  "iteration": 887,
   "phase": "extended",
+  "notes_887": "iter887 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_886": "iter886 NO-OP durability sweep — zero edits; re-probe FIRST_VALUE-default-frame (test slip recurrence) + 3 fresh adjacents.",
   "notes_885": "iter885 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_884": "iter884 NO-OP durability sweep — zero edits; 4 fresh adjacent probes into untested territory.",
