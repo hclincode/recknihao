@@ -1,83 +1,81 @@
-# Judge Feedback — iter876 (EXTENDED PHASE)
+# Judge Feedback — iter877 (EXTENDED PHASE)
 
-**Overall: 4.97 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.875 = 19.875/4 = 4.96875; margin +1.47; overall avg governs, no per-Q veto)
-**Federation NOT probed** (4.49944/310 row UNCHANGED).
-**Verdict drivers:**
-- (a) **iter876 gaps-and-islands FIX-A LANDED CLEAN.** The iter875 Q3 defect (1.81) is GONE. Responder now emits the correct **3-LAYER** form — Layer1 LAG gap-flag + DISTINCT dedup, Layer2 `SUM(is_new_streak) OVER (...)` streak_id in its OWN CTE, Layer3 `GROUP BY user_id,streak_id COUNT(*)` then outer `GROUP BY user_id MAX`. **No nested window function, no double-GROUP-BY.** Responder also explicitly STATES the rule: you cannot nest a window function inside another window's PARTITION BY/ORDER BY — each window must be materialized in its own CTE.
-- (d) **Both Q4 15-minute bucketing forms are VALID Trino 467 and equivalent.** FORM A (`%` on double epoch) and FORM B (`bigint * INTERVAL '1' MINUTE`) both verified against 467 source.
+**Overall: 4.84 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.375 = 19.375 / 4 = 4.84375; margin +1.34 over the 3.5 bar; overall average governs — no per-Q veto.)
 
-All dialect facts VERIFIED vs trino.io/docs/467 (functions/window.html, sql/select.html, functions/datetime.html, functions/math.html) + **git-tag 467 source** (ExpressionAnalyzer.java NESTED_WINDOW; DoubleOperators.java MODULUS; IntervalDayTimeOperators.java MULTIPLY) + WebSearch, 2026-06-10. Trino 467 PINNED.
+**FEDERATION NOT PROBED** — the 4.49944/310 federation row is UNCHANGED this iter (all 4 questions are analytical-SQL / Trino-dialect, no cross-source connector content).
+
+All dialect facts VERIFIED against trino.io/docs/467 (sql/select.html, functions/json.html, functions/window.html, functions/conversion.html) + the Trino "Introducing new window features" blog + WebSearch (Athena/Trino recursion-depth error text) on 2026-06-10. Trino 467 PINNED throughout.
 
 ---
 
-## Q1 — Personal-best workout streak (longest run of consecutive days per user, gaps-and-islands) — 5.00
+## Q1 — Longest run of consecutive SUBSCRIBED MONTHS per customer (gaps-and-islands) — 5.00
 
-Responder used the 3-LAYER form:
-- Layer1: `CASE WHEN date_diff('day', LAG(completion_date) OVER (PARTITION BY user_id ORDER BY completion_date), completion_date) = 1 THEN 0 ELSE 1 END AS is_new_streak` over `SELECT DISTINCT user_id, completion_date`.
-- Layer2: `SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY completion_date) AS streak_id` — in its own CTE.
-- Layer3: `MAX(streak_len)` over `(COUNT(*) AS streak_len GROUP BY user_id, streak_id)`, `GROUP BY user_id`.
+Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
 
-VERIFICATION (this is the iter875 Q3 1.81 DEFECT re-probe — the FIX):
-- **VALID Trino, no NESTED_WINDOW.** git-tag 467 `ExpressionAnalyzer.analyzeWindow` extracts a window's PARTITION BY / ORDER BY / frame child expressions and, if any is itself a window expression, throws `semanticException(NESTED_WINDOW, …, "Cannot nest window functions or row pattern measures inside window specification")`. The 3-layer form never places a window fn inside another window's OVER — Layer2's `SUM(...) OVER` consumes Layer1's *materialized* `is_new_streak` column. Clean.
-- **No double-GROUP-BY.** Each query level has exactly one GROUP BY (Layer3 inner `GROUP BY user_id,streak_id`; outer `GROUP BY user_id`). The iter875 parse-error draft is gone.
-- **Algorithm correct.** `date_diff('day', LAG(...), d)` → bigint (datetime.html); on the first row LAG is NULL → `date_diff` NULL → `NULL = 1` is not TRUE → ELSE branch → flagged as a new streak (correct boundary). Running SUM of the flag assigns a monotonic streak_id; consecutive days share an id; COUNT per (user,streak_id) = streak length; MAX per user = longest streak. Textbook gaps-and-islands.
-- `DISTINCT user_id, completion_date` correctly collapses multiple same-day completions so a busy day doesn't break the +1 logic.
-- **Rule stated explicitly** — responder articulates the no-nested-window rule and the must-materialize-each-window-in-a-CTE requirement.
+The responder emitted the correct **3-LAYER** gaps-and-islands form:
+- **Layer 1** — `CASE WHEN date_diff('month', LAG(subscription_month) OVER (PARTITION BY customer_id ORDER BY subscription_month), subscription_month) = 1 THEN 0 ELSE 1 END AS is_new_streak` over a `SELECT DISTINCT customer_id, subscription_month` dedup.
+- **Layer 2** — `SUM(is_new_streak) OVER (PARTITION BY customer_id ORDER BY subscription_month) AS streak_id` in its OWN layer.
+- **Layer 3** — inner `COUNT(*) AS streak_len GROUP BY customer_id, streak_id`, outer `MAX(streak_len) GROUP BY customer_id`.
 
-Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**. **FIX LANDED — no escalation.**
+And it explicitly stated Trino does NOT allow nesting window functions, so each window goes in its own layer.
 
-## Q2 — User IDs in BOTH subscriptions and trial_users (converted users) — 5.00
+VERIFIED: (1) No nested window function (NESTED_WINDOW would throw — git-tag 467 `ExpressionAnalyzer.analyzeWindow`/`extractWindowExpressions`, pinned iter875/876). (2) Exactly one GROUP BY per query level (no double-GROUP-BY parse error). (3) `date_diff('month', earlier, later) = 1` is the correct month-granularity gap flag (`date_diff(unit, ts1, ts2) -> bigint`, NULL on the first row's LAG so the first month flags as a new streak — datetime.html, pinned iter876). The month-granularity variant behaves identically to the day variant validated at iter876.
 
-`SELECT user_id FROM trial_users INTERSECT SELECT user_id FROM paid_subscriptions`; noted INTERSECT dedups + is NULL-safe (unlike NOT IN); gave INNER JOIN + DISTINCT alternative.
+**This is the 2nd CLEAN datapoint for the gaps-and-islands FIX-A (iter876 day-granularity, iter877 month-granularity). The fix is BULLETPROOFED — no regression, no escalation needed.**
 
-VERIFIED vs sql/select.html: "INTERSECT returns only the rows that are in the result sets of both"; default mode is DISTINCT ("If neither is specified, the behavior defaults to DISTINCT"). Both-in + dedup correct. The NULL-safety contrast with `NOT IN` is accurate and a genuinely useful pointer. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**.
+## Q2 — 7-day moving average of daily events per user, one pass — 5.00
 
-## Q3 — Latest version of each row from a CDC Iceberg table (multiple upsert rows per id) — 5.00
+Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
 
-`SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY updated_at DESC) AS rn FROM customers) WHERE rn = 1`; noted it beats the max-timestamp subquery-join.
+Responder: pre-aggregate to one-row-per-day-per-user in a CTE (`COUNT(*) AS daily_events GROUP BY user_id, event_date`), then `AVG(daily_events) OVER (PARTITION BY user_id ORDER BY event_date RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)`.
 
-VERIFIED vs window.html: `row_number()` "Returns a unique, sequential number for each row … according to the ordering of rows within the window partition." PARTITION BY key + ORDER BY updated_at DESC + outer `WHERE rn=1` = latest-row-per-key. Subquery wrap is required (window fns can't appear in WHERE; no QUALIFY in 467) — responder did exactly that. Correct. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 = **5.00**.
+VERIFIED:
+- **Trino 467 SUPPORTS `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`** over a date/timestamp ORDER BY column. RANGE-with-offset was added in Trino 346 (issue #609, "Introducing new window features" blog shows `RANGE BETWEEN INTERVAL '1' MONTH PRECEDING AND CURRENT ROW`); present and stable in 467. The sort key must be a single sortable (numeric/datetime) column and the offset an interval that can be added/subtracted from it — exactly the responder's shape.
+- The **ROWS-vs-RANGE distinction is accurate**: `ROWS BETWEEN 6 PRECEDING` counts physical rows and would (a) count 6 EVENTS not 6 days if applied to raw per-event rows, and (b) shift the window when calendar days are missing; `RANGE … INTERVAL '6' DAY` is calendar-value-aware and includes all rows within 6 days regardless of how many physical rows exist.
+- The **pre-aggregate-first reasoning is correct** — collapsing to daily grain before windowing is the right (and necessary) move to get a day-based moving average.
 
-## Q4 — Count webhook events per 15-minute bucket — 4.875
+No defect.
 
-Responder gave TWO forms and claimed both produce the same result.
+## Q3 — Recursive traversal of a product-category parent-child tree — 5.00
 
-**FORM A (epoch floor):** `from_unixtime(to_unixtime(event_timestamp) - to_unixtime(event_timestamp) % 900) AS window_start`.
-- `to_unixtime(ts)` → **double** (datetime.html). `%` on DOUBLE operands is VALID — git-tag 467 `DoubleOperators` has `@ScalarOperator(MODULUS) double modulus(double left, double right){ return left % right; }`. Subtracting the remainder floors epoch seconds to a 900s (15-min) boundary. `from_unixtime(double)` → `timestamp(3) with time zone`. **Floors correctly.** 900 = 15·60 is right.
-- Minor type note (not dinged into accuracy): FORM A returns `timestamp with time zone` while the input column is likely plain `timestamp`; boundaries are UTC-epoch-anchored. Doesn't change bucket assignment, but a one-line "FORM A yields a tz-timestamp" note would have been ideal.
+Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
 
-**FORM B (interval):** `date_trunc('minute', event_timestamp) - (EXTRACT(minute FROM event_timestamp) % 15) * INTERVAL '1' MINUTE`.
-- `date_trunc('minute', ts)` → same type as input, seconds zeroed (datetime.html). `EXTRACT(minute FROM ts)` → **bigint** (extract → bigint). `% 15` → bigint. **`bigint * INTERVAL '1' MINUTE` is VALID** — git-tag 467 `IntervalDayTimeOperators` defines all four MULTIPLY orderings: `multiplyByBigint(interval,bigint)`, `multiplyByDouble(interval,double)`, `bigintMultiply(bigint,interval)`, `doubleMultiply(double,interval)`. The responder's `bigint * INTERVAL` hits `bigintMultiply`. `timestamp - interval` → timestamp. **Floors to :00/:15/:30/:45 correctly.**
-- Responder's claim "EXTRACT(minute…) returns BIGINT so % works without a cast" is **CORRECT**.
+Responder: `WITH RECURSIVE category_tree` (base `WHERE category_id = ?`; recursive `JOIN categories c ON c.parent_category_id = t.category_id WHERE t.depth < 50`) then join products. Claimed (1) WITH RECURSIVE is EXPERIMENTAL in Trino 467, (2) `max_recursion_depth` defaults to 10 and ERRORS when exceeded, settable via `SET SESSION max_recursion_depth = 50`, (3) the base UNION ALL recursive form.
 
-**Equivalence:** both floor to the same 15-min boundary; equivalent for bucketing/GROUP BY (FORM A carries a tz-timestamp result type, the only difference, immaterial to counts). Claim holds.
+VERIFIED — **all three claims ACCURATE, NOT over-cautious**:
+- **(c) WITH RECURSIVE IS experimental in Trino 467.** sql/select.html states verbatim: *"This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload."* The responder's "experimental / not yet production-stable" framing is CORRECT, not over-cautious.
+- **max_recursion_depth DEFAULT IS 10.** Docs verbatim: *"recursion depth is fixed, defaults to 10, and doesn't depend on the actual query results"* and *"You can adjust the recursion depth with the session property max_recursion_depth."*
+- **Exceeding the depth ERRORS — it does NOT silently truncate.** The Trino/Athena (Trino-engine) error confirmed via WebSearch: `NOT_SUPPORTED: Recursion depth limit exceeded (10). Use 'max_recursion_depth'`. The responder's "errors when exceeded" is CORRECT.
+- The recursive-CTE syntax (anchor SELECT `UNION ALL` recursive SELECT referencing the CTE) is correct Trino. The `WHERE t.depth < 50` guard plus `SET SESSION max_recursion_depth = 50` is exactly the right safety pairing.
 
-Only ding: completeness — the tz-timestamp result-type shift in FORM A is unmentioned, and the simpler canonical `from_unixtime(floor(to_unixtime(ts)/900)*900)` isn't offered. Both forms WORK, so this is a nuance, not a defect.
+No defect.
 
-Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 = **4.875**.
+## Q4 — One JSON object per customer (total_orders / total_spend / avg_order_value) for a downstream API — 4.375
+
+Sub-scores: Accuracy 5 / **Completeness 3.5** / Clarity 4.5 / Actionability 4.5.
+
+Responder: `CAST(MAP(ARRAY['total_orders','total_spend','average_order_value'], ARRAY[CAST(COUNT(DISTINCT order_id) AS VARCHAR), CAST(SUM(amount) AS VARCHAR), CAST(AVG(amount) AS VARCHAR)]) AS JSON) AS customer_stats`; `json_format(CAST(... AS JSON))` for a VARCHAR string; warned that `CAST(map AS VARCHAR)` gives the non-JSON debug form `{k=v}` and not to hand-roll JSON.
+
+VERIFIED:
+- **MAP→JSON object is CORRECT.** json.html verbatim: `CAST(MAP(ARRAY['k1','k2','k3'], ARRAY[1,23,456]) AS JSON)` -> `JSON '{"k1":1,"k2":23,"k3":456}'`. MAP→JSON requires VARCHAR keys (satisfied). `json_format(...)` for the VARCHAR string and the `{k=v}` debug-form trap are both correct (matches the r09 LEADING CANONICAL card at L757-786).
+- **(d) json_object / json_array DO EXIST in Trino 467** as SQL/JSON constructors — `JSON_OBJECT(key VALUE value [, ...] [NULL ON NULL | ABSENT ON NULL] [RETURNING type])` and `JSON_ARRAY(...)` (functions/json.html). `json_object('total_orders' VALUE count(...), 'total_spend' VALUE sum(...), 'avg_order_value' VALUE avg(...))` builds the SAME object WHILE PRESERVING NUMERIC TYPES.
+
+**COMPLETENESS NUANCE (the only ding):** the responder's all-VARCHAR MAP forces every value through `CAST(... AS VARCHAR)`, so the downstream API receives `"total_spend":"1250.50"` (quoted string) instead of numeric `"total_spend":1250.50`. Because MAP requires a SINGLE homogeneous value type, you genuinely cannot mix INT + DECIMAL + DOUBLE in one MAP→JSON — so stringifying is an inherent MAP limitation. BUT `json_object(... VALUE ...)` has no homogeneity constraint and preserves each value's native JSON type. Since json_object EXISTS in 467 and is the type-preserving idiom an API consumer usually wants, NOT mentioning it is a real (minor) completeness miss — hence Completeness 3.5. The answer still WORKS (valid JSON, correct keys); the values are just quoted numbers.
+
+**NOTE on the question's ROW→JSON premise:** the prompt asserted `CAST(ROW(...) AS JSON)` "produces a JSON ARRAY (loses field names)." This is OUTDATED for Trino 467. Verified on functions/json.html (467): `CAST(CAST(ROW(123,'abc',true) AS ROW(v1 BIGINT, v2 VARCHAR, v3 BOOLEAN)) AS JSON)` -> `JSON '{"v1":123,"v2":"abc","v3":true}'` — a NAMED ROW casts to a JSON OBJECT with field names; only an ANONYMOUS ROW casts to an array. (Field-name-losing array behavior was true in old Presto/Trino <=~352 — changed since ~370.) This does NOT affect the responder's score (it used MAP and made no ROW→array claim), and the r09 card already documents this correctly (L772-774). Flagged only to keep the run-prompt premise from propagating into a future directive.
 
 ---
 
-## Overall
+## iter878 recommendation
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 streak (gaps-and-islands FIX) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 INTERSECT | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 ROW_NUMBER latest-per-key | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 15-min bucketing (2 forms) | 5 | 4.5 | 5 | 5 | 4.875 |
+**DEFAULT NO-OP with an OPTIONAL LIGHT FIX-A.** Three of four answers are flawless (5.00) and the gaps-and-islands FIX is now bulletproofed (2nd clean datapoint). The only blemish is the Q4 completeness nuance.
 
-**Overall = 19.875 / 4 = 4.96875 → STRONG PASS** (margin +1.47).
+- **OPTIONAL FIX-A (Q4 only):** In the r09 `CAST(map/array/row AS JSON)` LEADING CANONICAL card (resources/09-lakehouse-schema-design.md, L757-786), ADD a short note that for a **type-preserving** JSON object (numbers stay numeric for a downstream API) the SQL/JSON constructor `json_object('total_orders' VALUE count(...), 'total_spend' VALUE sum(...), 'avg_order_value' VALUE avg(...))` is the idiom, and contrast it with the all-VARCHAR MAP→JSON which stringifies values due to MAP's homogeneous-value-type requirement. Keep the existing MAP→JSON canonical (it is correct and the best answer when stringified values are acceptable). FENCE all SQL (pipe-escape trap). Keyword anchors: json_object Trino, type-preserving JSON object, numbers not quoted in JSON, build JSON object per row preserving numeric types, json_object VALUE constructor, SQL/JSON object constructor.
+- **DO NOT** touch the iter876 B-Streak card, the iter875 reconciliation card, or any iter534-876 pin. The Q1/Q2/Q3 forms are all dialect-clean — add no "wrong" cards for them.
+- **NO escalation.** No regression surfaced.
 
-**(a) Q1 gaps-and-islands FIX-A: LANDED CLEAN.** Valid 3-layer form, no nested window, no double GROUP BY, rule stated. No escalation to iter877.
-**(d) Q4 both bucketing forms: VALID Trino 467 and equivalent.** `%` on double (FORM A) and `bigint * INTERVAL` (FORM B) both source-verified.
+PIN Trino 467. NO federation edits. DO NOT bump training/state.json.
 
-## iter877 recommendation — DEFAULT NO-OP
-
-All 4 answers dialect-clean. The iter876 FIX-A (r07 3-layer streak card / NESTED_WINDOW rule) is confirmed working on its first re-probe; the gaps-and-islands topic should be re-probed once more from a 2nd phrasing (e.g. "longest consecutive login streak" or "max consecutive days a sensor stayed online") to bulletproof the fix before considering it locked, but NO resource edit is warranted now.
-
-- Do NOT add any "wrong" card for Q2/Q3/Q4 — all forms correct.
-- Do NOT touch the iter876 B-Streak card (clean), the iter875 reconciliation card, or any percent-of-total / DATE-coercion pin.
-- HOLD all iter534-875 locks. PIN 467. NO federation edits.
-- **DO NOT bump training/state.json.**
-- Optional fresh adjacents: gaps-and-islands 2nd phrasing (bulletproof) / `EXCEPT` vs `NOT IN` NULL-safety / `from_unixtime` tz-result vs `from_unixtime_nanos` / simpler `floor(to_unixtime/900)*900` bucketing / `width_bucket` for time bins.
+### Explicit answers to (c) and (d)
+- **(c)** WITH RECURSIVE IS experimental in Trino 467 (docs say so verbatim); `max_recursion_depth` DEFAULT IS 10, and exceeding it ERRORS (`Recursion depth limit exceeded (10)`), it does NOT silently truncate. The responder's claims were ALL accurate.
+- **(d)** `json_object` (and `json_array`) DO exist in Trino 467 as SQL/JSON constructors. The responder's all-VARCHAR MAP→JSON works but stringifies numbers; json_object would preserve numeric types — a completeness miss, not an error.
