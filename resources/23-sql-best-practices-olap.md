@@ -1387,6 +1387,32 @@ All three produce **identical row counts and identical query plans** on Trino 46
 
 > **Turn a boolean INTO a 1/0 SCALAR, PER ROW (NOT an aggregate).** *Keyword anchors: boolean to 1/0, convert true/false to integer, cast boolean to int per row, 1 when true 0 when false, turn a flag into a number, make a 0/1 column from a true/false column, scalar bool to int.* To produce a per-row `1`/`0` value from a boolean, **`CAST(flag AS integer)`** → `1` for `true`, `0` for `false` (`CAST(true AS integer)` = `1`, `CAST(false AS integer)` = `0`; established Trino 467 behavior — the conversion docs page doesn't spell boolean↔integer out, but it is stable). The reverse `CAST(int AS boolean)` → `0` = `false`, any nonzero = `true`. `SELECT order_id, CAST(shipped_late AS integer) AS late_flag FROM orders;` gives a 1/0 column you can then `SUM(...)` or feed into a downstream scoring formula. **Choose by intent:** use `count_if(flag)` (or `SUM(CASE WHEN flag THEN 1 ELSE 0 END)`) when you just want the **COUNT of TRUE rows** (an aggregate, above); use `CAST(flag AS integer)` when you need the **per-row 1/0 value itself**. `CAST(flag AS integer)` and `if(flag, 1, 0)` and `CASE WHEN flag THEN 1 ELSE 0 END` are all equivalent per-row 1/0 expressions — `CAST` is the shortest.
 
+> **PER-ROW: count how many boolean / flag COLUMNS are TRUE in a SINGLE ROW (NO GROUP BY) — `CAST(flag AS integer) + ...`, NOT `count_if`.** *Keyword anchors: count how many flags are true, how many boolean columns are on, number of features enabled per row, count true columns in a row, how many checkboxes checked, how many of these flags are set, count enabled flags for each customer, how many features turned on for this account.* When you have several boolean **columns** in one row (e.g. `has_sso`, `has_api_access`, `has_custom_reports`) and you want **how many of those columns are `TRUE` for each row**, that is a **per-row column count** — **SUM the columns cast to integer**, with **NO `GROUP BY`**.
+>
+> ```sql
+> -- ✅ COPY THIS — PER-ROW: how many of several boolean flag COLUMNS are true in THIS row (no GROUP BY):
+> SELECT customer_id,
+>        CAST(has_sso AS integer) + CAST(has_api_access AS integer)
+>          + CAST(has_custom_reports AS integer) AS flags_on
+> FROM feature_flags;
+> -- CAST(boolean AS integer): true->1, false->0; a NULL flag -> NULL, so wrap COALESCE(flag,false) if NULLs are possible:
+> --   CAST(coalesce(has_sso,false) AS integer) + CAST(coalesce(has_api_access,false) AS integer) + ...
+> -- optional array form for many flags (reduce folds the array; verified array.html):
+> -- reduce(ARRAY[has_sso, has_api_access, has_custom_reports], 0, (s,x) -> s + IF(coalesce(x,false),1,0), s -> s) AS flags_on
+> ```
+>
+> ```sql
+> -- WHICH shape?
+> --   how many flag COLUMNS are true in ONE ROW  -> per-row CAST-sum above (NO GROUP BY)
+> --   how many ROWS have flag = true per group   -> count_if(flag) AGGREGATE + GROUP BY  [see §3.1E above / §11]
+> ```
+>
+> ```sql
+> -- ❌ count_if(has_sso) + count_if(has_api_access) + ... GROUP BY customer_id  to count flags true IN A ROW -- WRONG: count_if is a per-GROUP aggregate (counts TRUE rows); for a per-row column count use CAST(flag AS integer)+... with NO GROUP BY — DO NOT COPY
+> ```
+>
+> **RULE:** To count how many boolean **columns** are true within a **single row**, SUM the columns cast to integer (`CAST(flag AS integer)`) with **no `GROUP BY`** — do **NOT** use `count_if` (that is an AGGREGATE that counts TRUE **rows** per group, a different shape). The per-GROUP "count rows where flag = true" question is the other shape — see the `count_if` LEADING CANONICAL at §3.1E above and the co-canonical at [§11](#11-).
+
 **When to reach for which.** Use `if()` for the 1-condition ternary. Use `CASE WHEN ... WHEN ... ELSE ... END` for **multi-branch** logic (`if()` does NOT chain — there is no `elseif` in the expression form; `CASE` is the only path). Use `count_if(p)` over `count(CASE WHEN p THEN 1 END)` and over `SUM(CASE WHEN p THEN 1 ELSE 0 END)` for COUNT-of-matching — the `count_if` form is the **idiomatic Trino-native** lead; `COUNT(*) FILTER (WHERE p)` is the ANSI-standard equivalent; `SUM(CASE WHEN p THEN 1 ELSE 0 END)` is the portable fallback.
 
 > **`IF(condition, A, B)` — the compact two-way pick (the inline if-else / shorter one-liner than CASE).** *Keyword anchors: shorter one-liner than CASE, inline if-else, two-way pick, "if this then A else B", compact conditional, pick one of two values by a condition, ternary, short conditional, pick A or B based on a flag, one-line conditional column.* When you only need to **pick one of TWO values by a single condition**, `IF(condition, true_value, false_value)` is the compact form — verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html): the 3-arg form *"Evaluates and returns `true_value` if `condition` is true, otherwise evaluates and returns `false_value`"* and is **equivalent to** `CASE WHEN condition THEN true_value ELSE false_value END` — just shorter.
@@ -3018,7 +3044,7 @@ WHERE event_date = DATE '2026-05-26';
 > GROUP BY region;
 > ```
 >
-> All three forms produce **identical row counts, identical column values, and identical query plans** on Trino 467. The `count_if(is_fraud)` form is the idiomatic Trino-native lead — reach for it first for any "count rows where condition is true per group / per region / per customer" question. Predicate form is also valid: `count_if(status = 'shipped' AND shipped_at > due_at)` — any boolean *expression* works, not just a stored boolean column. See [§ 3.1E LEADING CANONICAL](#31e-trino-if-vs-case-when-and-count_if--the-conditional-expression-family) for the single-row (non-grouped) form + the `if()` vs `CASE WHEN` family.
+> All three forms produce **identical row counts, identical column values, and identical query plans** on Trino 467. The `count_if(is_fraud)` form is the idiomatic Trino-native lead — reach for it first for any "count rows where condition is true per group / per region / per customer" question. Predicate form is also valid: `count_if(status = 'shipped' AND shipped_at > due_at)` — any boolean *expression* works, not just a stored boolean column. See [§ 3.1E LEADING CANONICAL](#31e-trino-if-vs-case-when-and-count_if--the-conditional-expression-family) for the single-row (non-grouped) form + the `if()` vs `CASE WHEN` family. **Different shape:** to count how many boolean flag *COLUMNS* are true *within a single row* (a per-row column count, NO `GROUP BY`), do NOT use `count_if` — use the per-row `CAST(flag AS integer) + ...` card at §3.1E (the "count how many flag COLUMNS are TRUE in a SINGLE ROW" canonical).
 
 > **Terminology note — call this pattern by its right name.** The `aggregate(...) FILTER (WHERE <cond>)` form above and the equivalent `SUM(CASE WHEN <cond> THEN <metric> END)` form are both **conditional aggregation** — also called **manual pivot** or **crosstab** when you build a multi-column pivot (e.g., quarterly revenue as `q1_revenue, q2_revenue, q3_revenue, q4_revenue` columns). Trino has **no `PIVOT` keyword** — you write the conditional aggregation explicitly. The `FILTER (WHERE ...)` clause is supported on every Trino aggregate per [Trino aggregate functions docs](https://trino.io/docs/current/functions/aggregate.html).
 >

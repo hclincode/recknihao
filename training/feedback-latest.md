@@ -1,117 +1,90 @@
-# Judge Feedback — iter865 (EXTENDED PHASE)
+# Judge Feedback — iter866 (EXTENDED PHASE)
 
-**Overall: 4.375 PASS** (per-Q 5.00 / 5.00 / 2.50 / 5.00 = 17.50 / 4 = 4.375; margin +0.875 over 3.5 threshold; overall average governs, NO per-Q veto). One REAL accuracy DEFECT at Q3 (per-row vs per-group misframe), three clean.
+**Overall: 4.84 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.375 = 19.375/4 = 4.84375; margin +1.34; overall average governs, no per-Q veto).
 
-Federation NOT probed this iter (4.49944/310 row UNCHANGED, still FAIL).
+Federation NOT probed this iteration (row UNCHANGED 4.49944/310, still FAIL).
 
-PIN Trino 467. All dialect facts verified against trino.io/docs/467 (array/comparison/aggregate/string/conversion .html) + WebFetch 2026-06-10.
-
----
-
-## Q1 — grab the LAST element of an array column
-
-**Answer:** `element_at(tags, -1) AS most_recent_tag`; negative indexing (-1 last, -2 second-to-last); element_at NULL-safe (NULL on empty/out-of-range) UNLIKE `array[n]` subscript which errors.
-
-**VERIFIED (array.html):**
-- "If `index` < 0, `element_at` accesses elements from the last to the first." → negative indexing CORRECT, -1 = last.
-- element_at "returns `NULL` when accessing an `index` larger than array length"; the `[]` subscript "would fail in such a case." → NULL-safe vs subscript-throws CONTRAST CORRECT.
-
-**Scores:** Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**. Clean. The element_at-vs-subscript NULL-safety distinction is exactly the trap engineers hit; fully correct and well-explained.
+All dialect facts VERIFIED vs trino.io/docs/467 (datetime.html, string.html, regexp.html, aggregate.html) + WebSearch, 2026-06-10. PIN Trino 467.
 
 ---
 
-## Q2 — NULL-safe join (match rows where BOTH sides NULL on the key)
+## Q1 — count how many of ~8 boolean flag COLUMNS are TRUE in a SINGLE ROW (per-row, not across rows)
 
-**Answer:** `JOIN ... ON a.account_id IS NOT DISTINCT FROM b.account_id`; explained null-safe equality (NULL IS NOT DISTINCT FROM NULL = true); works in INNER/LEFT/RIGHT/FULL.
+**THE iter865 Q3 PER-ROW-FLAG-COUNT FIX RE-PROBE.**
 
-**VERIFIED (comparison.html):** "The `IS DISTINCT FROM` and `IS NOT DISTINCT FROM` operators treat `NULL` as a known value and both operators guarantee either a true or false outcome even in the presence of `NULL` input." `NULL IS NOT DISTINCT FROM NULL` = **true**. Valid as a join condition (boolean predicate). CORRECT.
+Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
 
-Citation note (per run-prompt): responder cited a federation resource file, but the operator is general-purpose SQL and the SQL itself is correct — citation provenance is NOT scored as a defect here. The answer is dialect-correct and directly solves the asked join.
+**FIX LANDED — CLEAN.** Responder gave the correct per-row shape:
+`CAST(has_sso_enabled AS integer) + CAST(has_mfa_on AS integer) + ... AS features_enabled` with **NO GROUP BY**, explained CAST(boolean AS integer) → true=1/false=0, wrapped `COALESCE(flag,false)` for NULL safety, AND explicitly stated **"Do NOT use count_if() for this — that's an aggregate that counts TRUE rows per group, a different shape."**
 
-**Scores:** Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**. Clean.
+Verified vs trino.io/docs/467:
+- CAST(boolean AS integer) → 1/0 is established 467 behavior (documented in the pinned §3.1E "boolean → 1/0 scalar" card).
+- aggregate.html: count_if IS an aggregate (it is one of the 5 ignore-nulls EXCEPTIONS: count, count_if, max_by, min_by, approx_distinct) — counts TRUE input ROWS per group, NOT columns in a row. The responder's shape-distinction is exactly right.
 
----
-
-## Q3 — count how many of ~8 boolean flag columns are TRUE FOR EACH CUSTOMER ROW — **DEFECT (misframe)**
-
-**Question shape:** PER-ROW (row-wise) count of how many flag COLUMNS are TRUE in a single customer row. The engineer literally asked to "add a COLUMN to my query that shows a count of how many flags are turned on for each customer," explicitly without a massive CASE. This is a **row-wise expression**, NOT an aggregation.
-
-**Correct answer (NO GROUP BY, NO aggregate):**
-```sql
-SELECT customer_id,
-       CAST(has_sso        AS integer)
-     + CAST(has_api_access AS integer)
-     + CAST(has_audit_log  AS integer)
-     + ... AS flags_on
-FROM customers;
-```
-(Equivalently a `reduce`/array approach over `ARRAY[has_sso, has_api_access, ...]`.) Booleans CAST to integer give 1/0; their row-wise sum is the per-row count of TRUE columns. No grouping, no aggregate.
-
-**What the responder gave:** TWO AGGREGATE forms —
-1. `SUM(CAST(has_sso AS INTEGER) + CAST(...) + ...) ... GROUP BY customer_id`, and
-2. `count_if(has_sso) + count_if(has_api_access) + ... GROUP BY customer_id` — and called the count_if form "cleaner / more idiomatic."
-
-**Why this is WRONG (VERIFIED aggregate.html):** `count_if(x)` "Returns the number of `TRUE` input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`." It is an **AGGREGATE** that counts ROWS where its argument is TRUE across the GROUP — the wrong tool for a per-row count of how many COLUMNS are true in a single row. `count_if(has_sso)` counts how many customer ROWS have has_sso = true within the group, not whether THIS row's has_sso column is true. The form only coincidentally returns a plausible number when there is exactly one row per customer; with multiple rows per customer it is flatly wrong. The `SUM(...) GROUP BY` form likewise aggregates across rows the question never asked to collapse — it changes the query's grain and is structurally wrong for a per-row column-count. The responder MISFRAMED a per-row problem as an aggregation, and even ranked the most-wrong form ("count_if … cleaner/more idiomatic") first.
-
-**Diagnosis — RESOURCE-DEFECT contributor (not a pure synthesis slip).** GREP of resources/ confirms:
-- r23 § 3.1E and § 11 present `count_if(bool)` as the **LEADING / CO-CANONICAL** idiom for "count of X where boolean is true PER GROUP" / "how many flagged per region/customer/group" — heavily keyword-magnetic on "count … flags … per customer." Those cards are CORRECT for the per-GROUP question, but the responder pattern-matched the keywords ("count how many flags … for each customer") straight onto them and inherited the aggregate framing.
-- r07 § 11.x mirrors the same count_if-leads cross-ref.
-- The ONLY "count how many flags are enabled" worked example (r27 ~L1375) is `bit_count(flags, 64)` for a **single bit-packed integer column** — a different physical model (one packed bigint, not N separate boolean columns), so it does not serve this question either.
-- There is **NO card** anywhere teaching the row-wise `CAST(flag AS integer) + CAST(...) + ...` (or `reduce` over `ARRAY[flags]`) pattern for "how many of these boolean COLUMNS are true in a single ROW."
-
-So the gap is real: every findable "count flags true" anchor leads to an AGGREGATE, and nothing disambiguates the PER-ROW column-count shape. That is a findability/coverage gap, not just a one-off synthesis slip.
-
-**Scores:** Accuracy 1 (structurally wrong tool; misframes grain) / Completeness 3 (lists forms but never gives the correct no-GROUP-BY answer the question needs) / Clarity 4 (clearly written, but confidently wrong) / Actionability 2 (an engineer following the "idiomatic" count_if advice ships a query that breaks the moment a customer has >1 row) → **avg 2.50**.
+The iter866 FIX-A (per-ROW CAST-sum card + SHAPE-ROUTER + count_if defang adjacent to §3.1E/§11) **landed and routed correctly**. The misframe from iter865 (per-GROUP aggregate / "count_if cleaner") did NOT recur. No escalation to iter867.
 
 ---
 
-## Q4 — zero-pad integer invoice_id to exactly 8 digits (42 -> '00000042')
+## Q2 — convert milliseconds-since-epoch bigint (e.g. 1717612800000) to a readable timestamp
 
-**Answer:** `format('%08d', invoice_id) AS invoice_id_padded`; never truncates wider numbers (width = minimum); `lpad(CAST(invoice_id AS VARCHAR), 8, '0')` also works but lpad TRUNCATES to 8 chars if the ID exceeds 8 digits.
+Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
 
-**VERIFIED:**
-- conversion.html: `format(format, args...)` uses Java Formatter (printf) syntax; example `format('%03d', 8)` → `'008'`. `%08d` = zero-pad to minimum width 8; field width is a MINIMUM with no truncation of wider numbers. CORRECT.
-- string.html: `lpad(string, size, padstring)` — "If `size` is less than the length of `string`, the result is truncated to `size` characters." → lpad-truncates-when-input-longer CORRECT (the key trap: a 9-digit invoice silently loses a digit under lpad, while format keeps all digits).
+Responder: `from_unixtime(event_timestamp_ms / 1e3) AS event_timestamp`; CRITICAL gotcha — divide by `1e3` / `1000.0` NOT `1000` (integer division drops sub-second precision); from_unixtime expects SECONDS not millis (else year ~56378); can filter on converted ts or compare raw millis.
 
-The format-no-truncate vs lpad-truncates distinction is precisely the production-relevant gotcha (invoice IDs that grow past 8 digits). Mild overlap with iter836 lpad/format coverage; redundancy is not a defect and the answer is correct.
+Verified vs trino.io/docs/467 datetime.html:
+- from_unixtime takes UNIX **seconds** (docs: "number of seconds since 1970-01-01 00:00:00 UTC"), returns timestamp(3) with time zone. CONFIRMED seconds, not millis.
+- from_unixtime_nanos(bigint) exists; there is NO direct from-millis builtin in 467 — so the `/1e3` approach is the correct idiom. CONFIRMED.
+- Integer-division gotcha is real: `ms / 1000` (both bigint) truncates; `/1e3` (double divisor) promotes to seconds with sub-second fraction preserved. CONFIRMED.
 
-**Scores:** Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**. Clean.
-
----
-
-## Overall
-
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 element_at(-1) negative/NULL-safe | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 IS NOT DISTINCT FROM in join | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 per-row flag-count (MISFRAME) | 1 | 3 | 4 | 2 | 2.50 |
-| Q4 format/lpad zero-pad | 5 | 5 | 5 | 5 | 5.00 |
-
-**Overall average = (5.00 + 5.00 + 2.50 + 5.00) / 4 = 4.375 → PASS** (margin +0.875; overall average governs, no per-Q veto).
+Fully correct.
 
 ---
 
-## iter866 RECOMMENDATION — **FIX-A (Q3 real defect: per-ROW column-count vs per-GROUP count_if AGGREGATE)**
+## Q3 — find rows where a free-text notes column CONTAINS a keyword like 'escalated'
 
-Add a keyword-anchored card disambiguating the two question shapes. Place it where the question's keywords lead — adjacent to r23 § 3.1E / § 11 (the count_if cards the responder mis-pattern-matched), and cross-ref from r07 § 11.x.
+Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
 
-**Card content:**
-- LEADING CANONICAL for "**how many of these flag/boolean COLUMNS are true in a single ROW**" (per-row, NO GROUP BY):
-  ```sql
-  -- Trino 467 — per-row count of how many flag COLUMNS are true in THIS row (no GROUP BY, no aggregate)
-  SELECT customer_id,
-         CAST(has_sso AS integer) + CAST(has_api_access AS integer)
-       + CAST(has_audit_log AS integer) + ... AS flags_on
-  FROM customers;
-  ```
-  Optional array form for many flags: `reduce(ARRAY[has_sso, has_api_access, ...], 0, (acc,x) -> acc + IF(x,1,0), acc -> acc)` (VERIFY reduce signature against array.html before writing).
-- A SHAPE-ROUTER / DISAMBIGUATOR table:
-  - "count how many COLUMNS are true in a single ROW" → **row-wise `CAST(flag AS integer) + ...` sum, NO GROUP BY**.
-  - "count how many ROWS have flag = true PER GROUP" → **`count_if(flag)` AGGREGATE + GROUP BY** (existing § 3.1E / § 11 card).
-- FENCED inline DEFANG on its own un-copyable line: `count_if(has_sso) + count_if(has_api_access) + ... GROUP BY customer_id  -- WRONG for a per-ROW column count: count_if is an AGGREGATE that counts ROWS per group, not columns in a row; only coincidentally right with exactly one row per customer.` Use a FENCED code block (NOT a table cell) so pipes/raw markdown copy cleanly.
-- Keyword anchors: "how many flags are turned on for each customer", "count of true columns in a row", "count how many flag columns are true", "per-row flag count", "how many booleans are set in a row", "add a column showing count of flags on", "count_if vs row-wise sum".
+Responder: `WHERE notes LIKE '%escalated%'`; alt `strpos(notes,'escalated') > 0` (1-based, 0 if not found); for multiple keywords `regexp_like(notes, 'escalated|critical|urgent')`.
 
-Do NOT churn the existing count_if § 3.1E / § 11 per-GROUP cards (they are CORRECT for their shape) — only ADD the per-ROW canonical + the router + the defang, and cross-link. Distinguish clearly from the r27 `bit_count(flags, 64)` card (that is for a single bit-packed integer column, a different physical model).
+Verified vs trino.io/docs/467:
+- string.html: strpos returns 1-based starting position, 0 if not found. CONFIRMED.
+- LIKE '%word%' substring match is standard. CONFIRMED.
+- regexp.html: regexp_like "performs a *contains* operation rather than a *match* operation" (pattern need only be contained within string) → boolean; Java regex syntax → `|` alternation supported. CONFIRMED partial-match + alternation.
 
-HOLD all iter534-864 locks. PIN 467. NO federation edits (federation 4.49944/310, still FAIL). Do NOT bump training/state.json (already passed; this is extended-phase probing).
+All three correct.
+
+---
+
+## Q4 — one query giving per-customer total revenue AND paid-only revenue
+
+Scores: Accuracy 4 / Completeness 4 / Clarity 5 / Actionability 5 → **avg 4.375**
+
+Responder: `SUM(revenue) AS total_revenue, SUM(CASE WHEN payment_status='paid' THEN revenue ELSE 0 END) AS paid_revenue ... GROUP BY customer_id`; alt `SUM(revenue) FILTER (WHERE payment_status='paid')`; said both produce **identical results/plans**.
+
+Verified vs trino.io/docs/467 aggregate.html:
+- FILTER is supported for all aggregate functions. CONFIRMED.
+- Conditional aggregation SUM(CASE WHEN..) is valid. CONFIRMED.
+- **Minor imprecision (the only ding):** the "identical results" claim is NOT precisely true for a group with NO matching rows. SUM(CASE WHEN cond THEN x ELSE 0 END) sums the ELSE-0 branch → returns **0**; SUM(x) FILTER (WHERE cond) feeds the aggregate zero rows → SUM ignores nulls / returns NULL for no input (SUM is NOT in the 5-exception list) → returns **NULL**. So on a no-match group the two forms differ 0-vs-NULL. The core question (both forms valid, both give per-customer total + paid) is fully answered correctly; "identical results/plans" overstates the equivalence. Precision nuance, not a correctness error.
+
+Core correct; small completeness/accuracy ding for the over-broad "identical" claim.
+
+---
+
+## (a)-(d) Direct answers to the probe questions
+
+- **(a) Q1 per-row CAST-sum fix LANDED?** YES. Responder gave per-row `CAST(flag AS integer)+...` with NO GROUP BY and explicitly rejected count_if as a per-group aggregate. The iter865 misframe did not recur. Fix confirmed landed.
+- **(b) Q2 from_unixtime(ms/1e3) correct?** YES. from_unixtime takes SECONDS (verified datetime.html), `/1e3` converts millis→seconds, integer-division gotcha (`/1000` truncates) correctly flagged.
+- **(c) Q3 LIKE / strpos / regexp_like all correct?** YES. LIKE substring, strpos 1-based-0-if-absent, regexp_like contains-with-`|`-alternation all verified.
+- **(d) Q4 conditional SUM both forms correct + "identical results" precise?** Both forms correct/valid. "Identical results" is NOT strictly precise — empty-match group differs 0 (CASE/ELSE 0) vs NULL (FILTER, SUM returns null on no input). Minor nuance only.
+
+---
+
+## iter867 recommendation: **DEFAULT NO-OP** (durability sweep, teacher ZERO edits)
+
+The iter866 FIX-A LANDED CLEAN — Q1 per-row CAST-sum / count_if-shape-router is durable on the re-probe, and Q2/Q3 are textbook. The Q4 0-vs-NULL nuance is a single minor precision ding on an otherwise-correct answer; it does NOT meet the bar for a FIX-A (reconcile-don't-churn — the conditional-aggregation / FILTER cards are correct; the only gap is the responder's "identical" overstatement, a synthesis slip not a content defect).
+
+- Re-probe the per-row flag-count ONCE MORE from a 2nd phrasing ("how many of these toggles are on for each account" / "count enabled features per row") to BULLETPROOF the iter866 fix. Escalate to FIX-A only if the count_if/GROUP-BY misframe recurs.
+- Optional fresh adjacents: from_unixtime_nanos for nanos / to_unixtime round-trip; multi-keyword regexp_like with anchors or case-insensitive `(?i)`; SUM(CASE..ELSE 0) vs FILTER 0-vs-NULL 2nd phrasing (COALESCE-wrap to force 0).
+- If under-scoring recurs on Q4-style conditional aggregation, a light keyword cross-link noting "FILTER returns NULL on a no-match group, ELSE 0 returns 0; wrap COALESCE(..,0) to unify" would be the smallest possible touch — NOT warranted at 4.84.
+
+HOLD all iter534-865 locks. PIN Trino 467. NO federation edits (r22 §13.x ZERO edits; federation row stays 4.49944/310, still FAIL). DO NOT bump training/state.json (already passed).
