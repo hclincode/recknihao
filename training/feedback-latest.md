@@ -1,48 +1,50 @@
-# Judge Feedback — Iter 838 (EXTENDED PHASE)
+# Judge Feedback — Iter 839 (EXTENDED PHASE)
 
-**Mode:** DEFAULT NO-OP durability sweep. Teacher made ZERO resource edits. 4 SQL-fundamentals probes (date_trunc('week') Monday re-probe + CASE/IF NULL + ceil-round-up-to-5 + INTERSECT). All dialect claims verified against trino.io/docs/467 on 2026-06-09.
+**Mode:** DEFAULT NO-OP durability sweep. Teacher made ZERO resource edits. 4 SQL-fundamentals probes (seconds->'H:MM:SS' format + IS NOT DISTINCT FROM null-safe equality + DENSE_RANK nth-distinct + weighted average). All dialect claims verified against trino.io/docs/467 (string/conversion/comparison/math/window .html) on 2026-06-09. PIN Trino 467.
 
-**Overall: 5.00 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 5.00 = 20.00 / 4; margin +1.50 above 3.5 floor; overall avg governs, no per-Q veto).
-
-Federation NOT probed this iter — row stays 4.49944 / 310 (still FAIL, untouched).
+**Overall: 4.59 PASS** (per-Q 5.00 / 5.00 / 5.00 / 3.38 = 18.38 / 4; margin +1.09 above 3.5 floor; overall avg governs, no per-Q veto).
 
 ---
 
-## Per-question scores
+## Per-Q scores
 
-### Q1 — weekly signup totals, weeks Monday–Sunday, one row per week — 5.00
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- `date_trunc('week', signup_timestamp)` + `GROUP BY date_trunc('week', signup_timestamp)` ORDER BY week_start — clean, no manual date math.
-- VERIFIED trino.io/docs/467/functions/datetime.html: `date_trunc('week', ts)` ALWAYS returns the **Monday** of the ISO-8601 week, deterministic. Doc example `date_trunc('week', 2001-08-22 [Wed]) -> 2001-08-20 [Mon]` confirms. Responder's own worked example `DATE '2020-01-01' [Wed] -> 2019-12-30 [Mon]` is correct. No locale / no first_day_of_week / no Sunday-start option.
-- **CRITICAL RE-PROBE RESULT — HEDGE DID NOT RECUR.** Responder led cleanly with `date_trunc('week',...)` and stated "ALWAYS returns the MONDAY of that ISO week" with NO Sunday/locale/"depends on system week start" hedge. The iter837 Q2 hedge ("depends on system week start Sun/Mon") is **CONFIRMED a one-off responder slip, NOT a content gap.** The r07:2079-2103 week-anchor card (TRUTH 1: always Monday, no Sunday option, no locale, no first_day_of_week) is doing its job. No edit warranted.
+### Q1 — total seconds (integer) -> 'H:MM:SS' like '1:23:45' — **5.00 CLEAN**
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+- Canonical `format('%d:%02d:%02d', duration_seconds/3600, (duration_seconds%3600)/60, duration_seconds%60)`.
+- VERIFIED vs conversion.html: `format()` uses java.util.Formatter; `%d` = decimal integer, `%0Nd` zero-pads to width N (doc example `format('%03d', 8)` -> `'008'`), so `%02d` zero-pads to width 2 (e.g. minute 5 -> '05'). Accepts numeric/bigint args.
+- VERIFIED vs math.html: integer `/` truncates (integer division), `%` is modulus/remainder. Arithmetic decomposition is correct: hours = `s/3600`; minutes = `(s%3600)/60`; seconds = `s%60`. 4925s -> 1:22:05 checks out (1*3600 + 22*60 + 5 = 4925).
+- Correctly chose SQL over app code AND correctly noted `format()` is cleaner than `||` which would need `CAST AS varchar` on each piece. No leading zero-pad on the hours field (matches the asked '1:23:45' single-digit-hour shape, not a defect).
 
-### Q2 — CASE returning no value (NULL) for some rows — 5.00
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- "Yes — CASE returns NULL." Searched CASE with no ELSE -> NULL for unmatched rows; 2-arg `IF(cond, x)` -> NULL when false.
-- VERIFIED trino.io/docs/467/functions/conditional.html: CASE with no matching condition and no ELSE returns NULL; `IF(condition, true_value)` returns NULL and does not evaluate true_value when the condition is false. BOTH claims correct.
-- Correctly told the engineer NULL in the result set is valid and needs no app-layer handling. Cited resource 23.
+### Q2 — null-safe equality (NULL = NULL must be true) — **5.00 CLEAN**
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+- Canonical `a.region_override IS NOT DISTINCT FROM b.region_override`.
+- VERIFIED vs comparison.html: `IS NOT DISTINCT FROM` is the SQL-standard null-safe equality — treats NULL as a known value, guarantees a true/false outcome; `NULL IS NOT DISTINCT FROM NULL` -> true, `1 IS NOT DISTINCT FROM NULL` -> false. Exactly fixes the asked silent-drop on plain `=` (which yields NULL/UNKNOWN when either side is NULL). Correctly explains why plain `=` drops the NULL/NULL match.
 
-### Q3 — round price-in-cents UP to nearest 5 cents (103->105, 100->100) — 5.00
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- `CAST(ceil(price_cents / 5.0) * 5 AS integer)`. Worked: 103 -> ceil(20.6)*5 = 21*5 = 105; 100 -> 20*5 = 100. Correct.
-- VERIFIED trino.io/docs/467/functions/math.html: `ceil(x)/ceiling(x)` rounds toward +infinity; `floor(x)` -inf; `truncate(x)` toward zero. The `/ 5.0` is **load-bearing** — it forces non-integer (float/decimal) division so `103/5.0 = 20.6` survives to ceil; integer `103/5` would truncate to 20 BEFORE ceil and silently break the round-up. Responder correctly used `5.0` and explained ceil/floor/truncate distinction.
+### Q3 — 2nd/3rd highest DISTINCT value (ties for 1st collapse) — **5.00 CLEAN**
+Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+- Canonical CTE `SELECT DISTINCT revenue, DENSE_RANK() OVER (ORDER BY revenue DESC) AS rank FROM accounts`, outer `WHERE rank IN (2,3) ORDER BY rank`.
+- VERIFIED vs window.html: DENSE_RANK gives ties the same rank with NO gaps (1,2,2,3); RANK leaves gaps (1,2,2,4); ROW_NUMBER is strictly sequential. The DENSE_RANK + SELECT DISTINCT combo correctly yields the nth-DISTINCT value: with three accounts tied at the top, all get rank 1, and the next-lower distinct revenue is rank 2 = the 2nd-distinct value the engineer asked for. (The SELECT DISTINCT is belt-and-suspenders given DENSE_RANK already collapses ties, but it is correct and harmless.) Correct ROW_NUMBER-vs-DENSE_RANK characterization.
 
-### Q4 — users active in BOTH months (set intersection) — 5.00
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- `SELECT user_id FROM last_month_active_users INTERSECT SELECT user_id FROM this_month_active_users` + equivalent INNER JOIN + DISTINCT alt.
-- VERIFIED trino.io/docs/467/sql/select.html: INTERSECT defaults to INTERSECT DISTINCT — returns DISTINCT rows present in BOTH queries, dedups automatically. NULL-safe vs IN-subquery (correct framing). INNER JOIN + DISTINCT equivalence is correct (DISTINCT collapses the join's duplicate matches to one row per user_id). Cited resource 23.
+### Q4 — weighted average `SUM(score*weight)/SUM(weight)` — **3.38** (Accuracy 3.5 / Completeness 3 / Clarity 4 / Actionability 3)
+- The FORMULA is structurally correct: weighted mean = sum(value*weight) / sum(weight), grouped per `customer_segment`. Numerator/denominator decomposition described correctly.
+- **DEFECT (completeness + accuracy ding): the integer-division-truncation pitfall was NOT flagged.** VERIFIED vs math.html: integer `/` truncates. If `score` AND `weight` are both INTEGER/BIGINT (a very common survey schema — scores 1-5, integer weights), then `SUM(score*weight)` and `SUM(weight)` are both BIGINT and `BIGINT / BIGINT` is INTEGER DIVISION, truncating toward zero: e.g. 17/4 -> 4, not 4.25 — a silently wrong AVERAGE. This is directly analogous to the percent-of-total `* 100.0` fix and to the iter808/809 cast-less arithmetic dings. The fix the responder should have included: `SUM(score * weight) * 1.0 / SUM(weight)` (or `CAST(SUM(score*weight) AS DOUBLE) / SUM(weight)`, or `/ NULLIF(SUM(weight), 0)` to also guard zero-weight groups).
+- **Q4 INTEGER-DIVISION VERDICT: YES — the bare `SUM(x*w)/SUM(w)` IS a completeness ding (bordering accuracy) for not flagging integer-division truncation when both operands are integer types.** An average that silently returns 4 instead of 4.25 is a real silent-wrong-result hazard, exactly the failure mode an engineer asking for a *weighted average* cares about. The score is held at 3.38 (not lower) because the algebraic formula itself is correct and works as-is when either operand is decimal/double; it is not a fabrication or parse error. But for a metric whose entire point is a fractional mean, omitting the `*1.0`/CAST caveat is a substantive gap.
+- **Responder-slip, NOT a content gap.** r23 §3.1B troubleshooting checklist item 5 (line 827) already documents this exactly: "`SELECT SUM(a / b)` where `a` and `b` are `BIGINT` does INTEGER division per row (truncates) ... Cast at least one operand: `SUM(CAST(a AS DOUBLE) / b)`." The hazard content exists and is accurate; the responder landing on "weighted average" did not surface it. Findability miss: that checklist is anchored under "SUM looks too small / numbers are truncated," not under average/weighted-average/mean keywords.
 
 ---
 
-## Dimension cross-check
-Acc 5.00 / Comp 5.00 / Clar 5.00 / Appl 5.00 = 5.00. Agrees with per-Q average. **GOVERNING LABEL = PASS.**
+## Patterns / notes
+- 3 of 4 clean at 5.00; all dialect facts (format %02d zero-pad, IS NOT DISTINCT FROM null-safe semantics, DENSE_RANK no-gap, integer `/` truncation) docs-verified vs trino.io/docs/467.
+- No fabrications, no parse errors, no prod-env conflict (all pure Trino SQL — fits the on-prem Trino 467 / Iceberg / MinIO stack; no auth/authz scope touched).
+- The only defect is the recurring **cast-less integer-arithmetic / integer-division omission** — same family as iter808 (`format('%.2f%%', x*100)`) and the percent-of-total `100.0` fixes. The hazard is documented (r23 §3.1B item 5) but not keyword-surfaced where an average/weighted-mean question lands.
 
-## Defects / gaps
-NONE. Zero dialect errors, zero hedges, zero findability misses. All four critical verification targets PASSED.
+## iter840 directive — LIGHT FINDABILITY FIX-A
+A defect surfaced (Q4 integer-division-for-average), so iter840 is **FIX-A (light, findability)**, not a NO-OP:
+1. At the resource location where "average / weighted average / mean / AVG" questions land (r07 analytical patterns and/or r23 best-practices), add a short keyword-anchored AVERAGE/WEIGHTED-AVERAGE card. Lead with the copy-attractive canonical `SUM(score * weight) * 1.0 / SUM(weight)` (or `CAST(... AS DOUBLE)`), with `/ NULLIF(SUM(weight), 0)` zero-weight guard mentioned.
+2. State the one fact prominently: if BOTH operands are INTEGER/BIGINT, `SUM(x*w)/SUM(w)` is INTEGER DIVISION and TRUNCATES (17/4 -> 4 not 4.25) — silently wrong for an average. Inline-defang the bare `SUM(score*weight)/SUM(weight)` on its own un-copyable line (mark WRONG-when-integer), keep the `*1.0` form copy-attractive.
+3. Keyword anchors: weighted average, weighted mean, SUM(value*weight)/SUM(weight), average truncates to integer, integer division average wrong, plain AVG ignores weights, true decimal average.
+4. Cross-link to the existing r23 §3.1B item-5 integer-division-truncation checklist (content there is CORRECT — do not churn it).
+- PRESERVE all iter827 boolean-aggregate-NULL, iter836 lpad/rpad TRUNCATE + format('%06d'/'%08d'), iter837 string->DATE MySQL-vs-Joda disambiguator, iter831 month-label grouping, iter824/823 split_part/GROUP-BY-alias/repeat-char, trim char-set, default-NULLS-LAST, and full iter534-838 lock inventory.
+- NO federation edits (r22 §13.x ZERO edits; federation row stays 4.49944/310).
 
-## iter839 directive — DEFAULT NO-OP / durability sweep
-No open defect; no FIX-A. Do NOT pre-churn. The Q1 date_trunc('week')-Monday re-probe came back **CLEAN** — the iter837 Sunday/locale hedge is a confirmed one-off slip, so the narrow week-anchor exception remains satisfied with ZERO edits.
-
-**DO NOT:** touch r22 §13.x federation (4.49944/310 thin, ZERO probe iter838); re-edit the r07:2079-2103 week-anchor card or iter837 string->DATE / MySQL-vs-Joda disambiguator; churn the CASE/IF NULL, ceil-round-up-to-5 (`/5.0` load-bearing), INTERSECT/EXCEPT set-op, iter836 lpad/format pad+truncate, iter831 month-name, iter823 repeat-char, iter825/827 bool NULL cards; add `::`-casts (iter571 PIN), QUALIFY, RLIKE (iter623 ban), PERCENTILE_CONT/MEDIAN (iter611 ban), EXTRACT(EPOCH) (iter562 ban), DISTINCT ON (iter634 ban); fabricate dayname()/initcap; touch iter534-837 locks; bump training/state.json (already 838); git commit/push beyond appending the rubric score-history line.
-
-Suggested fresh adjacent picks for iter839 if probing: `UNION ALL` vs `UNION` dedup cost, multi-branch searched CASE, `floor(x/N)*N` round-DOWN-to-N (FLOOR sibling of the ceil card), `least`/`greatest` row-wise NULL-poison.
+**DO NOT bump training/state.json (already 839).**
