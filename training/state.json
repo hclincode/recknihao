@@ -1,6 +1,7 @@
 {
-  "iteration": 789,
+  "iteration": 790,
   "phase": "extended",
+  "notes_790": "iter790 durability-breadth sweep, no edits — 4 fresh adjacent topics (EXISTS / sum-FILTER-or-min-max / GROUP-BY-expression / pagination-OFFSET-or-random-sample)",
   "notes_789": "iter789 durability-breadth sweep, no edits — 4 fresh adjacent topics (multi-col-GROUP-BY / date-arithmetic-or-ts-diff / empty-vs-null-string / currency-string-to-numeric-or-date_trunc)",
   "notes_788": "iter788 durability-breadth sweep, no edits — lpad zero-pad re-probe to bulletproof + 3 fresh adjacent topics (concat-|| / IN-list-or-BETWEEN / bool-to-label)",
   "notes_787": "iter787 additive findability FIX-A: surfaced fixed-width-STRING-padding rpad/lpad canonical at r23 §3.1A + no-LEFT and %-20s-doesnt-truncate defangs + keyword anchors",
