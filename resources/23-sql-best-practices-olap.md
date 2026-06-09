@@ -841,6 +841,37 @@ When a `SUM(decimal)` result looks smaller than expected, the cause is NEVER sil
 
 ---
 
+## 3.1B-WA. Weighted average — `SUM(value * weight) / SUM(weight)` — FORCE non-integer division or the mean TRUNCATES
+
+> **Use this when you need to:** compute a **weighted average / weighted mean / average with weights** — e.g. a weighted review score (rating × number_of_reviews), a weighted price (price × quantity), a GPA (grade × credit_hours), a portfolio yield (rate × balance). *(Keyword anchors so the responder lands here: **weighted average, weighted mean, average with weights, weighted score, weighted rating, sum value times weight over sum weight, sum(value\*weight)/sum(weight), integer division truncates average, AVG ignores weights, mean comes out as a whole number, weighted avg returns integer, average rounds down to whole number**.)*
+
+**Trino has NO built-in weighted-average function.** `AVG(x)` is the *un-weighted* arithmetic mean — it divides by the row count and **ignores any weight column entirely**. To weight each value, compute `SUM(value * weight) / SUM(weight)` by hand. The trap: if `value` AND `weight` are both **INTEGER / BIGINT**, then `SUM(value * weight)` and `SUM(weight)` are both integers, so the division is **INTEGER division and TRUNCATES toward zero** — e.g. `17 / 4` returns `4`, not `4.25`. A weighted *mean* is almost always fractional, so this silently ships a wrong, rounded-down number. **Force non-integer division** by multiplying the numerator by `1.0` (or `CAST`-ing one side to `double` / `decimal`).
+
+```sql
+-- ✅ COPY THIS — weighted average = sum(value * weight) / sum(weight),
+-- forced to NON-integer division (else integer value*weight TRUNCATES the mean):
+SELECT
+  SUM(score * weight) * 1.0 / NULLIF(SUM(weight), 0) AS weighted_avg_score
+FROM reviews;
+
+-- ✅ equivalent CAST form (use DECIMAL instead of double for exact money/billing):
+SELECT
+  CAST(SUM(score * weight) AS double) / NULLIF(SUM(weight), 0) AS weighted_avg_score
+FROM reviews;
+```
+
+```text
+❌ SUM(score * weight) / SUM(weight) -- if score & weight are INTEGER this is INTEGER division -> the mean TRUNCATES (17/4 -> 4 not 4.25). Multiply by 1.0 or CAST to double — DO NOT COPY
+```
+
+**The rule.** If `score` AND `weight` are both `INTEGER` / `BIGINT`, then `SUM(score * weight) / SUM(weight)` is **INTEGER division** and **TRUNCATES** the average (`17 / 4 -> 4`, not `4.25`). Multiply by `1.0` (or `CAST` one side to `double` / `decimal`) to get a true fractional mean — the moment one operand is non-integer, Trino performs `double` (or `decimal`) division and keeps the fraction. **`NULLIF(SUM(weight), 0)`** guards an all-zero-weight (or empty / all-NULL-weight) group from a **divide-by-zero error** — `NULLIF(x, 0)` returns `NULL` when the sum is `0`, and dividing by `NULL` yields `NULL` (a clean "no data" result) instead of failing the query.
+
+**This is the SAME integer-division hazard documented as the general SUM/divide trap in [§3.1B item 5 — "Integer division upstream"](#sum-looks-too-small--numbers-are-truncated--the-real-causes-troubleshooting-checklist) above** (`SELECT SUM(a / b) FROM t` where `a`, `b` are `BIGINT` truncates each per-row ratio to 0, then sums). The weighted-average form is the **divide-AFTER-the-SUMs** version of that same `integer / integer = integer` rule — the fix is identical: cast at least one operand to `double` / `decimal`, or multiply by `1.0`.
+
+**Verified per [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html)** — the `/` operator "performs integer division" (truncation) when both operands are integers; **per [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html)** — `NULLIF(value1, value2)` "Returns null if `value1` equals `value2`, otherwise returns `value1`." A `double` (or `decimal`) operand on either side promotes the whole expression to non-integer division and preserves the fraction.
+
+---
+
 ## 3.1C. `CAST(DOUBLE/REAL AS DECIMAL)` uses **HALF_UP** rounding (NOT banker's / NOT HALF_EVEN) — billing-critical canonical
 
 **Keyword anchors:** Trino DECIMAL cast rounding, banker's rounding Trino, round half to even Trino, round half up Trino, Trino billing decimal rounding, HALF_UP vs HALF_EVEN, cast double to decimal rounding, RoundingMode.HALF_UP Trino, cast real to decimal rounding.
