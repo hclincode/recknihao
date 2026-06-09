@@ -1,87 +1,98 @@
-# Judge Feedback — iter772 (DEFAULT NO-OP / durability-breadth sweep)
+# iter773 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
 
-**Designation in:** durability-breadth sweep, teacher made ZERO resource edits.
-**Verification:** Every dialect claim cross-checked against trino.io/docs/467 (datetime, window, conditional, aggregate, sql/select) via WebFetch on 2026-06-09. Not relying on resources/ as ground truth.
-
----
-
-## Q1 — LTV: fractional months active (signup → cancel/today), 45 days ≠ 31 days
-
-Answer: `date_diff('day', signup_date, COALESCE(cancelled_date, current_date)) / 30.44 AS months_with_customer`. Explains whole-day count, /30.44 avg days/month, 45 days → ~1.48 months, COALESCE for still-active. Cites r23 days-between canonical.
-
-**Verification:** `date_diff('day', date, date)` confirmed → BIGINT day count (docs example `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` = 1). `current_date` confirmed SQL-standard (no parens). COALESCE valid. `/30.44` = 365.25/12 = 30.4375 — the standard average-days-per-month convention for fractional months. 45/30.44 = 1.478 ✓. The decimal divisor forces double division (date_diff returns BIGINT, so `/ 30.44` yields a double — no integer truncation). Directly satisfies "fractional, not calendar-month count."
-
-- Accuracy: 5 — sound, docs-verified, correct fractional convention.
-- Completeness: 5 — COALESCE for active, worked 45-day example, divisor rationale.
-- Clarity: 5 — explains every piece for a non-OLAP engineer.
-- Actionability: 5 — drop-in query.
-- **Q1 avg = 5.00**
-
-**WATCH-ITEM RESULT:** The iter771 crude `/31.0`-as-"more precise" imprecision did **NOT recur**. The responder used `/30.44` (the correct average-days-per-month value). **FRACTIONAL-MONTHS WATCH-ITEM = RESOLVED / CLOSED.** No FIX-A needed on this axis.
+**Designation:** DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits; 4 fresh adjacent probes).
+**Verification basis:** every dialect claim verified against trino.io/docs/467 (datetime / aggregate / language-types / sql-select .html) + Trino COUNT(DISTINCT) multi-column behavior (trinodb GitHub + sqlglot #2930 + Querify Labs distinct-aggregation writeup) on 2026-06-09. resources/ NOT treated as ground truth.
 
 ---
 
-## Q2 — Each category's revenue as % of grand total, single query no subquery
+## Q1 — Week bucketing (snap to week-start), weekly signup-count chart
 
-Answer: `ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS percent_of_total`. Explains empty-window SUM = grand total every row, single pass no subquery, 100.0* forces float, ROUND(...,2). Cites r23 window patterns.
+`SELECT date_trunc('week', created_at) AS week_start, COUNT(*) FROM signups GROUP BY date_trunc('week', created_at) ORDER BY week_start`
 
-**Verification:** sql/select.html confirms with no PARTITION BY and no ORDER BY "all rows are considered peers," so `SUM(x) OVER ()` spans the entire result set = grand total on every row. `100.0 *` forces double division (avoids integer truncation). `ROUND(x, 2)` valid. Correctly satisfies "single query no subquery" — the window function avoids a self-join/subquery for the denominator.
+**Verified:** trino.io/docs/467/functions/datetime.html — `date_trunc('week', ts)` truncates to the **start of the ISO week = MONDAY** (docs example `'2001-08-22 03:04:05.321'` → `'2001-08-20 00:00:00.000'`; Aug 20 2001 was a Monday). No built-in Sunday-start option — Sunday-start genuinely needs INTERVAL shifting (the answer's claim is exactly right). GROUP BY repeating the `date_trunc(...)` expression is valid (simple GROUP BY allows expressions). ORDER BY week_start valid.
 
-- Accuracy: 5 — empty-window grand-total semantics docs-confirmed.
-- Completeness: 5 — single-pass, float-coercion, rounding all addressed.
-- Clarity: 5 — empty `OVER ()` explained in plain terms.
-- Actionability: 5 — drop-in.
-- **Q2 avg = 5.00**
+| Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|
+| 5 | 5 | 5 | 5 |
 
----
-
-## Q3 — Most recent event row per order_id (one row each, latest status)
-
-Answer: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY timestamp DESC) AS rn FROM order_events) WHERE rn = 1`. Notes ties → tiebreaker (timestamp DESC, event_id DESC); Trino does NOT support QUALIFY; subquery form canonical; max_by alternative. Cites r23 §3.1G no-DISTINCT-ON.
-
-**Verification:** row_number() confirmed window ranking fn; rn=1 in outer subquery = canonical keep-latest idiom. QUALIFY confirmed NOT present anywhere in sql/select.html → subquery/CTE form correctly required. max_by(status, timestamp) GROUP BY order_id confirmed valid for the single-column "latest status." Tie note (add event_id DESC) is the right deterministic-ordering caveat. Correctly distinguishes this from DISTINCT ON (Postgres-only, absent in Trino).
-
-- Accuracy: 5 — idiom correct, QUALIFY-absence confirmed, max_by valid.
-- Completeness: 5 — full-row vs single-column (max_by) both covered + tiebreaker nuance.
-- Clarity: 5 — clear why subquery (no QUALIFY).
-- Actionability: 5 — drop-in.
-- **Q3 avg = 5.00**
+**Per-Q avg: 5.00 — CLEAN.** The Monday/ISO-week note + "no Sunday-start built-in, would need INTERVAL arithmetic" is precisely correct and is the exact nuance a charting engineer trips on.
 
 ---
 
-## Q4 — Label customers Gold/Silver/Bronze by total spend range
+## Q2 — 7-day trailing / moving average over daily_signups
 
-Answer: `CASE WHEN total_spend >= 1000 THEN 'Gold' WHEN total_spend >= 500 THEN 'Silver' ELSE 'Bronze' END AS tier`. Explains first-match top-to-bottom; notes if(condition, value) single-branch shorthand exists but CASE clearer for multiple tiers. Cites r23 §3.1E.
+`AVG(signup_count) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`
 
-**Verification:** conditional.html confirms searched CASE "evaluates each boolean condition from left to right until one is true and returns the matching result" — so `>= 500` after the `>= 1000` branch correctly maps 500–1000 to Silver (boundary handled via ordering). `if(condition, true_value)` confirmed returns NULL when false and no else — the responder's note that CASE is clearer for multiple tiers and that if() is a single-branch shorthand is accurate.
+**Verified:** trino.io/docs/467 window-functions / sql-select — `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is a valid 7-row trailing frame; `AVG(x) OVER (ORDER BY day ...)` is correct. The **KEY INSIGHT** ("ROWS counts PHYSICAL ROWS, not days — pre-aggregate to one-row-per-day first, else 6 PRECEDING reaches ~6 rows not 7 days") is correct AND is the single most important gotcha here. Source is already `daily_signups` (one row per day), so the ROWS frame is appropriate.
 
-- Accuracy: 5 — first-match ordering + if() NULL-when-false both docs-confirmed.
-- Completeness: 5 — boundary logic + if() alternative noted.
-- Clarity: 5 — top-to-bottom first-match explained plainly.
-- Actionability: 5 — drop-in.
-- **Q4 avg = 5.00**
+**Optional nuance (NOT a defect):** the ROWS frame assumes no missing calendar days. If days can be absent, a true 7-calendar-day window is `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`. Source guarantees one-row-per-day, so omitting this is fine; mentioning it would be a bonus.
+
+| Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|
+| 5 | 4.5 | 5 | 5 |
+
+**Per-Q avg: 4.875 — CLEAN.** Completeness shaved 0.5 only for the unstated missing-days/RANGE nuance (not required given the daily source).
 
 ---
 
-## Overall
+## Q3 — Count distinct (user_id, product_id) pairs [the scrutiny target]
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+`SELECT COUNT(DISTINCT ROW(user_id, product_id)) AS distinct_user_product_pairs FROM events`
+
+**CRITICAL VERIFY — Q3 VERDICT: CORRECT, no defect.**
+
+1. The user's error is **real**: `COUNT(DISTINCT user_id, product_id)` (multiple bare args) is INDEED invalid in Trino — Trino's `count` aggregate takes a single argument (`count(*)` / `count(x)`); the standard-SQL multi-arg COUNT DISTINCT is not supported. Confirmed via trinodb GitHub + sqlglot #2930 + Querify Labs.
+2. The fix is **valid**: the documented idiom is to wrap the columns into a single ROW-typed value. The canonical form cited everywhere is the **bare anonymous tuple** `COUNT(DISTINCT (user_id, product_id))`. The answer used the **explicit** `COUNT(DISTINCT ROW(user_id, product_id))` form. In Trino, `ROW(a, b)` and `(a, b)` are **equivalent row constructors** — `ROW(1, 2e0)` is shown valid in language/types.html, and the row's fields here (bigint user_id, varchar/bigint product_id) are comparable/orderable, so DISTINCT on the ROW value works. **The ROW() wrapper is ACCEPTED by Trino 467.**
+3. The pre-concat fallback (`COUNT(DISTINCT user_id || '~' || product_id)` with CAST) is a valid alternative.
+
+**Imprecision flag for iter774: NONE that rises to a defect.** Single watch-note only: the most commonly-documented / copy-canonical Trino form is the bare-tuple `(a, b)`; the explicit `ROW(a, b)` form the responder produced is equivalent and compiles, so this is NOT FIX-A material. (If a future probe shows the responder ever reaching for the invalid `COUNT(DISTINCT a, b)` form, that would flip to FIX-A — it did not here.)
+
+| Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|
+| 5 | 5 | 5 | 5 |
+
+**Per-Q avg: 5.00 — CLEAN.** Correctly diagnosed the real error, gave a compiling fix (ROW wrapper) plus a fallback.
+
+---
+
+## Q4 — First/earliest value per group (earliest order_date + product on that order, one row per customer)
+
+`SELECT customer_id, MIN(order_date) AS first_order_date, min_by(product_id, order_date) AS product_on_first_order FROM orders GROUP BY customer_id`
+
+**Verified:** trino.io/docs/467/functions/aggregate.html — `min_by(x, y)` = "Returns the value of x associated with the minimum value of y over all input values." So `min_by(product_id, order_date)` = the product on the earliest order, and `MIN(order_date)` = the earliest date, both in one `GROUP BY customer_id`. CORRECT, and the single-pass aggregate form is the cleanest answer. The `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date ASC) = 1` subquery alternative (returns ALL columns of the earliest row) is also valid.
+
+**Optional nuance (NOT a defect):** ties — two orders sharing the earliest `order_date` → `min_by` picks one arbitrarily (as does ROW_NUMBER without a tiebreaker). Minor; not required.
+
+| Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|
+| 5 | 5 | 5 | 5 |
+
+**Per-Q avg: 5.00 — CLEAN.** min_by primary + ROW_NUMBER alternative is exactly the right two-option answer.
+
+---
+
+## OVERALL
+
+| Q | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
 |---|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
+| Q1 week-bucket | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 trailing-avg | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q3 multi-col-distinct | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 first-per-group | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall avg = 5.00 — PASS** (threshold 3.5).
+**Overall average = (5.00 + 4.875 + 5.00 + 5.00) / 4 = 4.969**
 
-### Production-environment fit
-All four are pure Trino 467 SQL (Iceberg connector, Hive Metastore on-prem). No stack-incompatible recommendations; no auth/authz scope issues. Fits prod_info.md.
+**PASS** (threshold 3.5; overall average governs, no single-Q veto).
 
-### Watch-item status
-- **Fractional-months WATCH-ITEM: RESOLVED / CLOSED.** Q1 used `/30.44` (sound avg-days-per-month); the iter771 `/31.0`-as-"more precise" imprecision did NOT recur.
+---
 
-### Teacher feedback
-No action required. The zero-edit NO-OP was the correct call — all four canonicals held and produced docs-accurate, drop-in answers. No new defect, gap, or findability-miss surfaced. The fractional-months card is now demonstrated stable across re-probes.
+## Teacher feedback
 
-### iter773 designation
-**DEFAULT NO-OP / durability-breadth sweep.** No open defect. Continue probing fresh adjacent angles; the previously-open fractional-months watch-item is closed and need not be the primary probe (one confirmatory re-probe at most). Keep verifying every dialect claim against trino.io/docs/467.
+(a) **Q3 verdict:** `COUNT(DISTINCT ROW(user_id, product_id))` is **VALID Trino 467** — CORRECT, no imprecision. The user's `COUNT(DISTINCT user_id, product_id)` error is genuine (single-arg count only); the ROW()/tuple wrapper is the supported fix. `ROW(a,b)` ≡ `(a,b)` as row constructors; DISTINCT works because bigint/varchar fields are comparable. **NO iter774 FIX-A from Q3.**
+
+(b) **iter774 designation: DEFAULT NO-OP / durability-breadth sweep.** No open defect, no new imprecision surfaced; all four forms docs-verified clean. Teacher: ZERO edits, probe 4 fresh adjacent angles. Optional probes to convert these CLEAN datapoints toward BULLETPROOFED:
+- Re-probe multi-col-distinct from a different phrasing (e.g. "unique combinations of region + plan", or one that tempts the responder toward the invalid bare-arg `COUNT(DISTINCT a, b)`) to confirm it consistently routes to the ROW/tuple wrapper. If it ever emits the bare-arg form, that becomes FIX-A.
+- Re-probe trailing-average with a gappy/missing-days source to see whether the responder reaches for `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` when calendar-correctness matters.
+- Keep verifying every dialect claim vs trino.io/docs/467; resources/ is not ground truth.
+
+resources/22-trino-federation-postgresql.md HARD LOCK remains untouched (no edits this iter).
