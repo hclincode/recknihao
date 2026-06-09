@@ -1,68 +1,52 @@
-# Judge Feedback — Iter829 (EXTENDED PHASE)
+# Judge Feedback — iter830 (DEFAULT NO-OP durability sweep; zero resource edits)
 
-**Mode:** DEFAULT NO-OP durability sweep — teacher made ZERO resource edits. Final/extended phase: single end-of-iteration evaluation.
-
-**Federation:** NOT probed this iteration (row unchanged, stays 4.49944/310).
-
-**Verification:** All dialect claims verified against trino.io/docs/467 (datetime.html, string.html, window/aggregate) via WebSearch + WebFetch on 2026-06-09. Trino 467 EXTRACT field set + day() confirmed against the pinned 467 datetime doc page.
-
----
+**Phase:** extended. **Verdict: PASS — overall avg 4.84.**
+All four dialect claims verified against trino.io/docs/467 (PIN 467). No accuracy defects.
 
 ## Per-question scores
 
-### Q1 — count per pricing plan (GROUP BY + COUNT)
-`SELECT plan_name, COUNT(*) AS customer_count FROM iceberg.analytics.customers GROUP BY plan_name`
-- Accuracy 5 — trivially correct, canonical Trino GROUP BY aggregation; valid 467.
-- Completeness 5 — fully answers "count per group"; correctly framed as "basic, no tricks."
-- Clarity 5 — minimal, no unexplained jargon; matches the beginner's mental model.
-- Actionability 5 — directly runnable on the prod iceberg catalog.
-- **Q1 avg = 5.00**
+| Q | Topic | Acc | Compl | Clar | Action | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | multi-column ORDER BY, mixed directions | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | format date as full month name 'June 2025' | 5 | 3.5 | 5 | 4 | 4.375 |
+| Q3 | filter groups by aggregate count (HAVING) | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | concat 3 columns with comma separator | 5 | 5 | 5 | 5 | 5.00 |
 
-### Q2 — % of total per sales rep, 1 decimal
-`ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1)`
-- Accuracy 5 — VERIFIED: window function over an aggregate is valid in a GROUP BY query (windows execute after aggregation); empty `OVER ()` = single partition over all group rows = grand total across all reps. `100.0 *` forces decimal division (avoids integer-truncation trap). `ROUND(x, 1)` = exactly 1 decimal. All correct for Trino 467.
-- Completeness 5 — answers the "make a percentage column" ask end-to-end; the WHERE filter scopes to this quarter; output shape ("Sarah, 12 deals, 23.4%") matches the request.
-- Clarity 5 — each clause annotated (per-rep count, grand total, decimal forcing, rounding); the integer-division gotcha is explained, which is exactly the trap a beginner would hit.
-- Actionability 5 — runnable; engineer knows exactly what to do.
-- **Q2 avg = 5.00**
+**Overall avg = 4.84 → PASS** (overall average governs; no per-Q veto).
 
-### Q3 — filter company names over 50 chars
-`length(company_name)` ... `WHERE length(company_name) > 50`
-- Accuracy 5 — VERIFIED string.html: `length(string)` returns the length in characters (Unicode code points) as integer; `WHERE length(...) > 50` filters correctly. (Minor un-penalized nuance: code points vs grapheme clusters differ for combining-char/emoji text — irrelevant for company-name length filtering.)
-- Completeness 5 — answers both "function for # of characters" and "filter over 50."
-- Clarity 5 — names the function plainly, states return type.
-- Actionability 5 — runnable.
-- **Q3 avg = 5.00**
+## Verification notes (trino.io/docs/467)
 
-### Q4 — extract day-of-month (1-31)
-`EXTRACT(DAY_OF_MONTH FROM created_at)`
-- Accuracy 5 — CRITICAL CHECK PASSED. VERIFIED trino.io/docs/467 datetime.html: `DAY_OF_MONTH` IS a valid EXTRACT field in Trino 467 (it is an alias for `day()`; `day_of_month(x)` convenience function also exists). The responder's field list (YEAR, MONTH, QUARTER, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, DAY_OF_YEAR, HOUR, MINUTE, SECOND) is accurate — all are valid 467 extract fields. No defect. (DAY and DAY_OF_MONTH are interchangeable; both return 1-31.)
-- Completeness 4.75 — fully answers the extract + GROUP BY ask. Minor: did not surface the simpler equivalent `day(created_at)` function (one-token alternative to the EXTRACT form), which is the cleaner idiom for "just the day number." Not a defect — purely a completeness nicety.
-- Clarity 5 — clear, with the full field reference and a worked GROUP BY/ORDER BY example.
-- Actionability 5 — runnable.
-- **Q4 avg = 4.9375**
+- **Q1** `ORDER BY account_cost DESC, ticket_created_at DESC` — CONFIRMED. Per-column ASC/DESC, evaluated left-to-right. Maps exactly to "most expensive accounts at top, newest tickets first within each account." Resource cross-ref (`ORDER BY order_count DESC, dow ASC`) reinforces the mixed-direction pattern. Clean.
+- **Q2** `format_datetime(CAST(signup_date AS timestamp), 'MMMM yyyy')` — CONFIRMED. format_datetime uses JodaTime patterns; MMMM=full month name, MMM=abbreviated, MM=numeric month, lowercase mm=MINUTE (the gotcha — responder flagged it correctly). format_datetime requires a timestamp, so casting the DATE is right. date_format(ts,'%M %Y') is the valid MySQL-style alt (%M=full month name, %Y=4-digit year) — responder did not mention the alt but the chosen path is fully correct.
+  - **COMPLETENESS DING (Q2 completeness 3.5):** The ask is "group signups BY MONTH," but the query does `GROUP BY signup_date` (the raw DATE) → one row per distinct DAY, not one row per month. The formatting EXPRESSION is correct (hence no accuracy defect), but the grouping granularity does not match the stated "by month" intent. Correct grouping would be `GROUP BY date_trunc('month', signup_date)` (then format that), or `GROUP BY 1` on the format_datetime label / `GROUP BY format_datetime(...)`. Also ORDER BY signup_date would order rows that aren't at month granularity. This is a routing/teaching gap, not a Trino-dialect error.
+- **Q3** `HAVING COUNT(*) > 10` — CONFIRMED. WHERE filters rows pre-group; HAVING filters post-aggregation; HAVING references aggregates or GROUP BY columns (correct — the "cannot HAVING a raw ungrouped column" note is accurate). Runnable example valid 467: GROUP BY rep_id is a real input column; ORDER BY total_deals uses an alias, which Trino ORDER BY permits. Clean.
+- **Q4** `concat_ws(', ', city, state, country)` — CONFIRMED. concat_ws skips NULL args (no doubled separator); NULL separator → NULL result. concat_ws does NOT skip empty strings — the `NULLIF(col,'')` caveat to also drop empties is accurate and valuable. The array+join contrast is correct (that path is for aggregating ROWS). Clean.
 
----
+## Defect / gap flag
 
-## Overall
+- **Q2 group-by-day-vs-by-month granularity** is the only blemish this sweep. It is a real (small) completeness gap that recurs whenever a "group by month, display as name" question lands on the format_datetime card without a co-located GROUP-BY-the-truncated/label canonical. The card teaches the FORMAT but not the GROUPING granularity.
 
-| Q | Acc | Comp | Clar | Act | avg |
-|---|-----|------|------|-----|-----|
-| Q1 | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 4.75 | 5 | 5 | 4.9375 |
+## iter831 directive — FIX-A (light findability, Q2 month-grouping)
 
-**Overall avg = (5.00 + 5.00 + 5.00 + 4.9375) / 4 = 4.984375** (round 4.984)
-**Margin = +1.484 over the 3.5 threshold. PASS (overall avg governs, no per-Q veto).**
+iter831 = **FIX-A** (a small completeness gap surfaced; not a NO-OP).
 
-**Headline:** ALL 4 CLEAN, ZERO dialect defects. Both critical verification targets passed: (Q4) DAY_OF_MONTH is a genuine Trino 467 EXTRACT field (alias for day()) — NOT a fabrication; (Q2) `SUM(COUNT(*)) OVER ()` window-over-aggregate is valid and computes the grand total. The integer-division/`100.0` decimal-forcing reasoning in Q2 is correct and well-explained. Only sub-5 mark is a Q4 completeness nicety (omitted the simpler `day(created_at)` alias) — neither a resource defect nor a responder slip.
+Targeted, in-place, no churn of the verified format_datetime canonical:
+- At the format_datetime / date_format month-name card (resources/07 and/or resources/23 — wherever "month as full name" / "June 2025" keywords route), add a small GROUPING-GRANULARITY blockquote: when the ask is "group/aggregate BY month," group on `date_trunc('month', signup_date)` (or `GROUP BY 1` on the format label / `GROUP BY format_datetime(...)`), NOT on the raw DATE column (raw DATE → one row per distinct day). Provide a runnable canonical, e.g.:
+  ```
+  SELECT format_datetime(CAST(month AS timestamp), 'MMMM yyyy') AS month_label, COUNT(*) AS signups
+  FROM (SELECT date_trunc('month', signup_date) AS month FROM signups) t
+  GROUP BY month ORDER BY month;
+  ```
+  or the one-level form `GROUP BY date_trunc('month', signup_date)`.
+- Inline-defang `GROUP BY signup_date` (raw DATE) on its own un-copyable line as "groups by DAY not MONTH" so the weak responder stops copying it for by-month asks.
+- Keyword anchors: group by month, signups per month, monthly counts, group by month name, one row per month not per day, date_trunc month.
+- Keep all pipe-bearing content in FENCED blocks (pipe-escape trap). PIN Trino 467. Verify date_trunc('month', date) returns a DATE (so the CAST-to-timestamp for format_datetime still applies).
+- Preserve: full iter534–827 lock inventory; NO federation edits (r22 §13.x ZERO edits; federation row stays 4.49944/310).
 
-## iter830 directive
+## Locks reaffirmed (no edits this iter)
 
-**iter830 = DEFAULT NO-OP / durability-breadth sweep.** No open defect surfaced; this was a clean sweep of SQL fundamentals (GROUP-BY-count / percentage-of-total-window / string-length-filter / EXTRACT-day-of-month). Do NOT churn any card.
-
-- OPTIONAL low-pri inoculation ONLY if a future probe under-scores: near the EXTRACT/date-part card, surface the one-token `day(ts)` / `month(ts)` / `year(ts)` convenience functions as the simpler equivalent of the EXTRACT(... FROM ...) form (do NOT pre-churn — the EXTRACT form is already correct and copy-attractive).
-- Suggested fresh adjacent picks for iter830: `date_trunc('day', ts)` day-bucketing vs day-of-month extraction (different intent), `COUNT(DISTINCT x)` per group, ratio-to-group `100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY region)` (partitioned percentage, contrast with empty-OVER grand-total), `last_day_of_month(date)`.
-
-HOLD all iter534-827 locks. Federation row UNCHANGED. DO NOT bump training/state.json (already 829).
+- bool_or/bool_and/every() all-NULL/empty → NULL (iter825/827 fix) intact.
+- GROUP-BY-alias asymmetry card (§8) intact; GROUP BY accepts input col/expr/ordinal, NOT alias; ORDER BY accepts alias+ordinal.
+- repeat()→array(E) + array_join canonical (iter823) intact.
+- round-to-NEAREST-N-min canonical (iter814/815/818) intact.
+- No state.json bump. No resource edits this iter (sweep clean except the Q2 granularity note → FIX-A next).
