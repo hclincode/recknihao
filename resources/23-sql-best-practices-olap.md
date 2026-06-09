@@ -961,6 +961,63 @@ SELECT sin(radians(30)) AS s;   -- ~0.5         (trig args are in RADIANS — co
 
 ---
 
+### Convert a STRING to a DATE — ISO fast-path vs non-ISO (`date_parse` vs `parse_datetime`, and DON'T mix the two pattern families) — iter837 PIN
+
+> **Keyword anchors (route here on any of these):** string to date Trino, convert varchar to date, parse a non-ISO date string, parse a date string with slashes, `'03/15/2024'` to DATE, `MM/dd/yyyy` to date, `date_parse` vs `parse_datetime`, `date_format` vs `format_datetime`, MySQL specifiers vs Joda pattern, `%Y %m %d` vs `yyyy MM dd`, date pattern letters Trino, `%i` minute specifier, why does date_parse return NULL, date string parse wrong month, which date format function uses percent signs.
+
+**ISO `'YYYY-MM-DD'` strings need NO parse function — just `CAST`.** A string already in ISO calendar-date shape (`'2024-03-15'`) casts straight to `DATE`:
+
+```sql
+-- ✅ ISO fast-path: 'YYYY-MM-DD' string -> DATE. No date_parse / parse_datetime needed.
+SELECT CAST(signup_str AS DATE) AS signup_date FROM users;   -- signup_str = '2024-03-15' -> DATE 2024-03-15
+-- (from_iso8601_date(signup_str) also works for ISO 8601 input and returns DATE directly.)
+```
+
+**Non-ISO strings (`'03/15/2024'`, `'15-Jun-2026'`, etc.) need a parse function — and Trino has TWO families with DIFFERENT pattern syntaxes. Do NOT mix them:**
+
+```text
+Trino has TWO date-format function families with DIFFERENT pattern syntaxes — do NOT mix them:
+
+  - date_parse(str, fmt)  / date_format(ts, fmt)
+        -> MySQL specifiers:  %Y (4-digit year)  %m (month 01-12)  %d (day)
+                              %H (hour 00-23)    %i (MINUTE)        %s (second)
+        e.g.  date_parse('03/15/2024', '%m/%d/%Y')
+
+  - parse_datetime(str, fmt) / format_datetime(ts, fmt)
+        -> Joda / Java letters:  yyyy (year)  MM (month 01-12)  dd (day)
+                                 HH (hour 00-23)  mm (minute)    ss (second)
+        e.g.  parse_datetime('03/15/2024', 'MM/dd/yyyy')
+
+Mixing a MySQL function with a Joda pattern -- e.g. date_parse(.., 'MM/dd/yyyy') -- FAILS or misparses.
+Mnemonic: percent-sign -> MySQL -> date_parse / date_format ;  no percent sign -> Joda -> parse_datetime / format_datetime.
+NOTE the MySQL MINUTE specifier is %i, NOT %M  (%M is the full MONTH NAME 'January'..'December').
+NOTE Joda lowercase mm is MINUTE; uppercase MM is the MONTH (the classic month/minute swap).
+```
+
+**Matched-pair canonicals — non-ISO string → DATE (pick ONE family; never cross them).** `date_parse` returns `timestamp(3)` and `parse_datetime` returns `timestamp with time zone`, so wrap either in `CAST(... AS DATE)` to land on a `DATE`:
+
+```sql
+-- ✅ MySQL specifiers WITH date_parse  (percent-sign family):
+SELECT CAST(date_parse(signup_str, '%m/%d/%Y') AS DATE) AS signup_date FROM users;   -- '03/15/2024' -> DATE 2024-03-15
+
+-- ✅ Joda letters WITH parse_datetime  (no-percent family):
+SELECT CAST(parse_datetime(signup_str, 'MM/dd/yyyy') AS DATE) AS signup_date FROM users;  -- '03/15/2024' -> DATE 2024-03-15
+
+-- ✅ ISO 'YYYY-MM-DD' string: no parse function at all:
+SELECT CAST(signup_str AS DATE) AS signup_date FROM users;   -- '2024-03-15' -> DATE 2024-03-15
+```
+
+The wrong form to never copy (the families are crossed here):
+
+```text
+❌ date_parse(s, 'MM/dd/yyyy') -- WRONG: date_parse uses MySQL specifiers (%m/%d/%Y), NOT Joda letters; 'MM/dd/yyyy' is parse_datetime's syntax. Mixing families fails/misparses — DO NOT COPY
+❌ parse_datetime(s, '%m/%d/%Y') -- WRONG: parse_datetime uses Joda letters ('MM/dd/yyyy'), NOT MySQL %-specifiers. Mixing families fails/misparses — DO NOT COPY
+```
+
+**More cross-dialect detail** lives in the migration guide: [Resource 27 §4.3 TO_DATE → Trino string→date table](27-oracle-plsql-to-dbt-trino.md) (slash / day-first / abbreviated-month variants, `parse_date` is NOT a Trino function) and [Resource 27 §4.4B cross-dialect guardrail row](27-oracle-plsql-to-dbt-trino.md) (the explicit `date_parse('..','yyyy-MM-dd')`-mix ban). For the **reverse** direction (DATE/timestamp → string), see the `date_format` / `format_datetime` block above (the `'YYYY-MM'` and `'MMMM yyyy'` month-label cards), which uses the SAME two specifier families.
+
+---
+
 ## 3.1D. `arbitrary` / `any_value` (pick ONE value per group) and `max_by` / `min_by` (deterministic representative-value pick)
 
 **Keyword anchors:** arbitrary Trino, any_value aggregate, pick one value per group, representative value group by, functionally dependent column, "column is not part of GROUP BY", max_by min_by latest value, latest status per user, value associated with max date, one representative row per group, status as of latest update.
