@@ -1,6 +1,7 @@
 {
-  "iteration": 801,
+  "iteration": 802,
   "phase": "extended",
+  "notes_802": "iter802 durability-breadth sweep, no edits — 4 fresh adjacent topics (first_value-last_value / approx_distinct / unnest-map-to-rows / NTILE-or-fresh)",
   "notes_801": "iter801 durability-breadth sweep, no edits — 4 fresh adjacent topics (top-N-per-category / array_position / arrays_overlap-or-intersect / consecutive-delta-or-approx_distinct)",
   "notes_800": "iter800 durability-breadth sweep, no edits — numeric JSON-array-string re-probe to bulletproof + 3 fresh adjacent topics (transform / array-sum-reduce / array_position-or-overlap / CUBE-or-RANGE)",
   "notes_799": "iter799 additive findability FIX-A: added JSON-array-STRING explode branch UNNEST(CAST(json_parse(col) AS ARRAY(VARCHAR))) + native-vs-JSON disambiguator + UNNEST(varchar)-type-error defang at r07 §1a",
