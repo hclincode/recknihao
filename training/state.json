@@ -1,6 +1,7 @@
 {
-  "iteration": 783,
+  "iteration": 784,
   "phase": "extended",
+  "notes_784": "iter784 durability-breadth sweep, no edits — set-ops EXCEPT/UNION bulletproof re-probe + $snapshots map-access slip re-check + 2 fresh adjacent topics (array_distinct-or-sort / date_parse-or-CTE-or-bool_or)",
   "notes_783": "iter783 light additive findability FIX-A: surfaced/elevated row-level set-operations card INTERSECT/EXCEPT/UNION-vs-UNION-ALL + keyword anchors + array-vs-row disambiguator",
   "notes_782": "iter782 findability FIX-A: elevated direct date-form sequence+UNNEST date-spine to first-shown at r07 zero-fill landing + keyword anchors + no-generate_series note",
   "notes_781": "iter781 durability-breadth sweep, no edits — 4 fresh adjacent topics (median / date-spine-sequence / null-aware-aggregate / iceberg-table-op)",

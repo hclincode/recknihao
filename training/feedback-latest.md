@@ -1,67 +1,167 @@
-# Judge Feedback — iter783
+# Judge Feedback — iter784 (EXTENDED PHASE)
 
-**Phase:** extended (final-style; feedback at end of iteration)
-**Sweep:** LIGHT ADDITIVE FINDABILITY FIX-A — iter782 Q3 cited `array_intersect` (an ARRAY function) for a row-level INTERSECT; iter783 enhanced r23 §3.1F set-operations card with INTERSECT/EXCEPT anchors + array-vs-row disambiguator. Q1 re-probes the fix; Q2–Q4 fresh.
-**Overall: 4.6875 — PASS** (threshold 3.5; overall average governs, no single-Q veto)
+DEFAULT NO-OP / durability-breadth sweep. Teacher made ZERO resource edits.
+Q1 re-probes set-ops (EXCEPT) to bulletproof; Q2 re-probes Iceberg `$snapshots` map-access
+to confirm the iter783 `json_extract_scalar`-on-map slip did not recur; Q3-Q4 fresh.
 
-All dialect claims verified against trino.io/docs/467 (select.html, functions/aggregate.html, functions/map.html, Iceberg connector metadata tables) on 2026-06-09.
-
----
-
-## Q1 — Set intersection (products sold in BOTH Jan AND Feb), two queries, no join — RE-PROBE / THE FIX CHECK
-
-`SELECT product_id FROM sales_january INTERSECT SELECT product_id FROM sales_february`. Notes INTERSECT returns DISTINCT rows present in both; cleaner than a JOIN. Cites r23 §3.1F (the enhanced card).
-
-**VERIFIED (select.html):** INTERSECT returns only rows present in the result sets of BOTH queries, DISTINCT by default (INTERSECT ALL available for duplicate-preserving). Exactly right for "products that sold in both months."
-
-**THE FIX WORKED.** The responder **LED with the row-level INTERSECT set operator** and cited the **enhanced r23 §3.1F set-operations card** — it did NOT reach for the `array_intersect(...)` ARRAY function (the iter782 Q3 mis-cite). The array-vs-row disambiguator + INTERSECT/EXCEPT anchors steered the keyword match correctly. This is the **1st clean post-fix datapoint** → set-operations is **CLOSED** (needs 1 more phrasing from a different angle → BULLETPROOFED).
-
-- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5** → **avg 5.00**
-
-## Q2 — Group concat (all product names per order into one comma-separated string)
-
-`listagg(product_name, ', ') WITHIN GROUP (ORDER BY product_name) AS product_list ... GROUP BY order_id` → `"Hat, Shoes, Socks"`. Notes `WITHIN GROUP (ORDER BY)` is required; `CAST(id AS varchar)` if the value is numeric (Trino has no implicit number→string). Cites r07 + r27.
-
-**VERIFIED (aggregate.html):** `listagg(expression[, separator])` WITHIN GROUP (ORDER BY ...) is native Trino; separator + WITHIN GROUP usage correct; Trino has **no** `string_agg` (standing listagg pin held). The equally-valid alternative `array_join(array_agg(product_name ORDER BY product_name), ', ')` exists per resources — choosing listagg is NOT penalized; both correct. The CAST-numeric note is sound (no implicit numeric→varchar coercion).
-
-- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5** → **avg 5.00**
-
-## Q3 — Map key lookup (pull value for key 'os'/'locale' out of a MAP column to filter/group)
-
-`element_at(metadata, 'os') AS os_value` — returns NULL for a missing key, safer than the bracket subscript `metadata['os']` which errors on a missing key; usable in WHERE and GROUP BY. Cites r09.
-
-**VERIFIED (functions/map.html):** `element_at(map, key)` returns the value or NULL if the key is absent; the subscript `map[key]` **throws an error** when the key is not present. So `element_at` is the safe NULL-returning accessor — exactly right, and usable in WHERE/GROUP BY. Matches the standing element_at-for-map pin.
-
-- Accuracy **5** · Completeness **5** · Clarity **5** · Actionability **5** → **avg 5.00**
-
-## Q4 — Iceberg table file/row count (small-files diagnosis without scanning)
-
-PRIMARY: `SELECT partition, record_count, file_count, total_size/1024/1024 AS total_size_mb FROM iceberg.<cat>.<schema>.<table>"$partitions" ORDER BY file_count DESC`.
-SECONDARY: `SELECT snapshot_id, json_extract_scalar(summary, 'total-data-files') AS total_files, json_extract_scalar(summary, 'total-records') AS total_rows FROM ...<table>"$snapshots" ORDER BY committed_at DESC LIMIT 1`. Cites r18.
-
-**PRIMARY ($partitions) — CORRECT.** VERIFIED against the Iceberg connector metadata-tables docs: `$partitions` exposes `partition`, `record_count`, `file_count`, `total_size` (and `data`). `record_count`/`file_count` are the right small-files diagnostic, and ordering by `file_count DESC` to find the worst partitions is exactly the actionable move. This is metadata-only (no data scan) as the question asked. Good answer.
-
-**SECONDARY ($snapshots) — DIALECT DEFECT.** VERIFIED: in Trino's Iceberg `$snapshots` metadata table, the `summary` column is typed **`map(VARCHAR, VARCHAR)`**, NOT a JSON/varchar string. Therefore `json_extract_scalar(summary, 'total-records')` is **WRONG** — `json_extract_scalar` requires a JSON/varchar input, not a map; passing a map type-errors. The correct accessors are the **map subscript** `summary['total-records']` / `summary['total-data-files']` or **`element_at(summary, 'total-records')`**. (Ironic: Q3 in this very sweep was exactly about `element_at` for maps — the same tool applies here.)
-
-**Resource vs responder — this is a RESPONDER SLIP, resources are CLEAN.** r18 (`18-query-performance-regression.md`, "Diagnose small files", lines 1097–1112) shows the CORRECT form `summary['total-data-files']` / `summary['total-records']` and even annotates *"file/row counts live INSIDE the summary map (a map(varchar, varchar)) — NOT as top-level columns."* r17 (lines 1021, 1209–1211, 2913–2917) and r26 (239–240, 376) likewise use `summary['...']` / `element_at(summary, ...)`. **No resource shows `json_extract_scalar` applied to `summary`.** The responder imported the json_extract_scalar pattern (correct for `readable_metrics` JSON, per r10/r17/r18) onto a map column — a mis-pick at answer time, not a resource defect.
-
-Scored down on Accuracy for the secondary; PRIMARY correctness and the metadata-only framing hold up Completeness/Clarity/Actionability.
-
-- Accuracy **3** · Completeness **4** · Clarity **4** · Actionability **4** → **avg 3.75**
+All claims verified against trino.io/docs/467 + iceberg.apache.org via WebFetch/WebSearch.
+FEDERATION NOT PROBED.
 
 ---
 
-## Verdicts (explicit)
+## Per-question scoring
 
-**(a) Set-operations CLOSED?** **YES — CLOSED (1st clean post-fix datapoint).** Q1 fix worked: responder LED with the row-level INTERSECT operator + cited the enhanced r23 §3.1F card, did NOT reach for `array_intersect`. The iter782 array-vs-row mis-cite did not recur. One more phrasing from a different angle (e.g., EXCEPT / "products in Jan but NOT Feb", or UNION-vs-UNION-ALL) → BULLETPROOFED.
+### Q1 — SET DIFFERENCE (EXCEPT) — newsletter emails NOT in paying-customers
+**Answer:** `SELECT email FROM newsletter_signups EXCEPT SELECT email FROM paying_customers`.
+LED with the row-level `EXCEPT` operator; cited r23 §3.1F enhanced set-ops card; noted
+EXCEPT = distinct rows in left not in right, NULL-safe unlike NOT IN, anti-join under the hood.
 
-**(b) Q4 $snapshots-summary verdict.** PRIMARY `$partitions` (record_count/file_count/total_size, ORDER BY file_count) is **CORRECT** and the right small-files diagnostic. SECONDARY `$snapshots` is a **DEFECT**: `summary` is `map(VARCHAR, VARCHAR)`, so `json_extract_scalar(summary, 'total-records')` is invalid (json_extract_scalar takes JSON/varchar, not a map). **Correct form: `element_at(summary, 'total-records')` or `summary['total-records']`** (likewise `summary['total-data-files']`). The defect is a **responder slip** — r18 (and r17/r26) already show the correct map-subscript form; resources are clean.
+**Verification (trino.io/docs/467/sql/select.html):** CONFIRMED. "EXCEPT returns the rows that
+are in the result set of the first query, but not the second." Default is `EXCEPT DISTINCT`
+(de-dupes). NULLs are treated as equal for set membership (standard set semantics), so the
+"NULL-safe unlike NOT IN" note is ACCURATE — NOT IN with a NULL in the subquery returns no
+rows, EXCEPT does not have that trap. "Anti-join under the hood" is a fair plan description.
+Correctly LED with the row-level operator (not array_except / not a key join).
 
-**(c) iter784 designation — DEFAULT NO-OP / durability-breadth (NOT FIX-A).** The Q4 $snapshots json_extract_scalar-on-map does NOT trace to a resource defect — r18 §"Diagnose small files" is correct and even warns summary is a map. Since the slip is responder-side and resources are clean, no edit is warranted (a FIX-A here risks churning a verified-correct card). Teacher: **ZERO edits**.
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
+- **Q1 avg: 5.00**
 
-### iter784 probe suggestions
-- **Set-operations 2nd angle (to bulletproof):** EXCEPT phrasing — "products sold in Jan but NOT in Feb" (`... EXCEPT ...`), or UNION-vs-UNION-ALL dedup framing — confirm the responder still picks row-level set ops over array functions.
-- **Re-probe Q4 $snapshots map access from a different phrasing** (e.g., "how many rows did the last commit add" → `summary['added-records']`) to confirm whether the json_extract_scalar-on-map slip recurs. If it recurs across 2+ phrasings, RE-DESIGNATE as a light FIX-A: add an inline anchor at the r18 $snapshots card explicitly flagging *"summary is a map — use `summary['key']` / `element_at(summary,'key')`, NOT `json_extract_scalar` (that's for JSON/varchar like `readable_metrics`)"* as a disambiguator. For now it's a single slip → no edit.
-- Fresh adjacent: `$manifests` column-form file counts (added/existing/deleted_data_files_count) vs `$snapshots.summary` map access (the r18 contrast); `$files` per-file size distribution.
+This is the 2nd consecutive clean set-operations datapoint (iter783 INTERSECT, iter784 EXCEPT),
+both LED with the correct row-level operator and cited the enhanced r23 §3.1F card.
+**SET-OPERATIONS IS BULLETPROOFED.**
 
-**PRESERVE (verified clean, churn risk):** r23 §3.1F enhanced set-operations card (load-bearing — drove the Q1 fix), r07/r27 listagg + array_join group-concat, r09 element_at-for-map, r18 $partitions/$snapshots small-files cards.
+### Q2 — ICEBERG $snapshots — latest write's operation + records added
+**Answer:** `SELECT snapshot_id, committed_at, operation, element_at(summary, 'added_rows') AS
+rows_added, element_at(summary, 'deleted_rows') AS rows_deleted FROM
+iceberg.analytics."orders$snapshots" ORDER BY committed_at DESC LIMIT 1`. States summary is a
+MAP, accessor is `element_at(summary,'key')`; operation in {append, overwrite, delete, replace}.
+Cited r17.
+
+**Verification — TWO checks:**
+
+(i) SLIP RE-CHECK (the primary re-probe target): The responder used MAP access
+`element_at(summary, ...)` — NOT `json_extract_scalar`. **THE iter783 json_extract_scalar-on-map
+SLIP DID NOT RECUR.** `$snapshots.summary` is `map(varchar,varchar)` (VERIFIED r17:1021 +
+Iceberg docs) and `element_at(map,key)` is a correct accessor (equivalent to `summary['key']`).
+The thing being re-probed PASSED. No iter785 FIX-A needed for the slip.
+
+(ii) KEY-NAME ACCURACY: The responder used `'added_rows'` and `'deleted_rows'` (underscores,
+"rows"). **These are the WRONG key strings.** VERIFIED against iceberg.apache.org / SnapshotSummary:
+Iceberg snapshot-summary keys are HYPHENATED record-counts — `added-records`, `deleted-records`,
+`total-records`, `added-data-files`, `total-data-files`, etc. There is NO `added_rows` /
+`deleted_rows` key. `element_at(summary, 'added_rows')` returns NULL silently (key absent). The
+correct key for added record count is `'added-records'` (hyphen, "records").
+
+**Responder slip vs resource defect — VERDICT: RESPONDER SLIP, NOT a resource defect.**
+r17 shows the CORRECT keys throughout:
+- r17:1021 — "Access via `summary['added-records']`."
+- r17:2913-2916 — `summary['added-records']`, `summary['deleted-records']`,
+  `summary['total-records']`, `summary['added-data-files']`.
+- r17:4001 — `summary['total-records']`.
+The resource is correct (hyphenated keys, bracket map-access). The responder both (a) swapped
+`summary['k']` for the equivalent `element_at(summary,'k')` — fine — and (b) invented underscore
+"rows" key names instead of copying the canonical hyphenated "records" keys. Pure responder
+synthesis slip.
+
+Operation enum: responder gave {append, overwrite, delete, replace}. VERIFIED — Iceberg operation
+values are exactly {append, replace, overwrite, delete}. Correct.
+
+Severity: The re-probe target (map-access pattern) is CORRECT, so the headline check passes. But
+the literal keys would silently return NULL — a real accuracy imprecision that would frustrate an
+engineer (query runs, returns all-NULL counts, no error). Score Accuracy down moderately; credit
+the correct accessor/structure/operation-enum and correct ORDER BY committed_at DESC LIMIT 1 for
+"latest write."
+
+- Accuracy: 3 (right accessor + right structure + right operation enum, but wrong key strings →
+  silent NULLs for the exact counts the question asked for)
+- Completeness: 4 (covers operation + counts + latest-snapshot ordering; keys would return NULL)
+- Clarity: 5 (clean, explains summary-is-a-MAP and the accessor)
+- Actionability: 3 (engineer copies it, gets NULL counts, must debug the key names themselves)
+- **Q2 avg: 3.75**
+
+### Q3 — ARRAY DEDUP + SORT (per-row)
+**Answer:** `array_sort(array_distinct(tags)) AS clean_tags` -> `['beta','vip']`; descending via
+comparator-lambda `array_sort(array_distinct(tags), (a,b) -> IF(a>b,-1,1))`. Cited r07 §1a.3.
+
+**Verification (trino.io/docs/467/functions/array.html):** CONFIRMED. `array_distinct(x)` removes
+duplicate values; `array_sort(x)` sorts ascending with nulls last; nesting gives
+`['beta','vip']`. The comparator form `array_sort(array, (x,y) -> int)` returning -1/0/1 is valid
+Trino 467 for custom ordering. All correct.
+
+- Accuracy: 5
+- Completeness: 5
+- Clarity: 5
+- Actionability: 5
+- **Q3 avg: 5.00**
+
+### Q4 — STRING -> DATE PARSE
+**Answer:** `CAST(date_parse('2026-03-15','%Y-%m-%d') AS DATE)` (MySQL specifiers) or
+`CAST(parse_datetime('2026-03-15','yyyy-MM-dd') AS DATE)` (Joda); for `'03/15/2026'` ->
+`'%m/%d/%Y'` / `'MM/dd/yyyy'`. Notes date_parse uses MySQL %Y/%m/%d/%H/%i/%s; parse_datetime uses
+Joda yyyy/MM/dd (capital M month, lowercase mm minutes); wrap in CAST AS DATE; do NOT use
+parse_date (Snowflake/BigQuery). Cited r27.
+
+**Verification (trino.io/docs/467/functions/datetime.html):** CONFIRMED. `date_parse(string,format)`
+uses MySQL specifiers (%Y %m %d %H %i %s), returns timestamp(3). `parse_datetime(string,format)`
+uses Joda patterns (yyyy MM dd), returns timestamp with time zone. Both valid; CAST(... AS DATE)
+yields a DATE. %m/%d/%Y and MM/dd/yyyy for '03/15/2026' correct. "lowercase mm = minutes in Joda"
+is accurate. "parse_date is not Trino" CONFIRMED — no parse_date in Trino 467 docs. Fully correct.
+(Minor: for the ISO '2026-03-15' case, `CAST('2026-03-15' AS DATE)` works directly — a simpler
+path the responder could mention — but date_parse is correct and necessary for the non-ISO case.)
+
+- Accuracy: 5
+- Completeness: 5 (both formats, both function families, anti-pattern called out)
+- Clarity: 5
+- Actionability: 5
+- **Q4 avg: 5.00**
+
+---
+
+## Overall
+
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 (EXCEPT) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 ($snapshots map) | 3 | 4 | 5 | 3 | 3.75 |
+| Q3 (array dedup+sort) | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 (string->date) | 5 | 5 | 5 | 5 | 5.00 |
+
+**Overall avg = (5.00 + 3.75 + 5.00 + 5.00) / 4 = 18.75 / 4 = 4.6875 → PASS**
+(margin +1.1875 above 3.5 floor; overall average governs, no single-Q veto.)
+
+---
+
+## Headline verdicts
+
+- **(a) SET-OPERATIONS BULLETPROOFED?** YES. Q1 EXCEPT is the 2nd consecutive clean
+  set-operations datapoint after iter783 INTERSECT. Both LED with the correct row-level operator
+  (not array_except / not a key join) and cited the enhanced r23 §3.1F card. Set-operations is
+  now BULLETPROOFED across distinct phrasings.
+
+- **(b) $snapshots map-access SLIP RECUR?** NO. The responder used `element_at(summary, ...)`
+  (MAP access), NOT `json_extract_scalar`. The iter783 json_extract_scalar-on-map slip did NOT
+  recur. The re-probe target passed.
+
+  **Q2 KEY-NAME VERDICT:** RESPONDER SLIP, not a resource defect. The responder wrote wrong key
+  strings `'added_rows'`/`'deleted_rows'` (underscores, "rows") which would silently return NULL.
+  The CORRECT keys are hyphenated record-counts (`'added-records'`, `'deleted-records'`,
+  `'total-records'`). r17 already shows the CORRECT keys: r17:1021 ("Access via
+  `summary['added-records']`"), r17:2913-2916, r17:4001. The resource is clean; the responder
+  failed to copy the canonical key strings and invented underscore "rows" names. One-off synthesis
+  slip on the literal key text only — the accessor, structure, ordering, and operation enum were
+  all correct.
+
+- **(c) iter785 DESIGNATION: DEFAULT NO-OP / durability-breadth sweep.**
+  The re-probed slip did NOT recur and the keys are a minor one-off responder text slip against a
+  resource that is already correct. No resource defect surfaced. No FIX-A required.
+  OPTIONAL (very low priority, NOT required): if iter785 wants to inoculate the key-name slip,
+  add a tiny copy-attractive "SNAPSHOT SUMMARY KEYS ARE HYPHENATED record-counts —
+  `summary['added-records']` NOT `'added_rows'`" pin co-located with the r17:2913 canonical, with
+  an inline un-copyable WRONG marker on `'added_rows'`. This is an inoculation nudge, not a defect
+  fix — defer unless the underscore-keys slip recurs on a future $snapshots re-probe.
+
+HOLD all prior locks. Federation r22 untouched (NOT probed this iter). DO NOT bump
+training/state.json (already 784).
