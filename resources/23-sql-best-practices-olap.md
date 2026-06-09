@@ -944,7 +944,10 @@ GROUP BY product_id;
 
 ```text
 ❌ "Trino has no geometric-mean function" -- WRONG: geometric_mean(x) IS a built-in aggregate (aggregate.html) — DO NOT COPY
+❌ geometric_mean(rate) to average per-second/throughput RATES -- WRONG: rates use the HARMONIC mean 1.0/AVG(1.0/rate); geometric_mean is for multiplicative/growth data only — DO NOT COPY
 ```
+
+> **Averaging RATES (throughput/sec, requests/sec, speed)? That is NOT this function — use the HARMONIC mean** in **§3.1B-HM** below. `geometric_mean` is for *multiplicative/growth* data only.
 
 **Equivalent manual fallback** (only needed on an older engine that lacks `geometric_mean`, or when you want to *explicitly exclude* non-positive rows): `EXP(AVG(LN(x)))` — but ONLY over rows where `x > 0`, because `LN` is undefined for `x <= 0` (`LN(0)` → error/`-Infinity`, `LN(negative)` → `NaN`). On Trino 467 prefer the built-in; reach for the fallback only with a deliberate `WHERE x > 0`.
 
@@ -955,7 +958,43 @@ FROM   t
 WHERE  x > 0;            -- LN is undefined for x <= 0
 ```
 
-**Note:** `geometric_mean` is the *multiplicative* mean (nth root of the product). For the ordinary additive average use `AVG(x)` (§3.1B family); for a weighted average use `SUM(value*weight)/SUM(weight)` (§3.1B-WA above). All three are distinct.
+**Note:** `geometric_mean` is the *multiplicative* mean (nth root of the product). For the ordinary additive average use `AVG(x)` (§3.1B family); for a weighted average use `SUM(value*weight)/SUM(weight)` (§3.1B-WA above); for averaging **rates** use the **harmonic mean** (§3.1B-HM below). All four are distinct.
+
+---
+
+## 3.1B-HM. Averaging RATES — use the **harmonic mean** `1.0/AVG(1.0/rate)` (NOT `geometric_mean`, NOT plain `AVG`)
+
+> **Use this when you need to:** combine or average a set of **rates / ratios / speeds** — throughput per second, requests per second, miles-per-hour, items-per-worker, or any "X per Y" measured across nodes/runs that share a common numerator. *(Keyword anchors so the responder lands here: **average of rates, average throughput per second, combine rates across nodes, harmonic mean, mean of ratios, average speed, per-node throughput rate, average requests per second**.)*
+
+**The RULE.** To average **RATES** (throughput/sec, requests/sec, speed) use the **HARMONIC mean** `1.0/AVG(1.0/rate)` — **NOT** `geometric_mean` (that is for multiplicative/growth data, see **§3.1B-GM**) and **NOT** a plain `AVG` (that over-weights the fast nodes). Trino 467 has **no built-in `harmonic_mean`** — verified absent from the H section of [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html) and from [aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — so hand-write the closed form `1.0/AVG(1.0/NULLIF(rate,0))`.
+
+```sql
+-- WHICH MEAN? pick by the kind of data:
+--   averaging RATES / ratios / speeds (per-second, per-request) -> HARMONIC mean
+--   multiplicative / growth factors / returns / indexes        -> geometric_mean(x)   [see §3.1B-GM]
+--   plain additive quantities                                  -> AVG(x)
+-- Trino 467 has NO harmonic_mean built-in — hand-write it:
+SELECT 1.0 / AVG(1.0 / NULLIF(throughput_per_second, 0)) AS harmonic_mean_rate
+FROM worker_nodes;
+-- n / SUM(1/x): NULLIF guards a zero rate (1/0); harmonic mean excludes zeros
+```
+
+```sql
+-- ✅ per group (e.g. harmonic-mean throughput per cluster):
+SELECT cluster_id,
+       1.0 / AVG(1.0 / NULLIF(throughput_per_second, 0)) AS harmonic_mean_rate
+FROM   worker_nodes
+GROUP BY cluster_id;
+```
+
+Why harmonic and not arithmetic: the harmonic mean is `n / SUM(1/x) = 1.0/AVG(1.0/x)`. When you average rates that share a common numerator (e.g. each node processed the *same* amount of work and you want the combined effective rate), the harmonic mean is the statistically correct mean; a plain `AVG` of the rates is biased high.
+
+```text
+❌ geometric_mean(rate) to "average rates because throughput is multiplicative" -- WRONG: rates use the HARMONIC mean 1.0/AVG(1.0/rate) — DO NOT COPY
+❌ AVG(rate) to combine per-node throughput rates -- WRONG/biased: use 1.0/AVG(1.0/rate) — DO NOT COPY
+```
+
+**Cross-refs:** for *multiplicative/growth* data use `geometric_mean(x)` (**§3.1B-GM**); for a *weighted* average use `SUM(value*weight)/SUM(weight)` (**§3.1B-WA**); for plain additive quantities use `AVG(x)`.
 
 ---
 
