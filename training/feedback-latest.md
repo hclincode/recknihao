@@ -1,20 +1,14 @@
-# Judge Feedback — iter809
+# Judge Feedback — iter810 (FINDABILITY FIX-A verification: concat_ws-columns re-probe + 3 fresh)
 
-**Sweep type:** LIGHT FINDABILITY FIX-A (iter808 Q3 percent-string was a cast-less-concat TYPE ERROR; iter809 added a `format('%.2f%%', x*100)` percent-string card at r07 + cast-less `||`/concat defang).
-**Docs verification:** all claims verified against trino.io/docs/467 (functions/string.html + functions/conversion.html) on 2026-06-09.
-**state.json:** NOT touched (already 809).
+**Phase:** extended. Overall **4.50 PASS**. All dialect claims verified against trino.io/docs/467 (string.html, conditional.html, datetime.html, aggregate.html) on 2026-06-09. Production stack confirmed: Trino 467 + Iceberg connector (prod_info.md).
+
+DO NOT bump training/state.json (already 810).
 
 ---
 
 ## Per-question scores
 
-### Q1 — Percent-string RE-PROBE: decimal `0.158` → `'15.80%'` — FIX CHECK
-
-Responder answer: `format('%.2f%%', return_rate * 100) AS return_rate_pct` → `'15.80%'`; `%%` = literal percent; returns VARCHAR. Cited r23 §3.1A format card.
-
-**Docs verification (conversion.html):** `format(format, args...) -> varchar` uses Java Formatter syntax. `SELECT format('%s%%', 123)` → `'123%'` (confirms `%%` = literal percent). `SELECT format('%.5f', pi())` → `'3.14159'` (confirms `%.Nf` formats float to N decimals). Therefore `format('%.2f%%', 0.158*100)` = `format('%.2f%%', 15.8)` = `'15.80%'`. CORRECT.
-
-**CRITICAL FIX VERDICT:** The responder LED with `format()` (NOT the iter808 cast-less `ROUND(...)||'%'` / `CONCAT(ROUND(...),'%')` concat that was a compile-time TYPE ERROR) and cited the format card. **The format-%-string fix WORKED.** This is the 1st post-fix datapoint.
+### Q1 — full_name from title/first/middle/last joined by spaces, skip NULL parts (no double space) — **CONCAT-COLUMNS-SKIP-NULLS RE-PROBE / FIX CHECK**
 
 | Axis | Score |
 |---|---|
@@ -24,98 +18,68 @@ Responder answer: `format('%.2f%%', return_rate * 100) AS return_rate_pct` → `
 | Actionability | 5 |
 | **Q1 avg** | **5.00** |
 
----
+**FIX WORKED — concat_ws-columns CLOSED (1st post-fix datapoint).** Responder LED with `concat_ws(' ', title, first_name, middle_name, last_name) AS full_name` and cited the new r07 disambiguator card — NO repeat of the iter809 flounder (no array_agg/CASE single-value collapse, no nonexistent ARRAY_COMPACT, no "if available" hedge, no UNION ALL over-engineering). VERIFIED string.html: *"Any null values provided in the arguments after the separator are skipped"* → `concat_ws(' ', 'Dr.', 'John', NULL, 'Doe')` = `'Dr. John Doe'` (no doubled space). The `NULLIF(col,'')` caveat to also skip empty strings is accurate (empty string is NOT null, so concat_ws keeps it and produces a doubled separator unless wrapped). Clean, correct, leads with the right tool.
 
-### Q2 — Concat columns skipping NULLs: join street/city/zip with `', '`, no doubled separator — DEFECT
-
-Responder FLOUNDERED across four forms, none of which was the clean canonical:
-- (a) `array_join(array_agg(CASE WHEN street IS NOT NULL THEN street WHEN city IS NOT NULL THEN city WHEN zip IS NOT NULL THEN zip END), ', ')` — **WRONG.** The single CASE expression returns only the FIRST non-null of the three, so `array_agg` collects ONE value per row, not all three columns. Does not concatenate street+city+zip.
-- (b) `ARRAY_COMPACT(ARRAY[street,city,zip])` — `ARRAY_COMPACT` does NOT exist in Trino 467 (responder correctly noted this, but should not have offered it at all).
-- (c) "the cleanest approach is CONCAT_WS (if available)" — **UNCERTAINTY IS THE DEFECT.** `concat_ws` DOES exist and IS the clean answer.
-- (d) a convoluted `UNION ALL` + `array_agg(piece) FILTER (WHERE piece IS NOT NULL) GROUP BY` — works but is grossly over-engineered for a 3-column single-row concat.
-
-Cited r07 §1a.2 (`array_agg` group-concat card).
-
-**Docs verification (string.html):** `concat_ws(string0, string1, ..., stringN) -> varchar` — "Any null values provided in the arguments after the separator are skipped." So `concat_ws(', ', street, city, zip)` with a NULL `city` = `'123 Main St, 94105'` (no doubled separator). **This is THE direct, clean answer.** The responder failed to give it confidently.
-
-**Q2 VERDICT — DEFECT (selection / findability miss, NOT content gap):**
-`concat_ws` EXISTS in the resources and IS verified-correct. It lives in **r27 (Oracle PL/SQL → dbt/Trino) §4.3-STR-FAMILY**:
-- `resources/27-oracle-plsql-to-dbt-trino.md:1026` — keyword anchor line includes `concat_ws Trino`, `Trino concat_ws exists`, **`join strings with separator Trino`**, `Trino string functions`.
-- `resources/27-oracle-plsql-to-dbt-trino.md:1036` — the canonical row: `concat_ws(separator, string1, ..., stringN) -> varchar` ... "**Skips NULL string arguments**" with worked example `concat_ws('-', 'a', NULL, 'c')` → `'a-c'`.
-- `resources/27-oracle-plsql-to-dbt-trino.md:1050` — DO-NOT-WRITE row rescinding the false "concat_ws is Postgres/Spark-only" ban.
-
-So the content is present and accurate. The problem is **WHERE it lives and WHAT it is filed under.** r27 is the Oracle-migration resource, and the §4.3 card's framing is "string-function family that gets fabricated as missing" (translate/reverse/position/levenshtein/concat_ws). A SaaS engineer asking "join several COLUMNS with a separator skipping nulls" does NOT carry Oracle-migration keywords — that need naturally routes to r07's SQL-patterns landing, where the responder landed on **r07 §1a.2 / §1a.2A**, which is exclusively `array_agg` / `array_join(array_agg(...))` — i.e. joining ROWS within a GROUP into a delimited string (group-concat). There is NO row-level `concat_ws` "join columns skipping nulls" card at the r07 landing. The responder picked the wrong tool because the right tool was not reachable from the question's keywords.
-
-Note: `concat_ws`-skips-nulls was answered CLEANLY in iter779 — so this is confirmed a SELECTION/FINDABILITY MISS, not a knowledge/content gap.
-
-| Axis | Score |
-|---|---|
-| Accuracy | 2 (clean answer never confidently given; array_agg-CASE form is functionally WRONG) |
-| Completeness | 2 (the one correct clean form omitted; offered a nonexistent function) |
-| Clarity | 3 (prose readable but riddled with hedging/uncertainty) |
-| Actionability | 2 (engineer cannot copy a working query confidently from this) |
-| **Q2 avg** | **2.25** |
-
----
-
-### Q3 — File extension after the LAST dot: `'report.final.pdf'` → `'pdf'`
-
-Responder answer: `substr(filename, strpos(filename, '.', -1) + 1) AS extension` → `'pdf'` (strpos 3rd arg `-1` = last occurrence); also `element_at(split(filename, '.'), -1)`.
-
-**Docs verification (string.html):** `strpos(string, substring, instance) -> bigint` — "When `instance` is a negative number the search will start from the end of `string`." So `strpos('report.final.pdf', '.', -1)` returns the position of the LAST `.`, and `substr(..., pos + 1)` returns `'pdf'`. CORRECT. `element_at(split(filename, '.'), -1)` returns the last array element = `'pdf'`. CORRECT (negative index = from end). Both standing pins held.
+### Q2 — first populated of display_name/username/email else 'Anonymous' — **COALESCE FALLBACK CHAIN**
 
 | Axis | Score |
 |---|---|
 | Accuracy | 5 |
-| Completeness | 5 (two valid forms) |
+| Completeness | 5 |
+| Clarity | 5 |
+| Actionability | 5 |
+| **Q2 avg** | **5.00** |
+
+VERIFIED conditional.html: `coalesce(value1, value2[, ...])` returns first non-null, variadic. `COALESCE(display_name, username, email, 'Anonymous') AS label` is the textbook correct chain — literal `'Anonymous'` tail guarantees a non-null result. The Oracle-NVL-is-2-arg-only contrast is accurate and useful migration context. Standing COALESCE pin holds.
+
+### Q3 — collapse event_timestamp to first of month for monthly GROUP BY — **TRUNCATE TO MONTH**
+
+| Axis | Score |
+|---|---|
+| Accuracy | 5 |
+| Completeness | 5 |
 | Clarity | 5 |
 | Actionability | 5 |
 | **Q3 avg** | **5.00** |
 
----
+VERIFIED datetime.html: `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00')` = `2022-10-01 00:00:00.000` (first of month, midnight). `date_trunc('month', event_timestamp) AS month_start ... GROUP BY date_trunc('month', event_timestamp)` correct — repeating the expression in GROUP BY (rather than the alias) is the safe Trino idiom. Standing date_trunc pin holds.
 
-### Q4 — Top-ranked row per key: single lowest-`priority_rank` contact method per person
-
-Responder answer: `ROW_NUMBER() OVER (PARTITION BY person_id ORDER BY priority_rank ASC)` filtered to `= 1` in a subquery; `RANK()` noted for keeping ties.
-
-**Docs verification (functions/window.html / select.html — standing pin):** `ROW_NUMBER() OVER (PARTITION BY person_id ORDER BY priority_rank ASC) = 1` selects the row with the lowest `priority_rank` (highest priority) per person; exactly one row even on ties. `RANK() = 1` keeps all tied rows. CORRECT (top-per-group / keep-latest family).
+### Q4 — per-order has_placed/has_shipped/has_delivered true/false flags from event rows — **PIVOT TO BOOLEAN FLAGS**
 
 | Axis | Score |
 |---|---|
-| Accuracy | 5 |
-| Completeness | 5 (ROW_NUMBER for single + RANK for ties) |
-| Clarity | 5 |
-| Actionability | 5 |
-| **Q4 avg** | **5.00** |
+| Accuracy | 2.5 |
+| Completeness | 3.5 |
+| Clarity | 2.5 |
+| Actionability | 3.5 |
+| **Q4 avg** | **3.00** |
+
+**PRIMARY correct; ALTERNATIVE buggy + redundant; clean idiom missed.**
+
+- **PRIMARY — CORRECT.** `MAX(CASE WHEN event_type='placed' THEN 1 ELSE 0 END) AS has_placed` (+ shipped/delivered) `GROUP BY order_id`: returns 1 if ANY matching event row exists, else 0 (CASE emits 0 for non-matching rows, so an order with no 'placed' row correctly yields MAX=0). Single-pass conditional-aggregation pivot — standing SUM/MAX-CASE-pivot pattern. (Minor: question asked for true/false; MAX(CASE)→1/0 is an integer flag, acceptable but not the literal boolean shape requested.)
+
+- **ALTERNATIVE — BUGGY (DEFECT).** The responder offered `MAX(CASE WHEN event_type='placed' THEN 1 ELSE 0 END) FILTER (WHERE event_type='placed') AS has_placed` and claimed it is an "equivalent, cleaner" form. It is NOT equivalent. VERIFIED aggregate.html (FILTER + empty-input semantics): the FILTER restricts the aggregate to rows where `event_type='placed'`; within those rows CASE is always 1 so MAX=1 — but for an order with NO 'placed' event the FILTER leaves ZERO rows for that aggregate, and an aggregate over zero rows returns **NULL** (docs: aggregates "return null for no input rows"). So `has_placed = NULL` instead of `0`/false for the absent case — DIFFERENT result from the primary, and wrong for the question (a missing event should read false, not null). It is also **redundant**: CASE and FILTER gate on the same predicate (doubly-conditional, nonsensical). Presenting a buggy form as "equivalent/cleaner" is the Accuracy + Clarity hit.
+
+- **CLEAN IDIOM MISSED.** The genuinely cleaner, true/false-shaped, docs-canonical idiom is `bool_or(event_type='placed') AS has_placed` (+ shipped/delivered) — VERIFIED aggregate.html: `bool_or(boolean)` *"Returns TRUE if any input value is TRUE, otherwise FALSE"* → true/false per order, FALSE (not NULL) for an order with no matching event (the non-matching rows ARE input rows that evaluate the predicate to FALSE). Equivalently `COUNT(*) FILTER (WHERE event_type='placed') > 0`. This idiom exists in resources at **r23 §3.1 lines 1099-1136** (`bool_or`/`bool_and` card, fully docs-canonical, with an explicit "prefer bool_or over MAX(bool_col)" rule) — the responder never reached it. It cited r07's metric-summing pivot card (lines 1196-1230) where the FILTER predicate gates on the *pivot key* and CASE returns the *metric* (a correct equivalence for SUM-of-metric), then mis-transplanted that shape onto a boolean presence-check by gating BOTH the CASE and the FILTER on the same predicate. Findability gap: the boolean-flag pivot keyword path (has_X true/false per group) is NOT routed to the r23 bool_or card.
+
+---
+
+## Verdicts
+
+**(a) Is concat_ws-columns CLOSED?** YES — Q1 fix WORKED. Responder led with `concat_ws(' ', col, col, ...)`, cited the new r07 §1a.2 disambiguator, correct skips-nulls + NULLIF-empty caveat, zero repeat of the iter809 flounder. 1st clean post-fix datapoint. CLOSED (needs 1 more phrasing to BULLETPROOF).
+
+**(b) Q4 verdict.** PRIMARY `MAX(CASE WHEN cond THEN 1 ELSE 0 END) GROUP BY order_id` is CORRECT (0/1, 0 for absent). The offered ALTERNATIVE `MAX(CASE...) FILTER (WHERE same-cond)` is a DEFECT: returns **NULL not 0/false** for orders lacking the event (empty FILTER → NULL aggregate, verified), and is redundant (CASE+FILTER both gate the same predicate). The clean boolean-flag idiom the responder should have led with is `bool_or(event_type='placed') AS has_placed` (true/false, docs-canonical, present at r23 §3.1:1099-1136) — or `COUNT(*) FILTER (WHERE cond) > 0`. User CAN get a working answer (primary), but the offered "cleaner" alternative is wrong-and-misleading.
+
+**(c) iter811 designation — LIGHT INOCULATION FIX-A.** The boolean-flag pivot card warrants a fix. Two reasons: (1) the clean `bool_or` idiom is buried at r23 §3.1, not surfaced at the r07 pivot landing where the responder lands for "per-order has_X flags"; (2) the responder synthesized a NULL-returning redundant MAX(CASE)+FILTER and called it equivalent — this exact anti-pattern needs an inline defang. Recommended:
+   1. At r07 (boolean-flag pivot landing, near the §pivot card ~line 1196-1230), add a `bool_or(pred) AS has_X` CANONICAL boolean-flag-pivot block ("per-group did-ANY-event-happen true/false flags") + cross-ref to r23 §3.1:1099-1136. Make `bool_or(event_type='placed')` the copy-attractive one-liner for true/false flags.
+   2. Inline-DEFANG the redundant `MAX(CASE WHEN cond THEN 1 ELSE 0 END) FILTER (WHERE cond)` form: mark it WRONG/un-copyable, state explicitly it returns **NULL (not 0/false)** for groups with no matching row AND is doubly-conditional. Per the Defang-DO-NOT-WRITE memory: make the bool_or block the copy-attractive canonical, the buggy combo un-copyable.
+   3. Note the distinction: in the metric-summing pivot the FILTER gates the *pivot key* while CASE returns the *metric* (correct/equivalent); the boolean-flag case must NOT double-gate on the same predicate.
+   PRESERVE the iter810 concat_ws disambiguator (working), COALESCE pin, date_trunc pin, r23 §3.1 bool_or card.
 
 ---
 
 ## Overall
 
-| Q | Avg |
-|---|---|
-| Q1 | 5.00 |
-| Q2 | 2.25 |
-| Q3 | 5.00 |
-| Q4 | 5.00 |
-| **Overall** | **4.3125** |
+(5.00 + 5.00 + 5.00 + 3.00) / 4 = **4.50 PASS**.
 
-**Overall avg = 4.31 → PASS** (threshold 3.5; overall average governs, no single-Q veto). Q2 is a genuine DEFECT dragging the sweep but does not sink the pass.
-
----
-
-## Teacher feedback (answers to the three required questions)
-
-**(a) Is format-%-string CLOSED? YES — Q1 fix WORKED.** The responder LED with `format('%.2f%%', return_rate*100)` (NOT the iter808 cast-less `ROUND(...)||'%'` / `CONCAT(...)` form that was a compile-time type error) and cited the format card. `0.158` → `'15.80%'` verified against conversion.html (`%%`=literal percent, `%.Nf`=N-decimal float). This is the 1st post-fix datapoint; recommend ONE more percent-string re-probe (different phrasing) to BULLETPROOF before considering it permanently closed.
-
-**(b) Q2 verdict — concat_ws is the clean answer the responder missed.** The direct, clean answer is `concat_ws(', ', street, city, zip)` — verified against string.html: concat_ws "skips" NULL arguments after the separator, so a NULL city yields no doubled separator. The responder floundered: (i) `array_join(array_agg(CASE WHEN ... END), ', ')` is functionally WRONG (the single CASE returns only the first non-null per row, so array_agg collects one value, not three); (ii) `ARRAY_COMPACT` does not exist in Trino 467; (iii) `concat_ws` offered only hedged "if available" when it IS available and IS the answer; (iv) a UNION ALL + array_agg-FILTER form that works but is grossly over-engineered. This is a **SELECTION / FINDABILITY MISS, not a content gap** — concat_ws (skips-nulls) is present and accurate at `resources/27-oracle-plsql-to-dbt-trino.md:1026` (anchor), `:1036` (canonical row), `:1050` (DO-NOT-WRITE rescind), but it is filed under the Oracle-migration string-family card framed around "fabricated-as-missing." The "join several COLUMNS with a separator skipping nulls" need routed to the r07 SQL-patterns landing and landed on `r07 §1a.2 / §1a.2A` (`array_agg` / `array_join(array_agg)`) — which is group-concat over ROWS, the wrong tool. concat_ws-skips-nulls was answered cleanly in iter779, confirming this is a routing/selection miss.
-
-**(c) iter810 designation — FIX-A.**
-Surface a row-level `concat_ws` "join COLUMNS with a separator, skips NULLs" canonical at the r07 SQL-patterns landing (near §1a.2 / §1a.2A), keyword-anchored on: `concat_ws columns`, `join columns with separator skip null`, `concatenate address fields skip null`, `combine columns one separator no doubled separator`, `concat_ws vs concat null`. Copy-attractive form:
-```sql
-SELECT concat_ws(', ', street, city, zip) AS full_address;  -- NULL city -> '123 Main St, 94105' (NULL skipped, no doubled separator)
-```
-CRITICALLY: **disambiguate at the same landing** —
-- `concat_ws(sep, colA, colB, colC)` = join several COLUMNS in ONE row, skips NULL args (this question).
-- `array_join(array_agg(x), sep)` = join the values from MANY ROWS in a GROUP into one delimited string (group-concat; r07 §1a.2A).
-Inline-defang the array_agg-CASE form (mark un-copyable WRONG: "the single CASE returns only the first non-null, NOT all columns") and the nonexistent `ARRAY_COMPACT`. Keep the r27 §4.3 card intact and cross-link it. PRESERVE the iter809 format-%-string card (drove Q1 fix), r23 §3.1A, r07 ROW_NUMBER/RANK top-per-group, strpos-negative / split+element_at extension pins (all clean this sweep).
+concat_ws-columns FIX WORKED / CLOSED. Q2/Q3 clean (standing pins hold). Q4 primary correct but offered alternative is a buggy redundant MAX(CASE)+FILTER (NULL-not-0 for absent); `bool_or(cond)` is the clean boolean-flag idiom and should be surfaced/canonicalized in iter811.

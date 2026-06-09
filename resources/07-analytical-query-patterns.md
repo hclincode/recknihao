@@ -444,6 +444,32 @@ FROM iceberg.analytics.user_events
 GROUP BY user_id;
 ```
 
+> **DISAMBIGUATOR — "join with a separator" means TWO different things. Pick the right tool BEFORE reaching for `array_agg`.** *Keyword anchors: join columns with a separator, combine address fields into one string, concatenate several columns skipping nulls, build a delimited string from columns, full_address from street/city/zip, full_name from name parts, glue a few fields together with a comma.* There are two distinct needs and they use DIFFERENT functions:
+
+```sql
+-- (1) Join SEVERAL COLUMNS of ONE ROW into a delimited string, SKIPPING NULL columns:
+--     -> concat_ws(separator, c1, c2, ...). concat_ws SKIPS null args (no doubled separator).
+SELECT concat_ws(', ', street, city, zip) AS full_address FROM addresses;
+--     If city IS NULL -> '123 Main St, 94105' (the NULL column is dropped — NOT '123 Main St, , 94105').
+--     concat_ws (Trino 467) -> verified at trino.io/docs/467/functions/string.html:
+--       "Any null values provided in the arguments after the separator are skipped."
+--     concat_ws(', ', '123 Main St', NULL, '94105') = '123 Main St, 94105'.
+
+-- (2) Join the values of MANY ROWS in a GROUP into one string (group-concat / one string per GROUP BY):
+--     -> array_join(array_agg(x ORDER BY x), ', ')  (use FILTER to drop NULLs from the ROW set)
+SELECT user_id,
+       array_join(array_agg(item ORDER BY item) FILTER (WHERE item IS NOT NULL), ', ') AS items
+FROM cart_items GROUP BY user_id;
+```
+>
+> **The crisp rule:** **several COLUMNS in one row -> `concat_ws(sep, c1, c2, ...)` (skips NULLs); many ROWS in a group -> `array_join(array_agg(x), sep)`.** Do NOT use `array_agg` to glue a few columns of the SAME row — that is the iter809 trap below.
+>
+> **DO NOT WRITE (column-join traps):**
+> - ❌ `array_join(array_agg(CASE WHEN c1 IS NOT NULL THEN c1 WHEN c2 IS NOT NULL THEN c2 ... END), ', ')` — the single CASE returns only the FIRST non-null, NOT all columns; you get one value, not the joined string — DO NOT COPY (use `concat_ws`).
+> - ❌ `ARRAY_COMPACT(ARRAY[c1, c2, c3])` — `ARRAY_COMPACT` does NOT exist in Trino 467 (no such function) — DO NOT COPY (`concat_ws` already skips nulls, so no compaction step is needed).
+>
+> **Minor caveat:** `concat_ws` skips NULL **arguments** but does NOT skip empty strings `''` — a `''` field still produces a separator (`concat_ws(', ', 'a', '', 'c')` -> `'a, , c'`). If empty strings must be dropped too, `NULLIF(col, '')` each field first: `concat_ws(', ', NULLIF(street,''), NULLIF(city,''), NULLIF(zip,''))`. Full `concat_ws` signature/caveats canonical: [resource 27 § 4.3-STR-FAMILY](27-oracle-plsql-to-dbt-trino.md) (do not rewrite that card here).
+
 > **DO NOT WRITE.** (1) `array_agg(x)` without `ORDER BY` and expect chronological / insertion / file order — **non-deterministic**; will silently break the next time partitioning changes. (2) Outer `SELECT ... ORDER BY occurred_at` to "order the array" — that orders the OUTER ROWS, not the array's elements. ORDER BY must be **inside** the aggregate. (3) `array_agg(x ORDER BY y) OVER (PARTITION BY k)` — Trino does NOT support inline `ORDER BY` combined with `OVER (...)` in the same `array_agg`; see [resource 27 § 7A.2A](27-oracle-plsql-to-dbt-trino.md) for the pre-sorted CTE workaround. (4) `array_agg` for string-joining when you really want a delimited STRING — use `listagg(col, ',') WITHIN GROUP (ORDER BY col)` (one row per group) OR `array_join(array_agg(col ORDER BY col), ',')` (when you need windowed/array form); see [resource 27 § 7A.2A / § 7A.2B](27-oracle-plsql-to-dbt-trino.md) — do not rewrite that family here. (5) **`listagg(DISTINCT product, ',')` is NOT supported in Trino — listagg takes no DISTINCT keyword; for a distinct comma-separated roll-up / dedupe roll-up / unique values rolled up into one cell use `array_join(array_agg(DISTINCT product ORDER BY product), ', ')`.** *Keyword anchors: distinct comma-separated list, dedupe roll-up, listagg distinct, distinct array_agg join, unique values in one cell.* Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — the documented `listagg` signature is `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, ...) [FILTER (WHERE condition)]`. There is **no `DISTINCT` slot** in that signature; writing `listagg(DISTINCT x, ',')` fails at analysis. The `array_agg(DISTINCT x ORDER BY x)` form dedupes BEFORE collection, then `array_join(..., ', ')` concatenates with the separator — semantically identical to "Oracle's `LISTAGG(DISTINCT col, ',')` 12c+ extension", with the caveat that `array_join` skips NULLs by default in the 2-arg form (matching `listagg` NULL-skip behavior) and has no `ON OVERFLOW` clause (use explicit length checks if the joined string risks the 1 MiB row limit). See [resource 27 § 7A.2B](27-oracle-plsql-to-dbt-trino.md) for the broader string-aggregation choice between `listagg` and `array_join(array_agg(...))`. (6) **`array_agg(DISTINCT <expr_A> ORDER BY <expr_B>)` where `<expr_B>` is NOT identical to `<expr_A>`** — **analysis error in Trino 467**: `"For aggregate function with DISTINCT, ORDER BY expressions must appear in arguments"` ([trinodb/trino #20725](https://github.com/trinodb/trino/issues/20725), OPEN as of 2026-06-08). See the **iter703 FIX-A1 inoculation card immediately below (§1a.2A.1)** for the canonical correct forms and the EXACT trap shape — collecting numeric ids as varchar strings while trying to sort by the underlying numeric.
 
 #### 1a.2A.1 LEADING CANONICAL — `array_agg(DISTINCT ...)` with `ORDER BY` — the ORDER-BY key MUST match the aggregate's ARGUMENT expression (iter703 PIN — FIX-A1: collect distinct numeric ids as strings, sorted — pick a form that doesn't trip Trino's #20725 restriction)

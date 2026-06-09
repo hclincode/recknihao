@@ -1,6 +1,7 @@
 {
-  "iteration": 809,
+  "iteration": 810,
   "phase": "extended",
+  "notes_810": "iter810 findability FIX-A: concat_ws-vs-array_join disambiguator at r07 §1a.2 join-columns landing + defang array_agg-CASE / nonexistent ARRAY_COMPACT",
   "notes_809": "iter809 light findability FIX-A: format('%.2f%%',x*100) percent-STRING card at r07 percent-string landing + cast-less ||/concat defang",
   "notes_808": "iter808 durability-breadth sweep, no edits — json_array_length + corr/regr bulletproof re-probes + 2 fresh adjacent topics",
   "notes_807": "iter807 dual additive FIX-A: json_array_length JSON-array-count card at r07 + native corr/covar/regr aggregate-stats card outside federation",
