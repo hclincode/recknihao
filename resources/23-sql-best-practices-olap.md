@@ -676,6 +676,43 @@ FROM orders;
 
 In the Joda pattern `'yyyy-MM'`: lowercase `yyyy` = 4-digit year, **uppercase** `MM` = 2-digit month (`01`-`12`). Joda **lowercase** `mm` = MINUTE, not month — `format_datetime(ts, 'yyyy-mm')` silently yields year-minute, a classic bug. (MySQL-style `date_format` uses `%Y` = year, `%m` = month.) For grouping rows by calendar month, `date_trunc('month', ts)` (returns a truncated TIMESTAMP/DATE, not a string) is the better choice when you want a real date value rather than a label — see resource 07 Pattern A.
 
+**Full MONTH NAME label like `'June 2025'` — use Joda `'MMMM'`, and watch the `M`-count.** The number of `M` letters picks the form (verified against JodaTime `DateTimeFormat` — "3 or over: use text, otherwise use number"):
+
+```sql
+-- Joda month-letter count (full month NAME vs abbreviation vs zero-padded number):
+--   'MMMM yyyy' -> 'June 2025'   (FULL month name -- 4 letters = text, full form)
+--   'MMM yyyy'  -> 'Jun 2025'    (ABBREVIATED month name -- 3 letters = text, short form)
+--   'MM-yyyy'   -> '06-2025'     (zero-padded NUMBER -- 1-2 letters = number)
+--   lowercase 'mm' is MINUTE, NOT month (the classic gotcha above) -- never use lowercase mm for a month
+SELECT format_datetime(CAST(signup_date AS timestamp), 'MMMM yyyy') AS month_label  -- 'June 2025'
+FROM signups;
+```
+
+> **GROUPING GRANULARITY — to group "BY MONTH" with a month-name label, GROUP BY the MONTH BUCKET, not the raw DATE (iter831).** The format expression above turns a single value into `'June 2025'`, but it does NOT change how many rows you get. If you `GROUP BY signup_date` (the raw `DATE`), you get **one row per distinct DAY** — every calendar date in June 2025 becomes its own row, all labeled `'June 2025'`. To get **ONE row per month**, group by the month-truncated value `date_trunc('month', signup_date)` (or by the ordinal `GROUP BY 1` referencing the label in the SELECT list).
+>
+> **Type behavior you must match (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):** `date_trunc('month', x)` **preserves its input type** — a `DATE` in returns a `DATE` out, a `TIMESTAMP` in returns a `TIMESTAMP` out. `format_datetime(...)` **requires a TIMESTAMP** input. So when `signup_date` is a `DATE`, `date_trunc('month', signup_date)` is a `DATE` and you MUST `CAST(... AS timestamp)` before `format_datetime`. When `signup_date` is already a `TIMESTAMP`, `date_trunc('month', signup_date)` is a `TIMESTAMP` and **no cast is needed**.
+>
+> ```sql
+> -- Group BY MONTH with a 'June 2025' label (ONE row per month, not per day):
+> -- signup_date is a DATE here -> date_trunc('month', signup_date) is a DATE -> CAST to timestamp for format_datetime.
+> SELECT format_datetime(CAST(date_trunc('month', signup_date) AS timestamp), 'MMMM yyyy') AS month_label,
+>        COUNT(*) AS signups
+> FROM signups
+> GROUP BY date_trunc('month', signup_date)    -- group by the MONTH bucket (or GROUP BY 1 on the label)
+> ORDER BY date_trunc('month', signup_date)
+> -- => one row per month:  'May 2025' | 1203 ,  'June 2025' | 1457 , ...
+> ```
+>
+> If `signup_date` were a `TIMESTAMP`, drop the cast inside `date_trunc` (it is already a timestamp): `format_datetime(date_trunc('month', signup_date), 'MMMM yyyy')`.
+>
+> **GROUP BY accepts the ordinal or the full expression — NOT the SELECT alias (iter824 lock).** `GROUP BY 1` (the label's position in the SELECT list) works; `GROUP BY date_trunc('month', signup_date)` (the input expression) works; `GROUP BY month_label` (the SELECT alias) raises a column-resolution error — see § GROUP-BY alias rules.
+>
+> ```text
+> ❌ GROUP BY signup_date (raw DATE) when you want one row PER MONTH -- groups by DAY -> a separate row for every distinct date, not per month; use GROUP BY date_trunc('month', signup_date) or GROUP BY 1 on the month label -- DO NOT COPY
+> ```
+>
+> **Keyword anchors:** group by month with month name, one row per month, monthly signups label, group signups by month, date_trunc month group by, GROUP BY 1 month label, monthly report one row per month, month name label June 2025, group by month not day, full month name MMMM, MMMM yyyy.
+
 ### DO NOT WRITE
 
 | False claim | Reality |
