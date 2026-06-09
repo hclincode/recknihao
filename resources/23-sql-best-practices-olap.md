@@ -427,6 +427,25 @@ SELECT split_to_multimap('tag=a;tag=b;tag=c', ';', '=') AS m;
 
 **Note on multi-delimiter strings.** `split_part` always takes the **N-th** piece. For "the LAST piece" (e.g., filename from a path with an unknown number of `/`), `split_part` does **NOT** accept a negative index — use `element_at(split(path, '/'), -1)` instead (`element_at` on an array supports negative indexing from the tail; verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html)).
 
+> **GROUPING / COUNTING by the extracted value (e.g. "count signups per email domain", "group by the domain")?** *Keyword anchors:* group signups by domain, count users per email domain, group by the extracted domain, count per extracted value, group by split_part, GROUP BY domain. The extracted expression is a **derived column** — you must follow Trino's two `GROUP BY` rules or the query fails:
+> 1. **Do NOT `GROUP BY domain`** where `domain` is the SELECT-list **alias** — Trino does **NOT** accept a SELECT output alias in `GROUP BY` (issue [#16533](https://github.com/trinodb/trino/issues/16533), still open in 467). Use the **ordinal** `GROUP BY 1` or **repeat the expression** `GROUP BY split_part(email, '@', 2)`. (`ORDER BY` *can* use the alias — see the asymmetry rule below.)
+> 2. **Do NOT select a stray bare column** (e.g. `customer_id`, `email`) alongside the grouped aggregate — every SELECT column must be grouped or aggregated.
+>
+> ```sql
+> -- ✅ COPY THIS — count signups per email domain (Trino 467):
+> SELECT split_part(email, '@', 2) AS domain,
+>        COUNT(*)                  AS signups
+> FROM iceberg.analytics.signups
+> GROUP BY 1                      -- ordinal; or repeat the expr: GROUP BY split_part(email, '@', 2)
+> ORDER BY signups DESC;          -- ORDER BY CAN use the alias/ordinal
+> ```
+>
+> ```text
+> ❌ ... GROUP BY domain  (where `domain` is a SELECT-list alias) -- Trino does NOT support GROUP BY a SELECT output alias; use GROUP BY 1 (ordinal) or repeat the expression GROUP BY split_part(email,'@',2) — DO NOT COPY
+> ```
+>
+> Full DROP / WRAP / REGROUP picker for the stray-column case, plus the GROUP-BY-alias rule card, lives at [§8 — extract-then-count GROUP-BY-rules anchor](#8-filter-with-where-before-group-by-not-having).
+
 #### The position of the LAST occurrence of a character / the file extension after the last dot — `strpos(s, sub, -1)` (negative instance = search from the end)
 
 **Keyword anchors:** position of the last occurrence, find the last dot, find the last character, last index of a substring, strpos from the end, negative instance strpos, position of the last delimiter, file extension after the last dot, everything after the last delimiter, last occurrence of a character Trino, index of the final separator.
@@ -2085,6 +2104,24 @@ GROUP BY feature_name;
 > 5. A window's inline `ORDER BY` inside `OVER (...)` also uses **pre-projection scope** — `ORDER BY DATE_TRUNC('month', event_date)`, not `ORDER BY event_month`.
 >
 > For the canonical bucketed-running-total worked example (`GROUP BY` + `SUM(COUNT(*)) OVER (...)`), see [resource 07 § Pattern A2 — Bucketed running total](07-analytical-query-patterns.md).
+
+> **RULE — GROUP BY alias vs ORDER BY alias (the asymmetry — iter824 PIN).** *Keyword anchors:* GROUP BY alias error, group by output column name, GROUP BY ordinal, cannot group by alias in Trino, column '<alias>' cannot be resolved, column not found in GROUP BY, group by select alias, can I group by an alias, HAVING alias not allowed, alias works in ORDER BY but not GROUP BY. **Verified against [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) + [trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533) on 2026-06-09:**
+> - **`GROUP BY`** accepts an **INPUT column**, a **full EXPRESSION** of input columns, or an **ORDINAL** (`GROUP BY 1`) — but **NOT a SELECT-list output ALIAS** (unlike MySQL / PostgreSQL-with-extension). Doc verbatim: *"A simple `GROUP BY` clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)."*
+> - **`HAVING`** is the **same** — no alias (conditions on aggregates / GROUP BY columns).
+> - **`ORDER BY`**, by contrast, **CAN** use a SELECT-list **alias** OR an **ordinal**. Doc verbatim: *"Each expression may be composed of output columns, or it may be an ordinal number selecting an output column by position, starting at one."*
+>
+> **So: an alias works in `ORDER BY`, FAILS in `GROUP BY` / `HAVING`.** For grouping, use the **ordinal** (`GROUP BY 1`) or **repeat the expression** (`GROUP BY split_part(email,'@',2)`).
+>
+> ```text
+> ❌ SELECT split_part(email,'@',2) AS domain, COUNT(*) FROM t GROUP BY domain  -- `domain` is a SELECT alias; Trino does NOT accept an alias in GROUP BY — use GROUP BY 1 or GROUP BY split_part(email,'@',2) — DO NOT COPY
+> ```
+> ```sql
+> -- ✅ COPY THIS — ordinal in GROUP BY, alias in ORDER BY:
+> SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS signups
+> FROM iceberg.analytics.signups
+> GROUP BY 1            -- ordinal (or repeat the expression); NOT GROUP BY domain
+> ORDER BY signups DESC;  -- ORDER BY CAN use the alias
+> ```
 
 ### LEADING CANONICAL — extract-then-count (count per derived expression) — every SELECT column must be either GROUPED or AGGREGATED — DROP / WRAP / REGROUP the stray raw column (iter647 PIN — FIX-A for the count-users-per-email-domain GROUP-BY-rule violation)
 

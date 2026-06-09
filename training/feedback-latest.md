@@ -1,65 +1,54 @@
-# iter823 Judge Feedback — FIX-A re-probe (repeat-a-character) + 3 fresh probes
+# iter824 Judge Feedback — FIX-A verification (GROUP-BY-alias) + bool_and NULL re-probe
 
-**Overall: 4.44 / 5 — PASS** (overall average governs; no per-Q veto)
+**Overall: 4.625 — PASS** (threshold 3.5; overall average governs, no per-Q veto)
 
-All dialect claims verified against trino.io/docs/467 (PINNED 467; array.html, string.html, datetime.html, sql/select.html, GH#16533).
+All dialect claims docs-verified vs trino.io/docs/467 (aggregate/string/array/math .html) + WebSearch (round half-up) on 2026-06-09.
 
-## Per-Q scores
+| Q | Topic | Acc | Comp | Clar | Act | Avg | Verdict |
+|---|---|---|---|---|---|---|---|
+| Q1 | email-domain GROUP + COUNT + sort | 5 | 5 | 5 | 5 | **5.00** | CLEAN — **FIX LANDED** |
+| Q2 | flatten array-of-arrays | 5 | 5 | 5 | 5 | **5.00** | CLEAN |
+| Q3 | round to 2 decimals | 5 | 4.5 | 5 | 5 | **4.875** | CLEAN |
+| Q4 | all-items-fulfilled bool_and | 2.5 | 4 | 4.5 | 3.5 | **3.625** | **DEFECT (NULL-semantics accuracy)** |
 
-| Q | Topic | Acc | Compl | Clar | Action | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | repeat a char N times into a string (40-dash divider) | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 | per-day running/cumulative total (window over aggregate) | 5 | 5 | 5 | 5 | **5.00** |
-| Q3 | extract email domain after `@` + group by domain | 2 | 3 | 4 | 2 | **2.75** |
-| Q4 | add 90 days to a timestamp/date | 5 | 5 | 5 | 5 | **5.00** |
+## Q1 — GROUP-BY-alias fix LANDED -> CLOSED
 
-**Overall avg = (5.00 + 5.00 + 2.75 + 5.00) / 4 = 4.44 → PASS**
+The iter823 Q3 defect (responder emitted `GROUP BY <select-alias>`, which Trino rejects per GH#16533) is **FIXED**. This iteration the responder produced a fully runnable Trino 467 query:
 
-## Q1 — repeat-char fix LANDED. CLOSE the topic.
+- `GROUP BY split_part(email, '@', 2)` — grouped by the **repeated input EXPRESSION**, which IS valid Trino 467 (verified: GROUP BY accepts input col / expression / ordinal). NO alias in GROUP BY.
+- `ORDER BY signup_count DESC` — ORDER BY a **SELECT alias**, which IS allowed in Trino 467 (verified). The responder used the asymmetry correctly: alias forbidden in GROUP BY, allowed in ORDER BY.
+- `split_part(email,'@',2)` verified 1-indexed; field 2 after `@` -> `'jane@gmail.com'` -> `'gmail.com'`. Domain extraction correct.
 
-The iter822 Q3 2.00 defect (responder floundered, falsely claimed "Trino has no repeat()", showed broken `concat(repeat(...),repeat(...))`) is FIXED. The responder NOW:
-- LEADS with `array_join(repeat('-', 40), '')` -> 40 dashes (the canonical at r23:606-631).
-- Correctly states **repeat() returns an ARRAY, not a string** — the load-bearing rule.
-- Gives the dynamic-width form `array_join(repeat('-', header_length), '')`.
-- Explains WHY skipping array_join fails (prints as an array).
+No regression to the defanged `GROUP BY domain (alias)` form. The fix card at the split_part landing + the §8 GROUP-BY-rules asymmetry card both worked. **CLOSE the GROUP-BY-alias defect** (1st post-fix clean datapoint; one more angle — e.g. `GROUP BY 1` ordinal phrasing or HAVING-on-alias — would bulletproof it).
 
-Verified per docs: `repeat(element, count) -> array(E)` ("Repeat element for count times"); `array_join(x, delimiter) -> varchar` ("Concatenates the elements of the given array using the delimiter"). `array_join(repeat('-',40),'')` = 40 dashes. CLEAN. **repeat-char-to-string is CLOSED.** The r23:606-631 sub-canonical and its keyword anchors (divider line / ASCII bar / progress bar / star rating / row of dashes / repeat()) routed the responder correctly.
+## Q2 — flatten CLEAN
 
-## Q2 — clean. Window-over-aggregate confirmed valid.
+`flatten(nested_arrays_column)` verified: array.html "Flattens an array(array(T)) to an array(T) by concatenating the contained arrays." One flat array per row, type array(E), no row multiplication. Correctly steers away from UNNEST+re-aggregate. ARRAY[ARRAY[1,2],ARRAY[3,4]] -> ARRAY[1,2,3,4] confirmed.
 
-`SUM(COUNT(*)) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` with `GROUP BY event_date` is valid Trino 467: window functions are logically evaluated AFTER GROUP BY/aggregation, so `SUM(COUNT(*))` (window over an aggregate) compiles and returns one row per group with a running total. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW gives the cumulative frame. Correct "window functions return every input row unlike GROUP BY" note. Cited r07:2412-2437 (which shows the SUM(amount) OVER variant; the SUM(COUNT(*)) OVER nesting the responder produced is an equally-valid extension). No defect.
+## Q3 — round CLEAN (minor nuance only)
 
-## Q4 — clean. Both forms verified.
+`round(price, 2)` verified: math.html "Returns x rounded to d decimal places." Rounding mode HALF_UP / half-away-from-zero (confirmed via source/WebSearch). On DECIMAL, round(19.235,2)=19.24 is exact. Minor completeness ding (−0.5): the answer asserts the half-up examples without noting that on a **DOUBLE** column the binary representation can make round(19.235,2) imprecise (exact only on DECIMAL). Per directive this is a minor nuance, not a hard error — the Oracle-ROUND equivalence framing is apt and useful.
 
-`date_add('day', 90, session_start)` and `session_start + INTERVAL '90' DAY` both verified. `date_add(unit, value, timestamp)` returns the SAME TYPE as input (TIMESTAMP->TIMESTAMP, DATE->DATE) — confirmed at datetime.html. Correct, important note: **INTERVAL requires a string LITERAL; use date_add for a column/variable offset** (matches r07:2350-2391 leading canonical). Mar 1 + 90 days = May 30 traced correct (Mar31=+30, Apr30=+60, May30=+90). No defect.
+## Q4 — bool_and NULL claim is WRONG (accuracy defect)
 
-## Q3 — DEFECT (findable-but-WRONG-construct). New gap for iter824.
+bool_and is the correct function (vs MAX(CASE)/FILTER) and the SQL skeleton is right and clean. BUT the accuracy claim fails:
 
-`split_part(email, '@', 2)` is CORRECT and well-explained (1-indexed, field 2 = after the first `@`; verified at string.html: "Field indexes start with 1", out-of-range -> NULL). The `split_part`-vs-`substr(strpos)` framing (r23:411-427) is good.
+> Responder: "If even one is **FALSE OR NULL** -> FALSE."
 
-BUT the runnable example SQL is BROKEN in Trino 467:
+**This is incorrect for Trino 467.** Verified vs aggregate.html: bool_and/bool_or are NOT in the exception list (count/count_if/max_by/min_by/approx_distinct), so they follow the standard rule — **"all of these aggregate functions ignore null values."** Therefore:
 
-```sql
-SELECT customer_id, email, split_part(email, '@', 2) AS domain
-FROM signups GROUP BY domain ORDER BY COUNT(*) DESC
-```
+- bool_and over `[TRUE, NULL]` -> **TRUE** (NULL ignored), NOT FALSE.
+- bool_and over `[NULL]` (all null) -> NULL, not FALSE.
 
-Two fatal problems:
-1. **`GROUP BY domain` references a SELECT output ALIAS — Trino does NOT support this.** Confirmed: GH#16533 "Using alias in group by is not supported by Trino" (still the behavior in 467; ANSI-standard scoping — aliases are not visible to GROUP BY). The responder's routing asserted "GROUP BY by output alias/ordinal is allowed" — **the ORDINAL is allowed (`GROUP BY 3`), the ALIAS is NOT.** Must be `GROUP BY split_part(email, '@', 2)` or `GROUP BY 3`.
-2. **`customer_id, email` are selected alongside a domain GROUP BY** with neither aggregation nor membership in GROUP BY — internally inconsistent; would error even if alias-grouping worked. A "group signups by domain" query should be `SELECT split_part(email,'@',2) AS domain, COUNT(*) AS signups FROM signups GROUP BY 1 ORDER BY signups DESC`.
+Consequence: an order whose only un-fulfilled line item has `is_fulfilled = NULL` would be **wrongly flagged TRUE (all fulfilled)** — a silent wrong-result bug in production. To treat a NULL flag as not-fulfilled the responder must write `bool_and(COALESCE(is_fulfilled, false))`. Accuracy scored 2.5 (function/skeleton correct, NULL semantics materially wrong); actionability 3.5 (engineer who copies it gets a query that runs but mis-handles the realistic NULL-line-item case).
 
-Net: an engineer who copies this gets a query-analysis error. The function answer is right; the surrounding GROUP BY scaffold is wrong. Accuracy 2 / Actionability 2.
+## iter825 directive — FIX-A (inline NULL-semantics clarify at bool_and card)
 
-## iter824 directive — FIX-A (a defect surfaced; NOT a no-op)
+Make iter825 a **FIX-A** at the r07/r23 bool_and/bool_or card:
 
-Target the **GROUP BY-output-alias misconception** + the **email-domain grouping example**:
+1. Inline-clarify that **bool_and / bool_or IGNORE NULL inputs** (standard aggregate NULL-skip): bool_and([TRUE, NULL]) -> TRUE; all-NULL group -> NULL.
+2. Add the canonical for treating NULL-as-not-fulfilled: `bool_and(COALESCE(is_fulfilled, false)) AS all_items_fulfilled`. Lead with this when the question framing is "if even one is not fulfilled / missing -> false."
+3. Inline-defang the WRONG claim on its own line: `-- WRONG: "a NULL flag makes bool_and return FALSE" — NULL is IGNORED, not FALSE`.
+4. Keyword anchors: bool_and null, all true ignore null, treat null as false, all items fulfilled, every row true including nulls.
 
-1. At r23:411-427 (the split_part card), add a corrected, runnable grouping example:
-   `SELECT split_part(email, '@', 2) AS domain, COUNT(*) AS signups FROM signups GROUP BY 1 ORDER BY signups DESC` — group by the **ordinal** (`GROUP BY 1`) or the **repeated expression**, NOT the alias; and select ONLY the grouped expression + aggregates.
-2. Add an inline DO-NOT-WRITE defang (own line, un-copyable): `-- GROUP BY domain (a SELECT alias) -- Trino does NOT allow GROUP BY on an output ALIAS (GH#16533); use GROUP BY 1 or repeat the expression -- DO NOT COPY`.
-3. Add a short rule card (findable from keywords: *GROUP BY alias, group by output column, group by the aliased expression, group by 1, can I use an alias in GROUP BY Trino*): **Trino GROUP BY accepts input columns, expressions, or an ORDINAL (`GROUP BY 1`) — but NOT a SELECT alias.** Place it where the responder routes for "group by the domain / group by a derived column". Likely near the existing GROUP BY / aggregation guidance in r07 or r23; cross-link from the split_part card.
-4. Do NOT churn the verified split_part SQL or the verified r07 window/date_add canonicals.
-
-NO federation edits (r22 13.x untouched; federation 4.49944/310 holds).
-
-iter824 = **FIX-A** (GROUP BY-alias construct defect).
+PRESERVE: the iter824 split_part GROUP-BY-1 / repeated-expression fix card + §8 GROUP-BY-alias asymmetry rule card (both LANDED), flatten/round canonicals, and the full iter534-823 pin inventory. NO federation edits (margin thin, federation 4.49944/310). DO NOT bump state.json (already 824).
