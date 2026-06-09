@@ -1,6 +1,7 @@
 {
-  "iteration": 808,
+  "iteration": 809,
   "phase": "extended",
+  "notes_809": "iter809 light findability FIX-A: format('%.2f%%',x*100) percent-STRING card at r07 percent-string landing + cast-less ||/concat defang",
   "notes_808": "iter808 durability-breadth sweep, no edits — json_array_length + corr/regr bulletproof re-probes + 2 fresh adjacent topics",
   "notes_807": "iter807 dual additive FIX-A: json_array_length JSON-array-count card at r07 + native corr/covar/regr aggregate-stats card outside federation",
   "notes_806": "iter806 stronger regexp_extract inoculation: top-of-card group-index RULE + 3-arg-only copy-attractive value-after-label form + sharpened adjacent 2-arg WRONG-OUTPUT defang at r23",

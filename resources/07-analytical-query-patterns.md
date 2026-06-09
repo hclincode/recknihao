@@ -1650,6 +1650,23 @@ FROM iceberg.analytics.product_sales;
 - **Guard against divide-by-zero:** if the total can be 0 (all rows zero / filtered to nothing), wrap the denominator in `NULLIF(SUM(x) OVER (), 0)` so the result is `NULL` instead of an error.
 - **Do NOT collapse with `GROUP BY` to get the denominator** and then re-join — the empty-`OVER ()` window computes the grand total inline while keeping every detail row, no self-join needed. (For the grand-total/subtotal ROLLUP report shape — one explicit total ROW, not a per-row percent — see [resource 28 § GROUPING SETS / ROLLUP / CUBE](28-complex-sql-performance-trino-dbt.md) instead.)
 
+##### DISPLAY a ratio/decimal AS A PERCENT STRING (e.g. `0.0732` -> `'7.32%'`) — `format('%.2f%%', x*100)`, NOT cast-less `||`/`concat`
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** format as a percentage string · display a ratio as a percent · show X% with a percent sign · percent string · conversion rate as a percentage · two decimals and a `%` sign · return rate / abandonment rate as a percentage · format a decimal as `'7.32%'` · render a fraction as a percent label.
+
+> This is a DIFFERENT need from the percent-of-total cards above. Above = compute a number (`x / SUM(x)`). Here = take a ratio/decimal you already have and render it as a human-readable **percent STRING** with a literal `%` sign. The clean one-call form:
+
+```sql
+-- Display a ratio/decimal as a PERCENT STRING (e.g. 0.0732 -> '7.32%'):
+format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent sign; multiply the decimal by 100 first)
+
+-- ❌ ROUND(100.0 * conversion_rate, 2) || '%'   -- TYPE ERROR: || / concat are VARCHAR-only, NO implicit number->varchar cast. Use format('%.2f%%', x*100), or CAST(ROUND(...) AS varchar) || '%' -- DO NOT COPY
+```
+
+- `format('%.2f%%', x*100)` is the **clean one-call form**: `%.2f` renders the number to 2 decimals, `%%` renders a **literal `%`** sign (Java `Formatter` syntax per [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html)). So `format('%.2f%%', 7.32)` = `'7.32%'`, and `format('%.2f%%', 0.0732 * 100)` = `'7.32%'`. Multiply the **decimal by 100 first** (a ratio like `0.0732` is `7.32%`).
+- **Why the `||`/`concat` form is a TYPE ERROR:** Trino's `||` operator and `concat()` are **VARCHAR-only** and do **NOT** implicitly cast a number to varchar. Per [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) verbatim: *"Trino will not convert between character and numeric types."* So `ROUND(100.0 * conversion_rate, 2) || '%'` never compiles — it raises a type error, not the `'7.32%'` you wanted. **If you must concatenate a number with text, CAST the number to varchar first:** `CAST(ROUND(100.0 * conversion_rate, 2) AS varchar) || '%'`. Prefer `format()` for cleanliness.
+- Same printf-style spec as the [§3.1A `format()` canonical in resource 23 (line ~574: `format('%.1f%%', 87.5)` -> `'87.5%'`)](23-sql-best-practices-olap.md) — that card is the general reference for `format()` directives; this card is the percent-STRING-specific landing.
+
 ##### LEADING CANONICAL — share of a SUBSET over the GRAND TOTAL (final-assembly form — single-pass conditional-SUM / FILTER, no CTE cross-join) (iter636 PIN — FIX-A: subset-share final-assembly column-scope bug)
 
 > **Keyword anchors (READ THIS FIRST if your question contains any of these):** what share of revenue comes from the top quintile · what percent of total revenue comes from the top decile · top 20% revenue as a fraction of all revenue · subset sum over grand total · ratio of a filtered sum to the overall sum · what fraction of total X are Y · percent of total from a subset · share of revenue from the top X% / top N customers / top quintile / top decile / top quartile · how much of total revenue do the top spenders account for · subset/total revenue ratio · share of total contributed by a flagged subset · final assembly of share-from-subset · top_20_revenue / total_revenue.
