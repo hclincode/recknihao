@@ -2782,7 +2782,20 @@ WHERE regexp_like(account_id, '^[0-9]{8}$');
 | Ends with suffix `.csv` | `regexp_like(col, '\.csv$')` (or simpler: `col LIKE '%.csv'`) |
 | Contains any of `a`, `b`, `c` | `regexp_like(col, 'a\|b\|c')` (regex alternation — single call replaces chained `OR LIKE`; see [§27 multi-keyword canonical](27-oracle-plsql-to-dbt-trino.md)) |
 | Case-insensitive match | embed `(?i)` flag inline: `regexp_like(col, '(?i)pattern')` (Trino's `regexp_like` is 2-arg only — no flag-arg form; see [§27 dialect-nuance table](27-oracle-plsql-to-dbt-trino.md) row on 3-arg `regexp_like(s, pat, 'i')`) |
-| Flag rows NOT matching format (data-quality) | `WHERE NOT regexp_like(col, '^<pattern>$')` |
+| Flag rows NOT matching format (data-quality) | `WHERE NOT regexp_like(col, '^<pattern>$')` (in SQL: plain `|`) |
+
+#### Match ANY of several keywords / substrings in ONE expression (regex alternation)
+
+Use this when you need to **match any of several keywords**, **contains any of** a list, replace **multiple `LIKE` OR in one expression**, do **regex alternation**, match **any one of these patterns** (e.g. **refund chargeback dispute**), or test **any of these substrings**. A single `regexp_like` with plain `|` (pipe) alternation replaces a chain of `OR LIKE`:
+
+```sql
+-- Match ANY of several substrings/keywords in one expression (regex alternation):
+WHERE regexp_like(description, 'refund|chargeback|dispute')   -- plain | = OR/alternation; matches if ANY appears anywhere
+
+-- WRONG: regexp_like(description, 'refund\|chargeback\|dispute')  -- \| is a LITERAL pipe in Java regex (matches the '|' char), NOT alternation -> matches ~nothing. Use a PLAIN | . DO NOT COPY
+```
+
+**Markdown-layout caution:** A `\|` shown inside a markdown TABLE in these docs is markdown-layout-only (a literal pipe escaped so it doesn't break the `|`-delimited table) and renders as `|` — in actual SQL use a PLAIN unescaped `|`. So the companion-table row above showing `regexp_like(col, 'a\|b\|c')` means `regexp_like(col, 'a|b|c')` in real SQL. `regexp_like` is a **CONTAINS** check (no `^...$` anchors needed) — it returns TRUE if the column contains any of the alternatives. For case-insensitive, prefix the inline flag: `regexp_like(description, '(?i)refund|chargeback|dispute')`. (See the full multi-keyword canonical at [§27 multi-keyword canonical](27-oracle-plsql-to-dbt-trino.md).)
 
 **The complete Trino 467 regex function family** (memorize: regex is **FUNCTIONS, not operators**):
 
