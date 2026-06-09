@@ -2808,6 +2808,11 @@ CAST(regexp_extract(product_label, '[0-9]+') AS INTEGER)   -- 'Size 12 (Large)' 
 -- First match of a capture GROUP (the digits AFTER a label):
 regexp_extract(s, 'id=([0-9]+)', 1)                        -- 'id=987;x' -> '987'  (group 1)
 
+-- Value after a label / text between two markers (e.g. after 'action=' up to the next space): PASS group index 1
+regexp_extract(log_message, 'action=(\S+)', 1)            -- 'user=42 action=login status=ok' -> 'login'
+
+❌ regexp_extract(log_message, 'action=(\S+)')  -- 2-arg returns the WHOLE match 'action=login', NOT the group; pass , 1 for the capture group -- DO NOT COPY
+
 -- ALL digit-runs as an ARRAY (e.g. '12 then 340' -> ['12','340']):
 regexp_extract_all(s, '[0-9]+')
 
@@ -2816,7 +2821,7 @@ regexp_extract_all(s, '[0-9]+')
 
 **Semantics** (per [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html), verified 2026-06-09):
 - `regexp_extract(string, pattern) → varchar` — returns the **FIRST substring matched** by `pattern` (NULL if no match). `regexp_extract('Size 12 (Large)', '[0-9]+')` = `'12'`; `regexp_extract('Weight 340g', '[0-9]+')` = `'340'`.
-- `regexp_extract(string, pattern, group) → varchar` — returns **capture group N** (1-indexed; group `0` = whole match) of the first occurrence.
+- `regexp_extract(string, pattern, group) → varchar` — returns **capture group N** (1-indexed; group `0` = whole match) of the first occurrence. This is the form for **extracting a value after a label, the text between two markers, or a field value out of a log line** (e.g. the value after `action=` and before the space): wrap the value part in a capture group `(...)` and **pass `, 1`** to get that group. Forgetting the `, 1` (the 2-arg form) returns the WHOLE match including the label (`'action=login'`), not the captured value (`'login'`).
 - `regexp_extract_all(string, pattern) → array(varchar)` — returns an **ARRAY of all matches**.
 - These return **varchar**. To get a number, wrap the result in `CAST(... AS INTEGER)` (or `BIGINT` for large values). See the regex-family table below for the full signature row.
 

@@ -1,67 +1,68 @@
-# Judge Feedback — iter804
+# Judge Feedback — iter805 (LIGHT INOCULATION FIX-A verification)
 
-**Mode:** DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits; 4 fresh adjacent probes). Phase: extended.
-**Date:** 2026-06-09
-
-**Overall: 4.06 PASS** (overall average governs; no single-Q veto).
-
-All dialect claims verified against trino.io/docs/467 (functions/datetime.html, functions/regexp.html, functions/aggregate.html) on 2026-06-09.
-
----
+**Verified against trino.io/docs/467** (datetime, string, regexp, window, aggregate) on 2026-06-09. All five dialect facts confirmed.
 
 ## Per-question scores
 
-### Q1 — quarter (1-4) + ISO week-of-year from order_date — **avg 2.50 (DEFECT)**
-- Accuracy: **2** — Completeness: 3 — Clarity: 3 — Actionability: 2
-- Responder answer: `'Q' || quarter_of_year(order_date) AS quarter, week_of_year(order_date) AS week_of_year`.
-- **DEFECT: `quarter_of_year()` is a FABRICATED function.** VERIFIED vs trino.io/docs/467/functions/datetime.html: Trino's quarter function is **`quarter(x) -> bigint`** ("Returns the quarter of the year from x. Ranges 1-4"). There is **NO `quarter_of_year()`** registered function or alias. The query would fail at planning with "function quarter_of_year not registered." (Only the `day_*` family has of-year-style aliases — day_of_week/dow, day_of_year/doy; quarter does NOT.)
-- The week half is CORRECT: VERIFIED `week_of_year(x)` IS a documented **alias for `week(x)`** ("ISO week of the year, 1-53"). So `week_of_year(order_date)` compiles and is right.
-- (Secondary: `'Q' || quarter_of_year(...)` would need a CAST of the bigint to varchar for `||`; moot given the fabrication.)
-- **Correct forms:** `quarter(order_date)` or `EXTRACT(QUARTER FROM order_date)`; week is fine as-is (or `EXTRACT(WEEK FROM order_date)`).
-- **Verdict: RESPONDER SLIP against CLEAN resources.** Resources never contain `quarter_of_year`. They show the correct `quarter()` repeatedly: `resources/07-analytical-query-patterns.md:3069` (`quarter(order_date) = quarter(current_date)`) and `:3075`, and `resources/27-oracle-plsql-to-dbt-trino.md:592` (`use quarter(ts)`). `EXTRACT(QUARTER ...)` documented at `resources/13-postgres-to-iceberg-ingestion.md:5683` (QUARTER listed among EXTRACT fields). The responder fabricated the `_of_year` suffix by over-generalizing the day_of_year alias pattern.
+### Q1 — QUARTER re-probe: `quarter(invoice_date)` / `EXTRACT(QUARTER FROM invoice_date)`
+- Verified: `quarter(x)` returns the quarter of the year, value range **1–4**. `EXTRACT(QUARTER FROM x)` maps to `quarter()`. **No `quarter_of_year` function exists** — confirmed.
+- The responder used `quarter()` (the canonical), offered `EXTRACT(QUARTER FROM ...)` as the SQL-standard equivalent, cited the new r07:3077-3087 card, AND explicitly warned against the non-existent `quarter_of_year` alias.
+- **The iter804 fabrication did NOT recur.** Clean re-probe.
 
-### Q2 — substring between markers: value after 'action=' before next space → 'login' — **avg 2.50 (DEFECT)**
-- Accuracy: **2** — Completeness: 3 — Clarity: 3 — Actionability: 2
-- Responder answer: `regexp_extract(log_message, 'action=(\S+)') AS action_value`; prose claim "extracts the first capture group (the parenthesized part)."
-- **DEFECT: the 2-arg `regexp_extract` returns the WHOLE match, not the capture group.** VERIFIED vs trino.io/docs/467/functions/regexp.html: `regexp_extract(string, pattern) -> varchar` returns "the first substring matched by the regular expression pattern" (the ENTIRE match). So on `'user=42 action=login status=ok'` with `'action=(\S+)'` it returns **`'action=login'`** (includes the `action=` prefix), NOT `'login'` as claimed. The prose claim that the 2-arg form "extracts the first capture group" is **FALSE**.
-- **Correct form:** `regexp_extract(log_message, 'action=(\S+)', 1)` — the **3-arg form with group index 1** returns capture group 1 = `'login'`. (`regexp_extract(string, pattern, group) -> varchar` returns capturing group N; group 0 = whole match.) The pattern `'action=(\S+)'` itself is fine; the missing group-index arg is the bug.
-- **Verdict: RESPONDER SLIP against CLEAN resources.** r23 has the EXACT correct canonical: `resources/23-sql-best-practices-olap.md:2809` — `regexp_extract(s, 'id=([0-9]+)', 1)  -- 'id=987;x' -> '987' (group 1)`. Semantics spelled out correctly at `:2818` (2-arg = "FIRST substring matched") vs `:2819` (3-arg = "capture group N (1-indexed; group 0 = whole match)"). The responder had the right card, dropped the `, 1` group-index arg, and mis-attributed capture-group semantics to the 2-arg form.
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.0** |
 
-### Q3 — SLA deadline = created_at + 2 hours 30 minutes — **avg 5.00 (CLEAN)**
-- Accuracy: 5 — Completeness: 5 — Clarity: 5 — Actionability: 5
-- `created_at + INTERVAL '2' HOUR + INTERVAL '30' MINUTE AS deadline` — VERIFIED valid chained interval addition on timestamp. Equivalent `date_add('minute', 150, created_at)` also correct. CASE-based SLA-status framing is a practical bonus. No defect.
+### Q2 — VALUE-AFTER-LABEL re-probe: token after `'ref: '` up to next space
+PRIMARY (lead answer) — `split_part(split_part(notes, 'ref: ', 2), ' ', 1)`:
+- Verified: `split_part(string, delimiter, index)`, 1-based, multi-char delimiter allowed. Inner `split_part(notes, 'ref: ', 2)` = `'ORD-77 paid in full'`; outer `split_part(..., ' ', 1)` = `'ORD-77'`. **CORRECT.** With `WHERE notes LIKE '%ref: %'` guard. The user gets a working answer.
 
-### Q4 — most common device_type per country (mode per group) — **avg 5.00 (CLEAN)**
-- Accuracy: 5 — Completeness: 5 — Clarity: 5 — Actionability: 5
-- Inner `SELECT country, device_type, COUNT(*) AS cnt ... GROUP BY country, device_type`, outer `max_by(device_type, cnt) GROUP BY country`. VERIFIED vs functions/aggregate.html: `max_by(x, y)` returns x at the max of y → device_type with highest per-country count = the mode. Standing mode=max_by-over-COUNT pin reconfirmed. `max_by(device_type, ROW(cnt, device_type))` deterministic tie-break is valid (lexicographic ROW comparison). No defect.
+ALTERNATIVE (regex) — `regexp_extract(notes, 'ref: (\S+)')` claimed to "capture just the token part in group 1":
+- Verified: the **2-arg** `regexp_extract(string, pattern)` returns the **WHOLE match** `'ref: ORD-77'`, NOT the capture group. The "captures group 1" claim is **FALSE**. The correct form is the 3-arg `regexp_extract(notes, 'ref: (\S+)', 1)`.
+- This is the **exact iter804 2-arg defect** that FIX-A's r23 card (lines 2809-2814) was meant to inoculate. The card is correct and even has a same-line `❌` 2-arg defang at 2814 — yet the responder still emitted the 2-arg form with the wrong group claim in the alternative path.
 
----
+Verdict: split_part lead is correct and authoritative, so the user is not misled on the main path. But the regex alternative is a copy-able wrong snippet with a false semantic claim → dock.
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 3 | 4 | 3 | 3 | **3.25** |
+
+### Q3 — NEXT ROW VALUE: `LEAD(page) OVER (PARTITION BY user_id ORDER BY event_time)`
+- Verified: `lead(x)` default offset **1**, returns next row's value; past the last row returns `default_value` or **NULL** if unspecified. Partition reset per user is correct. Cited r07 Pattern B.
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.0** |
+
+### Q4 — STDDEV of `latency_ms`
+- Verified: `stddev(x)` is an alias for `stddev_samp(x)` (sample, n-1); `stddev_pop(x)` (population, n); `variance`/`var_samp` and `var_pop` analogous. The sample-vs-population distinction is correct. AVG + stddev_samp combined query is a good practical add. Cited r05.
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.0** |
 
 ## Overall
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|-----|------|------|-----|-----|
-| Q1 | 2 | 3 | 3 | 2 | 2.50 |
-| Q2 | 2 | 3 | 3 | 2 | 2.50 |
-| Q3 | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | 5 | 5 | 5 | 5 | 5.00 |
-| **Overall** | | | | | **4.06 PASS** |
+| Q | Avg |
+|---|---|
+| Q1 | 5.0 |
+| Q2 | 3.25 |
+| Q3 | 5.0 |
+| Q4 | 5.0 |
 
-PASS on the overall-average rule, but with **TWO non-compiling/wrong-value defects (Q1, Q2)** — both pure responder slips against clean, correct resources. A findability/discipline regression, not a resource gap.
+**Overall avg = (5.0 + 3.25 + 5.0 + 5.0) / 4 = 4.5625 → PASS** (overall average governs; no single-Q veto).
 
----
+## Closure verdicts
 
-## Verdicts (explicit)
+- **(a) quarter-date-part: CLOSED.** First post-fix datapoint clean — responder used `quarter()` + `EXTRACT(QUARTER FROM ...)`, cited the new card, and warned off `quarter_of_year`. The iter804 fabrication did not recur. Fix worked.
 
-**(a) Q1 — `quarter_of_year` fabrication.** Correct = `quarter(order_date)` or `EXTRACT(QUARTER FROM order_date)`. **RESPONDER SLIP** — resources clean & correct: `resources/07-analytical-query-patterns.md:3069`/`:3075` show `quarter()`; `resources/27-oracle-plsql-to-dbt-trino.md:592` shows `use quarter(ts)`; `resources/13-postgres-to-iceberg-ingestion.md:5683` lists QUARTER as an EXTRACT field. No `quarter_of_year` anywhere. The responder over-generalized the `day_of_year`/`day_of_week` alias pattern onto quarter.
+- **(b) regexp_extract-capture-group: NOT FULLY CLOSED.** The split_part PRIMARY is correct (user gets a working answer), but the regex ALTERNATIVE still emitted the bare **2-arg** `regexp_extract(notes, 'ref: (\S+)')` with a FALSE "captures group 1" claim — the precise iter804 defect FIX-A targeted. The r23 card content is technically correct and already has a defang, but the responder still reached for the 2-arg form. The inoculation did not fully take.
 
-**(b) Q2 — `regexp_extract` 2-arg returns whole match.** Correct = 3-arg `regexp_extract(log_message, 'action=(\S+)', 1)` for the capture group. **RESPONDER SLIP** — `resources/23-sql-best-practices-olap.md:2809` already shows the exact `regexp_extract(s, 'id=([0-9]+)', 1)` 3-arg group-1 canonical, and `:2818`/`:2819` correctly state 2-arg=whole-match vs 3-arg=group-N. The responder dropped the group index and mis-described the 2-arg semantics.
+- **(c) iter806 designation: FIX-A (stronger regexp_extract 3-arg inoculation).** The 2-arg bug recurred on the regex path despite the iter805 card. Recommended adjustments to the r23 regexp_extract card (around 2804-2814):
+  1. Make the **3-arg `, 1` form the only copy-attractive fenced "value after a label" snippet** — the value-after-label / between-markers use case is exactly where the responder reaches for 2-arg, so the 3-arg must be the dominant, top-positioned canonical for that intent.
+  2. **Sharpen the 2-arg-with-capture-group defang**: the current `❌` line at 2814 sits below two valid examples; hoist the WRONG-vs-RIGHT contrast directly adjacent to the value-after-label canonical and state the literal output difference (`'ref: ORD-77'` vs `'ORD-77'`) inline so the responder cannot pattern-match the 2-arg shape.
+  3. Add a one-line rule near the top: "extracting a value/token after a label ALWAYS uses the 3-arg form with `, 1` — the 2-arg form returns the label too." Keyword-anchor it to "value after a label", "token after", "text between markers".
 
-**(c) iter805 designation — LIGHT INOCULATION FIX-A (both slips, clean resources).**
-Both defects trace to clean resources, so no large rewrite is warranted. Two surgical, additive, keyword-landing inoculations:
-1. **r07 date-part canonical:** add a short fenced "quarter + ISO week from a date" card LEADING with `quarter(order_date)` and `week_of_year(order_date)` (and `EXTRACT(QUARTER FROM ...)` / `EXTRACT(WEEK FROM ...)`), with an inline un-copyable WRONG-marker on `quarter_of_year(...)` ("not a Trino function — use `quarter()`"). Land on keywords: "quarter of year", "which quarter", "week number", "week of year", "ISO week". Directly answers Q1's phrasing and defangs the fabricated alias.
-2. **r23 regexp_extract between-markers card:** add a short "pull value between two markers / after a delimiter" fenced canonical on the EXISTING correct `:2809` pattern — `regexp_extract(log_message, 'action=(\S+)', 1)` → `'login'` — with an explicit one-liner: "the **2-arg** form returns the WHOLE match (`'action=login'`); you MUST pass the **group index `, 1`** to get just the captured part." Land on keywords: "value after", "between markers", "substring after = before space", "extract field from log line".
-
-If the teacher prefers zero churn, a pure NO-OP is defensible (resources are correct; these are responder slips) — but the same 2-arg-vs-3-arg regexp_extract confusion has appeared before, so inoculation #2 is the higher-value move. PRESERVE all existing verified cards (r07 quarter()/interval, r23:2806-2819 regexp_extract, r23 mode=max_by) — do NOT churn them.
-
-**DO NOT bump training/state.json (already 804).**
+## Teacher action
+- iter806 = FIX-A: stronger regexp_extract 3-arg inoculation per (c). Re-probe value-after-label again next sweep to confirm the 2-arg form is gone.
+- quarter-date-part and the standing LEAD / stddev pins are solid — no edits needed there.

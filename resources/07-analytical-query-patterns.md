@@ -3074,6 +3074,18 @@ The phrases you would type into a search bar for this pattern: **year over year*
 >
 > Note: for a **quarter-vs-prior-quarter** comparison that crosses a year boundary (Q1 2026 vs Q4 2025), the simple `quarter(...) - 1` won't work (Q1 of 2026 has `quarter=1`, and `1 - 1 = 0` which is not a valid quarter). For that case, either subtract a quarter from `current_date` using `date_add('quarter', -1, current_date)` and read `year(...)` + `quarter(...)` of that, or scope by explicit date windows (the BETWEEN row above).
 
+> **WHICH-QUARTER / WEEK-OF-YEAR date-part card** *(keyword anchors: which quarter, fiscal quarter, quarter of the year, Q1 Q2 Q3 Q4, what quarter is this date in, week of year, ISO week number, week number of the year)* — to get the quarter number (1–4) or the ISO week-of-year number from a date, use the named date-part functions (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html), 2026-06-09):
+>
+> ```sql
+> -- Quarter (1-4) and ISO week-of-year from a date:
+> quarter(order_date)        -- 1..4   (or EXTRACT(QUARTER FROM order_date))
+> week_of_year(order_date)   -- ISO week 1..53  (alias of week(); or EXTRACT(WEEK FROM order_date))
+>
+> ❌ quarter_of_year(order_date)  -- NOT a Trino function (no such alias); use quarter() or EXTRACT(QUARTER FROM ...) -- DO NOT COPY
+> ```
+>
+> Note: the `day_*` family has `of-year`/`of-week` aliases (`day_of_week`/`dow`, `day_of_year`/`doy`, `week_of_year` = alias of `week`, `year_of_week`/`yow`), but **`quarter` has NO `quarter_of_year` alias** — it is just `quarter()` (or `EXTRACT(QUARTER FROM ...)`). Don't synthesize a `quarter_of_year` by analogy with `week_of_year` — it does not exist and fails at planning.
+
 > **DO-NOT-WRITE — period-total ratio specific (iter640 FIX-A — the iter639 Q2 responder miss):**
 >
 > | DO NOT write | Why it's wrong / silently-wrong | Correct form |
