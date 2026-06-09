@@ -1,68 +1,72 @@
-# Judge Feedback — iter796 (FINDABILITY FIX-A re-check: regexp_extract first-digit-run)
+# iter797 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
 
-**Phase:** extended / final-style (end-of-iteration feedback)
-**Verification date:** 2026-06-09 — all dialect claims verified vs trino.io/docs/467 (regexp / datetime / aggregate .html) + WebSearch (alias-not-allowed-in-WHERE).
+**Teacher edits this iter:** ZERO (no resource changes). Expected-strong durability sweep.
+**Verification:** every dialect claim checked against trino.io/docs/467 (regexp / aggregate / select / window .html) via WebFetch, 2026-06-09. resources/ NOT treated as ground truth.
 **Production fit:** Trino 467 + Iceberg, on-prem. All four answers are pure SQL within stack constraints. No auth/authz scope.
 
 ---
 
-## Per-question scores
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
 
-### Q1 — Extract numeric part of reference_code as integer (FIX-A KEY CHECK)
-**Answer:** `CAST(regexp_extract(reference_code, '[0-9]+') AS INTEGER) AS order_num` — 'ORD-000123-X'→123, 'INV-4567-A'→4567; cites new r23 §3.2 card.
+### Q1 — EXTRACT NUMBER RE-PROBE (4-digit year from filename → integer) — 2nd regexp_extract datapoint
+Answer: `CAST(regexp_extract(filename, '[0-9]{4}') AS INTEGER) AS year_number`; explained first-match + `{4}` = exactly 4 digits + CAST. Cited r23 §3.2 (lines 2800–2834). LED with regexp_extract.
+- **Accuracy 5** — VERIFIED vs regexp.html: `regexp_extract(string, pattern) → varchar` "Returns the first substring matched". `'report_2026_final.pdf'` → first 4-digit run `'2026'` → `CAST AS INTEGER` = 2026. Correct.
+- **Completeness 5** — pattern, first-match semantics, and CAST all explained. Acceptably flagged that `[0-9]{4}` grabs the FIRST 4-digit run (fine for these filenames).
+- **Clarity 5** — clean, leads with the canonical, no muddled framing.
+- **Actionability 5** — drop-in.
+- **Q1 avg = 5.00**
 
-- **Verified vs regexp.html:** `regexp_extract(string, pattern)` returns "the first substring matched by the regular expression pattern in string." `regexp_extract('ORD-000123-X','[0-9]+')` = `'000123'` → `CAST AS INTEGER` = `123`; `'INV-4567-A'` → `'4567'` → `4567`. CORE ANSWER CORRECT.
-- **FIX CONFIRMED:** Responder LED with `CAST(regexp_extract(s,'[0-9]+') AS INTEGER)` — did NOT use the iter795 broken `regexp_replace('[^0-9].*','')` form, did NOT repeat the false "no digit-extraction function" claim, and cited the new r23 §3.2 fenced canonical. The iter796 FINDABILITY FIX-A WORKED. **regexp_extract → CLOSED (1st post-fix datapoint, clean).**
-- **SECONDARY SLIP (minor, example-only):** the example query has `... WHERE order_num > 100 ORDER BY order_num`, where `order_num` is a SELECT alias. Verified vs Trino SELECT semantics (WebSearch + Trino SELECT docs): WHERE is evaluated BEFORE SELECT, so a SELECT alias is NOT resolvable in WHERE → `WHERE order_num > 100` would ERROR ("column 'order_num' cannot be resolved"). Correct forms: repeat the expression in WHERE, or wrap in a subquery/CTE. (`ORDER BY order_num` IS valid — alias allowed in ORDER BY.) This is an example imprecision, NOT a defect in the tested core answer.
-
-- Accuracy: **4** (core regexp_extract+CAST fully correct & verified; alias-in-WHERE example would not compile)
-- Completeness: **5** (digit-run semantics, first-match behavior, CAST, sort/join use all covered)
-- Clarity: **5** (clear walkthrough, `[0-9]+`/first-match explained, worked on both examples)
-- Actionability: **4** (copy-pasteable core; the example's `WHERE order_num` line would need a fix before it runs)
-- **Q1 avg = 4.50**
-
-### Q2 — Truncate timestamp to day for GROUP BY
-**Answer:** `date_trunc('day', event_time) AS day ... GROUP BY date_trunc('day', event_time)`. Cites r07 + r13.
-
-- **Verified vs datetime.html:** `date_trunc('day', timestamp)` truncates to start of day (midnight); docs example `date_trunc('day', TIMESTAMP '2022-10-20 05:10:00')` → `2022-10-20 00:00:00.000`. CORRECT. Repeating the expr in SELECT and GROUP BY is the right idiom (GROUP BY-by-ordinal or by-expression both valid).
-- Accuracy **5** / Completeness **5** / Clarity **5** / Actionability **5**
+### Q2 — FILTER ON COMPUTED VALUE / alias-in-WHERE WATCH
+Answer: "You CANNOT reference a SELECT alias in WHERE — universal SQL rule." Gave subquery form (repeat `discount_amount/order_total > 0.5` in outer WHERE) AND CTE form (`WITH discounts AS (... discount_ratio) SELECT * ... WHERE discount_ratio > 0.5`). Cited r23.
+- **Accuracy 5** — VERIFIED vs select.html: WHERE evaluated before SELECT → output aliases unresolvable in WHERE (valid in GROUP BY/HAVING/ORDER BY only). Rule correctly stated; both workarounds correct.
+- **Completeness 5** — covers the rule + two canonical wrappings (subquery & CTE); subquery form also implicitly shows the "repeat the bare expression" option.
+- **Clarity 5** — explains WHY (evaluation order), not just WHAT.
+- **Actionability 5** — engineer has two ready patterns.
 - **Q2 avg = 5.00**
 
-### Q3 — SUM of refunds → 0 instead of NULL
-**Answer:** `COALESCE(SUM(refund_amount), 0) AS total_refunds`. Cites r07 §1a SUM gotcha.
-
-- **Verified vs aggregate.html:** "all of these aggregate functions ignore null values and return null for no input rows or when all values are null" — `sum()` returns null, not zero, over zero/all-NULL input. `COALESCE(..., 0)` → 0. CORRECT (standard COALESCE-SUM-0 idiom; same fix also covers a group with rows but all-NULL values).
-- Accuracy **5** / Completeness **5** / Clarity **5** / Actionability **5**
+### Q3 — LATEST-PER-GROUP COMPANION (price at latest changed_at, not MAX(price))
+Answer: `ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY changed_at DESC)=1` (whole row) OR `max_by(price, changed_at) AS current_price` + `MAX(changed_at) GROUP BY product_id` (cheaper for specific columns). Cited r23 + r07.
+- **Accuracy 5** — VERIFIED vs aggregate.html: `max_by(x, y)` "Returns the value of x associated with the maximum value of y" → `max_by(price, changed_at)` = price at latest changed_at. ROW_NUMBER DESC =1 = latest whole row. Both correct.
+- **Completeness 5** — gives both the whole-row and the cheap-column approach with the right tradeoff guidance.
+- **Clarity 5** — distinguishes "latest row" from MAX(price) misconception explicitly.
+- **Actionability 5** — two drop-in patterns with a clear choice rule.
 - **Q3 avg = 5.00**
 
-### Q4 — Fold attr_key/attr_value rows into one map per user
-**Answer:** `map_agg(attr_key, attr_value) AS user_attributes GROUP BY user_id`; lookup via `element_at(map,'plan')` (NULL if missing) or `map['plan']` (errors if missing). Cites r07 §1a.
-
-- **Verified vs aggregate.html:** `map_agg(key, value) -> map<K,V>` aggregates key/value pairs over the group → one map per `user_id`. CORRECT. The `element_at` (NULL-safe) vs subscript `[]` (fails on missing key) distinction is accurate (matches the map element_at pin). Minor optional caveat not raised: duplicate keys within a group yield an arbitrary/erroring value — not required for a key/value-row fold.
-- Accuracy **5** / Completeness **5** / Clarity **5** / Actionability **5**
+### Q4 — CUMULATIVE RUNNING % (Pareto down revenue-desc ranking)
+Answer: `SUM(pct_of_total) OVER (ORDER BY revenue DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_pct`; inner `pct_of_total = SUM(amount)*100.0/SUM(SUM(amount)) OVER ()`. Cited r07.
+- **Accuracy 5** — VERIFIED vs window.html: aggregates usable as window fns via OVER; `SUM(SUM(amount)) OVER ()` = window-over-grouped-aggregate = grand total over the grouped result (standard valid Trino); explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` = standard running-total frame. `*100.0` forces double. Correct Pareto.
+- **Completeness 5** — both the per-row %-of-total and the cumulative running % shown.
+- **Clarity 5** — explicit frame removes ambiguity about default framing.
+- **Actionability 5** — complete two-layer query, drop-in.
 - **Q4 avg = 5.00**
 
 ---
 
 ## Overall
 
-| Q | Acc | Compl | Clar | Action | Avg |
-|---|---|---|---|---|---|
-| Q1 | 4 | 5 | 5 | 4 | 4.50 |
+| Q | Acc | Compl | Clar | Action | avg |
+|---|----|------|------|--------|-----|
+| Q1 | 5 | 5 | 5 | 5 | 5.00 |
 | Q2 | 5 | 5 | 5 | 5 | 5.00 |
 | Q3 | 5 | 5 | 5 | 5 | 5.00 |
 | Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall avg = (4.50 + 5.00 + 5.00 + 5.00) / 4 = 4.875 → PASS** (threshold 3.5).
+**Overall avg = 5.00 → PASS** (threshold 3.5).
 
 ---
 
-## Teacher feedback
+## Standing-item verdicts (teacher directives)
 
-**(a) Is regexp_extract CLOSED?** YES. The iter796 FIX-A worked on its first re-probe. Q1 led with `CAST(regexp_extract(reference_code,'[0-9]+') AS INTEGER)`, produced correct outputs (123, 4567), avoided the iter795 broken `regexp_replace('[^0-9].*','')` workaround, dropped the false "no digit-extraction function" premise, and cited the new fenced r23 §3.2 canonical. **regexp_extract first-digit-run = CLOSED (1st clean post-fix datapoint).** A 2nd re-probe from a different phrasing (e.g., "strip the prefix and parse the trailing number") in a future durability sweep would bulletproof it before fully retiring attention.
+**(a) regexp_extract — BULLETPROOFED.** Q1 is the 2nd consecutive clean post-fix datapoint (after iter796). Responder LED with `CAST(regexp_extract(s, '<pattern>') AS INTEGER)`, no false "no digit-extraction function" claim, no broken regexp_replace fallback. The iter795 defect is fully closed and durable across two phrasings. Watch-item RETIRED.
 
-**(b) Q1 alias-in-WHERE slip — warrants what?** Just a NOTE, no FIX-A. The slip is in the *example* (`WHERE order_num > 100` references a SELECT alias, which Trino cannot resolve in WHERE — would error), not in the core regexp_extract answer that the re-probe tested. It cost a 1-point ding each on Accuracy and Actionability for Q1, no more. This is a general SQL-evaluation-order imprecision, not a Trino dialect/resource defect, and it does not negate the fix. If the responder repeats "alias usable in WHERE" 2+ times across questions, consider a small one-line note in r07/r23 ("a SELECT alias is usable in GROUP BY/HAVING/ORDER BY but NOT in WHERE — repeat the expression or wrap in a subquery"). One occurrence = monitor only; do not churn resources for it now.
+**(b) alias-in-WHERE watch — CLOSED, slip did NOT recur.** iter796 carried a minor example-only slip (`WHERE order_num > 100` referencing a SELECT alias). In iter797 Q2 — directly probing filter-on-computed-value — the responder did the OPPOSITE of slipping: it correctly TAUGHT the rule ("cannot reference a SELECT alias in WHERE; WHERE runs before SELECT") and supplied correct subquery + CTE workarounds. Confirmed one-off; NO iter798 FIX-A. Watch-item CLOSED.
 
-**(c) iter797 designation:** **DEFAULT NO-OP / durability-breadth sweep.** No open resource defect. regexp_extract is now closed; Q2/Q3/Q4 are clean standing pins (date_trunc, COALESCE-SUM-0, map_agg/element_at). Teacher should make ZERO edits and probe 4 fresh adjacent angles (suggestions: 2nd regexp_extract re-probe with different phrasing to bank a 2nd datapoint / array of distinct values per group via `array_agg(DISTINCT ...)` / `from_unixtime` epoch→timestamp / `multimap_agg` vs `map_agg` for duplicate-key folding). PRESERVE r23 §3.2 regexp_extract canonical, r07 date_trunc/COALESCE-SUM/map_agg cards — all verified clean 2026-06-09, churn risk.
+**(c) Other standing pins all clean:** max_by-latest-per-group (Q3), running-cumulative `SUM() OVER (... ROWS UNBOUNDED PRECEDING)` + pct-of-total `SUM(SUM()) OVER ()` (Q4) — all verified, no regression.
 
-**Do NOT touch training/state.json** (already at 796).
+---
+
+## iter798 designation: DEFAULT NO-OP / durability-breadth (expected)
+
+No open defect, no new slip. Two watch-items closed this iteration (regexp_extract bulletproofed, alias-in-WHERE confirmed one-off). Recommend a NO-OP sweep of fresh adjacent topics. Suggested probes: `array_agg(DISTINCT ...)` / `from_unixtime` epoch→timestamp / `multimap_agg` vs `map_agg` / NTILE bucketing / `arbitrary()`/`any_value`. Optionally re-probe Q4 Pareto with different phrasing to bank a 2nd cumulative-% datapoint.
+
+**PRESERVE (churn risk — all verified clean):** r23 §3.2 regexp_extract canonical, r23 alias-in-WHERE/subquery-CTE content, r23/r07 max_by + ROW_NUMBER latest-per-group, r07 running-total/pct-of-total window cards. No edits warranted.
