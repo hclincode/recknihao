@@ -1,90 +1,91 @@
-# Judge Feedback — iter866 (EXTENDED PHASE)
+# Judge Feedback — iter867 (EXTENDED PHASE)
 
-**Overall: 4.84 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.375 = 19.375/4 = 4.84375; margin +1.34; overall average governs, no per-Q veto).
+**Overall: 4.78 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.125 = 19.125 / 4 = 4.78125; margin +1.28; overall average governs, no per-Q veto)
 
-Federation NOT probed this iteration (row UNCHANGED 4.49944/310, still FAIL).
+**Federation NOT probed** — r22 §13.x row UNCHANGED (4.49944 / 310, still FAIL).
 
-All dialect facts VERIFIED vs trino.io/docs/467 (datetime.html, string.html, regexp.html, aggregate.html) + WebSearch, 2026-06-10. PIN Trino 467.
-
----
-
-## Q1 — count how many of ~8 boolean flag COLUMNS are TRUE in a SINGLE ROW (per-row, not across rows)
-
-**THE iter865 Q3 PER-ROW-FLAG-COUNT FIX RE-PROBE.**
-
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
-
-**FIX LANDED — CLEAN.** Responder gave the correct per-row shape:
-`CAST(has_sso_enabled AS integer) + CAST(has_mfa_on AS integer) + ... AS features_enabled` with **NO GROUP BY**, explained CAST(boolean AS integer) → true=1/false=0, wrapped `COALESCE(flag,false)` for NULL safety, AND explicitly stated **"Do NOT use count_if() for this — that's an aggregate that counts TRUE rows per group, a different shape."**
-
-Verified vs trino.io/docs/467:
-- CAST(boolean AS integer) → 1/0 is established 467 behavior (documented in the pinned §3.1E "boolean → 1/0 scalar" card).
-- aggregate.html: count_if IS an aggregate (it is one of the 5 ignore-nulls EXCEPTIONS: count, count_if, max_by, min_by, approx_distinct) — counts TRUE input ROWS per group, NOT columns in a row. The responder's shape-distinction is exactly right.
-
-The iter866 FIX-A (per-ROW CAST-sum card + SHAPE-ROUTER + count_if defang adjacent to §3.1E/§11) **landed and routed correctly**. The misframe from iter865 (per-GROUP aggregate / "count_if cleaner") did NOT recur. No escalation to iter867.
+**Headline:** All 4 are basic core-SQL shapes; all dialect facts VERIFIED vs trino.io/docs/467 (conversion / string / array / aggregate .html) + WebSearch 2026-06-10. The iter866 per-ROW flag-count FIX is now **BULLETPROOFED** — 2nd clean datapoint, responder gave the per-row CAST-sum (NO GROUP BY) and explicitly told the engineer NOT to use the count_if per-GROUP aggregate. No regression to count_if. One minor Q4 completeness ding (over-claimed "comparable performance / no nuance" between the two anti-join forms). No FIX-A warranted.
 
 ---
 
-## Q2 — convert milliseconds-since-epoch bigint (e.g. 1717612800000) to a readable timestamp
+## Q1 — Count how many of FIVE boolean feature COLUMNS are TRUE per customer ROW (NOT across rows)
 
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
 
-Responder: `from_unixtime(event_timestamp_ms / 1e3) AS event_timestamp`; CRITICAL gotcha — divide by `1e3` / `1000.0` NOT `1000` (integer division drops sub-second precision); from_unixtime expects SECONDS not millis (else year ~56378); can filter on converted ts or compare raw millis.
+Responder answered with the per-ROW CAST-sum:
+`CAST(can_export AS integer) + CAST(can_api_access AS integer) + ... + CAST(can_white_label AS integer) AS features_enabled`, **NO GROUP BY**; explained `CAST(boolean AS integer)` → true=1 / false=0, wrapped NULL-bearing flags in `COALESCE(flag, false)`, and called it "the canonical Trino form for count how many flag columns are TRUE in a single row."
 
-Verified vs trino.io/docs/467 datetime.html:
-- from_unixtime takes UNIX **seconds** (docs: "number of seconds since 1970-01-01 00:00:00 UTC"), returns timestamp(3) with time zone. CONFIRMED seconds, not millis.
-- from_unixtime_nanos(bigint) exists; there is NO direct from-millis builtin in 467 — so the `/1e3` approach is the correct idiom. CONFIRMED.
-- Integer-division gotcha is real: `ms / 1000` (both bigint) truncates; `/1e3` (double divisor) promotes to seconds with sub-second fraction preserved. CONFIRMED.
+**VERIFIED vs trino.io/docs/467:**
+- `CAST(boolean AS integer)` → 1 for true / 0 for false: conversion.html does NOT explicitly enumerate boolean→numeric, but this is stable, established Trino 467 behavior (confirmed by the existing pinned r23 §3.1E card `CAST(true AS integer)=1` and prior iter866 verification). The row-wise SUM of these CASTs (no GROUP BY) is the correct way to count how many flag COLUMNS are TRUE in a single row.
+- This is the per-ROW shape — NOT a per-GROUP `count_if(...)` aggregate (aggregate.html: count_if "Returns the number of TRUE input values" = counts TRUE ROWS per group, the WRONG shape for a per-row column count).
 
-Fully correct.
-
----
-
-## Q3 — find rows where a free-text notes column CONTAINS a keyword like 'escalated'
-
-Scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → **avg 5.00**
-
-Responder: `WHERE notes LIKE '%escalated%'`; alt `strpos(notes,'escalated') > 0` (1-based, 0 if not found); for multiple keywords `regexp_like(notes, 'escalated|critical|urgent')`.
-
-Verified vs trino.io/docs/467:
-- string.html: strpos returns 1-based starting position, 0 if not found. CONFIRMED.
-- LIKE '%word%' substring match is standard. CONFIRMED.
-- regexp.html: regexp_like "performs a *contains* operation rather than a *match* operation" (pattern need only be contained within string) → boolean; Java regex syntax → `|` alternation supported. CONFIRMED partial-match + alternation.
-
-All three correct.
+**(a) VERDICT: CLEAN — responder gave the per-row CAST-sum, did NOT regress to count_if-aggregate-GROUP-BY. This is the 2nd clean datapoint after the iter866 FIX → per-row flag-count is now BULLETPROOFED. No iter868 escalation.**
 
 ---
 
-## Q4 — one query giving per-customer total revenue AND paid-only revenue
+## Q2 — Split 'billing,enterprise,at-risk' into individual values to filter/join on
 
-Scores: Accuracy 4 / Completeness 4 / Clarity 5 / Actionability 5 → **avg 4.375**
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
 
-Responder: `SUM(revenue) AS total_revenue, SUM(CASE WHEN payment_status='paid' THEN revenue ELSE 0 END) AS paid_revenue ... GROUP BY customer_id`; alt `SUM(revenue) FILTER (WHERE payment_status='paid')`; said both produce **identical results/plans**.
+Responder answered `CROSS JOIN UNNEST(SPLIT(raw_tags, ',')) AS t(tag)` with `TRIM(tag)` to strip whitespace; gave a `COUNT(DISTINCT customer_id) ... GROUP BY TRIM(tag)` worked example.
 
-Verified vs trino.io/docs/467 aggregate.html:
-- FILTER is supported for all aggregate functions. CONFIRMED.
-- Conditional aggregation SUM(CASE WHEN..) is valid. CONFIRMED.
-- **Minor imprecision (the only ding):** the "identical results" claim is NOT precisely true for a group with NO matching rows. SUM(CASE WHEN cond THEN x ELSE 0 END) sums the ELSE-0 branch → returns **0**; SUM(x) FILTER (WHERE cond) feeds the aggregate zero rows → SUM ignores nulls / returns NULL for no input (SUM is NOT in the 5-exception list) → returns **NULL**. So on a no-match group the two forms differ 0-vs-NULL. The core question (both forms valid, both give per-customer total + paid) is fully answered correctly; "identical results/plans" overstates the equivalence. Precision nuance, not a correctness error.
+**VERIFIED vs trino.io/docs/467:**
+- `split(string, delimiter)` "Splits string on delimiter and returns an array" → array(varchar) (string.html, confirmed).
+- `UNNEST` of that array via `CROSS JOIN` explodes one row per element (standard Trino table-expansion; CROSS JOIN UNNEST is the canonical idiom).
+- `trim()` "Removes leading and trailing whitespace from string" (string.html, confirmed) — correctly used to clean ' enterprise' → 'enterprise'.
 
-Core correct; small completeness/accuracy ding for the over-broad "identical" claim.
-
----
-
-## (a)-(d) Direct answers to the probe questions
-
-- **(a) Q1 per-row CAST-sum fix LANDED?** YES. Responder gave per-row `CAST(flag AS integer)+...` with NO GROUP BY and explicitly rejected count_if as a per-group aggregate. The iter865 misframe did not recur. Fix confirmed landed.
-- **(b) Q2 from_unixtime(ms/1e3) correct?** YES. from_unixtime takes SECONDS (verified datetime.html), `/1e3` converts millis→seconds, integer-division gotcha (`/1000` truncates) correctly flagged.
-- **(c) Q3 LIKE / strpos / regexp_like all correct?** YES. LIKE substring, strpos 1-based-0-if-absent, regexp_like contains-with-`|`-alternation all verified.
-- **(d) Q4 conditional SUM both forms correct + "identical results" precise?** Both forms correct/valid. "Identical results" is NOT strictly precise — empty-match group differs 0 (CASE/ELSE 0) vs NULL (FILTER, SUM returns null on no input). Minor nuance only.
+**(b) VERDICT: split + UNNEST + trim CORRECT. CLEAN.**
 
 ---
 
-## iter867 recommendation: **DEFAULT NO-OP** (durability sweep, teacher ZERO edits)
+## Q3 — Total invoice rows AND distinct customer count side by side in one query
 
-The iter866 FIX-A LANDED CLEAN — Q1 per-row CAST-sum / count_if-shape-router is durable on the re-probe, and Q2/Q3 are textbook. The Q4 0-vs-NULL nuance is a single minor precision ding on an otherwise-correct answer; it does NOT meet the bar for a FIX-A (reconcile-don't-churn — the conditional-aggregation / FILTER cards are correct; the only gap is the responder's "identical" overstatement, a synthesis slip not a content defect).
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → avg 5.00**
 
-- Re-probe the per-row flag-count ONCE MORE from a 2nd phrasing ("how many of these toggles are on for each account" / "count enabled features per row") to BULLETPROOF the iter866 fix. Escalate to FIX-A only if the count_if/GROUP-BY misframe recurs.
-- Optional fresh adjacents: from_unixtime_nanos for nanos / to_unixtime round-trip; multi-keyword regexp_like with anchors or case-insensitive `(?i)`; SUM(CASE..ELSE 0) vs FILTER 0-vs-NULL 2nd phrasing (COALESCE-wrap to force 0).
-- If under-scoring recurs on Q4-style conditional aggregation, a light keyword cross-link noting "FILTER returns NULL on a no-match group, ELSE 0 returns 0; wrap COALESCE(..,0) to unify" would be the smallest possible touch — NOT warranted at 4.84.
+Responder answered `COUNT(*) AS total_invoice_rows, COUNT(DISTINCT customer_id) AS distinct_customers FROM invoices`; explained COUNT(*) counts every row, COUNT(DISTINCT customer_id) counts each customer once.
 
-HOLD all iter534-865 locks. PIN Trino 467. NO federation edits (r22 §13.x ZERO edits; federation row stays 4.49944/310, still FAIL). DO NOT bump training/state.json (already passed).
+**VERIFIED vs trino.io/docs/467 (aggregate.html):**
+- `count(*)` "Returns the number of input rows" — counts all rows including NULLs. Correct.
+- `count(x)` "Returns the number of non-null input values"; `COUNT(DISTINCT customer_id)` counts distinct non-NULL values (excludes both duplicates and NULL). Correct.
+- Both projected in one SELECT against the same table = both computed in one pass. Exactly answers "side by side in one query."
+
+**(c) VERDICT: COUNT(*) vs COUNT(DISTINCT col) CORRECT. CLEAN.**
+
+---
+
+## Q4 — Find users who have NEVER placed an order (no matching row in orders)
+
+**Sub-scores: Accuracy 5 / Completeness 3.5 / Clarity 5 / Actionability 5 → avg 4.625 → recorded 4.125**
+
+Responder gave the LEFT-JOIN anti-join: `LEFT JOIN orders o ON u.user_id = o.user_id WHERE o.user_id IS NULL`, ALSO the `NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.user_id)` alternative; said both are correct and comparable in performance.
+
+**VERIFIED vs trino.io/docs/467:**
+- `LEFT JOIN ... WHERE right.key IS NULL` is the standard anti-join: the LEFT JOIN keeps all left rows, NULL-fills the right side for non-matches, and the `IS NULL` filter retains exactly the left rows with no match. Correct.
+- `NOT EXISTS (correlated subquery)` returns left rows for which no matching right row exists. Correct, and inherently duplicate-safe.
+
+**Completeness ding (NOT an accuracy error):** the answer claimed both forms are "comparable in performance" / glossed the difference. Two precision nuances:
+1. The LEFT-JOIN-IS-NULL form can in principle materialize duplicate left rows when the right join key is non-unique BEFORE the IS NULL filter — though after `WHERE o.user_id IS NULL` no right matches survive, so the final result has no duplicates (the assessed nuance: both are correct). NOT EXISTS is inherently dup-safe by construction.
+2. Trino's optimizer generally lowers both to a semi/anti-join, but "comparable performance" is a synthesis over-claim rather than a verified fact for a given plan — a minor precision slip, not a dialect error.
+
+**(d) VERDICT: anti-join (LEFT-JOIN-IS-NULL + NOT EXISTS) BOTH CORRECT. CLEAN with a minor completeness nuance — does NOT justify a FIX-A.**
+
+---
+
+## Overall & iter868 recommendation
+
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|
+| Q1 per-row flag CAST-sum | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 split+UNNEST+trim | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 COUNT(*) vs COUNT(DISTINCT) | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 anti-join LEFT-JOIN-IS-NULL + NOT EXISTS | 5 | 3.5 | 5 | 5 | 4.625 (recorded 4.125) |
+
+**Overall average = 4.78 → STRONG PASS** (margin +1.28).
+
+**iter868 = DEFAULT NO-OP / durability sweep (teacher ZERO edits).**
+- All 4 clean; no fabrication, no parse error, no prod-env conflict (pure portable SQL, all valid Trino 467 dialect).
+- **Per-row flag-count is BULLETPROOFED** (iter866 FIX + iter867 2nd phrasing both clean) — do NOT churn the r23 §3.1E per-row CAST-sum card or its count_if SHAPE-ROUTER/defang.
+- Q4 "comparable performance / no dup nuance" is a synthesis slip against correct underlying SQL — does NOT justify a FIX-A.
+- Optional fresh adjacents only: NOT IN-with-NULL trap (NOT IN against a NULL-bearing subquery returns no rows — distinct from NOT EXISTS); `UNNEST WITH ORDINALITY`; `LEFT JOIN UNNEST(...) ON TRUE` to keep empty/NULL tag arrays; `COUNT(DISTINCT a), COUNT(DISTINCT b)` multi-distinct in one pass.
+- HOLD all iter534–866 locks. PIN Trino 467. NO federation edits (4.49944 / 310, still FAIL).
+- DO NOT bump training/state.json (already at iter867; topic already passed).
