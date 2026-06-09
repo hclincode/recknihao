@@ -1,98 +1,110 @@
-# iter773 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
+# Judge Feedback — iter774 (DEFAULT NO-OP / durability-breadth sweep)
 
-**Designation:** DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits; 4 fresh adjacent probes).
-**Verification basis:** every dialect claim verified against trino.io/docs/467 (datetime / aggregate / language-types / sql-select .html) + Trino COUNT(DISTINCT) multi-column behavior (trinodb GitHub + sqlglot #2930 + Querify Labs distinct-aggregation writeup) on 2026-06-09. resources/ NOT treated as ground truth.
+**Teacher made ZERO resource edits this iteration.** 4 fresh adjacent probes. All dialect claims verified against trino.io/docs/467 (window / regexp / string / comparison / math .html) on 2026-06-09. resources/ NOT treated as ground truth.
 
----
+## Overall verdict
 
-## Q1 — Week bucketing (snap to week-start), weekly signup-count chart
+**Overall avg = 4.375 — PASS** (threshold 3.5; overall average governs, no single-Q veto).
 
-`SELECT date_trunc('week', created_at) AS week_start, COUNT(*) FROM signups GROUP BY date_trunc('week', created_at) ORDER BY week_start`
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
+|---|---|---|---|---|---|---|
+| Q1 | LAG by N / value 12 rows back (explicit "WITHOUT self-join") | 3 | 2 | 4 | 2 | **2.75** |
+| Q2 | title-case / no-initcap | 5 | 5 | 5 | 5 | **5.00** |
+| Q3 | histogram / equal-width $50 buckets | 5 | 4 | 5 | 5 | **4.75** |
+| Q4 | null-safe equality (IS NOT DISTINCT FROM) | 5 | 5 | 5 | 5 | **5.00** |
 
-**Verified:** trino.io/docs/467/functions/datetime.html — `date_trunc('week', ts)` truncates to the **start of the ISO week = MONDAY** (docs example `'2001-08-22 03:04:05.321'` → `'2001-08-20 00:00:00.000'`; Aug 20 2001 was a Monday). No built-in Sunday-start option — Sunday-start genuinely needs INTERVAL shifting (the answer's claim is exactly right). GROUP BY repeating the `date_trunc(...)` expression is valid (simple GROUP BY allows expressions). ORDER BY week_start valid.
+Overall = (2.75 + 5.00 + 4.75 + 5.00) / 4 = **4.375 PASS**.
 
-| Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|
-| 5 | 5 | 5 | 5 |
-
-**Per-Q avg: 5.00 — CLEAN.** The Monday/ISO-week note + "no Sunday-start built-in, would need INTERVAL arithmetic" is precisely correct and is the exact nuance a charting engineer trips on.
-
----
-
-## Q2 — 7-day trailing / moving average over daily_signups
-
-`AVG(signup_count) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`
-
-**Verified:** trino.io/docs/467 window-functions / sql-select — `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is a valid 7-row trailing frame; `AVG(x) OVER (ORDER BY day ...)` is correct. The **KEY INSIGHT** ("ROWS counts PHYSICAL ROWS, not days — pre-aggregate to one-row-per-day first, else 6 PRECEDING reaches ~6 rows not 7 days") is correct AND is the single most important gotcha here. Source is already `daily_signups` (one row per day), so the ROWS frame is appropriate.
-
-**Optional nuance (NOT a defect):** the ROWS frame assumes no missing calendar days. If days can be absent, a true 7-calendar-day window is `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW`. Source guarantees one-row-per-day, so omitting this is fine; mentioning it would be a bonus.
-
-| Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|
-| 5 | 4.5 | 5 | 5 |
-
-**Per-Q avg: 4.875 — CLEAN.** Completeness shaved 0.5 only for the unstated missing-days/RANGE nuance (not required given the daily source).
+Q1 is the sole weak answer and the key issue of this sweep. Q2/Q3/Q4 are strong and clean.
 
 ---
 
-## Q3 — Count distinct (user_id, product_id) pairs [the scrutiny target]
+## Per-question detail
 
-`SELECT COUNT(DISTINCT ROW(user_id, product_id)) AS distinct_user_product_pairs FROM events`
+### Q1 — LAG-by-N / value 12 rows back — **2.75 (the defect)**
 
-**CRITICAL VERIFY — Q3 VERDICT: CORRECT, no defect.**
+**The ask (verbatim intent):** monthly_revenue is "one row per month" (dense, gapless). User EXPLICITLY asked for "a cleaner way than a self-join — grab a value from the row that's 12 positions back in an ordered sequence, WITHOUT joining the table to itself." This is the textbook definition of `LAG(revenue_total, 12) OVER (ORDER BY month)`.
 
-1. The user's error is **real**: `COUNT(DISTINCT user_id, product_id)` (multiple bare args) is INDEED invalid in Trino — Trino's `count` aggregate takes a single argument (`count(*)` / `count(x)`); the standard-SQL multi-arg COUNT DISTINCT is not supported. Confirmed via trinodb GitHub + sqlglot #2930 + Querify Labs.
-2. The fix is **valid**: the documented idiom is to wrap the columns into a single ROW-typed value. The canonical form cited everywhere is the **bare anonymous tuple** `COUNT(DISTINCT (user_id, product_id))`. The answer used the **explicit** `COUNT(DISTINCT ROW(user_id, product_id))` form. In Trino, `ROW(a, b)` and `(a, b)` are **equivalent row constructors** — `ROW(1, 2e0)` is shown valid in language/types.html, and the row's fields here (bigint user_id, varchar/bigint product_id) are comparable/orderable, so DISTINCT on the ROW value works. **The ROW() wrapper is ACCEPTED by Trino 467.**
-3. The pre-concat fallback (`COUNT(DISTINCT user_id || '~' || product_id)` with CAST) is a valid alternative.
+**What the responder did:** REFUSED LAG. Said "Use a self-join on calendar arithmetic, NOT LAG — it's cleaner and more reliable," gave a `LEFT JOIN monthly_revenue prev ON ... prev.month = date_add('month', -12, cur.month)` self-join, and justified withholding LAG with the gaps-in-months caveat. Did **not** show the `LAG(revenue_total, 12) OVER (ORDER BY month)` form at all.
 
-**Imprecision flag for iter774: NONE that rises to a defect.** Single watch-note only: the most commonly-documented / copy-canonical Trino form is the bare-tuple `(a, b)`; the explicit `ROW(a, b)` form the responder produced is equivalent and compiles, so this is NOT FIX-A material. (If a future probe shows the responder ever reaching for the invalid `COUNT(DISTINCT a, b)` form, that would flip to FIX-A — it did not here.)
+**Docs verification (trino.io/docs/467/functions/window.html):** `lag(x[, offset[, default_value]]) -> "Returns the value at offset rows before the current row in the window partition."` Default offset 1; out-of-bounds returns default_value or NULL; ORDER BY required. So `LAG(revenue_total, 12) OVER (ORDER BY month)` returns the value exactly 12 rows back — **the exact clean, non-self-join answer the user asked for.**
 
-| Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|
-| 5 | 5 | 5 | 5 |
+**Verdict:**
+- The self-join query the responder produced is **valid Trino and returns correct numbers**, and the gaps caveat is **factually true** (LAG counts rows, not calendar months — confirmed). So Accuracy is not zero.
+- BUT the blanket "NOT LAG — it's unreliable" is **OVERSTATED to the point of being wrong for this question**. The user stated the precondition that makes LAG safe and canonical: **one row per month = dense/gapless**. On a dense monthly series, `LAG(revenue_total, 12) OVER (ORDER BY month)` is correct, canonical, and is precisely the "value N rows back without a self-join" the user requested. The gaps caveat is a real *edge* nuance, not a reason to withhold the correct primary.
+- This is a **SELECTION / COMPLETENESS MISS**: the responder answered a DIFFERENT question than asked (gave the self-join the user explicitly rejected) and actively dismissed the correct primary. Hence Completeness 2 and Actionability 2 — an engineer who explicitly wanted a non-self-join approach is handed exactly the thing they said they wanted to avoid, with no LAG option offered.
+- Accuracy 3 (working query + true caveat, but the "NOT LAG, unreliable" framing is a factual overreach for a dense series). Clarity 4 (well-written).
 
-**Per-Q avg: 5.00 — CLEAN.** Correctly diagnosed the real error, gave a compiling fix (ROW wrapper) plus a fallback.
+**The exact canonical to feature for this ask:**
+```sql
+SELECT
+  month,
+  revenue_total,
+  LAG(revenue_total, 12) OVER (ORDER BY month) AS revenue_same_month_last_year
+FROM monthly_revenue
+ORDER BY month;
+-- Returns the value 12 rows back. ASSUMES a dense, gapless monthly series
+-- (one row per month). If months can be MISSING, either densify with a date
+-- spine first, or use the self-join on date_add('month', -12, cur.month)
+-- (gap-safe by construction).
+```
 
----
+### Q1 ROOT CAUSE — RESOURCE EMPHASIS / FINDABILITY DEFECT (with responder over-application)
 
-## Q4 — First/earliest value per group (earliest order_date + product on that order, one row per customer)
+Grepped r07 (`resources/07-analytical-query-patterns.md`). The LAG form IS present, but the resource's framing actively steers AWAY from it for exactly this kind of ask:
 
-`SELECT customer_id, MIN(order_date) AS first_order_date, min_by(product_id, order_date) AS product_on_first_order FROM orders GROUP BY customer_id`
+- **r07:2789** Pattern B2 header — "LEADING CANONICAL — Period-over-period: YoY vs MoM with window functions."
+- **r07:2810** the offset table HAS `LAG(metric, 12)` for YoY — but every row carries a **"CONTIGUOUS … every month present"** requirement column.
+- **r07:2824–2826** FORM A (self-join) is explicitly labeled **"(preferred for YoY — gap-safe by construction)"** and **"It is the recommended pattern for any production YoY metric."**
+- **r07:2860–2862** FORM B (the LAG form) is gated: **"Use this form when you need ranks/running totals … You MUST gap-fill first or LAG will silently shift the offset."**
+- **r07:2903** the actual `LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY month)` lives inside FORM B, behind the gap-fill warning.
+- **r07:2930** DO-NOT-WRITE bans `LAG(usage_count, 12) … on a sparse monthly series with NO gap-fill`.
 
-**Verified:** trino.io/docs/467/functions/aggregate.html — `min_by(x, y)` = "Returns the value of x associated with the minimum value of y over all input values." So `min_by(product_id, order_date)` = the product on the earliest order, and `MIN(order_date)` = the earliest date, both in one `GROUP BY customer_id`. CORRECT, and the single-pass aggregate form is the cleanest answer. The `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date ASC) = 1` subquery alternative (returns ALL columns of the earliest row) is also valid.
+**Diagnosis:** The resource is calibrated for the *production-grade, possibly-sparse, per-entity YoY* case, where self-join IS the safer default. It LEADS with the self-join as "recommended" and buries LAG behind a "you MUST gap-fill first" gate. The responder faithfully amplified that framing into "NOT LAG, it's unreliable" — but the resource gives it **no landing point** for the simpler, explicit "grab the value N rows back from a DENSE ordered sequence WITHOUT a self-join" ask, where LAG is the correct, canonical primary and gap-fill is irrelevant (the series is dense by stipulation).
 
-**Optional nuance (NOT a defect):** ties — two orders sharing the earliest `order_date` → `min_by` picks one arbitrarily (as does ROW_NUMBER without a tiebreaker). Minor; not required.
-
-| Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|
-| 5 | 5 | 5 | 5 |
-
-**Per-Q avg: 5.00 — CLEAN.** min_by primary + ROW_NUMBER alternative is exactly the right two-option answer.
-
----
-
-## OVERALL
-
-| Q | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
-|---|---|---|---|---|---|
-| Q1 week-bucket | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 trailing-avg | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q3 multi-col-distinct | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 first-per-group | 5 | 5 | 5 | 5 | 5.00 |
-
-**Overall average = (5.00 + 4.875 + 5.00 + 5.00) / 4 = 4.969**
-
-**PASS** (threshold 3.5; overall average governs, no single-Q veto).
+This is therefore primarily a **resource emphasis/findability defect** (r07 Pattern B2 leads with self-join and under-features LAG for the bare "value N rows back" ask), compounded by responder over-application (it withheld LAG entirely rather than leading with it + noting the dense-series assumption).
 
 ---
 
-## Teacher feedback
+### Q2 — title-case / no-initcap — **5.00 (strong)**
 
-(a) **Q3 verdict:** `COUNT(DISTINCT ROW(user_id, product_id))` is **VALID Trino 467** — CORRECT, no imprecision. The user's `COUNT(DISTINCT user_id, product_id)` error is genuine (single-arg count only); the ROW()/tuple wrapper is the supported fix. `ROW(a,b)` ≡ `(a,b)` as row constructors; DISTINCT works because bigint/varchar fields are comparable. **NO iter774 FIX-A from Q3.**
+- **No-initcap claim CONFIRMED** (trino.io/docs/467/functions/string.html): Trino 467 has only `lower`/`upper`; no `initcap`, no title-case function. (Postgres/Oracle/Spark have initcap; Trino does not.) Correct.
+- **Workaround 1 CONFIRMED** (trino.io/docs/467/functions/regexp.html): `regexp_replace(string, pattern, function)` — the lambda receives an `array(varchar)` of capture groups, **1-indexed** (x[1]=group 1, x[2]=group 2). The docs literally give this exact example: `regexp_replace('new york', '(\w)(\w*)', x -> upper(x[1]) || lower(x[2]))` -> `'New York'`. The responder's form is the canonical docs answer verbatim. `\w` does not need double-escaping in a Trino string literal (Trino does not treat backslash as a string escape). Correct.
+- **Workaround 2 CONFIRMED valid:** `array_join(transform(split(lower(s), ' '), w -> upper(substr(w,1,1)) || substr(w,2)), ' ')` — split->array, transform+lambda, substr 1-indexed, array_join. All valid Trino 467. (It runs over `lower(s)` so the tail is already lowercase — correct in context.)
 
-(b) **iter774 designation: DEFAULT NO-OP / durability-breadth sweep.** No open defect, no new imprecision surfaced; all four forms docs-verified clean. Teacher: ZERO edits, probe 4 fresh adjacent angles. Optional probes to convert these CLEAN datapoints toward BULLETPROOFED:
-- Re-probe multi-col-distinct from a different phrasing (e.g. "unique combinations of region + plan", or one that tempts the responder toward the invalid bare-arg `COUNT(DISTINCT a, b)`) to confirm it consistently routes to the ROW/tuple wrapper. If it ever emits the bare-arg form, that becomes FIX-A.
-- Re-probe trailing-average with a gappy/missing-days source to see whether the responder reaches for `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` when calendar-correctness matters.
-- Keep verifying every dialect claim vs trino.io/docs/467; resources/ is not ground truth.
+Correctly handles a function Trino lacks, with two valid approaches. No defect.
 
-resources/22-trino-federation-postgresql.md HARD LOCK remains untouched (no edits this iter).
+### Q3 — histogram / equal-width $50 buckets — **4.75 (strong)**
+
+`(FLOOR(order_total / 50.0) * 50) AS price_band_start … GROUP BY FLOOR(order_total / 50.0) ORDER BY price_band_start`. Verified (math.html): `floor(x)` rounds down; `/50.0` forces non-integer division so FLOOR buckets correctly; GROUP BY on the FLOOR expression is valid. Correct equal-width histogram pattern. Completeness 4 only because Trino's native `width_bucket(x, bound1, bound2, n)` (verified in math.html as the equi-width bucketing function) would be worth a one-line "alternative" mention — but the FLOOR form is correct and idiomatic, so this is a minor enrichment, not a defect.
+
+### Q4 — null-safe equality — **5.00 (strong)**
+
+`CASE WHEN old.col IS NOT DISTINCT FROM new.col THEN 0 ELSE 1 END`. Verified (trino.io/docs/467/functions/comparison.html): `IS NOT DISTINCT FROM` is null-safe equality; `NULL IS NOT DISTINCT FROM NULL -> TRUE`, `NULL IS NOT DISTINCT FROM value -> FALSE`. The responder's semantics table and CASE usage are exactly correct. The r22/r28 citations are reads, not edits (no federation edit occurred) — not penalized; correctness is what's judged, and it's correct.
+
+---
+
+## Teacher guidance — iter775 designation: **FIX-A (resource emphasis/findability)**
+
+Q1 root cause is a resource emphasis/findability defect in r07 Pattern B2, so iter775 = **FIX-A (light, additive)**:
+
+**FIX-A:** Add/elevate a **LAG-first landing point** for the bare "value N rows back / prior-period value from an ordered sequence / WITHOUT a self-join" ask — distinct from the production-YoY decision tree that (correctly) prefers the self-join for possibly-sparse series.
+
+Concretely, at the "value N rows back" / prior-period landing point in r07 (adjacent to Pattern B2, or a short pre-B2 signpost), feature:
+
+```sql
+-- "Grab the value N rows back in an ordered sequence" (dense series, no self-join):
+LAG(metric, N) OVER (ORDER BY ordered_col)   -- value N rows before the current row
+```
+with:
+1. A **keyword anchor** for: "value N rows back", "prior-period value", "row 12 positions back", "previous/earlier row value", "without a self-join", "cleaner than a self-join", "lookback offset".
+2. A one-line **dense-series note**: "LAG counts ROWS, not calendar periods — this is exactly right when the series is dense/gapless (one row per month). If months can be MISSING, densify with a date spine OR use the self-join on `date_add('month', -12, cur.month)` (gap-safe by construction)."
+3. A pointer to FORM A (self-join) as the **gaps fallback** — NOT as the blanket default for this phrasing.
+
+**Important reconcile-in-place (do NOT just append):** soften r07:2824–2826's absolute "self-join is the recommended pattern for any production YoY metric" / the FORM B "you MUST gap-fill first" gate so they no longer read as "never use LAG." Reframe as: self-join = preferred when the series MAY be sparse; LAG = the clean canonical when the series is dense (and the user explicitly wants no self-join). The two forms answer the same question under different gap assumptions — make that the disambiguator, so the responder leads with LAG on the dense/"without self-join" phrasing instead of refusing it.
+
+**Inoculation note:** also defang the responder's failure mode — add an inline note that "NOT LAG, it's unreliable" is WRONG as a blanket statement: LAG is correct and canonical on a dense series; the only caveat is gaps.
+
+**Preserve (do NOT churn):** Q2 title-case (r27 §4.3 — both workarounds verified clean), Q3 FLOOR-histogram, Q4 IS NOT DISTINCT FROM cards are all correct — churn risk, leave them.
+
+State.json NOT touched (remains iter774, set by teacher).
