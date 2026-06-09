@@ -735,6 +735,17 @@ FROM iceberg.app.sessions;
 
 **Worked example #3 — "first 5 elements" (the simplest case).** `slice(arr, 1, 5)`. Equivalent intent to "head of array, take 5".
 
+**Worked example #4 — "first N elements, PADDED with NULLs if the array is shorter" (guarantee EXACTLY N).** `slice(arr, 1, 5)` on a 2-element array returns only 2 elements — `slice` does NOT pad. To guarantee exactly N elements, **concatenate N NULLs onto the end FIRST, then slice the first N** (the extra NULLs only matter when the array is short):
+```sql
+-- ✅ Take the first 5 array elements, padding with NULLs if the array is shorter (guarantees exactly 5):
+slice(concat(tags, ARRAY[NULL, NULL, NULL, NULL, NULL]), 1, 5)   -- slice is 1-based; returns fewer on a short array, so pad first
+```
+Array concatenation in Trino 467 is `concat(a, b)` or the `||` operator (verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html)):
+```sql
+-- ❌ array_concat(a, b) -- NO such function in Trino 467; concatenate arrays with concat(a, b) or the || operator — DO NOT COPY
+```
+(Equivalent with the operator: `slice(tags || ARRAY[NULL, NULL, NULL, NULL, NULL], 1, 5)`.)
+
 **DO NOT WRITE:**
 
 | Wrong shape | Why it's wrong |
@@ -744,6 +755,7 @@ FROM iceberg.app.sessions;
 | `slice(scores, 0, 3)` — to take the first 3 elements | **Wrong by one — `slice` is 1-based.** `start = 0` is treated as out-of-range in Trino's 1-based array indexing and yields an empty array (or behaves unexpectedly — do not rely on it). Use `start = 1` for the first element. |
 | `slice(scores, 1, 3)` to take the LAST 3 elements when `cardinality(scores) > 3` | Wrong DIRECTION. `start = 1` is the FIRST element, not the last. For the last 3, use `slice(scores, -3, 3)` (negative start counts from the end). |
 | `SUBARRAY(scores, 1, 3)` / `SUBSTRING(scores FROM 1 FOR 3)` on an ARRAY | **NOT Trino syntax.** No `SUBARRAY` function exists. `SUBSTRING` works only on STRINGS (varchar). Use `slice` for arrays. |
+| `array_concat(tags, ARRAY[NULL, NULL])` to pad before slicing | **NOT Trino syntax — `array_concat` does NOT exist in Trino 467** (`Function array_concat not registered`). Concatenate arrays with `concat(a, b)` or the `||` operator. See Worked example #4 above for the pad-then-slice canonical. |
 | Reaching for `UNNEST + ROW_NUMBER() + WHERE rn <= 3 + array_agg` to take "first 3 of an array" | Works but is wildly over-engineered — 3 operators where 1 suffices. `slice(arr, 1, 3)` is one in-array call, no row shuffle, no aggregation. Use UNNEST only when you actually need ROWS (e.g., to GROUP BY or JOIN across elements). |
 
 **Cross-references.**
@@ -1803,7 +1815,20 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 
 #### LEADING CANONICAL — round / snap a timestamp to the NEAREST hour (FLOOR vs NEAREST vs CEILING — three distinct idioms, do NOT confuse) (iter631 PIN)
 
-> **Keyword anchors (READ THIS FIRST if your question contains any of these):** round a timestamp to the nearest hour · snap a timestamp to the nearest hour · nearest whole hour · closest hour boundary · round to the nearest hour not just cut off the minutes · snap event time to the closest whole hour for an hourly chart · 4:12 -> 4:00 · 4:48 -> 5:00 · round to nearest hour Trino · which hour is closer · nearest-hour rounding · half-up to nearest hour · round timestamp to closest hour bucket.
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** round a timestamp to the nearest hour · snap a timestamp to the nearest hour · nearest whole hour · closest hour boundary · round to the nearest hour not just cut off the minutes · snap event time to the closest whole hour for an hourly chart · 4:12 -> 4:00 · 4:48 -> 5:00 · round to nearest hour Trino · which hour is closer · nearest-hour rounding · half-up to nearest hour · round timestamp to closest hour bucket. **⚠️ Asked to round to the nearest 30 / 15 / 5 MINUTES (any SUB-HOUR mark), NOT the nearest hour? Use the epoch `round()` ROUTER in the fenced block immediately below — `date_trunc('hour', ts + INTERVAL '30' MINUTE)` snaps to the nearest HOUR only and is the WRONG answer for nearest-30-min.**
+
+> **🧭 FLOOR vs NEAREST vs CEILING ROUTER — sub-hour marks (nearest 5 / 15 / 30 min). If the question says "round to the nearest 30 minutes" (snap to closest, e.g. `10:23 → 10:30`), copy the NEAREST line here — do NOT use the nearest-HOUR `+ INTERVAL '30' MINUTE` form in the table below (that snaps to the nearest HOUR):**
+> ```sql
+> -- ✅ ROUND to NEAREST sub-hour mark (snap to closest, e.g. nearest 30 min, 10:23 -> 10:30):
+> from_unixtime(round(to_unixtime(ts) / 1800) * 1800)   -- nearest 30 min; nearest 5 min -> /300*300 ; nearest 15 min -> /900*900
+> -- FLOOR to bucket START (round DOWN):  from_unixtime(to_unixtime(ts) - to_unixtime(ts) % 1800)
+> -- CEILING to next bucket:              from_unixtime(ceil(to_unixtime(ts) / 1800) * 1800)
+> ```
+> **Rule:** Round to NEAREST sub-hour mark => `from_unixtime(round(to_unixtime(ts)/N_seconds)*N_seconds)`. `date_trunc` only TRUNCATES (floors) and has NO sub-hour unit below `'hour'` — **there is no `date_trunc` path to a nearest 5/15/30-min mark; use the epoch `round()` trick.** Full card with worked SQL = the "round a timestamp to the NEAREST N minutes" LEADING CANONICAL further down (iter814 PIN).
+> ```sql
+> -- ❌ date_trunc('hour', ts + INTERVAL '30' MINUTE) -- snaps to nearest HOUR only; does NOT give nearest 30/15/5 min — DO NOT COPY for sub-hour rounding
+> -- ❌ date_trunc('minute', ts) - (EXTRACT(minute FROM ts) % 30) * INTERVAL '1' MINUTE -- subtracts the FULL remainder => FLOORS to bucket START (10:23 -> 10:00, NOT nearest 10:30) — DO NOT COPY
+> ```
 
 > **The pitfall in one sentence.** "Round to the nearest hour" is **NOT** the same as `date_trunc('hour', ts)` (which FLOORS — always drops the minutes), and it is **NOT** the same as "round UP to the next hour" (which CEILINGS — always pushes forward when not on the hour). NEAREST chooses whichever hour boundary (previous or next) is closer to `ts`: `4:12 -> 4:00`, `4:48 -> 5:00`, `2:30:00 -> 3:00` (the half-hour tie rounds UP because `add-30-min then floor` lands on the next hour). Picking the wrong one silently corrupts hourly charts: a 2:15 event lands on 3:00 instead of 2:00.
 
@@ -1812,7 +1837,7 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 > | Idiom | Trino 467 expression | Behavior — examples |
 > |---|---|---|
 > | **FLOOR** (drop the minutes; round DOWN to start of hour) | `date_trunc('hour', ts)` — see the existing FLOOR canonical immediately above. | `2:47 -> 2:00`; `2:15 -> 2:00`; `2:00 -> 2:00`. |
-> | **NEAREST** (snap to the closer hour boundary — what people usually mean by "round to the nearest hour") | `date_trunc('hour', ts + INTERVAL '30' MINUTE)` | `2:47 -> 3:00` (`2:47 + 0:30 = 3:17`, floors to `3:00`); `2:15 -> 2:00` (`2:15 + 0:30 = 2:45`, floors to `2:00`); `4:12 -> 4:00`; `4:48 -> 5:00`; `3:00:00 -> 3:00` (on-the-hour input is unchanged); `2:30:00 -> 3:00` (half-hour tie rounds UP). |
+> | **NEAREST HOUR** (snap to the closer HOUR boundary — what people usually mean by "round to the nearest hour"). **This is nearest-HOUR ONLY; for nearest 5/15/30 MIN use the epoch `round()` ROUTER above.** | `date_trunc('hour', ts + INTERVAL '30' MINUTE)` | `2:47 -> 3:00` (`2:47 + 0:30 = 3:17`, floors to `3:00`); `2:15 -> 2:00` (`2:15 + 0:30 = 2:45`, floors to `2:00`); `4:12 -> 4:00`; `4:48 -> 5:00`; `3:00:00 -> 3:00` (on-the-hour input is unchanged); `2:30:00 -> 3:00` (half-hour tie rounds UP). |
 > | **CEILING** (round UP to the next hour — use ONLY when the question explicitly says "round up") | `date_trunc('hour', ts - INTERVAL '1' SECOND) + INTERVAL '1' HOUR` | `2:47 -> 3:00`; `2:15 -> 3:00`; `2:00:00 -> 2:00` (exact-on-the-hour stays on the hour — `ts - 1s = 1:59:59`, floors to `1:00`, plus 1 hour = `2:00`). Sub-second precision: if `ts` can carry milliseconds (e.g. `2:00:00.500`), you may need `INTERVAL '1' MILLISECOND` instead of `INTERVAL '1' SECOND` to keep exact-on-the-hour values pinned. |
 
 > **NEAREST — one fact + worked SQL.** Add 30 minutes, then floor to the hour: an event that is **MORE THAN** 30 minutes past the previous hour gets pushed into the next hour by the `+30` shift; an event that is **LESS THAN** 30 minutes past the previous hour does NOT cross the next hour boundary even after the shift, so it stays floored at the previous hour.
@@ -1838,7 +1863,18 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 #### LEADING CANONICAL — N-minute (5 / 10 / 15 / 30-minute) timestamp buckets — `date_trunc` has NO sub-hour custom unit, use arithmetic (iter606 PIN)
 
 > **Keyword anchors (READ THIS FIRST if your question contains any of these):** 5-minute buckets · 10-minute buckets · 15-minute windows · 30-minute buckets · N-minute buckets · bucket timestamps into X-minute windows · group events every 5 minutes · finer than hourly · sub-hour time buckets · truncate timestamp to 15 minutes · **floor / truncate a timestamp to a 5/15/30-min bucket START** (round DOWN to the bucket boundary).
-> **⚠️ If your question says "round to the NEAREST 5/15/30 minutes" (snap to the CLOSEST mark, e.g. `10:02:30 → 10:05`) — that is a DIFFERENT idiom: see the "round to the NEAREST N minutes" canonical immediately BELOW this card. This FLOOR card always rounds DOWN; it does NOT snap to the closest boundary.**
+> **⚠️ If your question says "round to the NEAREST 5/15/30 minutes" (snap to the CLOSEST mark, e.g. `10:23 → 10:30`, `10:02:30 → 10:05`) — that is a DIFFERENT idiom. COPY THE NEAREST LINE RIGHT HERE; this FLOOR card always rounds DOWN and does NOT snap to the closest boundary:**
+> ```sql
+> -- ✅ ROUND to NEAREST sub-hour mark (snap to closest, e.g. nearest 30 min, 10:23 -> 10:30):
+> from_unixtime(round(to_unixtime(ts) / 1800) * 1800)   -- nearest 30 min; nearest 5 min -> /300*300 ; nearest 15 min -> /900*900
+> -- FLOOR to bucket START (round DOWN):  from_unixtime(to_unixtime(ts) - to_unixtime(ts) % 1800)
+> -- CEILING to next bucket:              from_unixtime(ceil(to_unixtime(ts) / 1800) * 1800)
+> ```
+> **Rule:** Round to NEAREST sub-hour mark => `from_unixtime(round(to_unixtime(ts)/N_seconds)*N_seconds)`. `date_trunc` only TRUNCATES (floors) and has NO sub-hour unit below `'hour'` — there is no `date_trunc` path to a nearest 5/15/30-min mark; use the epoch `round()` trick. Full card = "round a timestamp to the NEAREST N minutes" canonical immediately BELOW.
+> ```sql
+> -- ❌ date_trunc('hour', ts + INTERVAL '30' MINUTE) -- snaps to nearest HOUR only; does NOT give nearest 30/15/5 min — DO NOT COPY
+> -- ❌ date_trunc('minute', ts) - (EXTRACT(minute FROM ts) % 30) * INTERVAL '1' MINUTE -- subtracts the FULL remainder => FLOORS to bucket START (10:23 -> 10:00, NOT nearest 10:30) — DO NOT COPY
+> ```
 
 > **One fact.** `date_trunc(unit, ts)` supports only **FIXED units** — verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): the units are `millisecond`, `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year`. There is **NO `'5 minute'` / `'15 minute'` unit** — Trino raises an error if you pass one. So a custom sub-hour bucket (every 5 / 10 / 15 / 30 minutes) needs a little **arithmetic**: floor to the start of the hour, then add back the whole number of N-minute steps that have elapsed in that hour.
 
@@ -1891,8 +1927,10 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 > ```
 > FLOOR always rounds DOWN to the bucket start; NEAREST snaps to whichever mark is closer (`10:02:30 → 10:05`, `10:01:00 → 10:00`); CEILING always pushes UP to the next mark. Change one number for other sizes: `300` (5 min) → `900` (15 min) → `1800` (30 min) → `3600` (hourly). All three return `timestamp(3) with time zone`; wrap in `CAST(... AS TIMESTAMP)` if your column is naive (see r13:5671).
 
-> **CRITICAL — DO NOT WRITE (the iter813 Q2 nearest-5-min defect, banned):**
+> **CRITICAL — DO NOT WRITE (banned nearest-N-min forms — iter813 Q2 + iter814 Q1 defects):**
 > ```sql
+> -- ❌ date_trunc('hour', ts + INTERVAL '30' MINUTE) -- snaps to nearest HOUR only; does NOT give nearest 30/15/5 min — DO NOT COPY
+> -- ❌ date_trunc('minute', ts) - (EXTRACT(minute FROM ts) % 30) * INTERVAL '1' MINUTE -- subtracts the FULL remainder => FLOORS to bucket START (10:23 -> 10:00, NOT nearest 10:30) — DO NOT COPY
 > -- ❌ date_trunc('minute', ts + INTERVAL '2.5' MINUTE / 2)  -- date_trunc has NO 5-min unit (truncates to 1 min); fractional/divided interval literal is invalid — DO NOT COPY
 > -- ❌ from_unixtime(to_unixtime(ts) - to_unixtime(ts) % 300 + 150)  -- floors then +150 lands on the bucket MIDPOINT (:02:30), NOT the nearest boundary; add-half must come BEFORE the floor — DO NOT COPY
 > ```
