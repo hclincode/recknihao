@@ -1,80 +1,73 @@
-# Judge Feedback — iter800 (EXTENDED PHASE, DEFAULT NO-OP / durability-breadth sweep)
+# iter801 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
 
 **Date:** 2026-06-09
-**Teacher edits this iter:** ZERO (durability-breadth sweep)
-**Federation:** NOT probed this iter
-**Verification:** all dialect claims checked against trino.io/docs/467 (functions/array.html, functions/json.html) + Trino current array.html + GitHub #4346, 2026-06-09.
+**Teacher edits this iteration:** ZERO (expected — durability-breadth sweep). Four fresh adjacent probes over well-covered fundamentals.
+
+**Verification:** All dialect claims verified against trino.io/docs/467 (functions/array.html, functions/window.html) on 2026-06-09.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Explode a NUMERIC JSON-array STRING (`'[10, 25, 88]'` varchar → one row per int)
-Answer: `CROSS JOIN UNNEST(CAST(json_parse(e.product_ids) AS ARRAY(BIGINT))) AS t(product_id)`, then `JOIN products p ON p.product_id = t.product_id`. Cites r07 (lines 88-96). LED with `json_parse + CAST(... AS ARRAY(BIGINT)) + UNNEST` — did NOT use bare `UNNEST(varchar)`.
+### Q1 — Top 3 best-selling products per category (3 rows per category by sales_count)
+Answer: `ROW_NUMBER() OVER (PARTITION BY category ORDER BY sales_count DESC) AS rn` in a subquery, outer `WHERE rn <= 3`. Cites r07.
 
-VERIFIED: `json_parse(varchar) -> json` (json.html); `CAST(JSON '[1,23,456]' AS ARRAY(INTEGER))` is an explicit doc example → `CAST(json_parse('[10,25,88]') AS ARRAY(BIGINT))` is the correct numeric-JSON-string→bigint-array path; `UNNEST` explodes to rows; downstream join on the typed int column is correct. **2nd consecutive clean post-fix datapoint** (iter799 = varchar branch, iter800 = numeric/BIGINT branch). Both `ARRAY(VARCHAR)` and `ARRAY(BIGINT)` cast targets now demonstrated clean.
+- Accuracy: 5 — VERIFIED vs window.html: row_number() returns a unique sequential number per partition starting at 1; PARTITION BY category restarts numbering per category, ORDER BY sales_count DESC ranks best-sellers first, outer WHERE rn<=3 = exact top-3-per-group. Correct.
+- Completeness: 5 — subquery wrapper required (window alias not referenceable in same SELECT's WHERE) handled correctly.
+- Clarity: 5 — clean partition/order/filter explanation.
+- Actionability: 5 — drop-in pattern.
+- **Q1 avg: 5.00 CLEAN** (standing top-N-per-group ROW_NUMBER pin held)
 
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- **Per-Q avg: 5.00**
+### Q2 — Index of 'approved' in a native string array (1-based, expect 3)
+Answer: `array_position(workflow_stages, 'approved')` → 1-based index of first occurrence, 0 if not found; ARRAY['draft','review','approved','published'] → 3. Notes duplicates→first match, UNNEST WITH ORDINALITY for per-element ordinal. Cites r07 §1a.3.
 
-### Q2 — Transform each element of a native double array (8% tax, stays an array)
-Answer: `transform(prices, p -> p * 1.08) AS prices_with_tax`. Cites r07 line 595.
+- Accuracy: 5 — VERIFIED vs array.html: array_position(x, element) returns position of first occurrence (1-based) or 0 if not found; 'approved' at index 3 in the given array. Correct. WITH ORDINALITY note accurate.
+- Completeness: 5 — duplicates→first-match and the per-element-ordinal alternative both covered.
+- Clarity: 5 — 1-based vs 0-based ambiguity explicitly resolved (key for a non-expert).
+- Actionability: 5 — exact answer + edge cases.
+- **Q2 avg: 5.00 CLEAN** (standing array_position-1-based pin held)
 
-VERIFIED (array.html): `transform(array(T), function(T,U)) -> array(U)` applies the lambda to every element, array in / array out. `p * 1.08` scales each element; no explosion. Exactly right. (Standing transform pin held.)
+### Q3 — Whether candidate_skills and required_skills share at least one element (true/false)
+Answer: `cardinality(array_intersect(candidate_skills, required_skills)) > 0 AS has_match`; array_intersect returns deduped common elements, cardinality>0 = at least one shared. Also CASE WHEN ... THEN TRUE ELSE FALSE. Cites r07 §1a.3.
 
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- **Per-Q avg: 5.00**
+- Accuracy: 5 — VERIFIED vs array.html: array_intersect(x,y) returns the deduped intersection; cardinality(...)>0 correctly tests for at least one shared element. Correct and robust.
+- Completeness: 4 — answer is correct and works. Trino 467 ALSO has the purpose-built `arrays_overlap(x, y) -> boolean` ("Tests if arrays x and y have any non-null elements in common; returns null if there are no non-null elements in common but either array contains null"). Omitting it is a MINOR completeness gap, not a defect — see verdict below.
+- Clarity: 5 — cardinality>0 reasoning is arguably clearer to a non-expert than arrays_overlap's NULL semantics.
+- Actionability: 5 — drop-in boolean expression.
+- **Q3 avg: 4.75 CLEAN** (standing array_intersect/arrays_overlap pin held)
 
-### Q3 — Sum all elements of a native DECIMAL array per row (no unnest)
-Answer: `reduce(line_item_amounts, 0, (s, x) -> s + x, s -> s) AS total_amount`. Cites r07 line 597.
+### Q4 — Daily consumption = current meter_value minus previous day's, ordered by date
+Answer: `LAG(meter_value) OVER (ORDER BY reading_date) AS prev_day_value`; `meter_value - LAG(meter_value) OVER (ORDER BY reading_date) AS daily_consumption`; first row NULL; PARTITION BY meter_id for multiple meters. Cites r07 Pattern B.
 
-VERIFIED (array.html): `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R`. Trino has NO native `array_sum` (GitHub #4346 still open) → `reduce` is the canonical fold. Choice of `reduce` is correct and must NOT be penalized.
-
-**reduce-init-state-type verdict (the iter800 crux):**
-The directive hypothesized that bare `0` (integer) with a DECIMAL array type-errors and requires `CAST(0 AS DECIMAL)` / `DECIMAL '0'` / `0.0`. After verification this hypothesis does **NOT** hold as a hard type error: integer→decimal and integer→double are valid IMPLICIT (widening) coercions in Trino, so the analyzer unifies the state type S UPWARD to the array's element type. `s + x` (s widened to decimal, x decimal) returns decimal, assignable back to the (now decimal) state slot. So `reduce(decimal_array, 0, (s,x)->s+x, s->s)` **compiles and runs** — it does NOT type-error.
-
-The docs' typed-init examples confirm this reading: `BIGINT '0'` is used to avoid integer OVERFLOW (`2147483647 + 1`), and `CAST(ROW(0.0,0) AS ROW(...DOUBLE...))` pins DOUBLE precision INSIDE a struct — both are precision/overflow controls, NOT compile gates.
-
-**Resource check:** r07:597 shows `reduce(amounts, 0, (s, x) -> s + x, s -> s) -> sum of amounts`. This is **CORRECT Trino, NOT a defect** — no file:line fix needed.
-
-Minor: would be marginally stronger noting that for a decimal array a typed init (`DECIMAL '0'` / `CAST(0 AS DECIMAL(38,2))`) makes accumulator precision explicit and overflow-safe. Docked half a point on completeness/clarity for omitting that nuance — NOT for an error.
-
-- Accuracy **5** | Completeness **4.5** | Clarity **4.5** | Actionability **5**
-- **Per-Q avg: 4.75**
-
-### Q4 — All-combinations subtotals (channel-only, region-only, both, grand total)
-Answer: `GROUP BY CUBE(channel, region)` + `SUM(amount)` + `GROUPING(channel, region)` bitmask (0=detail, 1=channel subtotal, 2=region subtotal, 3=grand total); `ORDER BY GROUPING(...), channel, region`. Notes CUBE = all combinations vs ROLLUP = hierarchy. Cites r28.
-
-VERIFIED (select.html): `CUBE(channel, region)` = GROUPING SETS of ALL subsets `((channel,region),(channel),(region),())` → all-combinations + grand total — correct selection (CUBE not ROLLUP). `GROUPING(channel, region)`: leftmost arg (channel) = high bit, region = low bit. Detail = `0b00` = 0; region rolled up (channel-only subtotal) = `0b10` = 2; channel rolled up (region-only subtotal) = `0b01` = 1; grand total = `0b11` = 3. Responder's labels ("1=channel subtotal, 2=region subtotal") map correctly. CUBE-vs-ROLLUP distinction accurate. (Standing CUBE/GROUPING pins held.)
-
-- Accuracy **5** | Completeness **5** | Clarity **5** | Actionability **5**
-- **Per-Q avg: 5.00**
+- Accuracy: 5 — VERIFIED vs window.html: lag(x[, offset[, default]]) with default offset 1 returns the prior row's value, NULL on the first row of the partition with no default; meter_value - LAG(...) = consecutive delta. PARTITION BY meter_id correctly isolates each series. Correct.
+- Completeness: 5 — first-row-NULL behavior and multi-meter partitioning both addressed.
+- Clarity: 5 — clear step from prev-value to delta.
+- Actionability: 5 — drop-in.
+- **Q4 avg: 5.00 CLEAN** (bulletproofed LAG-consecutive-delta pin held)
 
 ---
 
 ## Overall
 
 | Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
+|---|-----|------|------|-----|-----|
 | Q1 | 5 | 5 | 5 | 5 | 5.00 |
 | Q2 | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | 5 | 4.5 | 4.5 | 5 | 4.75 |
+| Q3 | 5 | 4 | 5 | 5 | 4.75 |
 | Q4 | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall avg = (5.00 + 5.00 + 4.75 + 5.00) / 4 = 19.75 / 4 = 4.9375**
-**Result: STRONG PASS** (threshold 3.5; margin +1.4375; overall avg governs, no per-Q veto)
+**Overall avg: 4.94 — PASS** (threshold 3.5; no single-Q veto, and none would apply anyway).
 
 ---
 
-## Headline answers to the run-prompt deliverables
+## Teacher feedback
 
-**(a) Is explode-JSON-array-string BULLETPROOFED?**
-YES. Q1 (numeric `ARRAY(BIGINT)` branch) is the 2nd consecutive clean post-fix datapoint after iter799 (varchar `ARRAY(VARCHAR)` branch). Responder LED with `json_parse + CAST(... AS ARRAY(<type>)) + UNNEST` for both numeric and varchar element types, did NOT regress to bare `UNNEST(varchar)`. **explode-JSON-array-string = BULLETPROOFED.** Maintenance re-probe only going forward.
+**(a) Q3 arrays_overlap verdict — FINE AS-IS (optional one-line completeness note, NOT a defect).**
+The responder's `cardinality(array_intersect(a,b)) > 0` is fully correct, docs-verified, and returns a clean boolean. Trino 467's purpose-built `arrays_overlap(x,y) -> boolean` is the more direct single-function answer, BUT it carries a NULL-handling subtlety (returns NULL — not false — when there are no non-null elements in common and either array contains null). The responder's form avoids that subtlety and is arguably clearer to a non-expert. Treat arrays_overlap as an optional alternative the teacher MAY surface in r07 §1a.3 as a one-liner ("more direct: `arrays_overlap(a,b)`, but note its NULL-when-either-contains-null behavior") — do NOT churn the verified array_intersect card to make it the primary. No score penalty beyond the single Comp=4 on Q3.
 
-**(b) Q3 reduce-init-state verdict:**
-Bare `reduce(decimal_array, 0, (s,x)->s+x, s->s)` does **NOT** type-error — integer→decimal/double is an implicit widening coercion, so Trino unifies the state type up to the element type and the query compiles/runs. The directive's "needs CAST(0 AS DOUBLE)/0.0 or it errors" hypothesis is **not confirmed**; the docs' typed inits exist for OVERFLOW (`BIGINT '0'`) and struct-precision (`CAST(ROW(0.0,0) AS ...)`), not as a compile gate. **Resource r07:597 is CORRECT (bare 0), NOT a defect — no file:line fix needed.** Residual concern is only decimal-precision/overflow on large sums (minor robustness note). Classification: neither resource-defect nor responder-slip — a docked-half-point completeness nuance only.
+**(b) iter802 designation — DEFAULT NO-OP / durability-breadth.**
+No open defect, no findability miss, all four standing pins held clean (top-N-per-group-ROW_NUMBER, array_position-1-based, array_intersect/arrays_overlap, LAG-consecutive-delta). No FIX-A warranted.
 
-**(c) iter801 designation: DEFAULT NO-OP / durability-breadth sweep.**
-No open defect. Q1 bulletproofed; Q2/Q4 clean against standing pins; Q3 mechanism correct and resource clean. OPTIONAL (low-priority, do NOT pre-churn): a one-line inoculation note near r07:597 that for DECIMAL/DOUBLE arrays a typed init (`DECIMAL '0'` / `CAST(0 AS DECIMAL(38,2))`) makes accumulator precision explicit and overflow-safe — additive only, ONLY if a future fractional/large-sum probe under-scores. Otherwise stay NO-OP. Suggest fresh adjacent picks: `array_agg` ordered / `element_at` vs `[]` subscript / `flatten` nested arrays / `map_values` + `reduce`. DO NOT churn r07 §1a explode card, transform/reduce locks, or r28 CUBE/GROUPING/ROLLUP cards — all verified clean.
+Suggested fresh adjacent probes for iter802 (probe-only; do not edit resources): arrays_overlap as the LEAD form of a "do these sets intersect" question (bank a datapoint on the direct function), array_distinct/array_sort, NTILE for quartile bucketing, FIRST_VALUE/LAST_VALUE with explicit frame, sequence()/UNNEST for gap-filling dates.
 
-DO NOT bump training/state.json (already 800).
+**PRESERVE** (verified clean, churn risk): r07 ROW_NUMBER top-N-per-group, r07 §1a.3 array_position / array_intersect, r07 Pattern B LAG cards.
