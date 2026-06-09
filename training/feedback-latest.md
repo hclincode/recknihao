@@ -1,72 +1,100 @@
-# Judge Feedback — iter777
+# iter778 Judge Feedback — DEFAULT NO-OP / durability-breadth sweep
 
-**Mode**: DEFAULT NO-OP / durability-breadth sweep (teacher made ZERO resource edits). Final-phase / extended — single end-of-iteration feedback covering all 4 questions.
-
-**Verification**: Every dialect claim verified against trino.io/docs/467 (datetime.html, string.html, conversion.html) on 2026-06-09. Resources NOT treated as ground truth.
+**Phase**: extended | **Teacher edits this iter**: ZERO | **4 fresh adjacent probes**
+**All dialect claims verified vs trino.io/docs/467 (WebFetch, 2026-06-09)**: comparison.html, datetime.html, string.html.
 
 ---
 
-## Per-question scores
+## Q1 — COUNT DISTINCT PER GROUP (unique visitors per page)
 
-### Q1 — EPOCH-SECONDS → TIMESTAMP, group by day
-Answer: `date_trunc('day', from_unixtime(created_at)) AS day` + GROUP BY same expr. States `from_unixtime()` takes SECONDS not millis; millis variant `from_unixtime(created_at / 1e3)` with float divide (NOT /1000 integer, to preserve sub-second precision). Cites r13.
+Answer: `COUNT(DISTINCT user_id) AS unique_visitors ... GROUP BY page_url`. Cites r07.
 
-Verified (datetime.html): `from_unixtime(unixtime)` interprets the argument as SECONDS since 1970-01-01 UTC, returns `timestamp(3) with time zone`. So `from_unixtime(1748736000)` is correct for epoch-seconds. `date_trunc('day', ts)` zeroes time components → groups by calendar day. The millis caveat (divide by 1e3 as a float to keep sub-second precision) is correct and matches the standing epoch-seconds-not-millis pin. The seconds-vs-millis worry is addressed head-on.
+- **Accuracy 5** — `COUNT(DISTINCT user_id)` per `GROUP BY page_url` = distinct visitors per page. Standard SQL, valid Trino. Correct.
+- **Completeness 5** — directly answers the ask; nothing missing for the question.
+- **Clarity 5** — plain, beginner-readable.
+- **Actionability 5** — copy-paste runnable.
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+**Per-Q avg: 5.00 — CLEAN**
 
-### Q2 — first 4 chars of product_sku (user expected Postgres LEFT())
-Answer: Trino has NO `LEFT()`. `substr(product_sku, 1, 4)` → 'ELEC'. Alternative `split_part(product_sku, '-', 1)` for delimiter-based prefix. Cites r23.
+---
 
-Verified (string.html): Trino has no `left()`/`right()` (those are MySQL/Postgres — standing no-LEFT pin holds). `substr(string, start, length)` is 1-indexed → `substr(sku, 1, 4)` = first 4 chars = 'ELEC'. `split_part(sku, '-', 1)` = 'ELEC' (field before first dash). Both correct; the split_part alternative is a genuinely better fit for a `ELEC-12345-BLK` SKU shape where the prefix is delimiter-bounded.
+## Q2 — REPLACE ALL OCCURRENCES of a char (strip spaces/dashes from phone)
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+Answer: `regexp_replace(phone, ' ', '')` / `regexp_replace(phone, '-', '')` / `regexp_replace(phone, '[^0-9]', '')` (digits-only, `^` negates the class). Says don't use trim() for interior chars, don't nest replace() repeatedly. Cites r27.
 
-### Q3 — customers with MORE THAN 5 orders (WHERE COUNT(*)>5 errored)
-Answer: use `HAVING COUNT(*) > 5` not WHERE. Full query with GROUP BY customer_id. Explains eval order FROM→WHERE→GROUP BY→HAVING→SELECT→ORDER BY; WHERE runs before aggregation so cannot reference aggregates. Cites r07 + r23.
+VERIFIED vs string.html / regexp:
+- `regexp_replace(string, pattern, replacement)` is valid; `regexp_replace(phone, '[^0-9]', '')` = strip-all-non-digits. **Correct** (matches the standing strip-non-digits pin).
+- **CRITICAL COMPLETENESS CHECK**: the user explicitly hinted "or is there a simpler string function." Trino 467 string.html DOES document the non-regex **3-arg `replace(string, search, replace)`** — verbatim *"Replaces all instances of `search` with `replace` in `string`"* — and a **2-arg `replace(string, search)`** *"Removes all instances of `search` from `string`."* For removing a literal space/dash, `replace(phone, ' ', '')` / `replace(phone, '-', '')` is the MORE DIRECT answer the user was fishing for. The responder's `regexp_replace` is fully CORRECT but is the heavier tool for a fixed literal char, and it OMITTED the simpler `replace()`.
 
-Verified: HAVING filters groups after aggregation; WHERE cannot reference aggregates (runs before GROUP BY) → `WHERE COUNT(*)>5` is invalid, exactly the user's error. `HAVING COUNT(*)>5` correct. The logical evaluation-order explanation is accurate and directly explains WHY the user's WHERE failed — strong root-cause teaching.
+- **Accuracy 5** — every form shown is valid Trino; `[^0-9]` digit-strip and `^`-negates-class explanation correct. No false claim.
+- **Completeness 3** — works and is correct, but missed the simpler `replace()` the user explicitly asked about. A better answer LEADS with `replace(phone,' ','')`/`replace(phone,'-','')` for a fixed char and offers `regexp_replace('[^0-9]','')` for patterns/digit-classes. Meaningful (not severe) ding.
+- **Clarity 5** — clear; the do-not-trim / do-not-nest guidance is helpful.
+- **Actionability 4** — runnable, but the user wanting "the simple one" has to go find `replace()` themselves.
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+**Per-Q avg: 4.25 — minor completeness gap (NOT a defect)**
 
-### Q4 — safe varchar→number (junk 'N/A', ''), NULL for bad, no failure
-Answer: `TRY_CAST(quantity_str AS INTEGER)` → NULL for 'N/A'/'', good ones convert; `COALESCE(TRY_CAST(...), 0)` for a default. Notes Trino does NOT support `::` cast shorthand (`quantity_str::INTEGER` is a parse error). Cites r23 + r27.
+**Q2 replace() verdict**: Minor **completeness gap with a mild findability contributor**. `regexp_replace` is valid and correct, so this is NOT an accuracy defect. Findability note: grepping resources, r27 documents `regexp_replace` 2-arg / 3-arg-empty-string forms (r27:1158-1159) and a lambda 3-arg form (r27:1115), but the plain non-regex `replace(string, search, replace)` is NOT surfaced as "the simple function for removing a fixed literal char." That is why the responder reached for `regexp_replace`. OPTIONAL findability touch-up for iter779, not an open defect.
 
-Verified (conversion.html): `try_cast(value AS type)` returns NULL when the cast fails (vs CAST which errors). `TRY_CAST('N/A' AS INTEGER)` and `TRY_CAST('' AS INTEGER)` both fail to parse a valid integer → both return NULL (not an error) — exactly the "no query failure" requirement. `COALESCE(..., 0)` supplies a default. The no-`::`-shorthand note is correct (standing pin — Trino uses CAST/TRY_CAST, `::` is Postgres-only and parse-errors). Complete and directly actionable.
+---
 
-| Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|
-| 5 | 5 | 5 | 5 | **5.00** |
+## Q3 — DAY OF WEEK / WEEKEND FLAG
+
+Answer: `day_of_week(order_timestamp)` → 1=Monday..7=Sunday (ISO-8601). `format_datetime(CAST(ts AS timestamp),'EEEE')` for the name. Weekend: `CASE WHEN day_of_week(...) IN (6,7) THEN 'weekend' ELSE 'weekday'`. Says `dayname()` does NOT exist in Trino. Cites r07.
+
+VERIFIED vs datetime.html:
+- `day_of_week(x) -> bigint` returns ISO day of week, *"value ranges from 1 (Monday) to 7 (Sunday)"* — **CORRECT**. `dow()` alias confirmed exists.
+- Weekend `IN (6,7)` = Saturday(6), Sunday(7) — **CORRECT**.
+- `format_datetime(ts,'EEEE')` → full weekday name (Joda DateTimeFormat) — valid.
+- `dayname()` does NOT exist in Trino 467 — **CONFIRMED** (no dayname in datetime.html; correct claim).
+
+- **Accuracy 5** — day-number mapping, weekend set, name function, and the no-`dayname()` claim all verified correct.
+- **Completeness 5** — number→day mapping spelled out, name + flag both covered.
+- **Clarity 5** — explicitly states which number is which day (exactly what user asked).
+- **Actionability 5** — runnable CASE + name expression.
+
+**Per-Q avg: 5.00 — CLEAN** (matches standing day_of_week=1..7 Monday→Sunday pin)
+
+---
+
+## Q4 — ROW-WISE MAX ACROSS COLUMNS (highest of 3 scores per row)  [KEY SCRUTINY]
+
+Answer: `GREATEST(math_score, reading_score, writing_score) AS highest_score` — row-wise, one row in/out. Distinguishes from `MAX()` aggregate and `array_max(arr)`. CLAIMS: *"GREATEST returns NULL if ANY of its arguments is NULL — wrap with COALESCE(col,0) if you want to treat NULL as 0."* Cites r07 + r27.
+
+**CRITICAL VERIFICATION vs trino.io/docs/467/functions/comparison.html:**
+Exact documented text: **"Like most other functions in Trino, they return null if any argument is null."** Docs further note this differs from PostgreSQL (which returns NULL only when ALL args are null).
+
+→ **The responder's NULL claim is CORRECT.** `greatest()`/`least()` in Trino 467 DO return NULL if ANY argument is NULL (NULL-if-any-null, the Oracle/SQL-standard behavior — NOT ignore-nulls, NOT throw). The `COALESCE(col, 0)` workaround to treat NULL as 0 is **apt and correct**.
+- `GREATEST` vs `MAX()` aggregate (column-down) vs `array_max(array)` distinctions — all **correct**. GREATEST is row-wise across scalar args; MAX collapses rows; array_max operates on one array value.
+
+- **Accuracy 5** — the headline NULL claim is documented-correct verbatim; row-wise vs aggregate vs array_max distinctions correct. This was the one claim at risk and it holds.
+- **Completeness 5** — answers row-wise max, names the aggregate trap, AND volunteers the NULL-propagation caveat + COALESCE fix the user would otherwise hit silently.
+- **Clarity 5** — the MAX-vs-GREATEST disambiguation is exactly the beginner confusion point.
+- **Actionability 5** — runnable, with the NULL-handling foot-gun pre-empted.
+
+**Per-Q avg: 5.00 — CLEAN**
+
+**Q4 greatest-NULL verdict**: **CORRECT, not a defect.** Trino 467 comparison.html: *"Like most other functions in Trino, they return null if any argument is null."* Responder's "NULL if any arg NULL" + COALESCE workaround = accurate. No FIX needed.
 
 ---
 
 ## Overall
 
-| Q | Avg |
-|---|---|
-| Q1 epoch→timestamp | 5.00 |
-| Q2 first-N-chars / no-LEFT | 5.00 |
-| Q3 HAVING aggregate filter | 5.00 |
-| Q4 TRY_CAST / no-:: | 5.00 |
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | count-distinct-per-group | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | replace-all-occurrences | 5 | 3 | 5 | 4 | 4.25 |
+| Q3 | day-of-week / weekend flag | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | greatest row-wise max | 5 | 5 | 5 | 5 | 5.00 |
 
-**Overall average: 5.00 / 5 → STRONG PASS** (threshold 3.5).
+**Overall avg = (5.00 + 4.25 + 5.00 + 5.00) / 4 = 4.5625 → PASS** (threshold 3.5; overall average governs, no single-Q veto).
 
 ---
 
-## Teacher feedback
+## iter779 designation: **DEFAULT NO-OP / durability-breadth sweep**
 
-No action required. All four answers are docs-verified clean and all four standing pins held with zero drift:
-- **epoch-seconds-from_unixtime-not-millis** — held (Q1: seconds interpretation + float-divide millis caveat both correct).
-- **no-LEFT-use-substr** — held (Q2: no LEFT(), substr 1-indexed, split_part alt).
-- **HAVING-for-aggregate-filter** — held (Q3: HAVING vs WHERE + eval-order root cause).
-- **TRY_CAST-NULL-on-fail + no-::-cast** — held (Q4: NULL for bad rows, COALESCE default, no `::` shorthand).
+No open defect. The KEY scrutiny (Q4 greatest-NULL) verified CORRECT against Trino 467 docs. Q1/Q3 clean and on-pin. Q2 is a MINOR completeness/findability gap, not an accuracy defect — `regexp_replace` is valid.
 
-No new defect, imprecision, or findability gap surfaced. These four traps remain well-covered and durable across fresh phrasings. Do NOT churn the relevant cards (r07 HAVING/eval-order, r13 from_unixtime, r23 substr/split_part/TRY_CAST, r27 TRY_CAST) — churn risk on verified-clean content.
-
-**iter778 designation: DEFAULT NO-OP / durability-breadth sweep** — no open defect, no new imprecision; teacher ZERO edits. Probe 4 fresh adjacent topics that still touch known Trino traps (e.g. epoch-MILLIS-explicit / right-N-chars or suffix via substr-negative-start / FILTER-vs-HAVING on conditional counts / TRY(expr) vs TRY_CAST distinction). Continue verifying every dialect claim against trino.io/docs/467. PRESERVE all four cards above — verified clean, churn risk.
+- **Teacher**: ZERO required edits. Recommended ZERO churn to verified-clean cards (r07/r27 GREATEST + day_of_week + count-distinct cards held; churn risk).
+- **OPTIONAL (non-blocking) touch-up if teacher edits at all**: surface the plain non-regex **`replace(string, search, replace)` 3-arg** (and 2-arg `replace(string, search)`) as the simple "remove/replace all occurrences of a FIXED literal char" answer, with keyword anchors (replace, strip, remove spaces/dashes), and position `regexp_replace('[^0-9]','')` as the pattern/digit-class escalation. This would convert Q2's 4.25 → ~5.00 on the next phrasing. Do this ONLY as an additive landing point in r27's string-cleanup section — do NOT churn the verified regexp_replace content.
+- **Suggested fresh probes for iter779** (no re-probe mandatory; all 4 pins held): literal-substring `replace()` re-phrasing (to test if the above note, if added, lands) / `least()` row-wise min (mirror of Q4) / `extract(... FROM ts)` or `year()/month()/day()` date-part / `array_max`/`array_min` on a true array column (to confirm responder keeps array_max distinct from GREATEST).
+- **PRESERVE**: r07/r27 GREATEST card (NULL-if-any-null + COALESCE), day_of_week 1..7 mapping card, count-distinct-per-group card — all verified clean this iter.

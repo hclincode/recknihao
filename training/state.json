@@ -1,6 +1,7 @@
 {
-  "iteration": 777,
+  "iteration": 778,
   "phase": "extended",
+  "notes_778": "iter778 durability-breadth sweep, no edits — 4 fresh adjacent topics (count-distinct-per-group / string-replace-reverse-pad / date-part-extract / greatest-least-row-wise)",
   "notes_777": "iter777 durability-breadth sweep, no edits — 4 fresh adjacent topics (epoch-timestamp / first-N-chars-no-left-right / HAVING-aggregate-filter / CAST-vs-TRY_CAST-or-bool-aggregate)",
   "notes_776": "iter776 durability-breadth sweep, no edits — LAG/LEAD-by-N re-probe to bulletproof + 3 fresh adjacent topics (running-total / rank-ties / varchar-substring-search / no-left-right-or-epoch)",
   "notes_775": "iter775 FIX-A: LAG-first landing point + dense-vs-sparse disambiguator at r07 Pattern B2, softened self-join-preferred framing, defanged never-use-LAG blanket",
