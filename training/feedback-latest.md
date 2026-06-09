@@ -1,60 +1,84 @@
-# Judge Feedback — iter861
+# Judge Feedback — iter862
 
-**Phase:** extended (final-style). **Verdict: PASS** — overall average **4.0625** (>= 3.5 threshold).
-All dialect claims verified against trino.io/docs/467 (window.html, aggregate.html, functions/list.html, sql/select.html) + WebSearch on trino.io, 2026-06-10. Trino 467 PINNED. Multi-source used for every existence/capability claim. Prod env (on-prem Trino 467 + Iceberg + MinIO, JWT/OPA) unaffected — all four answers are pure ANSI/Trino SQL with no stack conflict.
+**Overall: 4.78125 — STRONG PASS** (Q1 5.00 / Q2 4.625 / Q3 5.00 / Q4 4.50)
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
-|---|---|---|---|---|---|
-| Q1 running total SUM(COUNT(*)) OVER | 5 | 5 | 5 | 5 | **5.00** |
-| Q2 concat distinct tags array_join(array_agg) | 5 | 3 | 5 | 4 | **4.25** |
-| Q3 NTILE(4) quartile bands | 1.5 | 3 | 4 | 2.5 | **2.75** |
-| Q4 first signup source FIRST_VALUE | 4.5 | 4 | 5 | 4.5 | **4.50** |
+Phase: extended. LIGHT FIX-A verification of the iter861 Q3 NTILE-inversion defect.
+All four answers are pure-SQL, dialect-only; on-prem Trino 467 + Iceberg + MinIO (JWT/OPA) unaffected.
+All dialect claims docs-verified vs trino.io/docs/467 (window / datetime / math / conditional .html) + WebFetch 2026-06-10, Trino 467 pinned, multi-source.
 
-**Overall = (5.00 + 4.25 + 2.75 + 4.50) / 4 = 4.0625 → PASS** (overall average governs; no per-question veto).
+**HEADLINE: the iter861 Q3 NTILE-direction FIX LANDED.**
 
 ---
 
-## Per-question notes
+## Q1 — Split customers into 5 equal groups by lifetime spend, group 1 = HIGHEST (VIP tier)
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00 CLEAN**
 
-### Q1 — running/cumulative sum of daily signups — 5.00 CLEAN
-Answer: `SUM(COUNT(*)) OVER (ORDER BY signup_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` with `GROUP BY signup_date`, plus `PARTITION BY tenant_id` note for multi-tenant.
-- VERIFIED window.html: `sum()` is usable as a window function; the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame is a correct, canonical running-total frame.
-- VERIFIED the window-over-aggregate layering is legal in Trino: `COUNT(*)` is evaluated by `GROUP BY signup_date`, then `SUM(...) OVER (...)` runs over the grouped rows in the same query level. Correct.
-- Multi-tenant `PARTITION BY tenant_id` advice is right (resets the cumulative per tenant). No defect.
+This is the iter861 Q3 NTILE-inversion fix RE-PROBE, and the **fix LANDED**.
 
-### Q2 — concatenate DISTINCT tags into one delimited string — 4.25 (completeness nuance)
-Answer: `array_join(array_agg(tag ORDER BY tag), ', ')` with `FILTER (WHERE tag IS NOT NULL)`; explicitly states Trino has NO `string_agg`.
-- VERIFIED functions/list.html S-section: NO `string_agg` (S-entries: second, sequence, sha*, shuffle, sign, ..., split*, sqrt, starts_with, stddev*, strpos, substr, substring, sum — no string_agg). The "Trino does not have string_agg" claim is correct.
-- VERIFIED aggregate.html: `array_agg`, `array_agg(x ORDER BY y)`, and `FILTER (WHERE ...)` on aggregates all exist and behave as described. `array_join(array, delimiter)` confirmed in list.html.
-- **COMPLETENESS GAP (the −1.0 on completeness, −1.0 on actionability):** the question explicitly asked for **DISTINCT** tags. The responder's `array_agg(tag ORDER BY tag)` does **NOT** dedupe — duplicate tags will appear multiple times in the output string. The correct dedup forms are `array_join(array_distinct(array_agg(tag)), ', ')` (array_distinct verified present) or `array_join(array_agg(DISTINCT tag), ', ')` (Trino documents DISTINCT applies to aggregations generally). Neither was mentioned. This is a real, on-point miss of the asked requirement, not a stylistic nit. Not a fabrication/dialect error — the SQL given is valid, it just answers "all tags" rather than "distinct tags."
+Responder answered `NTILE(5) OVER (ORDER BY total_spend DESC) AS tier`, and — critically — explicitly stated that **the SORT DIRECTION determines which bucket is tier 1**: you want highest, so sort `DESC`, which makes **tier 1 = top 20% / biggest spenders** and tier 5 = bottom 20%. Also noted remainder rows go to the earliest buckets.
 
-### Q3 — split 0-100 score into 4 quartile bands — 2.75 (REAL ACCURACY DEFECT: NTILE labels INVERTED)
-Answer: `NTILE(4) OVER (ORDER BY performance_score) AS quartile`, then CLAIMS "1 = top 25% (highest), 2 = 25-50%, 3 = 50-75%, 4 = bottom 25% (lowest)" and labels quartile 1 'elite', quartile 4 'at-risk'.
-- **VERIFIED window.html ntile:** "Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`." With `ORDER BY x` ASC, **bucket 1 = the LOWEST values; bucket n = the HIGHEST.** Confirmed via WebFetch.
-- **THE RESPONDER INVERTED THE BANDS.** With `ORDER BY performance_score` (default ASC), quartile **1 = the LOWEST 25% of scores** and quartile **4 = the HIGHEST 25%**. The responder claimed the exact opposite ("1 = top 25% highest", "4 = bottom 25% lowest") and then attached the **wrong human labels**: it tags the lowest-scoring group as 'elite' and the highest-scoring group as 'at-risk'. This is semantically backwards and would mislabel every row in a real product. The `NTILE(4)` mechanic and the CASE scaffold are correct; the ORDERING SEMANTICS and the resulting labels are wrong.
-- The fix the responder should have given: either `ORDER BY performance_score DESC` (so bucket 1 = highest = 'elite'), OR keep ASC and relabel (1='at-risk' lowest ... 4='elite' highest). It did neither and asserted the inverted mapping confidently.
-- **DIAGNOSIS — resource gap, not just a synthesis slip.** This is the recurring confident-wrong-direction class of defect. The NTILE coverage in resources/ does not pin the ASC-direction semantics with a copy-attractive, label-explicit canonical. Recommend FIX-A (below). Scored Accuracy 1.5 (core mechanic right, the load-bearing semantic claim and ALL derived labels wrong), Actionability 2.5 (an engineer copying this ships inverted dashboards), Completeness 3, Clarity 4 (well-written but confidently wrong).
+VERIFIED vs trino.io/docs/467 functions/window.html (verbatim):
+- "Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."
+- Uneven division verbatim: "the remainder values are distributed one per bucket, starting with the first bucket."
+- Example: "with `6` rows and `4` buckets, the bucket values would be as follows: `1` `1` `2` `2` `3` `4`" (larger buckets first, in ORDER BY order).
 
-### Q4 — each user's FIRST signup source by earliest timestamp — 4.50 (completeness nuance)
-Answer: `SELECT DISTINCT user_id, FIRST_VALUE(signup_source) OVER (PARTITION BY user_id ORDER BY signup_timestamp)`; notes adding columns to ORDER BY for tie-breaks.
-- VERIFIED sql/select.html: when ORDER BY is present and no frame is given, the default frame is `RANGE UNBOUNDED PRECEDING` (= `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`). For `first_value()` this still yields the partition's FIRST row by the ORDER BY — so the result is correct (the responder's pattern is NOT bitten by the default-frame trap that breaks `last_value`).
-- VERIFIED window.html: `first_value()` is a valid window value function; `SELECT DISTINCT` over the window collapses the repeated per-partition value to one row per user. Pattern works.
-- **COMPLETENESS NUANCE (the −0.5):** the cleaner Trino idiom is `min_by(signup_source, signup_timestamp) ... GROUP BY user_id` — one row per user with no DISTINCT-over-window and no window machinery (VERIFIED min_by in aggregate.html: "Returns the value of x associated with the minimum value of y"). Worth mentioning as the more efficient/idiomatic form. The tie-break note is correct. Not a defect — both approaches are correct; min_by is just leaner.
+Buckets are numbered 1..n in ORDER BY order. `ORDER BY total_spend DESC` => the highest values sort first => land in bucket 1. The responder's direction is now CORRECT and the explanation is label-explicit (it ties the DESC choice directly to "tier 1 = top"). This is the exact inverse of the iter861 Q3 error ("bucket 1 = top under ASC"), which is now gone. The remainder-to-earliest-buckets note also matches the docs. **Fix CONFIRMED LANDED.**
 
 ---
 
-## iter862 RECOMMENDATION — **FIX-A (Q3 NTILE label inversion is a REAL defect)**
+## Q2 — Duration between started_at and finished_at as plain minutes/hours
+**Sub-scores: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4.5 — avg 4.625**
 
-Add/repair an **NTILE direction card** in the resource that owns window-function ranking (analytical-query-patterns / SQL-best-practices NTILE coverage). As a copy-attractive FENCED canonical:
-- PIN the semantic: `NTILE(n) OVER (ORDER BY x)` with **default ASC ⇒ bucket 1 = LOWEST values, bucket n = HIGHEST values.**
-- Give BOTH labeled canonicals so the responder picks by intent:
-  - "top tier = bucket 1" → `NTILE(4) OVER (ORDER BY score DESC)` (highest in bucket 1).
-  - "ASC default" → state plainly bucket 1 = lowest, label accordingly (bucket 1 = worst/'at-risk', bucket 4 = best/'elite').
-- Inline-DEFANG, on its own un-copyable fenced line, the exact iter861 misconception: `NTILE(4) OVER (ORDER BY score) labeling bucket 1 as 'top 25% / elite' -- WRONG: ASC puts the LOWEST scores in bucket 1`.
-- Keyword anchors: quartile, quartiles, NTILE, top 25%, bottom 25%, percentile bands, equal-size buckets, tiers, elite/at-risk labeling, score bands.
+Responder answered `date_diff('minute', started_at, finished_at) AS duration_minutes` and `date_diff('hour', started_at, finished_at) AS duration_hours`; result is BIGINT; put the earlier timestamp first or you get a negative.
 
-This is a true accuracy/findability defect (a confident inverted directional claim) — warrants a LIGHT FIX-A, not a NO-OP.
+VERIFIED vs trino.io/docs/467 functions/datetime.html:
+- Signature `date_diff(unit, timestamp1, timestamp2)`, returns **bigint**.
+- "Returns `timestamp2 - timestamp1` expressed in terms of `unit`" => timestamp1 earlier yields a positive result. Responder's earlier-first guidance is correct.
+- `'minute'` and `'hour'` are valid units (millisecond/second/minute/hour/day/week/month/quarter/year).
 
-Secondary (NON-BLOCKING, do NOT force): Q2 DISTINCT-dedup miss (`array_agg(DISTINCT tag)` / `array_distinct(array_agg(...))`) and Q4 `min_by` leaner-idiom note. Single-datapoint completeness nuances; fold a one-line cross-ref only if cheap while editing the relevant cards — do NOT churn pins for them this iteration.
+CORE CORRECT. **Non-blocking completeness gap (the truncation nuance):** `date_diff` counts whole-unit boundaries and **truncates** — a 90-minute gap in `'hour'` returns **1, not 1.5**. The responder did not flag this. A SaaS engineer expecting a fractional "1.5 hours" duration would be silently surprised. The clean fractional-hours path is `date_diff('second', started_at, finished_at) / 3600.0` (or `/ 60.0` for fractional minutes). Minor deductions on Completeness/Actionability only; the integer-boundary core is correct and is what most callers want.
 
-PRESERVE all iter534-860 pins; NO federation edits (federation row stays 4.49944/310). DO NOT bump training/state.json (already 861).
+---
+
+## Q3 — Each row's value as a percent of the overall total, in one query
+**Sub-scores: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00 CLEAN**
+
+Responder answered `ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS pct_of_total`; explained that the empty `OVER ()` computes the grand total repeated on every row, and that `100.0` (not `100`) forces decimal division else integer division truncates.
+
+VERIFIED vs trino.io/docs/467:
+- window.html: "All Aggregate functions can be used as window functions by adding the `OVER` clause." Empty `OVER ()` (no PARTITION BY / no ORDER BY / no frame) => the frame is all rows => `SUM(revenue) OVER ()` is the grand total repeated on every row. Valid window usage, correct.
+- math.html: "Division (integer division performs truncation)" — confirms all-integer operands (`100 * revenue / SUM(...)`) would truncate. Promoting one operand to decimal/double (`100.0`) makes the whole division non-integer. The `100.0`-not-`100` caveat is correct and well-explained.
+
+Clean, well-reasoned, no gaps.
+
+---
+
+## Q4 — First non-null of preferred_email, backup_email, work_email in one expression
+**Sub-scores: Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 4 — avg 4.50**
+
+Responder answered `COALESCE(preferred_email, backup_email, work_email) AS contact_email`; returns the first non-null, NULL if all null; cleaner than nested IF.
+
+VERIFIED vs trino.io/docs/467 functions/conditional.html (verbatim):
+- "Returns the first non-null `value` in the argument list. Like a `CASE` expression, arguments are only evaluated if necessary." Variadic (`value1, value2[, ...]`). Returns NULL if all are NULL.
+
+CORE CORRECT. **Non-blocking completeness gap (empty-string vs NULL):** the question said "some rows have preferred_email filled in, some don't." If "don't" means an **empty string `''`** rather than NULL, COALESCE will NOT skip it — `COALESCE('', backup_email)` returns `''`, not the backup. COALESCE only treats NULL as absent. A short note ("if blank fields are `''` not NULL, wrap each with `NULLIF(preferred_email,'')`") would have made this bulletproof against real-world data where empty strings are common. COALESCE is the correct core answer; minor Completeness/Actionability deductions only.
+
+---
+
+## Verdict & iter863 recommendation
+
+**Overall 4.78125 = STRONG PASS** (threshold 3.5; no per-question veto). Every dialect fact verified accurate against trino.io/docs/467.
+
+- (a) **Q1 NTILE direction fix LANDED** — responder now uses `ORDER BY ... DESC` for bucket 1 = highest and explains the direction-to-label tie explicitly. The iter861 Q3 inversion is fixed (1st post-fix datapoint on the VIP/quintile/highest phrasing; needs 1 more angle — e.g. an ASC "bottom decile / lowest-N" phrasing, or a label-mismatch trap — to fully bulletproof the C3 direction card).
+- (b) **Q2 date_diff correct**; whole-unit truncation IS worth a one-line note (90 min in hours = 1 not 1.5) — minor completeness only, not a defect.
+- (c) **Q3 SUM() OVER () percent-of-total + integer-division caveat fully correct** — clean.
+- (d) **Q4 COALESCE correct**; empty-string-vs-NULL (`NULLIF(x,'')`) was a reasonable completeness note given the "some don't have it" phrasing — minor only, not a defect.
+
+**No defect surfaced. No fabrication, no wrong signature, no crossed-family error, no findability slip, no prod-env conflict.**
+
+**iter863 = DEFAULT NO-OP / durability sweep.** No resource edit warranted. Recommended probes:
+- Re-probe NTILE direction from a 2nd angle (ASC "bottom/lowest band" or a deliberately-mislabeled trap) to bulletproof the iter862 label-explicit C3 card.
+- Optional fresh adjacents only: `date_diff` fractional-duration phrasing (does the responder reach for `/3600.0`?); COALESCE-with-empty-string phrasing (does it reach for `NULLIF`?). Escalate to a LIGHT FIX-A ONLY if either dings below threshold on a 2nd datapoint — neither is warranted now (single clean datapoints).
+- PRESERVE iter862 label-explicit NTILE-direction C3 card + full iter534-861 pin inventory; NO federation edits (federation stays 4.49944/310).
+
+DO NOT bump training/state.json (already 862).

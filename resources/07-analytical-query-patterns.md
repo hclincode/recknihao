@@ -3798,6 +3798,49 @@ FROM (
 
 ### Pattern C3: `NTILE` — bucket rows into equal-size groups (quartiles, deciles, percentile buckets)
 
+> **LABEL-EXPLICIT CANONICAL — "split rows into N equal bands / quartiles with NTILE: WHICH bucket is which?" (iter862 PIN — FIX-A).** *Keyword anchors so the responder lands here on every shape:* split into quartiles, four equal bands, split a 0-100 score into 4 quartile bands, NTILE, NTILE(4), top 25 percent, top quartile, highest 25%, bottom quartile, at-risk band, performance tiers, performance score quartile, percentile bands, bucket rows into groups, quintiles, NTILE(5), divide into equal groups, which NTILE bucket is the top.
+>
+> **The one fact you must keep straight — the ORDER BY direction decides which bucket is "top".** `NTILE(n)` numbers buckets in the order of the `ORDER BY`. **Under the DEFAULT `ASC`, bucket `1` = the LOWEST values, and bucket `n` = the HIGHEST.** It is BACKWARDS to write `NTILE(4) OVER (ORDER BY score)` and then call bucket `1` the "top / highest / elite" tier — under `ASC`, bucket `1` is the LOWEST 25% and bucket `4` is the highest. To make **bucket `1` = the TOP/HIGHEST 25%, order `DESC`.**
+>
+> ```sql
+> -- NTILE(4) buckets rows into 4 ~equal groups. WHICH bucket is "top" depends on ORDER BY:
+> -- ASC (default): bucket 1 = LOWEST quartile, bucket 4 = HIGHEST
+> SELECT tenant_id, performance_score,
+>        NTILE(4) OVER (ORDER BY performance_score)        AS quartile_low1   -- 1 = lowest 25%
+> FROM tenant_metrics;
+>
+> -- For bucket 1 = TOP/HIGHEST 25%, order DESC:
+> SELECT tenant_id, performance_score,
+>        NTILE(4) OVER (ORDER BY performance_score DESC)   AS quartile_top1   -- 1 = highest 25%
+> FROM tenant_metrics;
+> ```
+>
+> **THE RULE:** `NTILE(n)` numbers buckets in `ORDER BY` order: **`ASC` -> bucket `1` = lowest; `DESC` -> bucket `1` = highest.** Pick the `ORDER BY` direction to MATCH your label (e.g. "top tier" = bucket `1` needs `DESC`; "at-risk / bottom tier" = bucket `1` needs `ASC`). To filter or label a bucket, project `NTILE` in a CTE/subquery FIRST — window functions cannot go in `WHERE` (Trino 467 has no `QUALIFY`; see the anti-pattern note below).
+>
+> ```sql
+> -- ❌ NTILE(4) OVER (ORDER BY score) then calling bucket 1 the "top/highest 25%" -- WRONG: ASC makes bucket 1 the LOWEST; use ORDER BY score DESC for bucket 1 = highest — DO NOT COPY
+> ```
+>
+> **Labeling into named tiers (CTE first, then CASE).** To turn quartiles into human labels, compute `NTILE` in a subquery, then map the bucket number with `CASE` — keeping the direction straight:
+>
+> ```sql
+> -- "top tier" = highest scores: order DESC so bucket 1 = top.
+> SELECT tenant_id, performance_score,
+>        CASE quartile
+>          WHEN 1 THEN 'top 25% (elite)'
+>          WHEN 2 THEN 'upper-middle'
+>          WHEN 3 THEN 'lower-middle'
+>          WHEN 4 THEN 'bottom 25% (at-risk)'
+>        END AS tier
+> FROM (
+>   SELECT tenant_id, performance_score,
+>          NTILE(4) OVER (ORDER BY performance_score DESC) AS quartile   -- DESC: bucket 1 = highest
+>   FROM tenant_metrics
+> );
+> ```
+>
+> Cross-refs: [Pattern C3 remainder rule + no-frame restriction + NULL handling below](#) and the [PERCENT_RANK / NTILE direction guardrail above](#leading-canonical--percent_rank--ntile-direction-guardrail-iter635--top-x-by-metric-inversion-trap) (the "top X% by metric" inversion trap — same direction fact, fraction-threshold framing). Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-10: `ntile(n) -> bigint` "Divides the rows for each window partition into n buckets ranging from 1 to at most n"; with 6 rows / 4 buckets the values are `1 1 2 2 3 4` (remainder goes to the EARLIEST buckets, in `ORDER BY` order).
+
 "Bucket each tenant into one of 10 deciles based on monthly active users so a dashboard can show 'top decile' / 'bottom decile' segments."
 
 ```sql
