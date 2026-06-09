@@ -1280,6 +1280,21 @@ FROM accounts;
 
 > **Cross-references.** For `power()` and the **NO `^` operator** rule (bytes→GB conversion), see [resource 05 §multi-tenant storage math](05-multi-tenant-analytics.md). `sqrt(x)` pairs with the standard-deviation / RMS patterns; `truncate(n * power(10, d)) / power(10, d)` in §4.4C already uses `power()` for decimal truncation. For rounding the `double` result back to a fixed scale, wrap in `CAST(... AS DECIMAL(18,2))` or `round(x, d)` — see §4.4A and §B2.
 
+#### 4.4F.1 Trigonometric functions + degrees ⇄ radians — `radians` / `degrees` / `pi` / `sin` / `cos` / `tan`
+
+**Keyword anchors:** degrees to radians Trino, convert degrees to radians, radians to degrees, convert an angle, trigonometric functions Trino, trig in SQL, sine cosine tangent, `sin` `cos` `tan` `asin` `acos` `atan` `atan2`, `radians()` `degrees()` `pi()`, value of pi, Oracle `SIN`/`COS`/`TAN` migration, haversine / great-circle distance Trino, geo distance between lat/long.
+
+**The one fact (verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html)).** Trino has the full trig family and angle-conversion helpers — all return **`double`**, and the trig functions take their argument in **radians**. Use **`radians(x)`** ("converts angle `x` in **degrees to radians**"), **`degrees(x)`** ("converts angle `x` in **radians to degrees**"), and **`pi()`** for π.
+
+```sql
+-- ✅ COPY THIS — angle conversion + trig (Oracle SIN/COS/TAN map 1:1).
+SELECT radians(180)     AS rad;  -- ~3.14159265  (degrees -> radians)
+SELECT degrees(pi())    AS deg;  -- 180.0        (radians -> degrees)
+SELECT sin(radians(30)) AS s;    -- ~0.5         (trig args are RADIANS — convert degrees first)
+```
+
+The full family (all `-> double`, all take radians): `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, `atan2(y, x)`. **Oracle→Trino is 1:1** for these names; the only thing to watch is the radians convention — if your stored angles are in **degrees** (lat/long, headings), wrap each in `radians(...)` before `sin`/`cos`/`tan`. A haversine great-circle distance is the canonical example: `sin(radians(lat2 - lat1) / 2)`, never `sin(lat2 - lat1)`. See [resource 23 §3.1C trig card](23-sql-best-practices-olap.md) for the OLAP-side worked example.
+
 ### 4.4G BITWISE CANONICAL — AND/OR/XOR/NOT, bit shifts, and counting set bits on integers: `bitwise_and` / `bitwise_or` / `bitwise_xor` / `bitwise_not` / `bitwise_left_shift` / `bitwise_right_shift` / `bit_count(x, bits)` (iter740 PIN — FIX-A)
 
 **Keyword anchors:** bitwise AND OR XOR Trino, bitmask in SQL, test if a bit is set, check if a flag bit is set, permission flags packed in an integer, feature flags bitmask, count set bits, count enabled flags, number of bits set, bitwise NOT Trino, bit shift Trino, left shift right shift SQL, bit_count Trino, popcount Trino, packed integer flags.

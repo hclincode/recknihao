@@ -501,6 +501,20 @@ FROM events;
 
 > **Co-located note — the `split_part` URL chain is FRAGILE; use `url_extract_*` for URL parts.** You *can* approximate the host with `split_part(split_part(page_url, '://', 2), '/', 1)` (split off the scheme, then take the part before the first `/`), and it works on a *simple* `https://host/path` URL. But it **breaks** the moment the URL has a **port** (`host:8080` comes back glued to the host), a **query string** (no `?` handling), a **fragment** (`#...` leaks into the host on schemeless inputs), or a **missing scheme** (the first `split_part` on `'://'` returns the whole string). For anything that is a real URL, reach for the `url_extract_*` family first — it is one call, scheme/port/query/fragment-aware, and reads as intent. The `split_part` chain stays in your toolbox only for **arbitrary delimited strings that are not URLs** (see the email-domain idiom above).
 
+#### Make a string URL-safe — `url_encode` / `url_decode` (percent-encode / escape for a query parameter)
+
+**Keyword anchors:** URL encode, url_encode, percent-encode, percent encode a string, escape string for a URL query parameter, escape for query param, make string URL-safe, url-encode a value, encode a string for a URL, url_decode, decode a percent-encoded string, unescape a URL string.
+
+**The one fact.** To take an *arbitrary string* (a search term, a tag, a customer name) and make it safe to drop into a URL query parameter, use **`url_encode(value) -> varchar`** (escape / percent-encode). Its inverse is **`url_decode(value) -> varchar`**. This is the *opposite* job from `url_extract_*` above — that family *pulls pieces out of* a finished URL; `url_encode`/`url_decode` *escape / unescape one value* going into or out of a URL.
+
+```sql
+-- ✅ COPY THIS — percent-encode a string for safe use in a URL query parameter.
+SELECT url_encode('summer sale & promo') AS encoded;  -- -> 'summer+sale+%26+promo'
+SELECT url_decode('summer+sale+%26+promo') AS decoded; -- -> 'summer sale & promo'
+```
+
+**Exact encoding rules — verbatim from [trino.io/docs/467/functions/url.html](https://trino.io/docs/467/functions/url.html).** Alphanumerics and `.`, `-`, `*`, `_` are left as-is. **The ASCII space is encoded as `+`** (NOT `%20`). Every other character is converted to UTF-8 bytes and emitted as `%XX`, so `&` becomes `%26`, `=` becomes `%3D`, `/` becomes `%2F`, etc. `url_decode` reverses all of this (`+` → space, `%XX` → the original byte). Cross-ref the `url_extract_*` family above when you need to *parse* a full URL rather than *escape* a value.
+
 ### DO NOT WRITE
 
 | False claim | Reality |
@@ -746,6 +760,46 @@ FROM   iceberg.billing.invoices;
 - Trino source — `core/trino-main/src/main/java/io/trino/type/DecimalCasts.java` — `numberToShortDecimal` / `numberToLongDecimal` both call `setScale(..., HALF_UP)`; overflow check throws `NUMERIC_VALUE_OUT_OF_RANGE` ([github.com/trinodb/trino](https://github.com/trinodb/trino/blob/master/core/trino-main/src/main/java/io/trino/type/DecimalCasts.java)).
 - [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) — DECIMAL type definition. Page does NOT document the cast rounding mode (silent — source is authoritative).
 - [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — `round(x, d)` reference.
+
+---
+
+### Convert an integer to a hex / binary / base-N string (and back) — `to_base` / `from_base` (NOT `to_hex` / `from_hex`)
+
+**Keyword anchors:** integer to hex string, convert a number to hexadecimal, decimal to hex Trino, hex string to integer, parse a hex string to a number, convert number to binary/octal Trino, base conversion, decimal to base-N, base-N to decimal, `to_base`, `from_base`, number to base 16/2/8, radix conversion.
+
+**The one fact (verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html)).** To turn an **integer** into its hex / binary / octal / any-base **string** form (and back), Trino 467 uses **`to_base(n, radix) -> varchar`** and **`from_base(string, radix) -> bigint`**. The `radix` is any base from 2 to 36, so this covers hex (16), binary (2), octal (8), and base-36 IDs.
+
+```sql
+-- ✅ COPY THIS — integer ⇄ hex/binary/octal STRING (radix 2–36).
+SELECT to_base(255, 16)   AS hex;    -- 'ff'      (integer  -> hex string)
+SELECT from_base('ff', 16) AS n;     -- 255       (hex string -> integer)
+SELECT to_base(255, 2)    AS binary; -- '11111111'(integer  -> binary string)
+SELECT to_base(255, 8)    AS octal;  -- '377'     (integer  -> octal string)
+```
+
+**Do NOT reach for `to_hex` / `from_hex` to convert an integer — those operate on `VARBINARY`, not integers:**
+
+- `to_hex(255)`   — ❌ **TYPE ERROR.** `to_hex(varbinary) -> varchar` expects binary; passing an integer fails — DO NOT COPY.
+- `from_hex('ff')` — ❌ returns the `varbinary` value `x'ff'`, **NOT** the integer `255` — DO NOT COPY for integer parsing.
+
+**When `to_hex` / `from_hex` ARE correct: VARBINARY ↔ hex, not integers.** `to_hex(varbinary)` is exactly right for turning a **binary value** into a printable hex string — e.g. a hash digest for a surrogate key: `to_hex(md5(to_utf8(...)))` (see [resource 27 §4.5A surrogate-key pattern](27-oracle-plsql-to-dbt-trino.md)). That usage is correct and stays. The split is simply: **integer ⇄ base-N string → `to_base` / `from_base`; VARBINARY ⇄ hex string → `to_hex` / `from_hex`.**
+
+---
+
+### Trigonometric functions and degrees ⇄ radians — `radians` / `degrees` / `pi` / `sin` / `cos` / `tan`
+
+**Keyword anchors:** degrees to radians, convert degrees to radians Trino, radians to degrees, convert an angle, trigonometric functions Trino, trig functions, sine cosine tangent, `sin` `cos` `tan`, `asin` `acos` `atan` `atan2`, `radians()`, `degrees()`, `pi()`, value of pi, haversine distance Trino, great-circle distance, angle conversion.
+
+**The one fact (verified at [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html)).** Trino's trig functions take their argument in **radians**. To convert between the two angle units use **`radians(x) -> double`** ("converts angle `x` in **degrees to radians**") and **`degrees(x) -> double`** ("converts angle `x` in **radians to degrees**"). `pi() -> double` returns π.
+
+```sql
+-- ✅ COPY THIS — angle conversion + trig.
+SELECT radians(180)   AS rad;   -- ~3.14159265  (degrees -> radians)
+SELECT degrees(pi())  AS deg;   -- 180.0        (radians -> degrees)
+SELECT sin(radians(30)) AS s;   -- ~0.5         (trig args are in RADIANS — convert first)
+```
+
+**The full family** (all return `double`, all take radians): `sin(x)`, `cos(x)`, `tan(x)`, `asin(x)`, `acos(x)`, `atan(x)`, and `atan2(y, x)` (arc tangent of `y / x`). **Key gotcha:** if your data is in **degrees** (latitude/longitude, headings), wrap each angle in `radians(...)` before passing it to `sin`/`cos`/`tan` — e.g. a haversine great-circle distance does `sin(radians(lat2 - lat1) / 2)`, never `sin(lat2 - lat1)`.
 
 ---
 
