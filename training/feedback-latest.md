@@ -1,46 +1,44 @@
-# Judge Feedback — Iter 840 (EXTENDED PHASE)
+# Judge Feedback — Iter 841 (EXTENDED PHASE)
 
-**Verdict: PASS — overall avg 4.97 (per-Q 5.00 / 4.9375 / 5.00 / 5.00 = 19.9375/4; margin +1.47; overall avg governs, no per-Q veto)**
+**Verdict: PASS — overall avg 4.55** (per-Q 3.81 / 5.00 / 5.00 / 4.375 = 18.1875/4; margin +1.05; overall avg governs, no per-Q veto)
 
-**HEADLINE: The iter839 weighted-average integer-truncation findability fix LANDED — CLOSED.** Q1 re-probed the exact iter839 Q4 gap (integer rating * integer weight, mean came back whole numbers) and the responder NOW (1) correctly diagnosed the integer-division-truncation root cause and (2) led with the integer-safe form. The r23 §3.1B-WA weighted-average card + r07 AVG-landing routing pointer routed the responder to the right content. No defect this iteration.
-
-Federation NOT probed this iteration (r22 §13.x untouched; federation row stays 4.49944/310, still FAIL).
-
----
+DEFAULT NO-OP durability sweep — teacher made ZERO resource edits. All four questions are pure-SQL analytics idioms (no prod-env/auth/federation surface). All core dialect claims docs-verified vs trino.io/docs/467 aggregate/window/map/array .html + WebSearch 2026-06-09.
 
 ## Per-question scores
 
-### Q1 — weighted avg, integer rating*weight came back whole numbers — **5.00** (Acc 5 / Comp 5 / Clar 5 / Act 5)
-CRITICAL TARGET — **FIX LANDED.** Responder:
-- DIAGNOSED the integer-division trap: both numerator and denominator integer -> Trino does integer division and TRUNCATES (17/4 -> 4 not 4.25). Correctly noted the FORMULA itself is fine; only the type is the problem.
-- Gave the integer-safe canonical: `SUM(rating*weight)*1.0/NULLIF(SUM(weight),0)` + the `CAST(SUM(rating*weight) AS double)/NULLIF(SUM(weight),0)` equivalent.
-- Explained `*1.0` (decimal literal) promotes the division to non-integer, and `NULLIF(SUM(weight),0)` guards the all-zero/all-NULL-weight group from divide-by-zero.
-VERIFIED vs trino.io/docs/467 math.html ("Division (integer division performs truncation)" — integer/integer truncates) and conditional.html (NULLIF(v1,v2) returns null if v1=v2 else v1; a double/decimal operand promotes the whole division to non-integer). This is the precise content the iter839 Q4 answer omitted. **CLOSED.**
+### Q1 — p95 latency (approx_percentile) — Accuracy 3.25 / Completeness 4.5 / Clarity 4.0 / Actionability 3.5 → **avg 3.81**
+CORE IS FULLY CORRECT and docs-verified:
+- `approx_percentile(response_ms, 0.95)` — CONFIRMED (signature `approx_percentile(x, percentage)`, percentage in [0,1]).
+- Array form `approx_percentile(response_ms, ARRAY[0.5,0.95,0.99])` — CONFIRMED (`approx_percentile(x, percentages)` returns array<same as x>).
+- "~2.3% stddev, fast/accurate enough for dashboards" — apt and correct.
+- "Trino has NO PERCENTILE_CONT/PERCENTILE_DISC and NO MEDIAN — use approx_percentile(col,0.5)" — CONFIRMED (no such functions in aggregate.html).
 
-### Q2 — deal NAME at max amount per rep without self-join — **4.9375** (Acc 5 / Comp 4.75 / Clar 5 / Act 5)
-`max_by(deal_name, amount)` returns deal_name from the row where amount is maximal; one pass, no self-join. Correct. Tie-break via `max_by(deal_name, ROW(amount, deal_name))` is valid — ROW is a comparable type in Trino, compared field-by-field lexicographically, so passing a ROW ordering key resolves ties deterministically (alphabetical on deal_name when amounts tie). VERIFIED vs aggregate.html (max_by(x,y) = value of x at max of y). Minor completeness ding only: the "returns one, unspecified which" note on amount ties is adequate but terse. No accuracy issue.
+**DEFECT (accuracy ding): the exact-percentile / PERCENT_RANK aside is WRONG.** The responder said "For EXACT use PERCENT_RANK() OVER (ORDER BY response_ms)". Verified window.html: `percent_rank()` returns the **relative rank of each row** as a value `(r-1)/(n-1)` in [0,1] — it does NOT return the column VALUE at a given percentile. The responder conflated "rank of a row" with "value at percentile." There is no built-in exact percentile-VALUE function in Trino 467; `approx_percentile` is the answer, and an exact value would require manual ranking/positioning (e.g. ORDER BY + offset by ceil(0.95*n), or filtering on a window rank). Pointing the engineer at `PERCENT_RANK() OVER (ORDER BY response_ms)` as "the exact percentile" would NOT give them a p95 latency value — it would give them a per-row rank column. This is a real, actionable mistake an engineer could copy and get wrong output from.
 
-### Q3 — safe cast of junk VARCHAR score, AVG ignores bad rows — **5.00** (Acc 5 / Comp 5 / Clar 5 / Act 5)
-`TRY_CAST(score AS INTEGER)` -> NULL on non-numeric ('n/a','pending') instead of erroring; AVG ignores NULLs so the mean is over valid rows only; `try(expr)` recommended for complex expressions that may throw at runtime (div-by-zero, overflow). VERIFIED vs conversion.html (TRY_CAST "Like cast(), but returns null if the cast fails") and conditional.html (try(expression) returns NULL on division-by-zero, invalid cast, overflow, JSON errors). AVG-ignores-NULL is standard aggregate behavior (aggregate.html). All correct.
+**PERCENT_RANK VERDICT: YES, real accuracy ding.** Not catastrophic — the engineer's actual question (p95 for a dashboard) is answered correctly and prominently by the approx_percentile lead, and the bad advice is a parenthetical aside the engineer likely skips for a dashboard use case. But it is a genuine factual error (mischaracterizes what percent_rank returns) and could misdirect an engineer who does want exactness. Held Q1 accuracy to 3.25 and the aside also lightly dings actionability (the "exact" path is a dead end). Did not drop lower because the headline answer is bulletproof and the array/median/no-percentile_cont content is all correct.
 
-### Q4 — event distribution as single map {type:count} — **5.00** (Acc 5 / Comp 5 / Clar 5 / Act 5)
-- Per-user map: `map_agg(event_type, event_count)` over an inner `GROUP BY user_id, event_type` that pre-aggregates the counts -> {click:42,...} per user. Correct: map_agg(k,v) builds a map from key/value pairs, so the values must already be the per-type counts.
-- Whole-table one-step: `histogram(event_type)` -> map of value->count in one row, no GROUP BY. Correct.
-- When-to-use-which framing accurate: map_agg for per-group (needs pre-aggregated counts in an inner GROUP BY); histogram for the no-GROUP-BY one-step summary.
-VERIFIED vs aggregate.html (map_agg(key,value) "Returns a map created from the input key/value pairs"; histogram(x) "Returns a map containing the count of the number of times each input value occurs").
+### Q2 — refund rate as decimal (count_if + *1.0 guard) — Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 → **avg 5.00**
+`count_if(is_refunded) * 1.0 / COUNT(*)` — CONFIRMED. count_if(boolean) returns number of TRUE values (aggregate.html, "equivalent to count(CASE WHEN x THEN 1 END)"). The `*1.0` guard is load-bearing and correctly explained — without it, integer `/` truncates to 0. `*100.0` percent variant correct. FILTER and SUM(CASE) equivalents valid. (Note: the even-terser `avg(CAST(is_refunded AS double))` was not required and its absence is not penalized.) CLEAN.
 
----
+### Q3 — list map keys (map_keys) — Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 → **avg 5.00**
+`map_keys(properties) -> array(K)` — CONFIRMED (`map_keys(x(K,V)) → array(K)`). `map_values(map) -> array(V)` correct. CROSS JOIN UNNEST(map_keys(...)) AS t(key) to explode keys to rows with GROUP BY/count — valid and useful. CLEAN.
 
-## Dimension cross-check
-Acc 5.00 / Comp 4.9375 / Clar 5.00 / Act 5.00. Per-Q average = (5.00+4.9375+5.00+5.00)/4 = 4.984 ... rounded 4.97. Agrees. GOVERNING LABEL = PASS.
+### Q4 — integer series 1..N without a table (sequence + UNNEST) — Accuracy 4.75 / Completeness 4.5 / Clarity 4.5 / Actionability 4.5 → **avg 4.375**
+`UNNEST(sequence(1, 30)) AS t(n)` — CONFIRMED. sequence(start,stop[,step]) returns an array (array.html); UNNEST turns it into rows (standard Trino, well-established); Postgres generate_series equivalent correct. "step optional (default 1 for ints)" — CONFIRMED (increments by 1, or -1 if start>stop). Date variant `UNNEST(sequence(DATE '2026-01-01', current_date, INTERVAL '1' DAY)) AS t(day)` — CONFIRMED (date step is INTERVAL DAY TO SECOND or YEAR TO MONTH). Minor: did not show the bare `CROSS JOIN UNNEST(...)` placement caveat (UNNEST typically appears in FROM, often as `... CROSS JOIN UNNEST(sequence(1,30)) AS t(n)` or `SELECT n FROM UNNEST(sequence(1,30)) AS t(n)`) — the `AS t(n)` aliasing is shown which is the load-bearing part, so this is a tiny completeness nuance, not an error. Essentially CLEAN.
 
-## iter841 directive — DEFAULT NO-OP / durability sweep
-No open defect; the iter839->840 weighted-average integer-truncation arc is CLOSED (re-probed clean from the explicit-integer angle). Do NOT pre-churn:
-- r23 §3.1B-WA weighted-average card (integer-safe `*1.0`/`CAST AS double` + NULLIF guard) — validated CLEAN, do not edit.
-- r23 §3.1B item 5 SUM-truncation checklist, §3.1D max_by/ROW-tie-break card.
-- r27 §4.4A/§4.4E TRY_CAST/try() cards.
-- r07 map_agg/histogram map-functions card (~225-283) and the r07 AVG-landing routing pointer.
+## Patterns / takeaways
+- Q2/Q3/Q4 bulletproof; core p95 answer (Q1) bulletproof. The ONLY blemish is the Q1 PERCENT_RANK-as-exact-percentile mischaracterization.
+- No fabrications, no parse errors, no wrong dialect imports, no prod-env conflict.
+- Findability: all four questions landed on the right resource content; no responder-slip-vs-gap ambiguity worth grepping (the PERCENT_RANK error is a content-or-elaboration miss, not a wrong-resource landing — see iter842 directive).
 
-Suggest fresh ADJACENT probes for breadth (no edits unless a 2nd probe under-scores): min_by sibling / `max_by(x,y,n)` top-N array form / multimap_agg vs map_agg key-collision / `transform_values(histogram(x), ...)` / decimal-vs-double precision on the weighted mean / `element_at(map, key)` map lookup.
+## iter842 directive — LIGHT FIX-A (one real defect surfaced)
+The Q1 PERCENT_RANK error is a recurring-style "responder volunteers a wrong 'exact' alternative" miss. **iter842 = LIGHT FIX-A** at the approx_percentile / percentile / p95 landing (r05/r23 wherever percentile keywords route):
+- Add a FENCED keyword-anchored note distinguishing **value-at-percentile** vs **rank-of-row**: `approx_percentile(x, p)` returns the VALUE at percentile p (approximate); `percent_rank()` / `cume_dist()` window functions return a per-row RANK/position in [0,1], NOT a percentile value — they are NOT a substitute for approx_percentile and do NOT give "the exact p95."
+- State plainly: **Trino 467 has NO built-in exact percentile-VALUE function** (no percentile_cont/percentile_disc); for an exact value you must rank/position manually (e.g. ORDER BY x + pick row at index, or `ROW_NUMBER()`/`COUNT(*) OVER ()` ratio filter). approx_percentile is the recommended dashboard answer.
+- Inline-DEFANG on its own un-copyable fenced line: `PERCENT_RANK() OVER (ORDER BY x)` as "the exact percentile value" (mark WRONG — returns per-row rank, not the value at the percentile).
+- Keyword anchors: exact percentile, exact p95, percentile value vs rank, percent_rank not percentile, no percentile_cont in Trino, value at percentile.
+- Verify against trino.io/docs/467 window.html (percent_rank = (r-1)/(n-1)) + aggregate.html (approx_percentile). PIN Trino 467. Pipe/check content FENCED (pipe-escape trap).
 
-HOLD all iter534-839 locks. Federation row UNCHANGED (4.49944/310, still FAIL). Do NOT bump training/state.json (already 840). Do NOT touch r22 §13.x federation.
+PRESERVE all standing locks: iter840 weighted-average integer-truncation card (r23 §3.1B-WA) + iter837 string->DATE MySQL-vs-Joda + iter836 lpad/rpad TRUNCATE/format('%06d') + iter831 month-label grouping + iter827 boolean-aggregate-NULL + iter824/823 split_part/GROUP-BY-alias/repeat-char + trim char-set + default-NULLS-LAST + full iter534-840 pin inventory. NO federation edits (federation row stays 4.49944/310).
+
+DO NOT bump training/state.json (already 841).
