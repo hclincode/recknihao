@@ -2799,19 +2799,26 @@ WHERE regexp_like(description, 'refund|chargeback|dispute')   -- plain | = OR/al
 
 #### Extract the FIRST number / pull digits out of a messy string (`regexp_extract`)
 
-Use this when you need to **extract the first number**, **pull digits out of a string**, **parse a leading integer**, **get the number from a messy string**, grab the **first run of digits**, extract a **substring matching a pattern**, pull out a **capture group**, or get **all matches** out of a string. The tool is **`regexp_extract`** (first match / capture group) and **`regexp_extract_all`** (array of all matches) — wrap in `CAST(... AS INTEGER)` or `CAST(... AS BIGINT)` to get a number. **Trino DOES have `regexp_extract` / `regexp_extract_all` — do NOT claim there is no digit-extraction function.**
+Use this when you need to **extract the first number**, **pull digits out of a string**, **parse a leading integer**, **get the number from a messy string**, grab the **first run of digits**, extract a **substring matching a pattern**, pull out a **capture group** / **the part in parentheses**, extract a **value after a label** / **token after a prefix** / **text between two markers** / **a field value** (the value after `ref:` / `action=` / `status=` / `Chrome/` / `utm_source=`), or get **all matches** out of a string. The tool is **`regexp_extract`** (first match / capture group) and **`regexp_extract_all`** (array of all matches) — wrap in `CAST(... AS INTEGER)` or `CAST(... AS BIGINT)` to get a number. **Trino DOES have `regexp_extract` / `regexp_extract_all` — do NOT claim there is no digit-extraction function.**
 
 ```sql
+-- ====================================================================
+-- RULE: to extract a CAPTURE GROUP (the value INSIDE the parentheses), you
+-- MUST pass the group index: regexp_extract(s, pattern, 1). The 2-arg form
+-- regexp_extract(s, pattern) returns the WHOLE match — a pattern WITH
+-- parentheses STILL returns the whole match unless you add , 1 .
+-- ====================================================================
+
 -- Extract the FIRST run of digits from a messy string, AS A NUMBER:
 CAST(regexp_extract(product_label, '[0-9]+') AS INTEGER)   -- 'Size 12 (Large)' -> 12 ; 'Weight 340g' -> 340
 
 -- First match of a capture GROUP (the digits AFTER a label):
 regexp_extract(s, 'id=([0-9]+)', 1)                        -- 'id=987;x' -> '987'  (group 1)
 
--- Value after a label / text between two markers (e.g. after 'action=' up to the next space): PASS group index 1
-regexp_extract(log_message, 'action=(\S+)', 1)            -- 'user=42 action=login status=ok' -> 'login'
-
-❌ regexp_extract(log_message, 'action=(\S+)')  -- 2-arg returns the WHOLE match 'action=login', NOT the group; pass , 1 for the capture group -- DO NOT COPY
+-- ✅ COPY THIS — value after a label / token after a prefix / text between two markers
+-- (value after 'action=' up to the next space). ALWAYS the 3-arg form with the group index:
+regexp_extract(log_message, 'action=(\S+)', 1)   -- 'user=42 action=login status=ok' -> 'login'   (3-arg: capture group 1)
+❌ regexp_extract(log_message, 'action=(\S+)')   -- returns 'action=login' (the WHOLE match), NOT 'login' — you forgot the , 1 group index — DO NOT COPY
 
 -- ALL digit-runs as an ARRAY (e.g. '12 then 340' -> ['12','340']):
 regexp_extract_all(s, '[0-9]+')
