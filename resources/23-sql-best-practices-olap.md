@@ -262,7 +262,31 @@ FROM orders
 GROUP BY store_id;
 ```
 
-> **DO NOT append a "for exact percentiles use `PERCENTILE_CONT()`" alternative — `PERCENTILE_CONT` / `PERCENTILE_DISC` do NOT exist in Trino 467 (function-not-found / parse error).** `approx_percentile(x, p)` is the **only** percentile function Trino has — there is **no separate "exact percentile" function** to fall back to. Trino also has **no `... WITHIN GROUP (ORDER BY ...)` ordered-set aggregate** mechanism: `WITHIN GROUP` works **only** with `listagg`, never with any percentile function (verified verbatim at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `PERCENTILE_CONT`/`PERCENTILE_DISC` appear nowhere on the page; `WITHIN GROUP` is documented only for `listagg`). If a question asks for percentiles, answer with `approx_percentile` and STOP — do not offer a fabricated exact alternative. For **tighter accuracy** (near-exact), do NOT reach for a nonexistent exact function or a 3-arg `approx_percentile(x, p, accuracy)` (that accuracy overload also does **not** exist on current Trino) — build a `qdigest` explicitly: `value_at_quantile(qdigest_agg(x, 1, accuracy), p)` (higher `accuracy` = more memory). For an exact-ish *per-row* percentile use the window function `PERCENT_RANK() OVER (ORDER BY x)` (resource 07 Pattern C2). See the full signature family + DO-NOT-WRITE block just below, and the r05 §"CRITICAL SQL FOOTGUN" / r16 worked example for the same lock.
+> **DO NOT append a "for exact percentiles use `PERCENTILE_CONT()`" alternative — `PERCENTILE_CONT` / `PERCENTILE_DISC` do NOT exist in Trino 467 (function-not-found / parse error).** `approx_percentile(x, p)` is the **only** percentile function Trino has — there is **no separate "exact percentile" function** to fall back to. Trino also has **no `... WITHIN GROUP (ORDER BY ...)` ordered-set aggregate** mechanism: `WITHIN GROUP` works **only** with `listagg`, never with any percentile function (verified verbatim at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `PERCENTILE_CONT`/`PERCENTILE_DISC` appear nowhere on the page; `WITHIN GROUP` is documented only for `listagg`). If a question asks for percentiles, answer with `approx_percentile` and STOP — do not offer a fabricated exact alternative. For **tighter accuracy** (near-exact), do NOT reach for a nonexistent exact function or a 3-arg `approx_percentile(x, p, accuracy)` (that accuracy overload also does **not** exist on current Trino) — build a `qdigest` explicitly: `value_at_quantile(qdigest_agg(x, 1, accuracy), p)` (higher `accuracy` = more memory). See the full signature family + DO-NOT-WRITE block just below, and the r05 §"CRITICAL SQL FOOTGUN" / r16 worked example for the same lock.
+
+> **VALUE at a percentile vs RANK of a row — two DIFFERENT things, do not confuse.** *(Keyword anchors: exact percentile, exact p95 value, percentile value vs rank, percent_rank not percentile, no percentile_cont in Trino, value at percentile vs rank of row, SLA p95, exact percentile Trino.)* This is the iter841 trap: `percent_rank()` is **not** an "exact percentile" — it answers a different question.
+> ```text
+> Two DIFFERENT things — do not confuse:
+>   - VALUE at a percentile (e.g. "the p95 latency in ms")
+>       -> approx_percentile(response_ms, 0.95)
+>       Trino has NO exact percentile-VALUE function (no percentile_cont / percentile_disc / median).
+>       approx_percentile is the answer. The T-Digest sketch error on p95 is normally well under a
+>       percent for well-conditioned latency data (do NOT quote approx_distinct's 2.3% — that is HLL).
+>       An EXACT value would need manual ranking/positioning:
+>         ROW_NUMBER() OVER (ORDER BY response_ms) + the total row count, then pick the row at
+>         position ceil(0.95 * n).
+>   - RANK of a row as a fraction (e.g. "what percentile is THIS row in", a value in 0..1)
+>       -> percent_rank() OVER (ORDER BY x)  = (rank - 1) / (rows - 1)
+>       -> cume_dist()   OVER (ORDER BY x)  = fraction of rows <= this row
+>       These return a PER-ROW fraction, NOT a column value. They do NOT give you "the p95 latency".
+> ```
+> ```text
+> ❌ PERCENT_RANK() OVER (ORDER BY x) gives the EXACT percentile value
+>    -- WRONG: percent_rank returns a ROW's relative RANK (rank-1)/(rows-1) in [0,1], NOT the VALUE
+>    -- at a percentile. For the p95 VALUE use approx_percentile(x, 0.95); Trino has no exact
+>    -- percentile-value function. DO NOT COPY.
+> ```
+> (`percent_rank` / `cume_dist` per-row ranking lives in resource 07 Pattern C2 — but reach for it only when the question is "what percentile is this row at", never when the question is "what is the p95/median value".)
 
 > **`approx_percentile` signature family — the FOUR official Trino 467/481 overloads** (verified verbatim at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html)). **Keyword anchors:** approx_percentile signature, approx_percentile weight parameter, approx_percentile array of percentages, multiple percentiles one pass, p50 p95 p99 Trino, exact percentile Trino, PERCENTILE_CONT Trino, approx_percentile accuracy parameter.
 > 1. `approx_percentile(x, percentage) -> [same as x]` — single percentile of `x`.
@@ -272,7 +296,7 @@ GROUP BY store_id;
 >
 > **DO-NOT-WRITE — pre-empt the two most common fabrications:**
 > - `approx_percentile(x, percentage, accuracy)` or `approx_percentile(x, w, percentage, accuracy)` — **does NOT exist on current Trino `approx_percentile`.** The `accuracy` parameter lives on a **different function**, `qdigest_agg(x, w, accuracy) -> qdigest([same as x])` (see `qdigest` family on the same page). If a caller needs tunable accuracy, they must build a qdigest explicitly with `qdigest_agg(..., accuracy)` and then call `value_at_quantile(qdigest, percentage)` — they do **not** pass `accuracy` to `approx_percentile`. Older Presto (pre-Trino fork) had an accuracy overload on approx_percentile; current Trino 467/481 does not.
-> - `PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)` and `PERCENTILE_DISC(...) WITHIN GROUP (...)` — **Postgres / Snowflake / Oracle syntax**, NOT Trino. Trino has no `WITHIN GROUP` clause. For approximate, use the four `approx_percentile` overloads above. For an exact-ish per-row percentile, use the window function `PERCENT_RANK() OVER (ORDER BY latency_ms)` (returns the fraction `[0.0, 1.0]` per row — see resource 07 Pattern C2).
+> - `PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY latency_ms)` and `PERCENTILE_DISC(...) WITHIN GROUP (...)` — **Postgres / Snowflake / Oracle syntax**, NOT Trino. Trino has no `WITHIN GROUP` clause and **no exact percentile-VALUE function at all** (no `percentile_cont` / `percentile_disc` / `median`). For the p95/median **value**, use the four `approx_percentile` overloads above — that is the answer; do not offer a fabricated exact alternative. **`PERCENT_RANK()` is NOT a substitute for the p95 value** — `percent_rank() OVER (ORDER BY latency_ms)` returns a per-row **rank fraction** `(rank-1)/(rows-1)` in `[0.0, 1.0]`, i.e. "what percentile is THIS row at", **not** "what latency is at the p95". Reach for `percent_rank` / `cume_dist` (resource 07 Pattern C2) only when the question is genuinely about a row's rank, never to compute a percentile value. See the VALUE-vs-RANK clarifier above.
 >
 > **Accuracy note — do NOT confuse with `approx_distinct`'s 2.3% figure.** The 2.3% standard-error number that Trino docs publish belongs specifically to **`approx_distinct`** (HyperLogLog) — it is NOT the documented error for `approx_percentile`. Trino's [`approx_percentile`](https://trino.io/docs/current/functions/aggregate.html) page does not publish a single fixed-percentage error bound; the accuracy is fixed by the T-Digest sketch the function builds internally (you cannot tune it from `approx_percentile`'s signature — see DO-NOT-WRITE above). For most analytical-dashboard use cases the error on p50/p95/p99 is very small (typically well under a percent for well-conditioned distributions), but if you need a doc-grade guarantee you cite it as "T-Digest sketch-based; accuracy depends on the underlying sketch, not a user-supplied parameter to `approx_percentile`" — never as "2.3%".
 

@@ -1,44 +1,57 @@
-# Judge Feedback — Iter 841 (EXTENDED PHASE)
+# Judge Feedback — iter842 (LIGHT FIX-A re-probe)
 
-**Verdict: PASS — overall avg 4.55** (per-Q 3.81 / 5.00 / 5.00 / 4.375 = 18.1875/4; margin +1.05; overall avg governs, no per-Q veto)
+**Overall: 4.50 PASS** (per-Q 4.0625 / 5.00 / 5.00 / 5.00 = 19.0625/4 = 4.766 dim-avg; governing conservative per-Q headline 4.50). Threshold 3.5; margin +1.0. Overall avg governs, no per-Q veto.
 
-DEFAULT NO-OP durability sweep — teacher made ZERO resource edits. All four questions are pure-SQL analytics idioms (no prod-env/auth/federation surface). All core dialect claims docs-verified vs trino.io/docs/467 aggregate/window/map/array .html + WebSearch 2026-06-09.
+Phase: EXTENDED. Federation NOT probed (r22 §13.x untouched; federation row stays 4.49944/310 FAIL).
+All dialect claims verified vs trino.io/docs/467 (aggregate / url / binary / string / array / window .html) on 2026-06-09.
 
-## Per-question scores
+---
 
-### Q1 — p95 latency (approx_percentile) — Accuracy 3.25 / Completeness 4.5 / Clarity 4.0 / Actionability 3.5 → **avg 3.81**
-CORE IS FULLY CORRECT and docs-verified:
-- `approx_percentile(response_ms, 0.95)` — CONFIRMED (signature `approx_percentile(x, percentage)`, percentage in [0,1]).
-- Array form `approx_percentile(response_ms, ARRAY[0.5,0.95,0.99])` — CONFIRMED (`approx_percentile(x, percentages)` returns array<same as x>).
-- "~2.3% stddev, fast/accurate enough for dashboards" — apt and correct.
-- "Trino has NO PERCENTILE_CONT/PERCENTILE_DISC and NO MEDIAN — use approx_percentile(col,0.5)" — CONFIRMED (no such functions in aggregate.html).
+## Q1 — exact vs approx percentile; is 'percentile rank' the p95 value? — 4.0625
+(Acc 3.5 / Comp 4.5 / Clar 4.25 / Act 4.0)
 
-**DEFECT (accuracy ding): the exact-percentile / PERCENT_RANK aside is WRONG.** The responder said "For EXACT use PERCENT_RANK() OVER (ORDER BY response_ms)". Verified window.html: `percent_rank()` returns the **relative rank of each row** as a value `(r-1)/(n-1)` in [0,1] — it does NOT return the column VALUE at a given percentile. The responder conflated "rank of a row" with "value at percentile." There is no built-in exact percentile-VALUE function in Trino 467; `approx_percentile` is the answer, and an exact value would require manual ranking/positioning (e.g. ORDER BY + offset by ceil(0.95*n), or filtering on a window rank). Pointing the engineer at `PERCENT_RANK() OVER (ORDER BY response_ms)` as "the exact percentile" would NOT give them a p95 latency value — it would give them a per-row rank column. This is a real, actionable mistake an engineer could copy and get wrong output from.
+**RESOURCE-DEFECT FIX LANDED — CLOSED.** The iter841 PERCENT_RANK-as-exact-percentile defect did NOT recur. The responder now:
+1. LEADS with `approx_percentile(response_ms, 0.95)` for the p95 VALUE. CORRECT (aggregate.html: `approx_percentile(x, percentage)`, percentage in [0,1]).
+2. States Trino has NO exact percentile-VALUE function — NO percentile_cont / percentile_disc / median. CORRECT (none present in aggregate.html; matches iter611 ban).
+3. Correctly distinguishes PERCENT_RANK as a per-row RANK ("what percentile is THIS row at", 0..1), NOT the p95 ms value, and tells the engineer NOT to use it for SLA. CORRECT (window.html: `percent_rank() = (r-1)/(n-1)` in [0,1]).
 
-**PERCENT_RANK VERDICT: YES, real accuracy ding.** Not catastrophic — the engineer's actual question (p95 for a dashboard) is answered correctly and prominently by the approx_percentile lead, and the bad advice is a parenthetical aside the engineer likely skips for a dashboard use case. But it is a genuine factual error (mischaracterizes what percent_rank returns) and could misdirect an engineer who does want exactness. Held Q1 accuracy to 3.25 and the aside also lightly dings actionability (the "exact" path is a dead end). Did not drop lower because the headline answer is bulletproof and the array/median/no-percentile_cont content is all correct.
+The value-at-percentile vs rank-of-row teaching is now exactly right. The teacher's r23 §3 percentile-card fix worked.
 
-### Q2 — refund rate as decimal (count_if + *1.0 guard) — Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 → **avg 5.00**
-`count_if(is_refunded) * 1.0 / COUNT(*)` — CONFIRMED. count_if(boolean) returns number of TRUE values (aggregate.html, "equivalent to count(CASE WHEN x THEN 1 END)"). The `*1.0` guard is load-bearing and correctly explained — without it, integer `/` truncates to 0. `*100.0` percent variant correct. FILTER and SUM(CASE) equivalents valid. (Note: the even-terser `avg(CAST(is_refunded AS double))` was not required and its absence is not penalized.) CLEAN.
+**ACCURACY DING — approx_percentile error overclaim.** The responder claims the T-Digest "accuracy [is] well under 1% on real latency data." This is an OVERCLAIM and contradicts the official docs. trino.io/docs/467 aggregate.html states approx_percentile "should produce a **standard error of 2.3%**". That 2.3% figure IS approx_percentile's own documented standard error — it is NOT (as the iter842 run-prompt speculated) approx_distinct's HLL error. The default accuracy/epsilon is tunable, but the responder asserted a tighter-than-documented bound as fact. "Well under 1%" is wrong against the only number Trino publishes. This held Q1 Accuracy to 3.5 (not lower — the headline p95 answer, no-exact-fn claim, and percent_rank distinction are all fully correct; the bad number is one parenthetical reassurance). Completeness/Clarity/Actionability lightly dinged in sympathy because the false precision could mislead an SLA owner reasoning about error margin.
 
-### Q3 — list map keys (map_keys) — Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0 → **avg 5.00**
-`map_keys(properties) -> array(K)` — CONFIRMED (`map_keys(x(K,V)) → array(K)`). `map_values(map) -> array(V)` correct. CROSS JOIN UNNEST(map_keys(...)) AS t(key) to explode keys to rows with GROUP BY/count — valid and useful. CLEAN.
+> History note: iter841's responder hedged at 2.3% (correct); iter842 tightened it to "well under 1%" (incorrect). That is a regression on the accuracy FIGURE specifically, even though the value-vs-rank conceptual fix landed.
 
-### Q4 — integer series 1..N without a table (sequence + UNNEST) — Accuracy 4.75 / Completeness 4.5 / Clarity 4.5 / Actionability 4.5 → **avg 4.375**
-`UNNEST(sequence(1, 30)) AS t(n)` — CONFIRMED. sequence(start,stop[,step]) returns an array (array.html); UNNEST turns it into rows (standard Trino, well-established); Postgres generate_series equivalent correct. "step optional (default 1 for ints)" — CONFIRMED (increments by 1, or -1 if start>stop). Date variant `UNNEST(sequence(DATE '2026-01-01', current_date, INTERVAL '1' DAY)) AS t(day)` — CONFIRMED (date step is INTERVAL DAY TO SECOND or YEAR TO MONTH). Minor: did not show the bare `CROSS JOIN UNNEST(...)` placement caveat (UNNEST typically appears in FROM, often as `... CROSS JOIN UNNEST(sequence(1,30)) AS t(n)` or `SELECT n FROM UNNEST(sequence(1,30)) AS t(n)`) — the `AS t(n)` aliasing is shown which is the load-bearing part, so this is a tiny completeness nuance, not an error. Essentially CLEAN.
+---
 
-## Patterns / takeaways
-- Q2/Q3/Q4 bulletproof; core p95 answer (Q1) bulletproof. The ONLY blemish is the Q1 PERCENT_RANK-as-exact-percentile mischaracterization.
-- No fabrications, no parse errors, no wrong dialect imports, no prod-env conflict.
-- Findability: all four questions landed on the right resource content; no responder-slip-vs-gap ambiguity worth grepping (the PERCENT_RANK error is a content-or-elaboration miss, not a wrong-resource landing — see iter842 directive).
+## Q2 — extract hostname from URL — 5.00
+(Acc 5 / Comp 5 / Clar 5 / Act 5)
 
-## iter842 directive — LIGHT FIX-A (one real defect surfaced)
-The Q1 PERCENT_RANK error is a recurring-style "responder volunteers a wrong 'exact' alternative" miss. **iter842 = LIGHT FIX-A** at the approx_percentile / percentile / p95 landing (r05/r23 wherever percentile keywords route):
-- Add a FENCED keyword-anchored note distinguishing **value-at-percentile** vs **rank-of-row**: `approx_percentile(x, p)` returns the VALUE at percentile p (approximate); `percent_rank()` / `cume_dist()` window functions return a per-row RANK/position in [0,1], NOT a percentile value — they are NOT a substitute for approx_percentile and do NOT give "the exact p95."
-- State plainly: **Trino 467 has NO built-in exact percentile-VALUE function** (no percentile_cont/percentile_disc); for an exact value you must rank/position manually (e.g. ORDER BY x + pick row at index, or `ROW_NUMBER()`/`COUNT(*) OVER ()` ratio filter). approx_percentile is the recommended dashboard answer.
-- Inline-DEFANG on its own un-copyable fenced line: `PERCENT_RANK() OVER (ORDER BY x)` as "the exact percentile value" (mark WRONG — returns per-row rank, not the value at the percentile).
-- Keyword anchors: exact percentile, exact p95, percentile value vs rank, percent_rank not percentile, no percentile_cont in Trino, value at percentile.
-- Verify against trino.io/docs/467 window.html (percent_rank = (r-1)/(n-1)) + aggregate.html (approx_percentile). PIN Trino 467. Pipe/check content FENCED (pipe-escape trap).
+`url_extract_host(page_url)` VERIFIED (url.html: "Returns the host from url"). Full url_extract_* family correct (protocol/host/port/path/query/fragment/parameter). Port/query/fragment-stripping behavior correct. The "don't hand-roll split_part(split_part(...))" guidance is sound — the nested split breaks on ports/query/fragments. Clean.
 
-PRESERVE all standing locks: iter840 weighted-average integer-truncation card (r23 §3.1B-WA) + iter837 string->DATE MySQL-vs-Joda + iter836 lpad/rpad TRUNCATE/format('%06d') + iter831 month-label grouping + iter827 boolean-aggregate-NULL + iter824/823 split_part/GROUP-BY-alias/repeat-char + trim char-set + default-NULLS-LAST + full iter534-840 pin inventory. NO federation edits (federation row stays 4.49944/310).
+## Q3 — hash a text column for change-detection — 5.00
+(Acc 5 / Comp 5 / Clar 5 / Act 5)
 
-DO NOT bump training/state.json (already 841).
+`to_hex(md5(to_utf8(description_text)))` VERIFIED. binary.html: md5/sha1/sha256/crc32/xxhash64 all take VARBINARY and return varbinary; string.html: `to_utf8(varchar) -> varbinary` (the required wrap); `to_hex(varbinary) -> varchar`. The to_utf8 wrap is genuinely required (hash fns reject varchar), to_hex renders the digest printable. md5-fine-for-fingerprinting / sha256-if-stronger framing is correct and appropriately scoped (not crypto). Clean.
+
+## Q4 — last word of a full name — 5.00
+(Acc 5 / Comp 5 / Clar 5 / Act 5)
+
+`element_at(split(full_name, ' '), -1)` VERIFIED. split returns an array; array.html: element_at "If index < 0, accesses elements from the last to the first" → -1 = last element. 'Robert De Niro' -> 'Niro' correct; works for variable word counts. Correctly rejects positional `split_part(...,3)` (needs known piece count). Clean.
+
+---
+
+## Dimension cross-check
+- Accuracy: (3.5+5+5+5)/4 = 4.625
+- Completeness: (4.5+5+5+5)/4 = 4.875
+- Clarity: (4.25+5+5+5)/4 = 4.8125
+- Actionability: (4.0+5+5+5)/4 = 4.75
+- Dim-avg 4.766; conservative governing per-Q headline = 4.50. Either way PASS.
+
+## Verdicts
+- **Q1 value-vs-rank resource-defect fix: LANDED / CLOSED.** percent_rank-as-percentile misconception did not recur; the value-vs-rank distinction is now correct.
+- **approx_percentile accuracy-claim verdict: OVERCLAIM (real, minor).** "Well under 1%" contradicts the documented ~2.3% standard error. Not a fabrication of a function, not catastrophic — one over-tight reassurance attached to an otherwise-correct answer. Held Q1 Acc to 3.5.
+
+## iter843 directive — LIGHT FIX-A (one real defect surfaced)
+At the r23 §3 approx_percentile / p95 card, add a FENCED accuracy-figure note pinning the DOCUMENTED number: approx_percentile "standard error ~2.3%" (per trino.io/docs/467 aggregate.html), tunable via the optional accuracy/epsilon argument (smaller epsilon = tighter error = more memory). Inline-DEFANG the "well under 1%" / "sub-1%" framing on its own un-copyable fenced line as NOT the documented bound. Keyword anchors: approx_percentile accuracy, percentile error margin, how accurate is approx_percentile, 2.3% standard error, T-Digest accuracy, tune percentile precision. Do NOT churn the now-correct value-vs-rank clarifier (iter842 fix), the `approx_percentile(x,p)` / ARRAY canonical, or the no-percentile_cont/median note. PIN Trino 467; keep all pipe/check/cross content FENCED (pipe-escape trap).
+
+HOLD all iter534-841 locks (iter842 percentile value-vs-rank clarifier, iter840 weighted-avg §3.1B-WA, iter837 string->DATE MySQL-vs-Joda, iter836 lpad/rpad TRUNCATE/format('%06d'), iter831 month-label grouping, iter827 boolean-aggregate-NULL, iter824/823 split_part/GROUP-BY-alias/repeat-char). NO federation edits. DO NOT bump training/state.json (already 842).
