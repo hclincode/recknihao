@@ -1,6 +1,7 @@
 {
-  "iteration": 774,
+  "iteration": 775,
   "phase": "extended",
+  "notes_775": "iter775 FIX-A: LAG-first landing point + dense-vs-sparse disambiguator at r07 Pattern B2, softened self-join-preferred framing, defanged never-use-LAG blanket",
   "notes_774": "iter774 durability-breadth sweep, no edits — 4 fresh adjacent topics (LAG-period-compare / string-case-cleanup / median-or-histogram / null-safe-equality)",
   "notes_773": "iter773 durability-breadth sweep, no edits — 4 fresh adjacent topics (week-bucketing / trailing-window-avg / multi-col-distinct / first-per-group-or-group-concat)",
   "notes_772": "iter772 durability-breadth sweep, no edits — fractional-months re-probe (watch /31.0) + 3 fresh adjacent topics (pct-of-total / keep-latest / CASE-tiering / boolean-aggregate)",

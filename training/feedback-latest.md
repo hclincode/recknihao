@@ -1,110 +1,84 @@
-# Judge Feedback — iter774 (DEFAULT NO-OP / durability-breadth sweep)
+# Judge Feedback — iter775 (FIX-A verification: LAG-by-N dense-series re-probe)
 
-**Teacher made ZERO resource edits this iteration.** 4 fresh adjacent probes. All dialect claims verified against trino.io/docs/467 (window / regexp / string / comparison / math .html) on 2026-06-09. resources/ NOT treated as ground truth.
+**Overall: 4.94 — STRONG PASS** (threshold 3.5). All 4 answers docs-verified against trino.io/docs/467 on 2026-06-09. resources/ NOT treated as ground truth.
 
-## Overall verdict
-
-**Overall avg = 4.375 — PASS** (threshold 3.5; overall average governs, no single-Q veto).
-
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Per-Q avg |
-|---|---|---|---|---|---|---|
-| Q1 | LAG by N / value 12 rows back (explicit "WITHOUT self-join") | 3 | 2 | 4 | 2 | **2.75** |
-| Q2 | title-case / no-initcap | 5 | 5 | 5 | 5 | **5.00** |
-| Q3 | histogram / equal-width $50 buckets | 5 | 4 | 5 | 5 | **4.75** |
-| Q4 | null-safe equality (IS NOT DISTINCT FROM) | 5 | 5 | 5 | 5 | **5.00** |
-
-Overall = (2.75 + 5.00 + 4.75 + 5.00) / 4 = **4.375 PASS**.
-
-Q1 is the sole weak answer and the key issue of this sweep. Q2/Q3/Q4 are strong and clean.
+This was a FIX-A iteration. iter774 Q1 surfaced a resource emphasis/findability defect: the responder REFUSED `LAG` for a dense series and pushed the user-rejected self-join. iter775 added a LAG-FIRST ROUTER + dense-vs-sparse disambiguator at r07:2802-2839 and defanged the "never use LAG" blanket. **Q1 re-probes the fix on an explicitly dense series.**
 
 ---
 
-## Per-question detail
+## Q1 — LAG-by-N on an explicitly DENSE daily series (FIX-A RE-PROBE, CRITICAL)
 
-### Q1 — LAG-by-N / value 12 rows back — **2.75 (the defect)**
+**User ask:** daily_active_users, exactly one row per day no gaps, want each day's count next to the count 7 rows back (week-over-week), explicitly NOT a self-join.
 
-**The ask (verbatim intent):** monthly_revenue is "one row per month" (dense, gapless). User EXPLICITLY asked for "a cleaner way than a self-join — grab a value from the row that's 12 positions back in an ordered sequence, WITHOUT joining the table to itself." This is the textbook definition of `LAG(revenue_total, 12) OVER (ORDER BY month)`.
+**Answer:** `LAG(dau_count, 7) OVER (ORDER BY day_date) AS count_7_days_ago`. Explicitly: "exactly one row per day no gaps → LAG(metric, 7) counts exactly 7 rows backward = 7 calendar days; offset is ROWS not periods; no self-join needed." Cites r07 LAG-FIRST ROUTER (2802-2839). LED with LAG, did NOT refuse it, did NOT push self-join.
 
-**What the responder did:** REFUSED LAG. Said "Use a self-join on calendar arithmetic, NOT LAG — it's cleaner and more reliable," gave a `LEFT JOIN monthly_revenue prev ON ... prev.month = date_add('month', -12, cur.month)` self-join, and justified withholding LAG with the gaps-in-months caveat. Did **not** show the `LAG(revenue_total, 12) OVER (ORDER BY month)` form at all.
+**Verification (window.html):** `lag(x, offset)` = "Returns the value at offset rows before the current row in the window partition." Default offset 1; requires ORDER BY. On a dense gapless one-row-per-day table, `LAG(dau_count, 7) OVER (ORDER BY day_date)` = the value exactly 7 days back. The offset-is-ROWS-not-calendar-periods caveat is correctly stated, and the dense-series precondition that makes 7-rows == 7-days is correctly flagged.
 
-**Docs verification (trino.io/docs/467/functions/window.html):** `lag(x[, offset[, default_value]]) -> "Returns the value at offset rows before the current row in the window partition."` Default offset 1; out-of-bounds returns default_value or NULL; ORDER BY required. So `LAG(revenue_total, 12) OVER (ORDER BY month)` returns the value exactly 12 rows back — **the exact clean, non-self-join answer the user asked for.**
+**THE FIX WORKED.** The iter774 defect (refuse LAG / force self-join) did NOT recur. Responder routed straight to the LAG-FIRST canonical, led with LAG, gave the literal docs answer the user asked for, and correctly stated the rows-vs-periods precondition.
 
-**Verdict:**
-- The self-join query the responder produced is **valid Trino and returns correct numbers**, and the gaps caveat is **factually true** (LAG counts rows, not calendar months — confirmed). So Accuracy is not zero.
-- BUT the blanket "NOT LAG — it's unreliable" is **OVERSTATED to the point of being wrong for this question**. The user stated the precondition that makes LAG safe and canonical: **one row per month = dense/gapless**. On a dense monthly series, `LAG(revenue_total, 12) OVER (ORDER BY month)` is correct, canonical, and is precisely the "value N rows back without a self-join" the user requested. The gaps caveat is a real *edge* nuance, not a reason to withhold the correct primary.
-- This is a **SELECTION / COMPLETENESS MISS**: the responder answered a DIFFERENT question than asked (gave the self-join the user explicitly rejected) and actively dismissed the correct primary. Hence Completeness 2 and Actionability 2 — an engineer who explicitly wanted a non-self-join approach is handed exactly the thing they said they wanted to avoid, with no LAG option offered.
-- Accuracy 3 (working query + true caveat, but the "NOT LAG, unreliable" framing is a factual overreach for a dense series). Clarity 4 (well-written).
-
-**The exact canonical to feature for this ask:**
-```sql
-SELECT
-  month,
-  revenue_total,
-  LAG(revenue_total, 12) OVER (ORDER BY month) AS revenue_same_month_last_year
-FROM monthly_revenue
-ORDER BY month;
--- Returns the value 12 rows back. ASSUMES a dense, gapless monthly series
--- (one row per month). If months can be MISSING, either densify with a date
--- spine first, or use the self-join on date_add('month', -12, cur.month)
--- (gap-safe by construction).
-```
-
-### Q1 ROOT CAUSE — RESOURCE EMPHASIS / FINDABILITY DEFECT (with responder over-application)
-
-Grepped r07 (`resources/07-analytical-query-patterns.md`). The LAG form IS present, but the resource's framing actively steers AWAY from it for exactly this kind of ask:
-
-- **r07:2789** Pattern B2 header — "LEADING CANONICAL — Period-over-period: YoY vs MoM with window functions."
-- **r07:2810** the offset table HAS `LAG(metric, 12)` for YoY — but every row carries a **"CONTIGUOUS … every month present"** requirement column.
-- **r07:2824–2826** FORM A (self-join) is explicitly labeled **"(preferred for YoY — gap-safe by construction)"** and **"It is the recommended pattern for any production YoY metric."**
-- **r07:2860–2862** FORM B (the LAG form) is gated: **"Use this form when you need ranks/running totals … You MUST gap-fill first or LAG will silently shift the offset."**
-- **r07:2903** the actual `LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY month)` lives inside FORM B, behind the gap-fill warning.
-- **r07:2930** DO-NOT-WRITE bans `LAG(usage_count, 12) … on a sparse monthly series with NO gap-fill`.
-
-**Diagnosis:** The resource is calibrated for the *production-grade, possibly-sparse, per-entity YoY* case, where self-join IS the safer default. It LEADS with the self-join as "recommended" and buries LAG behind a "you MUST gap-fill first" gate. The responder faithfully amplified that framing into "NOT LAG, it's unreliable" — but the resource gives it **no landing point** for the simpler, explicit "grab the value N rows back from a DENSE ordered sequence WITHOUT a self-join" ask, where LAG is the correct, canonical primary and gap-fill is irrelevant (the series is dense by stipulation).
-
-This is therefore primarily a **resource emphasis/findability defect** (r07 Pattern B2 leads with self-join and under-features LAG for the bare "value N rows back" ask), compounded by responder over-application (it withheld LAG entirely rather than leading with it + noting the dense-series assumption).
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
 
 ---
 
-### Q2 — title-case / no-initcap — **5.00 (strong)**
+## Q2 — ARRAY membership (filter tags containing 'vip')
 
-- **No-initcap claim CONFIRMED** (trino.io/docs/467/functions/string.html): Trino 467 has only `lower`/`upper`; no `initcap`, no title-case function. (Postgres/Oracle/Spark have initcap; Trino does not.) Correct.
-- **Workaround 1 CONFIRMED** (trino.io/docs/467/functions/regexp.html): `regexp_replace(string, pattern, function)` — the lambda receives an `array(varchar)` of capture groups, **1-indexed** (x[1]=group 1, x[2]=group 2). The docs literally give this exact example: `regexp_replace('new york', '(\w)(\w*)', x -> upper(x[1]) || lower(x[2]))` -> `'New York'`. The responder's form is the canonical docs answer verbatim. `\w` does not need double-escaping in a Trino string literal (Trino does not treat backslash as a string escape). Correct.
-- **Workaround 2 CONFIRMED valid:** `array_join(transform(split(lower(s), ' '), w -> upper(substr(w,1,1)) || substr(w,2)), ' ')` — split->array, transform+lambda, substr 1-indexed, array_join. All valid Trino 467. (It runs over `lower(s)` so the tail is already lowercase — correct in context.)
+**Answer:** `contains(tags, 'vip')` in WHERE. Notes Postgres `ANY()` is not the translation; `contains()` is the Trino array-membership function. Cites r07 §1a.3 array quick reference.
 
-Correctly handles a function Trino lacks, with two valid approaches. No defect.
+**Verification (array.html):** `contains(x, element) → boolean` — "true if the array x contains the element." Array-only (not varchar substring — that's strpos/LIKE). `contains(tags, 'vip')` is correct for an `array(varchar)` column. The Postgres ANY()/@> note is accurate. The standing contains-is-ARRAY-ONLY pin is correctly applied here (genuine array column).
 
-### Q3 — histogram / equal-width $50 buckets — **4.75 (strong)**
-
-`(FLOOR(order_total / 50.0) * 50) AS price_band_start … GROUP BY FLOOR(order_total / 50.0) ORDER BY price_band_start`. Verified (math.html): `floor(x)` rounds down; `/50.0` forces non-integer division so FLOOR buckets correctly; GROUP BY on the FLOOR expression is valid. Correct equal-width histogram pattern. Completeness 4 only because Trino's native `width_bucket(x, bound1, bound2, n)` (verified in math.html as the equi-width bucketing function) would be worth a one-line "alternative" mention — but the FLOOR form is correct and idiomatic, so this is a minor enrichment, not a defect.
-
-### Q4 — null-safe equality — **5.00 (strong)**
-
-`CASE WHEN old.col IS NOT DISTINCT FROM new.col THEN 0 ELSE 1 END`. Verified (trino.io/docs/467/functions/comparison.html): `IS NOT DISTINCT FROM` is null-safe equality; `NULL IS NOT DISTINCT FROM NULL -> TRUE`, `NULL IS NOT DISTINCT FROM value -> FALSE`. The responder's semantics table and CASE usage are exactly correct. The r22/r28 citations are reads, not edits (no federation edit occurred) — not penalized; correctness is what's judged, and it's correct.
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
 
 ---
 
-## Teacher guidance — iter775 designation: **FIX-A (resource emphasis/findability)**
+## Q3 — Divide-by-zero guard (conversions/visits)
 
-Q1 root cause is a resource emphasis/findability defect in r07 Pattern B2, so iter775 = **FIX-A (light, additive)**:
+**Answer:** `conversions * 1.0 / NULLIF(visits, 0)` → NULL when visits=0; `COALESCE(..., 0)` if you want 0 instead. Cites r07 divide-by-zero guard.
 
-**FIX-A:** Add/elevate a **LAG-first landing point** for the bare "value N rows back / prior-period value from an ordered sequence / WITHOUT a self-join" ask — distinct from the production-YoY decision tree that (correctly) prefers the self-join for possibly-sparse series.
+**Verification (conditional.html):** `NULLIF(value1, value2)` = "Returns null if value1 equals value2, otherwise returns value1." So `NULLIF(visits, 0)` → NULL when visits=0, and `x / NULL` → NULL (no divide-by-zero error). `conversions * 1.0` forces non-integer (double) division. `COALESCE(..., 0)` to coerce the NULL to 0. All correct, standard guard.
 
-Concretely, at the "value N rows back" / prior-period landing point in r07 (adjacent to Pattern B2, or a short pre-B2 signpost), feature:
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
 
-```sql
--- "Grab the value N rows back in an ordered sequence" (dense series, no self-join):
-LAG(metric, N) OVER (ORDER BY ordered_col)   -- value N rows before the current row
-```
-with:
-1. A **keyword anchor** for: "value N rows back", "prior-period value", "row 12 positions back", "previous/earlier row value", "without a self-join", "cleaner than a self-join", "lookback offset".
-2. A one-line **dense-series note**: "LAG counts ROWS, not calendar periods — this is exactly right when the series is dense/gapless (one row per month). If months can be MISSING, densify with a date spine OR use the self-join on `date_add('month', -12, cur.month)` (gap-safe by construction)."
-3. A pointer to FORM A (self-join) as the **gaps fallback** — NOT as the blanket default for this phrasing.
+---
 
-**Important reconcile-in-place (do NOT just append):** soften r07:2824–2826's absolute "self-join is the recommended pattern for any production YoY metric" / the FORM B "you MUST gap-fill first" gate so they no longer read as "never use LAG." Reframe as: self-join = preferred when the series MAY be sparse; LAG = the clean canonical when the series is dense (and the user explicitly wants no self-join). The two forms answer the same question under different gap assumptions — make that the disambiguator, so the responder leads with LAG on the dense/"without self-join" phrasing instead of refusing it.
+## Q4 — Year-month label ('YYYY-MM' for monthly grouping)
 
-**Inoculation note:** also defang the responder's failure mode — add an inline note that "NOT LAG, it's unreliable" is WRONG as a blanket statement: LAG is correct and canonical on a dense series; the only caveat is gaps.
+**Answer:** `substr(CAST(CAST(event_timestamp AS DATE) AS varchar), 1, 7) AS month_label`; OR `format_datetime(event_timestamp, 'yyyy-MM')`. Warns Joda lowercase `mm` = MINUTE not month ('yyyy-mm' silently yields year-minute). Cites r23 YYYY-MM label section.
 
-**Preserve (do NOT churn):** Q2 title-case (r27 §4.3 — both workarounds verified clean), Q3 FLOOR-histogram, Q4 IS NOT DISTINCT FROM cards are all correct — churn risk, leave them.
+**Verification (datetime.html):** (1) `CAST(date AS varchar)` yields 'YYYY-MM-DD'; `substr(...,1,7)` = 'YYYY-MM' — valid. (2) `format_datetime(timestamp, format)` uses Joda-Time DateTimeFormat: `yyyy`=four-digit year, uppercase `MM`=month, lowercase `mm`=MINUTE. The critical warning that `'yyyy-mm'` is a year-minute bug is ACCURATE for Joda/format_datetime. Both forms produce '2026-03'. (date_format(ts, '%Y-%m') is the MySQL-style alternative — not needed, would also work.)
 
-State.json NOT touched (remains iter774, set by teacher).
+This is a high-value answer: the lowercase-mm=minute gotcha is the single most common silent bug in this pattern, and the responder surfaced it unprompted.
+
+| Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|
+| 5 | 5 | 5 | 5 | **5.00** |
+
+---
+
+## Overall
+
+| Q | Topic | Avg |
+|---|---|---|
+| Q1 | LAG-by-N dense series (FIX-A re-probe) | 5.00 |
+| Q2 | array membership (contains) | 5.00 |
+| Q3 | divide-by-zero guard (NULLIF) | 5.00 |
+| Q4 | year-month label (format_datetime Joda) | 5.00 |
+
+**Overall avg = 5.00 — STRONG PASS.** No imprecision found on any axis across all four answers.
+
+---
+
+## Teacher feedback
+
+1. **(a) Is LAG-by-N CLOSED?** YES — Q1 is the **1st clean post-fix datapoint**. The iter775 FIX-A (LAG-FIRST ROUTER at r07:2802-2839 + dense-vs-sparse disambiguator + defanged "never use LAG" blanket) WORKED. The responder led with LAG on the explicitly-dense series, did not refuse it, did not push the self-join, and correctly stated the offset-is-rows / dense-series precondition. **LAG-by-N is CLOSED but NOT YET BULLETPROOFED** — per the two-datapoint rule, it needs ONE more clean datapoint from a different phrasing before promotion to BULLETPROOFED.
+
+2. **iter776 designation — DEFAULT NO-OP / durability-breadth sweep.** No open defect, no new imprecision surfaced. Teacher should make ZERO edits. RECOMMEND ONE of the 4 fresh probes be a **fresh LAG-by-N phrasing** (e.g. day-over-day `LAG(x,1)` on a dense daily table, or LEAD-by-N for a forward look on a dense series, or a partitioned dense series `LAG(x,N) OVER (PARTITION BY series_id ORDER BY t)`) to convert LAG-by-N from CLOSED → BULLETPROOFED. The other 3 should be fresh adjacent angles.
+
+3. **PRESERVE (churn risk):** the LAG-FIRST ROUTER and dense-vs-sparse disambiguator (r07:2802-2839) are verified clean and load-bearing — do NOT rewrite. Keep the self-join FORM A scoped to SPARSE series and the inline "never use LAG" defang at r07:2822. The contains-ARRAY-ONLY pin, NULLIF divide-guard, and format_datetime-Joda-yyyy-MM-lowercase-mm-is-minute card are all verified clean — leave them be.
+
+4. **Standing pins all held:** LAG-dense-vs-self-join-sparse (now CLOSED), contains-ARRAY-ONLY, NULLIF-divide-guard, format_datetime-yyyy-MM-lowercase-mm-is-minute, plus the full iter534-774 inventory. No regressions observed.

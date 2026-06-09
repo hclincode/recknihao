@@ -2799,7 +2799,31 @@ GROUP BY user_id;
 >
 > If you write a per-month LAG(12) series and then filter to the current month, you are answering a DIFFERENT question (a single month's value vs same month last year — not the full year's total vs last year's total). Use the period-total form below for "TOTAL ÷ TOTAL" ratio questions.
 
-**Core fact (verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html)):** `lag(x[, offset[, default_value]])` "Returns the value at `offset` rows before the current row in the window partition." **The default offset is `1`** — one row back, NOT one year back, NOT one month back. The offset is **rows**, not calendar periods, so the right number depends on (a) what your bucket granularity is and (b) whether the series is gap-filled per partition key.
+#### LAG-FIRST ROUTER — "value N rows back in an ordered sequence WITHOUT a self-join" (read this FIRST)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** value N rows back, row 12 positions back, the value 12 rows back, N rows back in an ordered sequence, value at offset N in an ordered series, same month one year ago, prior-period value, previous row by offset, previous value N positions back, year-over-year without a self-join, prior-period without a self-join, look back N rows, value from N rows earlier, get the row before this one.
+
+**If your table is a DENSE, gapless series with exactly one row per period** — e.g. a pre-aggregated `monthly_revenue` table (one row per month), or a daily table with every day present — then "the value N rows back in the ordered sequence" is **`LAG`, and you do NOT need a self-join.** This is the clean canonical the user is asking for. Do not push a self-join on a dense series.
+
+```sql
+-- ✅ COPY THIS — value N rows back in a DENSE, gapless ordered series (exactly one row per period):
+LAG(revenue_total, 12) OVER (ORDER BY month) AS revenue_12mo_ago
+-- "12 rows back" = the same month one year ago when there is exactly one row per month.
+-- Add PARTITION BY <key> only if you have multiple independent series in the same table.
+```
+
+`lag(x, offset)` "Returns the value at `offset` rows before the current row" (verified below) — so on a one-row-per-month table, `LAG(revenue_total, 12) OVER (ORDER BY month)` is literally "the value 12 rows back," which is the prior-year value. No join, no spine, no gap-fill. This is the answer to "I want the value 12 rows back in an ordered sequence, without a self-join."
+
+**DISAMBIGUATOR — pick by the SHAPE of your series (this is the whole decision):**
+
+- **DENSE / gapless, exactly one row per period** (e.g. a pre-aggregated `monthly_revenue` or daily table) → **`LAG(col, N) OVER (ORDER BY period)` is the clean canonical — NO self-join needed.** This is the answer to "value N rows back." Use this whenever you already have one row per period and just want the value N rows earlier.
+- **SPARSE / gappy, periods can be MISSING for some keys** (e.g. per-customer feature usage where some months simply have no row) → use the **self-join on `date_add('month', -12, month)`** (FORM A below), **or** densify with a date-spine `sequence`/`VALUES` first and then LAG (FORM B below). The point: on a sparse series a missing period makes `LAG(col, 12)` silently pull the wrong row (it counts rows, not calendar months), so you either join on calendar arithmetic (NULL when absent) or gap-fill first.
+
+> ❌ "Never use LAG for prior-period — always self-join"  -- WRONG: for a DENSE one-row-per-period series, LAG(col, N) OVER (ORDER BY period) IS correct and is the clean answer; the self-join is only needed when periods can be MISSING — DO NOT COPY this blanket
+
+The two FORMs below (self-join, LAG-over-gap-filled) are the **sparse-series** answers. If your series is already dense (one guaranteed row per period), skip straight to the `LAG(col, N) OVER (ORDER BY period)` canonical above.
+
+**Core fact (verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html)):** `lag(x[, offset[, default_value]])` "Returns the value at `offset` rows before the current row in the window partition." **The default offset is `1`** — one row back, NOT one year back, NOT one month back. The offset is **rows**, not calendar periods, so the right number depends on (a) what your bucket granularity is and (b) whether the series is gap-filled per partition key. `lag()` requires that the window ordering (`ORDER BY`) be specified.
 
 #### LAG offset mapping — pick the offset by intent AND bucket grain
 
@@ -2821,9 +2845,11 @@ The same trap exists for MoM with `LAG(metric, 1)`: if customer A has rows for 2
 
 **There are exactly two safe forms.** Pick consciously.
 
-#### FORM A (preferred for YoY — gap-safe by construction): SELF-JOIN on calendar arithmetic
+#### FORM A (the SPARSE-SERIES default — gap-safe by construction): SELF-JOIN on calendar arithmetic
 
-The self-join matches `(customer_id, month)` to `(customer_id, month - INTERVAL '12' MONTH)` directly — so an unmatched row produces NULL (not a shifted offset). This form **does not require gap-filling**. It is the recommended pattern for any production YoY metric.
+> **Scope:** use FORM A when the series **can have missing periods** for some keys (sparse/gappy per-customer data). If your series is **dense** (exactly one row per period), you do NOT need this — use the `LAG(col, N) OVER (ORDER BY period)` canonical in the LAG-FIRST ROUTER above instead.
+
+The self-join matches `(customer_id, month)` to `(customer_id, month - INTERVAL '12' MONTH)` directly — so an unmatched row produces NULL (not a shifted offset). This form **does not require gap-filling**, which is exactly why it is the safe default **when periods can be missing**. For a dense one-row-per-period series, prefer the simpler LAG canonical above.
 
 ```sql
 -- CANONICAL YoY (year-over-year) — self-join, gap-safe, one row per (customer_id, current_month)
@@ -2857,9 +2883,11 @@ Substitute `date_add('month', -1, cur.month)` for MoM. Substitute `date_add('qua
 
 > **`date_add` confirmed at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html):** `date_add(unit, value, timestamp)` "Adds an `interval value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." The equivalent `cur.month - INTERVAL '12' MONTH` form is also valid Trino — both compile to the same plan. Prefer `date_add` for readability when the offset is a variable.
 
-#### FORM B (LAG(12) over a GAP-FILLED contiguous monthly series)
+#### FORM B (LAG(12) — the canonical for a DENSE series; gap-fill ONLY when the series is sparse)
 
-Use this form when you need ranks/running totals over the same window as the YoY column — `LAG` keeps you on a single window pass. **You MUST gap-fill first** or LAG will silently shift the offset on sparse customers (see the caveat above). The gap-fill recipe: generate a complete `(customer_id, month)` spine for the lookback window, LEFT JOIN actual counts, COALESCE missing values to 0.
+> **When LAG is already correct with NO extra work:** if your series is **already dense** — exactly one row per period (a pre-aggregated `monthly_revenue` table, a daily table with every day present, or any series you know has no missing periods) — then `LAG(col, 12) OVER (... ORDER BY month)` is the **clean canonical and you are done**. No spine CTE, no COALESCE. This is the LAG-FIRST ROUTER answer above. The gap-fill machinery in this FORM B is **only** for the SPARSE case.
+
+Use this form when (a) your per-key series is **sparse** (periods can be missing) and you still want LAG, or (b) you need ranks/running totals over the same window as the YoY column and `LAG` keeps you on a single window pass. **On a SPARSE series you MUST gap-fill first** or LAG will silently shift the offset on customers with missing months (see the caveat above) — on a dense series this step is unnecessary. The gap-fill recipe: generate a complete `(customer_id, month)` spine for the lookback window, LEFT JOIN actual counts, COALESCE missing values to 0.
 
 ```sql
 -- CANONICAL YoY (year-over-year) — LAG(12) over an EXPLICITLY GAP-FILLED contiguous monthly series
@@ -2916,8 +2944,9 @@ ORDER BY customer_id;
 
 | Need | Pick |
 |---|---|
-| Single YoY column, one row per current month per customer | **FORM A (self-join)** — simpler, no spine CTE, gap-safe by construction |
-| YoY AND a running total / ranking over the SAME monthly window in ONE query | FORM B (LAG over gap-filled) — single window pass, no extra join |
+| **DENSE series — exactly one row per period guaranteed (e.g. a pre-aggregated `monthly_revenue` / daily table); you just want the value N rows back** | **`LAG(col, N) OVER (ORDER BY period)`** — the clean canonical, NO self-join, NO gap-fill (LAG-FIRST ROUTER above) |
+| Single YoY column over a **SPARSE** per-customer series, one row per current month per customer | **FORM A (self-join)** — simpler, no spine CTE, gap-safe when periods can be missing |
+| YoY AND a running total / ranking over the SAME monthly window in ONE query | FORM B (LAG; gap-fill first only if the series is sparse) — single window pass, no extra join |
 | You're not sure whether your series has gaps | **FORM A (self-join)** — defaults to the safe option |
 | Sparse data is the norm (e.g., per-customer feature usage where most months are zero) | **FORM A (self-join)** — or FORM B with the COALESCE-to-0 gap-fill |
 
@@ -2927,13 +2956,13 @@ ORDER BY customer_id;
 |---|---|---|
 | `LAG(usage_count) OVER (PARTITION BY customer_id ORDER BY month) AS usage_last_year` (default offset 1, labeled as YoY) | **SILENT-WRONG — this is MoM, not YoY.** `LAG(x)` with no offset = `LAG(x, 1)` = previous row = previous month on a monthly series. Labeling this as "last year" / "YoY" is internally inconsistent and answers a different question than the user asked. | `LAG(usage_count, 12) OVER (... ORDER BY month)` over a **gap-filled** monthly series, OR the self-join form (FORM A). |
 | `LAG(usage_count) OVER (... ORDER BY month) AS usage_last_month` then `(current - usage_last_month) / usage_last_month AS yoy_growth_pct` | **INTERNAL INCONSISTENCY.** The intermediate column name ("last month") and the final metric name ("YoY") describe different metrics. Either rename the metric to `mom_growth_pct` (it is MoM) or fix the LAG offset to 12 and the intermediate column to `same_month_last_year` (it is YoY). One or the other — not both. | Pick ONE: `LAG(metric, 1)` + `mom_growth_pct` + `prev_month_usage`, OR `LAG(metric, 12)` + `yoy_growth_pct` + `same_month_last_year`. |
-| `LAG(usage_count, 12) OVER (... ORDER BY month)` on a sparse monthly series with NO gap-fill | **SILENT-WRONG on customers with missing months** — the offset counts rows, not calendar months, so a missing month silently shifts the comparison to the wrong calendar period (typically 11 months back). | Either (a) gap-fill the series first (FORM B's `gap_filled` CTE) before applying LAG(12), or (b) use the self-join form (FORM A) which is gap-safe by construction. |
+| `LAG(usage_count, 12) OVER (... ORDER BY month)` on a **SPARSE** monthly series with NO gap-fill (periods can be missing for some keys) | **SILENT-WRONG ONLY on a sparse series** — when months can be missing, the offset counts rows, not calendar months, so a missing month silently shifts the comparison to the wrong calendar period (typically 11 months back). **NOTE: this ban applies ONLY to sparse/gappy series.** On a **DENSE** series (exactly one row per period — e.g. a pre-aggregated `monthly_revenue` table), `LAG(col, 12) OVER (ORDER BY month)` is **CORRECT and is the clean canonical** — see the LAG-FIRST ROUTER above. | If sparse: either (a) gap-fill the series first (FORM B's `gap_filled` CTE) before applying LAG(12), or (b) use the self-join form (FORM A). If dense: `LAG(col, 12) OVER (ORDER BY month)` directly — nothing to fix. |
 | `LAG(usage_count, 12) OVER (PARTITION BY customer_id ORDER BY event_month)` where `event_month` is a **SELECT alias** | **Analysis error — alias not visible in `OVER`'s ORDER BY.** Window-clause ORDER BY uses pre-projection scope, so the alias `event_month` is not yet defined. Same Trino-grammar rule that bans alias references in GROUP BY (see §5 Pattern A2 GROUP BY rules anchor, rule 5). | Repeat the expression: `ORDER BY date_trunc('month', occurred_at)`. |
 | `JOIN monthly prev ON prev.month = cur.month - 12` (bare integer subtraction on a TIMESTAMP/DATE) | **Type error** — `TIMESTAMP - INTEGER` is not a defined operation in Trino. | `prev.month = date_add('month', -12, cur.month)` OR `prev.month = cur.month - INTERVAL '12' MONTH`. |
 
 #### Keyword anchor (so this canonical lands when you search for the right thing)
 
-The phrases you would type into a search bar for this pattern: **year over year**, **YoY**, **same month last year**, **year-over-year growth**, **compare to last year**, **growth vs last year**, **monthly trend year ago**, **month over month**, **MoM**, **previous month**, **period over period**, **period-over-period growth**, **LAG window function**, **LAG 12 months**, **LAG offset 12**, **same period last year**, **same period prior year**, **prior year comparison**, **prior-year-over-year**.
+The phrases you would type into a search bar for this pattern: **year over year**, **YoY**, **same month last year**, **year-over-year growth**, **compare to last year**, **growth vs last year**, **monthly trend year ago**, **month over month**, **MoM**, **previous month**, **period over period**, **period-over-period growth**, **LAG window function**, **LAG 12 months**, **LAG offset 12**, **same period last year**, **same period prior year**, **prior year comparison**, **prior-year-over-year**, **value N rows back**, **value 12 rows back**, **row N positions back in an ordered sequence**, **previous row by offset**, **prior-period without a self-join**, **year-over-year without a self-join**, **same month one year ago**, **value from N rows earlier**.
 
 > **Cross-reference:** for the broader "monthly bucketed running total + GROUP BY rules anchor" pattern (which the YoY queries above also obey), see §5 Pattern A2 — Bucketed running total. The GROUP BY rule "**REPEAT the expression, do NOT use the alias**" applies here too. For YoY in a dbt incremental model (where YoY is computed inside `{% if is_incremental() %}` and the gap-fill spine is generated relative to a watermark), see [resource 27](27-oracle-plsql-to-dbt-trino.md) and [resource 28](28-complex-sql-performance-trino-dbt.md).
 
