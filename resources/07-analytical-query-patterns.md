@@ -56,15 +56,26 @@ WHERE order_date >= date_trunc('month', current_date)
 WHERE order_date >= current_date - INTERVAL '30' DAY
 ```
 
-**The RULE:** To filter a date/timestamp column to a period, use a **half-open BARE-COLUMN range** — `col >= start AND col < start + INTERVAL`. Keep the column itself bare; put every function on the **constant** side. Wrapping the COLUMN in a function — `year(order_date) = year(current_date)`, `date_trunc('year', order_date) = ...`, `CAST(order_date AS date) = ...` — returns **CORRECT results** but **DEFEATS** Iceberg partition pruning and Parquet min-max file skipping, so Trino does a **full table scan**. The column must be bare for the engine to compare it against the partition boundaries and per-file min/max statistics.
+**The RULE (lead with this — it ALWAYS prunes, on any engine):** To filter a date/timestamp column to a period, the clearest and most portable form is a **half-open BARE-COLUMN range** — `col >= start AND col < start + INTERVAL`. Keep the column bare and put every function on the **constant** side. This form is guaranteed prunable regardless of optimizer version and reads obviously to anyone reviewing the query, so prefer it.
 
-Why `date_trunc('year', current_date)` is the start of the year: verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — `date_trunc('year', TIMESTAMP '2022-10-20 05:10:00')` returns `2022-01-01 00:00:00.000`; `current_date` "Returns the current date as of the start of the query"; and `date + INTERVAL '1' YEAR` is valid date+interval arithmetic (`date '2012-08-08' + interval '2' day` -> `2012-08-10`). The half-open range (`>= start AND < start + INTERVAL`) is the standard sargable form: it captures the whole period without an off-by-one on the boundary and never wraps the column.
+Why `date_trunc('year', current_date)` is the start of the year: verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — `date_trunc('year', TIMESTAMP '2022-10-20 05:10:00')` returns `2022-01-01 00:00:00.000`; `current_date` "Returns the current date as of the start of the query"; and `date + INTERVAL '1' YEAR` is valid date+interval arithmetic (`date '2012-08-08' + interval '2' day` -> `2012-08-10`). The half-open range (`>= start AND < start + INTERVAL`) is the standard form: it captures the whole period without an off-by-one on the boundary and never wraps the column.
+
+**Trino 467 reality — the common wrapped temporal comparisons DO still prune (they are NOT footguns here):** Unlike Postgres/Oracle, Trino 467 ships **default-on optimizer rules** that automatically *unwrap* the common date/timestamp comparisons into a bare-column range before pushdown, so they still trigger Iceberg partition pruning + Parquet min/max file skipping:
 
 ```sql
-⚠ WHERE year(order_date) = year(current_date) -- correct RESULTS but wraps the column -> NO partition pruning (full scan); prefer the bare-column half-open range above
+-- ALL of these unwrap to a bare-column range in Trino 467 and DO prune:
+WHERE CAST(order_date AS date)      = DATE '2026-01-01'   -- via UnwrapCastInComparison
+WHERE date_trunc('day', order_ts)   = DATE '2026-01-01'   -- via UnwrapDateTruncInComparison
+WHERE year(order_date)              = 2026                -- via UnwrapYearInComparison
+WHERE EXTRACT(YEAR FROM order_date) = 2026                -- parsed to year(order_date) -> same rule
+WHERE year(order_date)              = year(current_date)  -- RHS is constant-folded at plan time, then unwrapped
 ```
 
-(See also [resource 23 §6 — Always include the partition column in WHERE](23-sql-best-practices-olap.md) and [resource 28 §4 — predicate pushdown / partition-prune predicate shape](28-complex-sql-performance-trino-dbt.md) for the partition-transform fragility nuances.)
+These rule names are verified in the Trino 467 source (`io/trino/sql/planner/iterative/rule/UnwrapCastInComparison.java`, `UnwrapDateTruncInComparison.java`, `UnwrapYearInComparison.java`) and are registered unconditionally in the default optimizer set (`PlanOptimizers.java`, `simplifyOptimizerRules`) — there is no session flag to enable them. See the Trino team's blog ["Just the right time date predicates with Iceberg"](https://trino.io/blog/2023/04/11/date-predicates.html). So you can write the readable form and still prune; the bare-column range above is recommended for clarity and cross-engine portability, not because the wrapped forms break pruning in 467.
+
+**The genuine pruning-killer:** an *opaque, non-invertible* expression on the partition/sort column that the optimizer CANNOT rewrite into a bare-column range — a UDF, `regexp_*`, JSON extraction, `LOWER(col)`/`SUBSTR(col, ...)`, or non-monotonic arithmetic. There, pushdown is lost and Trino scans + filters in memory, so you MUST use the bare-column range (or pre-compute the value at ingest). Verify any case with `EXPLAIN` — a pruning predicate shows as `constraint on [<col>]` in the scan node; a lost one shows the function in `filterPredicate` with no constraint.
+
+(See also [resource 23 §6 — Don't wrap partition or filter columns in functions](23-sql-best-practices-olap.md) and [resource 28 §4 — predicate pushdown / partition-prune predicate shape](28-complex-sql-performance-trino-dbt.md), which list exactly which forms Trino 467 unwraps vs. which truly break pruning.)
 
 ---
 

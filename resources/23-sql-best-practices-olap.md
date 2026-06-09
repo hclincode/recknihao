@@ -2313,7 +2313,7 @@ GROUP BY user_id;
 
 | Red flag in EXPLAIN ANALYZE | What it means | Fix |
 |---|---|---|
-| **`Input` physical bytes >> what your partition predicate should allow** | Predicate pushdown FAILED — you wrapped the partition column in a function (`date(event_date) = ...`) OR you have a type mismatch. Trino scanned everything and filtered in memory. | Use the bare partition column: `event_date = DATE '2026-06-01'`. See §6 below. |
+| **`Input` physical bytes >> what your partition predicate should allow** | Predicate pushdown FAILED — you wrapped the partition column in a function the optimizer can't invert (`month(event_ts)=...`, `LOWER(col)=...`, a UDF/`regexp_*`/JSON extraction) OR you have a type mismatch. Trino scanned everything and filtered in memory. (Note: `CAST(col AS date)=lit`, `date_trunc('day',col)=lit`, `year(col)=N` DO unwrap and prune in 467 — see §6.) | Use the bare partition column / a half-open range: `event_date = DATE '2026-06-01'`. See §6 below. |
 | **`CorrelatedJoin` node in the plan** | Trino's `Decorrelate Subqueries` rule bailed out — the correlated subquery runs **once per outer row** (O(N×M)). | ANALYZE the inner table; if `CorrelatedJoin` persists, manually rewrite the correlated subquery as a JOIN or `SemiJoin`-friendly `IN`. See §10 below. |
 | **`Input` rows >> `Output` rows** (e.g., `ScanFilterProject` reads 1B rows and emits 5M) | Filter-after-scan — the predicate did not push into the connector; Trino read everything and dropped 99.5% post-scan. | Same fix as row 1 (drop function wrappers, fix type, use partition column). Also check `filterPredicate = ...` vs `constraint on [...]` in plain EXPLAIN. |
 | **High per-operator `Input std.dev.` % (e.g., 80%, 200%, "stddev across drivers" big)** — real Trino-docs examples: `Input avg.: 15.63 rows, Input std.dev.: 24.36%` healthy vs `Input std.dev.: 793.73%` extreme skew | **DATA SKEW.** One driver/worker is processing far more rows than the others — typical with a hot join key (e.g., one giant tenant). The skewed stage is the bottleneck. `EXPLAIN ANALYZE VERBOSE` adds the per-driver `Input rows distribution` percentiles (`p01`/`p50`/`p99`) — a wide `p99` vs `p50` gap confirms it. | **Salt** the hot key on the join (`ON a.key = b.key AND a.salt = b.salt` with random salt buckets), or break a skewed GROUP BY with the two-level (key, salt) → final SUM pattern. Also check if the build side was inverted (run `ANALYZE` on both join sides). **Worked salt-the-key example:** see [resource 18 § Step 5 — Check for partition / data skew](18-query-performance-regression.md#step-5-check-for-partition--data-skew--explain-analyze-input-stddev-one-worker-slow-one-stage-slow-uneven-worker-time-skewed-join-skewed-group-by-salt-the-key-leading-canonical-oncall-worked-example--read-this-first-when-one-stage--one-worker-is-dragging-the-query) (Fix 1 = canonical two-level GROUP BY with salt). |
@@ -2353,12 +2353,13 @@ WHERE event_date = DATE '2026-05-26'
 
 **Why**: Most functions applied to a column in WHERE block Iceberg from using that column for partition pruning or Parquet min/max statistics — the predicate cannot be **pushed down**. There are important exceptions in Trino 467, but the safe habit is to filter the raw column directly.
 
-> **To filter a date column to a period (this year / this month / last N days), use a half-open BARE-COLUMN range** (`col >= date_trunc('year', current_date) AND col < date_trunc('year', current_date) + INTERVAL '1' YEAR`) — never wrap the column in `year(col)=...` / `date_trunc('year',col)=...` (correct results but no pruning). See the sargable date-filter card at [resource 07 §1 — Filter a date column to a period](07-analytical-query-patterns.md#filter-a-datetimestamp-column-to-a-period-this-year--this-month--last-n-days--keep-the-column-bare-so-partition-pruning-works).
+> **To filter a date column to a period (this year / this month / last N days), the clearest portable form is a half-open BARE-COLUMN range** (`col >= date_trunc('year', current_date) AND col < date_trunc('year', current_date) + INTERVAL '1' YEAR`) — it always prunes on any engine. Trino 467 ALSO unwraps the common wrapped comparisons (`year(col)=...`, `date_trunc('day',col)=...`, `CAST(col AS date)=...`, `EXTRACT(YEAR FROM col)=...`) via its default-on unwrap rules (see the §6 detail below), so those prune too — prefer the bare range for clarity, not because the wrapped forms break pruning in 467. See the sargable date-filter card at [resource 07 §1 — Filter a date column to a period](07-analytical-query-patterns.md#filter-a-datetimestamp-column-to-a-period-this-year--this-month--last-n-days--keep-the-column-bare-so-partition-pruning-works).
 
-**Important nuance for Trino 467**: Trino ships **two** optimizer rules that unwrap common timestamp/date predicates so partition pruning still works:
+**Important nuance for Trino 467**: Trino ships **three** default-on optimizer rules that unwrap common timestamp/date predicates so partition pruning still works (verified in the 467 source under `io/trino/sql/planner/iterative/rule/`, all registered unconditionally in `PlanOptimizers.java` `simplifyOptimizerRules` — no session flag):
 
-- **`UnwrapCastInComparison`** (Trino PR #13567, 2022): rewrites simple casts on the column side back to typed literals on the value side. So `WHERE CAST(event_ts AS DATE) = DATE '2026-05-26'` (and its alias `WHERE DATE(event_ts) = DATE '2026-05-26'`) is rewritten to a timestamp range predicate on `event_ts` and **does** prune partitions correctly.
-- **`UnwrapDateTruncInComparison`** (Trino PR #14011, 2022): handles `date_trunc('day', ts) = DATE '...'` (and the analogous `<`, `<=`, `>`, `>=` shapes) by rewriting it to the same kind of timestamp range predicate. So `WHERE date_trunc('day', event_ts) = DATE '2026-05-26'` also prunes partitions correctly on Trino 467.
+- **`UnwrapCastInComparison`**: rewrites simple casts on the column side back to typed literals on the value side. So `WHERE CAST(event_ts AS DATE) = DATE '2026-05-26'` (and its alias `WHERE DATE(event_ts) = DATE '2026-05-26'`) is rewritten to a timestamp range predicate on `event_ts` and **does** prune partitions correctly.
+- **`UnwrapDateTruncInComparison`**: handles `date_trunc('day', ts) = DATE '...'` (and the analogous `<`, `<=`, `>`, `>=` shapes) by rewriting it to the same kind of timestamp range predicate. So `WHERE date_trunc('day', event_ts) = DATE '2026-05-26'` also prunes partitions correctly on Trino 467.
+- **`UnwrapYearInComparison`**: rewrites `year(col) = 2026` (and `<`/`<=`/`>`/`>=`/`IN`) into `col BETWEEN <start-of-year> AND <end-of-year>`, a bare-column range that prunes. `EXTRACT(YEAR FROM col)` is parsed to `year(col)`, so it goes through the SAME rule and also prunes. A constant-foldable RHS like `year(current_date)` is folded to an integer at plan time first, then unwrapped — so `WHERE year(event_ts) = year(current_date)` prunes too.
 
 See the Trino team's blog post "Just the right time date predicates with Iceberg" (trino.io/blog/2023/04/11/date-predicates.html), which walks through both rewrites.
 
@@ -2382,16 +2383,16 @@ WHERE event_ts >= TIMESTAMP '2026-05-26 00:00:00'
 
 - `CAST(col AS DATE)` and its alias `DATE(col)` against a `DATE` literal — via `UnwrapCastInComparison`
 - `date_trunc('day', col) = DATE '...'` (and `<`, `<=`, `>`, `>=`) — via `UnwrapDateTruncInComparison`
+- `year(col) = 2026` and `EXTRACT(YEAR FROM col) = 2026` (EXTRACT parses to `year`) — via `UnwrapYearInComparison`; a constant-foldable RHS like `year(current_date)` is folded first, then unwrapped, so it prunes too
 - `CAST(col AS some_type)` for simple, monotonic, invertible casts on the column side
 - Comparisons like `=`, `<`, `<=`, `>`, `>=` against a typed literal
 
 **Functions that truly break pruning (no unwrap rule exists)**:
 
-These are either **non-monotonic** (the value jumps around as `ts` increases, so the predicate cannot be expressed as a single contiguous timestamp range) or **non-invertible on strings**:
+These are either **non-monotonic** (the value jumps around as `ts` increases, so the predicate cannot be expressed as a single contiguous timestamp range) or **non-invertible on strings**. Note `year` is NOT in this list — it HAS an unwrap rule (above); but `month`, `day_of_week`, and `hour` have NO unwrap rule in 467, so they break pruning:
 
 | Bad | Good |
 |---|---|
-| `WHERE year(event_ts) = 2026` | `WHERE event_ts >= TIMESTAMP '2026-01-01 00:00:00' AND event_ts < TIMESTAMP '2027-01-01 00:00:00'` |
 | `WHERE month(event_ts) = 5` | Range predicate on `event_ts` for the desired month(s) |
 | `WHERE day_of_week(event_ts) = 1` | Pre-compute a `dow` column at ingest if you need this filter often |
 | `WHERE hour(event_ts) = 9` | Range predicate, or pre-compute an `hour` column |
@@ -2399,7 +2400,7 @@ These are either **non-monotonic** (the value jumps around as `ts` increases, so
 | `WHERE SUBSTR(country, 1, 2) = 'US'` | `WHERE country LIKE 'US%'` (LIKE with a leading literal can use pushdown) |
 | `WHERE CAST(user_id AS VARCHAR) = '42'` | `WHERE user_id = 42` (use correct type — section 5) |
 
-`year`, `month`, `day_of_week`, and `hour` are all **non-monotonic over time** — `month(ts) = 5` matches May of every year, which is not a single timestamp range, so there's no general rewrite. `LOWER` and `SUBSTR` are non-invertible (many inputs collapse to the same output), so the optimizer cannot recover the original column predicate.
+`month`, `day_of_week`, and `hour` are **non-monotonic over time** — `month(ts) = 5` matches May of every year, which is not a single timestamp range, so there's no rewrite rule for them in 467. (`year` IS monotonic — `year(ts) = 2026` is exactly one contiguous range — which is why Trino 467 DOES have `UnwrapYearInComparison` and `year(col)=N` prunes.) `LOWER` and `SUBSTR` are non-invertible (many inputs collapse to the same output), so the optimizer cannot recover the original column predicate.
 
 **Edge cases where even the unwrap rules can fail** — fall back to the explicit TIMESTAMP range form and verify with `EXPLAIN`:
 
