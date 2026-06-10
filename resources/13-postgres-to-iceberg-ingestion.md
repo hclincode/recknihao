@@ -3384,6 +3384,24 @@ FROM iceberg.analytics.events;
 
 Prefer `JSON_VALUE` when you care about distinguishing "key absent" from "JSON corrupt"; stick with `json_extract_scalar` for ad-hoc, error-tolerant lookups.
 
+> **LEADING CANONICAL — check whether a JSON KEY EXISTS (presence, not just a non-null value) → `json_exists`.** *Keyword anchors: JSON key exists, does the JSON have a key, check if a key is in the JSON, key presence not value, json_exists, distinguish a missing key from a null value, absent vs null JSON key, key present even when its value is null, test if a JSON string contains a key.*
+>
+> To test whether a JSON KEY EXISTS **directly on a JSON string** (VARCHAR holding JSON, or the `JSON` type), use `json_exists(json, 'strict $.key')`. It returns a **boolean** — `true` if the key is present (even when its value is `null`), `false` if the key is absent.
+>
+> ```sql
+> -- Does the JSON key EXIST (present even if its value is null)?  -> json_exists
+> SELECT event_id,
+>        json_exists(metadata, 'strict $.device_type') AS has_device_type   -- true if key present (even null), false if absent
+> FROM iceberg.analytics.events;
+> -- json_exists distinguishes key-PRESENT-with-null (true) from key-ABSENT (false), directly on a JSON string.
+> ```
+>
+> **Why `strict` mode is the right path for a presence test.** Per [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html): `JSON_EXISTS(json_input [FORMAT JSON], json_path [PASSING ...] [{TRUE|FALSE|UNKNOWN|ERROR} ON ERROR]) -> boolean` *"determines whether a JSON value satisfies a JSON path specification. The returned value is `true` if the path returns a non-empty sequence, and `false` if the path returns an empty sequence."* The default behaviour on error is `FALSE ON ERROR`. In **strict** mode a structural error (an absent member at `$.key`) makes *"path evaluation fail"*, which—under the default `FALSE ON ERROR`—yields `false`; a **present** key (even one whose value is `null`) is not a structural error, so the path returns a non-empty sequence and the result is `true`. That is exactly the present-even-null = `true` / absent = `false` distinction you want.
+>
+> **The RULE.** To test whether a JSON KEY EXISTS in a JSON string, use `json_exists(json, 'strict $.key') -> boolean` — `true` if the path is present (even when its value is `null`), `false` if absent. `json_extract_scalar(json, '$.key') IS NOT NULL` is simpler but **CONFLATES key-absent with key-present-but-null** (both return NULL), so it cannot distinguish them; use `json_exists` when you must. (`contains(map_keys(CAST(json AS MAP(VARCHAR, JSON))), 'key')` also works but requires parsing the WHOLE JSON string into a MAP first — `json_exists` walks just the one path.)
+>
+> **Cross-references.** For the simpler non-null **value** check (when keys are only ever set to non-null values and you don't need to tell absent from null apart), `json_extract_scalar(json, '$.key') IS NOT NULL` or the `JSON_VALUE` form above is fine — both are valid for that case. For the same EXACT key-existence test on a native **`MAP(VARCHAR, VARCHAR)`** column (not a JSON string), use `contains(map_keys(map_col), 'key')` — see [resource 09 § "EXACT key-EXISTENCE vs. value-PRESENT"](09-lakehouse-schema-design.md). Pick by the column's actual TYPE: JSON string → `json_exists`; native MAP → `contains(map_keys(...))`.
+
 > **Gotcha — `json_extract_scalar` always returns VARCHAR.** Comparisons against numbers or booleans need an explicit `CAST` — e.g., `CAST(json_extract_scalar(properties, '$.price') AS DECIMAL) > 100` or `CAST(json_extract_scalar(properties, '$.is_premium') AS BOOLEAN) = true`. Without the cast, the comparison is a string comparison: `'100' > '99'` evaluates to **false** (lexicographic ordering), and `'true' = true` is a type-mismatch error. `JSON_VALUE` accepts a `RETURNING` clause for the same purpose — `JSON_VALUE(properties, '$.price' RETURNING DECIMAL)` typecasts in one step.
 
 > **LEADING CANONICAL — Trino JSON extraction family: `json_extract` vs `json_extract_scalar` + `json_array_length` / `json_size` / `json_parse` / `json_format`.** Keyword anchors: Trino json_extract vs json_extract_scalar, extract nested json object vs leaf, get value from json column, json path, json_array_length, json_size, parse json string Trino, jsonpath returns null. Per [trino.io/docs/current/functions/json.html](https://trino.io/docs/current/functions/json.html):

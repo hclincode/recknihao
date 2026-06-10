@@ -1,6 +1,7 @@
 {
-  "iteration": 890,
+  "iteration": 891,
   "phase": "extended",
+  "notes_891": "iter891 LIGHT FIX-A (additive) \u2014 ADDED json_exists key-existence canonical to resources/13 (JSON-string landing, after JSON_VALUE) + cross-link in resources/09 MAP key-existence callout. STEP A verified on trino.io/docs/467 functions/json.html: JSON_EXISTS(json_input [FORMAT JSON], json_path [PASSING ...] [{TRUE|FALSE|UNKNOWN|ERROR} ON ERROR]) -> boolean 'determines whether a JSON value satisfies a JSON path specification. The returned value is true if the path returns a non-empty sequence, and false if the path returns an empty sequence.' Default = FALSE ON ERROR. In strict mode an absent member makes path evaluation FAIL -> FALSE; a present key (even value null) is non-empty -> TRUE. So json_exists(json,'strict $.key') = present-even-null TRUE / absent FALSE, the clean canonical the iter890 Q3 responder missed. NO federation edits; KEPT json_extract_scalar IS NOT NULL + map_keys/contains as valid alternatives.",
   "notes_890": "iter890 NO-OP durability sweep \u2014 zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_889": "iter889 NO-OP durability sweep \u2014 zero edits; 4 fresh adjacent probes into untested territory.",
   "notes_888": "iter888 NO-OP durability sweep \u2014 zero edits; 4 fresh adjacent probes into untested territory.",
