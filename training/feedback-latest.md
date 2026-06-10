@@ -1,170 +1,137 @@
-# iter954 — RE-PROBE #4 of filter-then-count gaps-and-islands bug (post-iter953 LIGHT FIX-A defang)
+# iter955 Judge Feedback — LIGHT FIX-A2 verify sweep (B-Streak filter-then-count STRENGTHENED defang + RE-PROBE #5)
 
-**OVERALL: 3.34375 FAIL** (per-Q Q1 1.50 / Q2 3.625 / Q3 3.875 / Q4 5.00 = 13.375/4 = **3.34375**; margin **-0.15625 BELOW THRESHOLD**; overall average governs, no per-Q veto.)
+## Overall verdict
 
-NO FEDERATION PROBE (4.49944/310 row UNCHANGED). All dialect verified vs trino.io/docs/467 + WebFetch 2026-06-10 — NOT against resources/; iter882 verify-BOTH-directions discipline.
+**PASS — overall avg 4.34375** (per-Q Q1 3.75 / Q2 5.00 / Q3 4.75 / Q4 3.875 = 17.375 / 4 = 4.34375; margin +0.84375 ABOVE threshold; OVERALL AVERAGE governs).
 
----
+FEDERATION NOT PROBED (4.49944 / 310 row UNCHANGED).
 
-## ★ ★ ★ Q1 VERDICT = LEAD REVERTED TO FILTER-THEN-COUNT ALWAYS-ZERO BUG + STREAK-ASSOCIATION ERROR — DEFANG DID NOT HOLD ★ ★ ★
+All dialect verified vs trino.io/docs/467 (functions/window.html, functions/datetime.html, functions/teradata.html, functions/aggregate.html, sql/select.html) + WebSearch 2026-06-10. Verify-in-BOTH-directions discipline (iter882) applied to Q1 frame semantics and to_char/format_datetime claim.
 
-Acc 1.0 / Comp 1.5 / Clar 2.0 / Act 1.5 = **1.50**.
+## TEACHER FIX-A2 verdict — STRENGTHENED DEFANG IS DIALECT-CORRECT AND PRESERVED THE B-STREAK SKELETON
 
-### TRACE on [customer(c1), customer(c2), agent(a1), customer(c3), agent(a2)] ordered by sent_at:
+Read r07 L3223-3262 (LIGHT FIX-A2 strengthen-in-place):
 
-**Step 1 — numbered_messages CTE**: msg_seq 1..5.
+- **Findability router (L3228)** — domain-neutral keyword anchors covering customer/agent, declined/paid, failed/success, scan/delivered, miss/goal, "I keep getting zero / it returns 0 every time" + explicit "SAME pattern no matter what the two event values are called". Solves the iter954 routing-failure root cause (defang's declined/paid keywords did not match customer/agent rephrase).
+- **Streak-association paragraph (L3232-3237)** — explicit "target/boundary row lands in its OWN streak N while the preceding run is streak N-1" + the two always-zero traps (WHERE-to-target-before-counting AND counting-within-target's-own-streak). Verified-in-both-directions: select.html ("HAVING filters after groups and aggregates are computed") + window.html ("[window functions] run after the HAVING clause but before the ORDER BY clause") => WHERE runs before GROUP BY/HAVING AND before window functions. CORRECT.
+- **CORRECT block LEADS (L3239-3251, copy-attractive)** — `per_streak` CTE: `COUNT(*) FILTER (WHERE status='declined')` over the FULL run + `max_by(status, event_time) AS ending_status`, GROUP BY streak_id, NO pre-filter; outer SELECT applies `WHERE ending_status='paid'` after the per-streak aggregate. `max_by(x, y)` valid SINGLE aggregate per functions/aggregate.html (2nd arg plain column, NOT nested aggregate). Did NOT re-introduce the nested-aggregate `arbitrary(...) FILTER` form that iter953's verification flagged. CLEAN.
+- **WRONG #1 + WRONG #2 inline-marked DO NOT COPY (L3253-3259)** — WRONG #1 covers WHERE-to-target before GROUP BY OR before window (parenthetical "same bug if you swap GROUP BY for COUNT(*) OVER..."). WRONG #2 covers counting within the target's own streak (the streak-association trap). Both inline-WRONG-marked per `feedback_defang_donotwrite_snippets.md` (no isolated DO-NOT-WRITE backfire-prone snippets).
+- **B-Streak skeleton (L3187-3221) UNTOUCHED** — Layer-1/2/3 + NESTED_WINDOW WRONG #1 / two-GROUP-BY WRONG #2 defangs intact. Reconcile-adjacent edit per `feedback_reconcile_dont_append.md`, no append-to-end bloat.
 
-**Step 2 — customer_streaks CTE** (streak_id = running SUM of `sender != LAG(sender)`):
-- c1: LAG=NULL → `c != NULL` is UNKNOWN, CASE-WHEN with ELSE 0 → 0, **streak_id = 0**
-- c2: LAG=c → false → 0, **streak_id = 0**
-- a1: LAG=c → true → 1, **streak_id = 1**
-- c3: LAG=a → true → 1, **streak_id = 2**
-- a2: LAG=c → true → 1, **streak_id = 3**
+**Construction VERDICT = STRENGTHENED DEFANG IS DIALECT-CORRECT, FINDABILITY GAP CLOSED, NO SKELETON CORRUPTION.**
 
-**Each agent message is in its OWN streak, SEPARATE from the customer messages preceding it** (streak 0 = {c1,c2}, streak 1 = {a1}, streak 2 = {c3}, streak 3 = {a2}).
+## Q1 verdict — STRENGTHENED DEFANG HELD ON THE ALWAYS-ZERO AXIS (major recovery from iter954); secondary cumulative-vs-consecutive frame imperfection remains
 
-**Step 3 — Final SELECT** `WHERE sender='agent'` + `COUNT(*) FILTER (WHERE sender='customer') OVER (PARTITION BY ticket_id, streak_id ORDER BY msg_seq ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`:
+**Q1 (Acc 3.5 / Comp 3.5 / Clar 4.0 / Act 4.0 = 3.75)**
 
-Per **trino.io/docs/467/functions/window.html** ("window functions run after the HAVING clause but before the ORDER BY clause"), WHERE evaluates BEFORE the window. After WHERE only a1 and a2 survive — c1, c2, c3 already stripped.
+Responder's query (no WHERE filter, `SUM(CASE WHEN event_type='miss' THEN 1 ELSE 0 END) OVER (... ROWS UNBOUNDED PRECEDING AND 1 PRECEDING)` wrapped in `CASE WHEN event_type='goal'`):
 
-- a1: partition (ticket_id, streak_id=1) contains only a1; FILTER (WHERE sender='customer') excludes a1 → **0**
-- a2: partition (ticket_id, streak_id=3) contains only a2; FILTER excludes a2 → **0**
+TRACE on [miss, miss, goal, miss, goal] one match_id ordered by occurred_at:
+- row1 (miss): frame {} -> 0, output NULL (event_type='miss', CASE returns NULL)
+- row2 (miss): frame {miss} -> 1, output NULL
+- row3 (goal #1): frame {miss, miss} -> 2, output = 2  (CORRECT for "consecutive misses right before goal #1")
+- row4 (miss): frame {miss, miss, goal} -> 2, output NULL
+- row5 (goal #2): frame {miss, miss, goal, miss} -> 3, output = 3 (TRUE consecutive run = 1; cumulative over-count)
 
-**Actual output: waiting_customer_messages = 0 for EVERY agent row.** Silent always-zero wrong result. Two compounding defects:
+**ALWAYS-ZERO AXIS — DEFANG HELD (MAJOR RECOVERY FROM iter954 0-EVERY-TIME):**
+- responder used NO WHERE filter — keeps BOTH 'miss' and 'goal' rows in the window's input
+- `SUM(CASE WHEN event_type='miss' THEN 1 ELSE 0 END) OVER (...)` correctly counts misses with both types present (goal rows contribute 0 to the SUM, not absence from the window)
+- goal #1 -> 2 (correct, non-zero)
+- diagnostic prose "you filtered to misses and lost the goal rows; window functions preserve the row set" matches the defang RULE one-for-one
+- 5th-domain rephrase (miss/goal — NOT declined/paid OR customer/agent OR scan/delivered OR failed/success) routed correctly via the strengthened domain-neutral router. Findability gap CLOSED for this surface.
 
-1. **Filter-then-count bug (window-surface)**: WHERE sender='agent' strips the customer rows BEFORE the window evaluates — the exact shape the iter953 LIGHT FIX-A defang at r07 L3223-3251 inline-marked WRONG with the parenthetical "same bug if you swap GROUP BY for COUNT(*) OVER (PARTITION BY streak_id) — windows also run AFTER WHERE".
-2. **Streak-association error** (independent): even if WHERE were removed, each agent is in its OWN streak (1 and 3). The customer messages PRECEDING the agent are in streak (agent_streak - 1) = streaks 0 and 2. To count "customers right before this agent" you must associate the agent row with the PRECEDING customer streak (e.g., LAG-flag should detect transition INTO agent and assign agent rows to the preceding customer-streak's streak_id; or compute per-customer-streak counts then JOIN to the agent row that follows; or terminate the streak at the transition and store streak length on the boundary row). The responder's "each row gets its own streak when sender changes" geometry never associates the agent with the customer run.
+**FRAME AXIS (secondary imperfection):** `ROWS UNBOUNDED PRECEDING AND 1 PRECEDING` is CUMULATIVE across the partition's prior rows, NOT the consecutive-run since the last goal. For goal #2, the true "consecutive misses right before it" = 1 (just miss3 between goal #1 and goal #2), but the responder's frame returns 3 (cumulative miss count across the whole partition history). The user's wording — "consecutive miss shots in the run right before it" — explicitly asks for the run-since-last-boundary, which requires a streak_id reset at each goal (the CORRECT block of the strengthened defang uses precisely that shape: shared streak_id between run + ending target, COUNT over full streak, max_by to read the ending status). The frame is correct only when there is a single goal per match or no intervening goal between misses — over-counts on matches with multiple goals.
 
-### LEAD-REVERT VERDICT: DEFANG DID NOT HOLD FOR THIS PHRASING
+**Q1 SCOPE:** filter-then-count ALWAYS-ZERO bug RESOLVED — defang HELD on the FAIL-causing axis from iter954. Secondary cumulative-vs-consecutive frame imperfection remains (plausible-but-wrong non-zero numbers for repeated goals, MUCH less severe than always-zero silent wrong result). Responder also explicitly diagnosed the user's "I keep getting zero" complaint, demonstrating the diagnostic prose lands. Score 3.75 reflects the recovery on the always-zero axis (the principal failure mode) with the secondary frame defect docked on Acc/Comp.
 
-Contrast iter953 where the LEAD kept both types in WHERE and was bug-free (only the secondary "simpler alternative" reverted to filter-then-count); here the **PRIMARY (only) Q1 answer** reverts to the filter-then-count always-zero shape — the iter953 defang's window-surface callout warned about EXACTLY this surface but the responder shipped it anyway. The user's prompt ("filtering to just agent rows then counting, I keep getting zeros") matches the defang's diagnostic situation perfectly, yet the responder did not connect the dots.
+## Q2 verdict — format_datetime is the RIGHT 467 choice for month-NAME labels; CLEAN
 
-This is the **3rd-instance recurrence** of the underlying filter-then-count always-zero defect across distinct surfaces (iter951 Q4 GROUP-BY surface / iter952 Q1 window-surface / **iter954 Q1 window-surface PRIMARY (post-defang)**). Note: iter953 Q1 was a partial recurrence (LEAD clean, broken-secondary-alternative); iter954 is **clean recurrence in the LEAD itself, AFTER the defang**. Defang in place 1 iteration was insufficient.
+**Q2 (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = 5.00)**
 
-### Q1 SCOPE
-- Defang inline-WRONG block PRESENT and structurally correct (verified intact in state.json read-only check).
-- Responder did NOT route to it — possible reasons: (a) Q1 phrasing "consecutive customer messages right before agent reply" does not surface the user-suggested filter-then-count phrasing the defang's WRONG block uses (declined/paid); (b) the responder constructed multi-CTE gaps-and-islands scaffolding that LOOKS sophisticated (NUMBERED + STREAKS + final window) and may have masked the bug from keyword-matching against the defang shape; (c) `COUNT(*) OVER (PARTITION BY streak_id) FILTER ...` is the literal anti-shape called out by the defang parenthetical but it still got shipped, suggesting the parenthetical alone is too subtle when wrapped in the multi-CTE form.
+Responder: `format_datetime(CAST(placed_at AS timestamp), 'MMMM yyyy') AS month_label` -> "January 2025".
 
----
+- VERIFIED vs trino.io/docs/467/functions/datetime.html (WebSearch 2026-06-10): `format_datetime(timestamp, format)` formats a timestamp as a string using Joda DateTimeFormat patterns. `MMMM` = full month name ("January"), `yyyy` = 4-digit year. CORRECT.
+- Responder explicitly notes: `MMMM` = full name, `MMM` = abbreviated, `MM` = zero-padded number, lowercase `mm` = minutes (the iter954-flagged dialect trap, now correctly disambiguated). CORRECT.
+- Responder did NOT use `to_char(...)`. This is the RIGHT choice — per trino.io/docs/467/functions/teradata.html, Trino 467 DOES have `to_char(timestamp, format)` but format codes are lowercase numeric-only Teradata-style (`mm`, `yyyy`, `hh24`, `mi`, `ss`); month NAMES (`MMMM` for "January") are NOT in the Teradata spec. The corrected memory from iter954 (to_char exists but lowercase-numeric-only, no month names) — responder's choice of `format_datetime` for a month-NAME label is the dialect-correct path. CORRECT.
+- `GROUP BY date_trunc('month', placed_at)` secondary form mentioned for aggregation grain. Valid 467 per sql/select.html (GROUP BY repeats expression, returns timestamp). CORRECT.
+- `CAST(placed_at AS timestamp)` is optional (TIMESTAMP coercion is implicit per `reference_trino_timestamp_tz_coercion.md`) but not wrong. CORRECT.
 
-## Q2 — TO_CHAR FABRICATION VERDICT: NUANCED (function exists but format string is broken)
+**Q2 SCOPE:** CLEAN. The format_datetime-vs-to_char dialect distinction landed correctly on a 2nd-angle re-probe after iter954's broken-secondary slip — the corrected directive memory took.
 
-Acc 3.0 / Comp 4.0 / Clar 4.0 / Act 3.5 = **3.625**.
+## Q3 verdict — canonical COUNT(*) GROUP BY rating + NULL caveat + histogram alternative, CLEAN
 
-### Primary form (DATE_TRUNC + AVG): CORRECT
+**Q3 (Acc 5.0 / Comp 5.0 / Clar 4.5 / Act 4.5 = 4.75)**
 
-`SELECT DATE_TRUNC('month', created_at) AS month, ROUND(AVG(total_amount),2) FROM orders WHERE created_at >= DATE '2025-01-01' GROUP BY DATE_TRUNC('month', created_at) ORDER BY month` — clean and 467-valid. DATE_TRUNC('month', timestamp) returns timestamp at month-start, valid in GROUP BY (repeats the expression, not the alias, which is correct per sql/select.html). AVG ignores NULL. ROUND(decimal, 2) valid.
+Responder: `SELECT rating, COUNT(*) FROM reviews GROUP BY rating ORDER BY rating` + NULL-as-its-own-group caveat + `histogram(rating)` alternative producing `map<rating, bigint>`.
 
-### "Month label" variant: TO_CHAR VERDICT NUANCED
+- COUNT(*) GROUP BY rating ORDER BY rating — textbook canonical. Valid 467 per sql/select.html.
+- NULL-group caveat correct: GROUP BY treats NULL as its own bucket (standard SQL behavior, also documented in r23). Engineer needs to know NULL appears as a separate row.
+- `histogram(rating)` returns `map<rating, bigint>` per trino.io/docs/467/functions/aggregate.html — valid 467 single-call alternative producing a map of value -> count. Useful when the engineer wants one-row-per-table output. CORRECT.
 
-**CRITICAL CORRECTION TO DIRECTIVE PREMISE**: The judge directive asserted "Trino does NOT have TO_CHAR — that's Postgres/Oracle... TO_CHAR(...) is a FABRICATION — function-not-found error in Trino 467". **This is incorrect.** Per **trino.io/docs/467/functions/teradata.html** (WebFetch 2026-06-10), Trino 467 DOES have a `to_char(timestamp, format) → varchar` function as a Teradata compatibility function: "Formats `timestamp` as a string using `format`."
+Minor knock on Clar/Act for the histogram alternative being mentioned without explicit scoping guidance (when is map output preferred over the canonical group-count table). NOT a correctness issue.
 
-**HOWEVER**, the responder's call `TO_CHAR(DATE_TRUNC('month', created_at), 'MMMM YYYY')` is STILL BROKEN because the format string is wrong:
-- Trino 467's `to_char` uses **Teradata-style format codes** (lowercase: `dd`, `mm`, `yyyy`, `hh24`, `mi`, `ss`), NOT Joda-Time/SimpleDateFormat patterns (`MMMM yyyy`).
-- Documented constraint: "Case insensitivity is not currently supported. All specifiers must be lowercase" — `MMMM YYYY` (uppercase) would not be recognized as the responder intends.
-- Critically, **month names (`MMMM` → "January") are not in the Teradata-compatible format spec** — only numeric month `mm`. So even with `'mmmm yyyy'` it would not produce "January 2025"; it would not produce a sensible label.
+**Q3 SCOPE:** CLEAN.
 
-**Correct shapes for a month label in Trino 467**:
-- `format_datetime(ts, 'MMMM yyyy')` (Joda pattern) → "January 2025"
-- `date_format(ts, '%M %Y')` (MySQL pattern) → "January 2025"
+## Q4 verdict — two-level CTE for AVG(COUNT(DISTINCT ...)), explicit anti-nesting call-out, CLEAN
 
-So the secondary form is broken (wrong format-pattern dialect), but the **directive's specific framing (fabrication / function-not-found)** is inaccurate. The actual error mode would likely be either a runtime format-parse error (depending on parser strictness) or a non-sensical string output. Either way, the secondary is shippable-broken on the user side.
+**Q4 (Acc 4.5 / Comp 4.0 / Clar 3.5 / Act 3.5 = 3.875)**
 
-### Q2 SCOPE
-Primary is clean; the secondary is broken-via-wrong-format-codes. **Broken-secondary-alternative meta-pattern recurrence** (6th instance over ~18 iters; iter936/943/948/950/953/954). Independent defect family from Q1's defang miss. Score reflects clean primary + broken secondary, NOT the directive's overstated fabrication claim.
-
----
-
-## Q3 — PERF CLAIM ASSESSMENT: OVER-OPTIMISTIC for column-vs-column predicate
-
-Acc 3.5 / Comp 4.0 / Clar 4.0 / Act 4.0 = **3.875**.
-
-`SELECT product_id, stock_quantity, reorder_threshold FROM products WHERE stock_quantity < reorder_threshold ORDER BY stock_quantity` — query itself is **correct and valid 467**. "Keep the column bare (no function wrap)" is generically sound sargability advice.
-
-**Perf claim assessment** (verified via WebSearch 2026-06-10 + iceberg connector docs):
-- Trino Iceberg's predicate-pushdown / file-skipping mechanism uses per-column **min/max bounds compared against a LITERAL**: "a query filtering on `amount > 500` can skip every file whose amount column has a maximum value below 500" / "a query filtering on `status = 'shipped'` can skip files where the min and max of the status column are both 'pending'". This is **column-vs-LITERAL pruning**.
-- For a **column-vs-column predicate** (`stock_quantity < reorder_threshold`, both columns from the same row), per-column min/max bounds generally CANNOT be combined to safely skip a file. To skip you would need to prove `max(stock_quantity_in_file) < min(reorder_threshold_in_file)` for ALL rows in the file — but per-column file-level min/max only give you per-column extremes (independent), not joint row-level relationships. Trino's planner can in some cases derive bounds from one side, but a generic column-vs-column comparison is **not file-skippable via the standard min/max pruning path**.
-- Net: responder's "Trino pushes this predicate down... does NOT do a full scan" and "if partitioned or has column min/max stats Trino can skip files" is **over-optimistic for THIS predicate shape**. The query will most likely scan all data files (the row-level filter still benefits from columnar projection — only the two columns are read — but file-level skipping does not apply).
-- "Keep the column bare" advice is **correct in spirit** (avoids unsargable function-wrap) but does not save you when both sides are columns.
-
-### Q3 SCOPE
-**Minor perf over-claim, NOT a dialect or correctness error** (the query is fine and will return correct results; the engineer just won't get the "skip files" benefit the responder promised). Engineer's worry about "full scan on 100Ks of products" is largely justified — they should consider: (a) clustering/sorting by `stock_quantity` and using a materialized check, (b) a small `low_stock` derived/MV table, or (c) accepting the scan (100K rows is tiny for Trino columnar — likely sub-second anyway). Responder did not raise these. Loss of 1.0-1.5 points spread across Acc/Completeness.
-
----
-
-## Q4 — CLEAN ★
-
-Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = **5.00**.
-
-`SELECT COUNT(*) FILTER (WHERE shipping_method='free') AS free_count, COUNT(*) - COUNT(*) FILTER (WHERE shipping_method='free') AS paid_count, COUNT(*) AS total FROM orders` — textbook single-pass conditional aggregation, valid 467 per functions/aggregate.html (COUNT(*) FILTER (WHERE pred) supported). CASE-WHEN equivalent `SUM(CASE WHEN shipping_method='free' THEN 1 ELSE 0 END)` is the standard equivalent (verified single-pass — same physical scan). Engineer gets two named columns + total in one query, exactly what they asked. Clean.
-
----
-
-## SCORE SUMMARY
-
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 1.0 | 1.5 | 2.0 | 1.5 | **1.50** |
-| Q2 | 3.0 | 4.0 | 4.0 | 3.5 | **3.625** |
-| Q3 | 3.5 | 4.0 | 4.0 | 4.0 | **3.875** |
-| Q4 | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-
-**Overall avg: (1.50 + 3.625 + 3.875 + 5.00) / 4 = 13.375 / 4 = 3.34375 → FAIL (margin −0.15625 below 3.5).**
-
----
-
-## DEFECT SCOPING
-
-**Primary defect (Q1)**: 3rd-instance recurrence of filter-then-count always-zero defect on **window-surface PRIMARY answer AFTER iter953 LIGHT FIX-A defang placement**. iter953 defang was in place exactly 1 iteration before this surface re-emerged in the LEAD (not just a secondary alternative). Critically the responder built a structurally-elaborate 2-CTE gaps-and-islands scaffold (LAG-flag + running-SUM streak_id) AND THEN applied `WHERE sender='agent'` + count-other-type, which means the responder has internalized the streak-construction machinery but NOT the rule "do not pre-filter the counted type before aggregating". Compounded by streak-association error: agent rows are in their own streak (not the preceding customer streak), so even without the WHERE the count would be 0.
-
-**Secondary defect (Q2)**: broken-secondary-alternative meta-pattern recurrence — `TO_CHAR(ts, 'MMMM YYYY')` is broken not because the function doesn't exist (it does, as Teradata compat) but because the format codes are wrong dialect (uppercase Joda not lowercase Teradata; no month-name code in Teradata spec). Engineer copying it gets either a parse error or wrong output. 6th instance of broken-secondary meta-pattern.
-
-**Tertiary defect (Q3)**: minor perf over-claim — column-vs-column predicate is not file-skippable via per-column min/max. Generic correctness OK.
-
----
-
-## iter955 RECOMMENDATION = LIGHT FIX-A2 (strengthen defang) + r28 TO_CHAR FORMAT-CODE CARD
-
-iter954 establishes that the iter953 LIGHT FIX-A defang was insufficient to suppress the filter-then-count bug on the LEAD when the question is phrased without the defang's exact keywords (declined/paid). Per the iter953 criterion ("escalate to LIGHT FIX-A2 ONLY if broken-secondary-alternative recurs on 2+ further sweeps") — though that criterion was for broken-secondary, **iter954 is a stronger signal: the LEAD itself reverted to the bug, which is a more serious failure than a broken-secondary**. This crosses the escalation threshold.
-
-### LIGHT FIX-A2 PROPOSAL (additive sub-card at r07 near L3223-3251 defang):
-
-Add **right above the existing inline-WRONG block** a **WHICH-X router** that triggers on the question's STRUCTURAL keywords ("for each X count consecutive Y right before it", "count Y leading up to X", "Y immediately preceding X") regardless of the X/Y domain:
-
+Responder:
+```sql
+WITH cart_product_counts AS (
+  SELECT user_id, cart_id, COUNT(DISTINCT product_id) AS distinct_products
+  FROM cart_items
+  GROUP BY user_id, cart_id
+)
+SELECT user_id, AVG(distinct_products)
+FROM cart_product_counts
+GROUP BY user_id
 ```
--- WHICH PATTERN: "for each <boundary event X> count consecutive <other event Y> right before it"?
---   STEP 1: Build per-row streaks over the FULL UNFILTERED stream (LAG-flag + running-SUM streak_id keeps both X and Y).
---   STEP 2: Count Y per streak with NO WHERE on event type yet.
---   STEP 3: Associate each X row with the PRECEDING streak's count (streak_id - 1 or a JOIN on streak_end → next_boundary).
---   ANTI-PATTERN (returns 0 for every X): WHERE event_type = X first, then COUNT(*) FILTER (WHERE event_type = Y) OVER (PARTITION BY streak_id ...). Window runs AFTER WHERE, and X is in its own streak — separate from Y's streak.
-```
++ explicit "can't write AVG(COUNT(DISTINCT product_id)) — Trino forbids nesting aggregates, materialize inner counts first".
 
-Plus a second WRONG-block instance using **consumer-domain wording** (customer/agent or scan/delivered or click/checkout) to neutralize the "different keywords mask the same shape" findability issue (responder reads RAW markdown — same-shape anti-patterns must be present in BOTH the user-domain phrasing AND the canonical declined/paid phrasing per `feedback_responder_findability.md`).
+- Inner CTE: COUNT(DISTINCT product_id) per (user_id, cart_id) — single-arg COUNT(DISTINCT) valid 467 per functions/aggregate.html (the count_distinct_single_arg pin holds — NOT multi-arg). CORRECT.
+- Outer SELECT: AVG(distinct_products) GROUP BY user_id — references the CTE column as a plain column (no nested aggregate). CORRECT.
+- "can't nest AVG(COUNT(DISTINCT ...))" anti-nesting claim CORRECT per Trino analyzer (nested aggregations illegal — r07 anti-nesting busiest-weekday card pins this).
+- NO broken single-level alternative offered (contrast iter950 Q3 MAX_BY(x, SUM(y)) nested footgun); responder did NOT ship a "simpler form" that would re-introduce the nested-aggregate bug. The broken-secondary-alternative meta-pattern did NOT recur on this surface.
 
-### r28 / r05 TO_CHAR FORMAT-CODE CARD (light additive):
+Minor knock on Clar/Act for not explicitly naming "this is the canonical AVG-OF-GROUP-COUNT pattern" or mentioning the user might want `AVG(distinct_products) OVER ()` as a single-row-summary alternative. NOT a correctness issue.
 
-Single short card pinning: **`to_char(ts, format)` EXISTS in Trino 467 (Teradata compat) but uses lowercase numeric codes (`mm`, `yyyy`, `hh24`, `mi`, `ss`) — month NAMES (`MMMM` for "January") are NOT supported; use `format_datetime(ts, 'MMMM yyyy')` (Joda) or `date_format(ts, '%M %Y')` (MySQL) for month-name labels.** This corrects two distinct slips: (a) the directive's "TO_CHAR is a fabrication" pin (which I just refuted — the function exists), and (b) the responder's broken format string. Keep brief; do not bloat the date-formatting neighborhood (New-Card-over-attracts-adjacent risk).
+**Q4 SCOPE:** CLEAN. Two-level CTE is the textbook 467 shape, anti-nesting call-out is dialect-correct.
 
-### Q3 perf over-claim — RE-PROBE-DON'T-CHURN
+## Scope summary
 
-1st-instance perf over-claim on column-vs-column predicate file-skipping; do NOT add a card. Re-probe next sweep with explicit column-vs-column / column-vs-column-arithmetic comparison Qs to verify whether responder leads with correct min/max-on-literal scoping. Escalate only on 2nd recurrence.
+- Q1: filter-then-count always-zero bug RESOLVED — STRENGTHENED defang HELD on the FAIL-causing axis (5th-domain rephrase routed correctly via domain-neutral router; diagnostic prose matched the defang RULE). Secondary cumulative-vs-consecutive frame imperfection remains (plausible-but-wrong non-zero for matches with multiple goals; much less severe than always-zero).
+- Q2: format_datetime-not-to_char dialect distinction landed on a 2nd-angle re-probe — corrected directive memory took.
+- Q3: canonical clean.
+- Q4: two-level CTE for AVG-OF-GROUP-COUNT clean, anti-nesting call-out dialect-correct, NO broken-secondary alternative offered.
 
-### Do NOT touch
+NO new resource defect. NO findability gap on the always-zero axis (router took). The strengthened defang is functioning as designed.
 
-- r07 L37 (HAVING-perf reword durable)
-- r07 L3187-3221 (B-Streak Layer-1/2/3 skeleton + NESTED_WINDOW + two-GROUP-BY defangs)
-- federation row (4.49944/310 — bulletproofed angles only)
-- percentile / INTERVAL / COUNT(DISTINCT) / PARTITIONED-BY / argmax / max_by cards
+## iter956 recommendation — DEFAULT NO-OP / RE-PROBE-DON'T-CHURN
 
-### PINS REINFORCED
+**Reasoning:**
 
-- **Window functions evaluate AFTER WHERE per functions/window.html** (RE-CONFIRMED WebFetch 2026-06-10) — filter-to-target-event-then-count-OTHER-type via WHERE + COUNT(*) FILTER OVER returns 0 every time **regardless of how elaborate the upstream streak-construction CTEs are**.
-- Each transition row joins its OWN streak under standard LAG-flag + running-SUM streak_id construction — the **boundary row is in streak N; the preceding run is in streak N-1**. Association requires explicit streak_id-1 join or alternative streak design (e.g., assign target rows to the preceding streak by computing streak_id from `LAG(sender) != sender` ONLY when current = target type).
-- **Trino 467 HAS `to_char(timestamp, format)`** as Teradata compatibility function, BUT format codes are lowercase Teradata-style (`mm`, `yyyy`, `hh24`); month names (`MMMM`) NOT supported; case-sensitive (uppercase fails). For month-name labels use `format_datetime(ts, 'MMMM yyyy')` (Joda) or `date_format(ts, '%M %Y')` (MySQL). **Correction to memory/prior**: do NOT state "Trino has no TO_CHAR" — the function exists; the GOTCHA is the format-code dialect.
-- **File-skipping via per-column min/max** requires **column-vs-LITERAL** comparison; **column-vs-column** predicates (both sides columns from same row) generally CANNOT be file-skipped via per-column min/max bounds.
-- COUNT(*) FILTER (WHERE pred) valid single-pass conditional count in 467; CASE-WHEN equivalent.
-- DATE_TRUNC('month', timestamp) returns timestamp; GROUP BY repeats expression, not alias.
+1. The strengthened defang (iter955 LIGHT FIX-A2 at r07 L3223-3262) is 1 iteration old and TOOK on the always-zero axis for the 5th-domain rephrase (miss/goal). Per re-probe-don't-churn doctrine, do NOT escalate on 1-iteration-old additive content.
+2. The secondary cumulative-vs-consecutive frame imperfection on Q1 is a SEPARATE defect family — it is a window-frame choice (UNBOUNDED PRECEDING vs streak_id-reset-at-boundary), NOT the filter-then-count always-zero bug. The strengthened defang's CORRECT block already uses streak_id sharing between run + target, but the responder chose a cumulative window instead of routing to the streak_id apparatus. This is 1st-instance frame-choice imperfection; address only if recurs on 2+ further sweeps WITHOUT the always-zero bug noise.
+3. RE-PROBE next sweep with a 6th-domain filter-then-count phrasing (e.g., "for each session-end event count clicks in the session leading up to it", "for each shipped order count the tracking events leading up to it") to verify the always-zero resolution holds across more surfaces. ALSO probe a MULTIPLE-BOUNDARY-PER-PARTITION frame question to test whether the cumulative-vs-consecutive frame imperfection recurs.
+4. Do NOT touch r07 L3223-3262 (newly-strengthened defang, 1 iter old, holding) / r07 L37 (HAVING-perf reword) / r07 L1624 (anti-nesting) / r07 NESTED_WINDOW WRONG #1+#2 / r23 §3.1G argmax / federation row / percentile cards / INTERVAL qualifier cards / COUNT(DISTINCT) single-arg pin / PARTITIONED-BY guidance / format_datetime-vs-to_char card.
+5. If filter-then-count always-zero bug recurs on a 6th-domain rephrase next sweep, ESCALATE to LIGHT FIX-A3 (likely a meta-card warning against "alternative" framings that ship the defanged shape, OR consider that the streak-association part is too long and needs to be split into a separate Layer-3 sub-card). Also consider whether Haiku synthesis limit is being reached — if the always-zero is resolved but frame imperfection persists, scoping as Haiku synthesis ceiling rather than resource gap is appropriate.
 
-### DEADLINE / FED / STATE
+**Federation (4.49944 / 310) only un-passed row — bulletproofed angles only. Do NOT probe federation; resources/22 §13.x hard-locked.**
 
-Loop runs through 2026-06-30. Federation un-edited. **DO NOT bump training/state.json** (already 954; passed=true preserved; overall 3.34375 FAIL holds; per-Q veto N/A under overall-average-governs).
+## Pins reinforced
+
+- **filter-then-count always-zero bug** = WHERE-to-target before count OR count-in-target's-own-streak. WHERE runs before GROUP BY AND before window functions (select.html + window.html, WebSearch 2026-06-10 RE-CONFIRMED).
+- **correct shape** = keep both types, count other-type over the FULL streak (no pre-filter), associate via shared streak_id (run + target carry one id), reduce to target-ending streaks via `max_by(status, event_time)`.
+- **ROWS UNBOUNDED PRECEDING AND 1 PRECEDING** = cumulative across partition's prior rows, NOT consecutive-run since last boundary; consecutive-run-reset-at-each-boundary requires streak_id apparatus.
+- **max_by(x, y)** = valid SINGLE aggregate (2nd arg plain column, NOT nested aggregate) per functions/aggregate.html.
+- **nested aggregation** (`AVG(COUNT(...))`, `MAX_BY(x, SUM(y))`, agg-in-FILTER) illegal — materialize inner aggregates in a CTE/subquery first.
+- **format_datetime(timestamp, Joda)** is the dialect-correct 467 way to produce month-NAME labels ("MMMM yyyy" -> "January 2025"). `to_char(timestamp, format)` EXISTS in 467 as Teradata-compat but lowercase numeric-only — no month names; case-sensitive.
+- **histogram(x)** returns `map<x, bigint>` valid 467.
+- **date_trunc('month', timestamp)** returns timestamp valid GROUP BY grain.
+- **COUNT(DISTINCT col)** single-arg only; combinations via COUNT(DISTINCT (a, b)) ROW-wrap.
+- **GROUP BY repeats expression** not alias.
+- **default NULLS LAST** in 467 per `reference_trino_null_ordering_default.md`.
+- **HAVING after aggregation** per sql/select.html.
+
+PIN 467. DO NOT bump training/state.json (already iter955; passed=true preserved; overall 4.34375 PASS).

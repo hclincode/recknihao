@@ -3223,32 +3223,43 @@ The Trino 467 analyzer source confirms WRONG #1: `ExpressionAnalyzer.java` extra
 **Variants.**
 
 - **Streak as of a target date / current streak.** After Layer 2, filter to the streak that contains the latest `active_date` per user: find each user's max `active_date`, take its `streak_id`, and `COUNT(*)` the rows in that `(user_id, streak_id)` island.
-- **Count the OTHER event type in the run right before a boundary event (declines before a `paid`, failures before a `success`, scans before a `delivered`).** Count the other-type over the FULL streak FIRST (per `streak_id`, with NO pre-filter to the target event), and only THEN reduce to the streak that ENDS in the target row. **Do NOT `WHERE` down to the target event before counting** — `WHERE` runs before GROUP BY *and* before window functions, so the rows you wanted to count are stripped first and the answer is 0 on every row (a silent wrong result, not an error):
+- **Count the OTHER event type in the run right before a boundary event — "how many of the OTHER event type came right before each target row".**
+
+  > **FINDABILITY ROUTER (read this FIRST — it is the SAME pattern no matter what the two event values are called).** Land here for ALL of: "count the events/messages/attempts in the run right before each boundary event", "consecutive customer messages before an agent reply", "how many declined attempts before a paid", "failed logins before a success", "scans before a delivered", "misses before a goal", "how many of the OTHER event type came right before each target row", "I keep getting zero / it returns 0 every time". The domain words (customer/agent, declined/paid, failed/success, scan/delivered, miss/goal) do NOT change the SQL — it is one pattern: **count the run of type-A rows that ENDS at each type-B target row.**
+
+  Count the other-type over the FULL streak FIRST (per `streak_id`, with NO pre-filter to the target event), and only THEN reduce to the streak that ENDS in the target row.
+
+  **STREAK ASSOCIATION — the part that silently returns 0 even WITHOUT a WHERE filter.** The target/boundary row (the `paid`, the agent reply, the `success`) does NOT belong with the run of other-type rows that precede it unless you build the streak so they SHARE a `streak_id`. Two always-zero traps:
+
+  1. **WHERE-to-target-before-counting** — strips the very rows you meant to count. `WHERE` runs before GROUP BY *and* before window functions (verified: select.html — `HAVING` filters *after* aggregates are computed; window.html — window functions "run after the `HAVING` clause"), so by the time the COUNT happens the type-A rows are already gone → 0 on every row (a silent wrong result, not an error).
+  2. **Counting within the target's OWN streak** — if your streak flag opens a new streak ON the target row, the target sits ALONE in streak `N` while the preceding run of other-type rows is streak `N-1`. Counting other-type rows *within the target's own streak* counts an island that contains only the target → 0, even with no WHERE.
+
+  **The fix: make the run and the target it terminates SHARE one `streak_id`, count over the full streak, then keep the streaks whose ENDING row is the target.** Because the target ENDS the streak, the run + target carry the same `streak_id`, so the per-streak count already includes every preceding type-A row; `max_by(status, event_time)` reads the streak's final (= target) row to decide which streaks to keep. (If instead your construction puts the target in its own streak `N`, associate it with the preceding run by reading the count from `streak_id - 1`.)
 
 ```sql
--- ❌ WRONG (returns 0 every time — WHERE strips the counted 'declined' rows before GROUP BY / the window):
-SELECT order_id, streak_id,
-       COUNT(*) FILTER (WHERE status = 'declined') AS declines_before  -- nothing left to count
-FROM streaks
-WHERE status = 'paid'                 -- <-- runs FIRST, removes every 'declined' row
-GROUP BY order_id, streak_id;         -- -- DO NOT COPY
--- (same bug if you swap GROUP BY for COUNT(*) OVER (PARTITION BY streak_id) — windows also run AFTER WHERE.)
-
--- ✅ CORRECT — count the other type over the WHOLE streak, THEN keep streaks that END in the target:
+-- ✅ CORRECT — count the other type over the WHOLE streak (run + the target that ends it share a streak_id),
+--    THEN keep only the streaks whose ENDING row is the target:
 WITH per_streak AS (
   SELECT streak_id,
          COUNT(*) FILTER (WHERE status = 'declined') AS declines_in_run,  -- counts over the FULL run
-         MAX(event_time)                              AS streak_end,
-         max_by(status, event_time) AS ending_status  -- status of the latest row in the streak
+         max_by(status, event_time) AS ending_status  -- status of the LATEST row in the streak (= the target)
   FROM streaks
   GROUP BY streak_id                  -- NO pre-filter — every row of the run is still here
 )
 SELECT streak_id, declines_in_run
 FROM per_streak
 WHERE ending_status = 'paid';         -- reduce AFTER the per-streak aggregate, not before
+
+-- ❌ WRONG #1 (returns 0 — WHERE strips the counted 'declined' rows before GROUP BY / the window):
+--   SELECT streak_id, COUNT(*) FILTER (WHERE status = 'declined') AS declines_before
+--   FROM streaks WHERE status = 'paid' GROUP BY streak_id;   -- 'declined' rows already deleted -- DO NOT COPY
+--   (same bug if you swap GROUP BY for COUNT(*) OVER (PARTITION BY streak_id) — windows also run AFTER WHERE.)
+-- ❌ WRONG #2 (returns 0 — counting INSIDE the target's own streak): if the flag opens a new streak ON the
+--   target row, the target is alone in streak N and the preceding run is streak N-1, so the target's own
+--   streak has zero type-A rows. Either share the id (run + target = one streak, above) or read streak_id-1. -- DO NOT COPY
 ```
 
-  **The rule:** to count type-A events that precede a type-B boundary, aggregate over the full streak (no pre-filter), then filter to the target AFTER aggregating. Filtering to the target with `WHERE` before the COUNT — whether the COUNT is a GROUP BY aggregate or a window function — deletes exactly the rows you meant to count and returns 0 every time.
+  **The rule:** to count type-A events that precede a type-B boundary, build the streak so the run and the target it terminates share one `streak_id`, aggregate over the full streak (no pre-filter), then filter to the target AFTER aggregating via `max_by(status, event_time)`. Filtering to the target with `WHERE` before the COUNT — whether the COUNT is a GROUP BY aggregate or a window function — deletes exactly the rows you meant to count; and counting within the target's OWN streak counts an island that holds only the target. Both return 0 every time.
 - **Longest streak meeting a condition (e.g. consecutive days with revenue > 0).** Build the `events`-equivalent base as `SELECT DISTINCT user_id, active_date FROM daily WHERE revenue > 0`, then the three layers are unchanged.
 - **Consecutive WEEKS / MONTHS instead of days.** Change the gap unit and the "1" accordingly: for months, derive a month index and test `month_index - LAG(month_index) <> 1` (calendar-month arithmetic, not `date_diff('month', ...)` on raw dates which can mis-count partial months). Keep the same 3-layer skeleton.
 - **Return the streak's start/end dates too.** In Layer 3's inner subquery add `MIN(active_date) AS streak_start, MAX(active_date) AS streak_end`; in the outer, pick the row with the max length per user via `ROW_NUMBER()` instead of `MAX()` if you need the dates alongside the length.
