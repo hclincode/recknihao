@@ -1,7 +1,7 @@
 {
-  "iteration": 930,
+  "iteration": 931,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter930 re-probe sweep — zero edits; two-CTE-layer/window-alias one-off confirm + 3 fresh adjacents."
+  "note": "iter931 re-probe sweep — zero edits; first-matching-condition-per-group one-off confirm + 3 fresh adjacents."
 }
