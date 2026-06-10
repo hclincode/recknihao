@@ -1,10 +1,10 @@
-# Judge Feedback — iter893 (EXTENDED PHASE)
+# Judge Feedback — iter894 (EXTENDED PHASE, NO-OP durability sweep)
 
-**Overall: 4.86 / 5.00 — STRONG PASS** (per-Q 5.00 / 4.9375 / 4.8125 / 4.6875 = 19.4375 / 4 = 4.859; margin +1.36 over the 3.5 threshold; the OVERALL AVERAGE governs — no per-question override).
+**Overall: 4.94 / 5.00 — STRONG PASS** (per-Q 5.00 / 4.875 / 5.00 / 4.875 = 19.75 / 4 = 4.9375; margin +1.44 over the 3.5 threshold; the OVERALL AVERAGE governs — no per-question override).
 
 **Federation NOT probed this iter** — the Trino-federation row (4.49944 / 310, FAIL) is UNCHANGED.
 
-**iter893 was a NO-OP durability sweep** — 4 fresh adjacent SQL-pattern probes. Three answers dialect-clean; ONE minor accuracy nit (Q4 ISO-week-1 rationale). All cores correct and actionable.
+**iter894 was a NO-OP durability sweep** — week-of-year re-probe (iter893 slip recurrence test) + 3 fresh adjacents. All 4 answers dialect-clean. **The iter893 Q4 ISO-week-1 slip did NOT recur** (see Q1 below) → week-of-year topic CONFIRMED CLEAN.
 
 ---
 
@@ -12,51 +12,53 @@
 
 | Q | Topic | Acc | Comp | Clar | Act | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | % of customers with >1 product category (COUNT(DISTINCT)+FILTER) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q2 | single product nearest to $49.99 (ORDER BY abs(diff) LIMIT 1) | 5.0 | 4.75 | 5.0 | 5.0 | **4.9375** |
-| Q3 | count occurrences of 'timeout' in text (length-diff trick) | 5.0 | 4.5 | 4.75 | 5.0 | **4.8125** |
-| Q4 | group signups by calendar week-of-year (week_of_year/EXTRACT WEEK) | 4.25 | 4.75 | 4.75 | 5.0 | **4.6875** |
+| Q1 | week-number-of-year (1-53) to compare week 12 across years | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q2 | split full_name into first/last (split_part) | 5.0 | 4.5 | 5.0 | 5.0 | **4.875** |
+| Q3 | collapse runs of spaces to a single space (regexp_replace) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q4 | day-of-month with highest average purchase value | 5.0 | 4.5 | 5.0 | 5.0 | **4.875** |
+
+---
+
+## Q1 — WEEK-OF-YEAR SLIP RECURRENCE VERDICT: **ONE-OFF — CLEAN — slip did NOT recur**
+
+The iter893 Q4 answer carried an INACCURATE ISO-8601 rationale ("week 1 = first week containing a Monday"). The iter894 Q1 re-probe of the SAME concept gave the **CORRECT** rationale:
+
+> "Week 1 is the week containing the **FIRST THURSDAY** of the year, weeks 1-53, week always starts Monday."
+
+This is the **textbook-correct ISO-8601 week-date definition**. VERIFIED (WebSearch Wikipedia *ISO week date* + *ISO 8601*, 2026-06-10): ISO week 1 = the week containing the year's first Thursday (equivalently the week containing January 4, equivalently the earliest week with ≥4 January days); weeks start Monday. The responder's "first Thursday" framing is exactly right.
+
+**Therefore the iter893 "first Monday" framing was a RESPONDER SYNTHESIS SLIP / ONE-OFF, NOT a content defect.** Week-of-year is CONFIRMED CLEAN. **NO FIX-A needed; iter894 = NO-OP** (scope check is moot — the responder produced the correct rationale unaided, so there is no "first Monday" card to hunt; do NOT add a "wrong" card, do NOT churn the week_of_year/EXTRACT(WEEK) SQL or the Monday-week-start fact).
+
+Q1 Accuracy = **5.0** (per the run-prompt directive: first-Thursday framing correct → Acc 5.0).
 
 ---
 
 ## Verification (all vs trino.io/docs/467, WebFetch/WebSearch 2026-06-10)
 
-**Q1 — 5.00 — CORRECT.** `WITH customer_categories AS (SELECT customer_id, COUNT(DISTINCT product_category) AS n_categories FROM purchases GROUP BY customer_id) SELECT 100.0*COUNT(*) FILTER (WHERE n_categories>1)/COUNT(*) AS pct FROM customer_categories`.
-- VERIFIED functions/aggregate.html: the `FILTER (WHERE <condition>)` clause "can be used to remove rows from aggregation processing with a condition" and "is supported for all aggregate functions" — so `COUNT(*) FILTER (WHERE n_categories>1)` is valid. Multiple `COUNT(DISTINCT ...)` in one query is supported in 467 (the inner per-customer `COUNT(DISTINCT product_category)` is one such).
-- The `100.0*` prefix is a DECIMAL literal, so `100.0*COUNT(*) FILTER(...)/COUNT(*)` evaluates as DECIMAL division (non-integer) — correctly avoids integer-truncated 0. Two-stage CTE (per-customer category count → outer ratio of >1-category customers) is the idiomatic shape. No defect.
+**Q1 — 5.00 — CORRECT.** `week_of_year(order_date)` (alias `week()`) or `EXTRACT(WEEK FROM order_date)`; ISO-8601, week 1 = week containing the first Thursday, weeks 1-53, weeks start Monday.
+- VERIFIED functions/datetime.html: `week(x)` "Returns the **ISO week** of the year from x. The value ranges from 1 to 53." `week_of_year(x)` "This is an alias for week()." `EXTRACT(WEEK FROM x)` returns the ISO week (same 1-53 range). Function names, EXTRACT equivalence, and the 1-53 range all CONFIRMED.
+- VERIFIED ISO-8601 week-1 characterization (WebSearch): "first Thursday" = "containing Jan 4" = "earliest week with ≥4 January days"; Monday week-start. Responder's framing is the standard definition — fully accurate, no slip.
 
-**Q2 — 4.9375 — CORRECT.** `SELECT product_id, product_name, target_price FROM products ORDER BY ABS(target_price - 49.99) LIMIT 1`.
-- VERIFIED functions/math.html: `abs(x)` "Returns the absolute value of x". ORDER BY an arbitrary expression (`abs(a-b)`) is standard Trino/SQL — valid. Nearest-to-target = sort by absolute distance ascending + LIMIT 1; correct and minimal.
-- Completeness nit (−0.25 Comp): on an exact tie (two products equidistant from 49.99) `LIMIT 1` returns an **arbitrary** one with no deterministic tiebreaker. A one-line note ("add `, product_id` to ORDER BY for a deterministic pick on ties") would make it bulletproof. Minor only — not an accuracy defect.
+**Q2 — 4.875 — CORRECT.** `split_part(full_name,' ',1) AS first_name, split_part(full_name,' ',2) AS last_name`, with the honest caveat that multi-word last names ("Robert De Niro" → "De") need app/dbt logic.
+- VERIFIED functions/string.html: `split_part(string, delimiter, index)` "Splits string on delimiter and returns the field index. Field indexes start with **1**. If the index is larger than the number of fields, then **null** is returned." So `split_part(...,1)` / `split_part(...,2)` are valid and 1-based.
+- The honest "Robert De Niro → De is wrong; SQL alone can't parse arbitrary names" caveat is **APPROPRIATE, not a defect** — it is exactly the right scoping for the engineer (parsing arbitrary human names is genuinely out of reach for a single delimiter split). Good judgment.
+- Minor completeness nit only (−0.5 Comp): docs say out-of-range index returns **NULL** (not empty string). A single-word `full_name` (no space) makes `split_part(...,2)` return NULL — worth a one-line "single-word names → last_name is NULL" note. The responder did NOT incorrectly claim it returns '' (the run-prompt's "returns ''" premise is wrong, but the responder's actual answer doesn't assert it), so there is NO accuracy defect. Optional micro-anchor only.
 
-**Q3 — 4.8125 — CORRECT (core); cleaner built-in not mentioned.** `(LENGTH(description) - LENGTH(REPLACE(description,'timeout',''))) / LENGTH('timeout') AS timeout_count`; worked example 100→86, (100−86)/7 = 2.
-- VERIFIED functions/string.html: `length(string)` "Returns the length of string in **characters**" (codepoints, not bytes); `replace(string, search, replace)` "Replaces all instances of search with replace". The arithmetic is sound: each removed non-overlapping `'timeout'` (7 chars) shrinks the string by exactly 7, so `(orig − stripped)/7` = occurrence count. Because `length()` counts CHARACTERS uniformly on both sides, the divide-by-`length('timeout')` is correct even if the text contains multibyte chars — the per-occurrence delta is in the SAME character unit as the divisor. Worked example correct.
-- Completeness nit (−0.5 Comp, −0.25 Clar): a cleaner, more direct Trino 467 built-in exists and was NOT mentioned —
-  - `cardinality(regexp_extract_all(description,'timeout'))`, or
-  - `cardinality(split(description,'timeout')) - 1`.
-  Per the iter893 run-prompt and the iter882 lesson, this is **at most a COMPLETENESS nit, NOT an accuracy defect** — the length-diff trick is genuinely correct and portable. Do NOT over-penalize and do NOT defang the responder's trick. (Caveat the responder also did not state: the length-diff trick counts NON-OVERLAPPING occurrences and is case-SENSITIVE — same as `replace`/`regexp_extract_all` defaults — so the two approaches agree.)
+**Q3 — 5.00 — CORRECT.** `regexp_replace(user_input,'\s+',' ')` to collapse whitespace runs; `trim(regexp_replace(...))` to also strip the ends.
+- VERIFIED functions/regexp.html: `regexp_replace(string, pattern, replacement) → varchar` 3-arg form exists, "Replaces every instance of the substring matched by the regular expression pattern in string with replacement." "All of the regular expression functions use the **Java pattern** syntax" — so `\s` is the Java whitespace class and `\s+` matches one-or-more whitespace.
+- The single-quoted literal `'\s+'` correctly passes the literal backslash-s to the regex engine: Trino standard string literals do NOT interpret backslash escapes (backslash is an ordinary character), so `'\s+'` reaches the Java regex engine intact as the whitespace-class pattern. CONFIRMED correct. Wrapping in `trim(...)` to also strip leading/trailing whitespace is the right finishing touch.
 
-**Q4 — 4.6875 — CORE CORRECT; one MINOR ACCURACY NIT in the rationale.** `week_of_year(signup_date) AS week_number, COUNT(*) ... GROUP BY week_of_year(signup_date)`; alt `EXTRACT(WEEK FROM signup_date)`; "both ISO week 1-53; Trino week starts Monday (ISO-8601), **week 1 is the first week that contains a Monday**."
-- VERIFIED functions/datetime.html: `week()` / `week_of_year()` "Returns the **ISO week** of the year from x. The value ranges from 1 to 53"; `EXTRACT(WEEK FROM x)` is equivalent to `week()`. The function choice, the `EXTRACT(WEEK ...)` equivalence, the 1–53 range, and "weeks start on Monday" are ALL CORRECT and actionable.
-- **NIT (−0.75 Acc):** the boundary rationale "week 1 is the first week that contains a **Monday**" is an INACCURATE definition of ISO-8601 week 1. VERIFIED (WebSearch, Wikipedia ISO 8601 / ISO week date): ISO-8601 week 1 is "the week with the **first Thursday** of the Gregorian year in it" — equivalently the week **containing January 4**, equivalently the first week with the **majority (≥4) of its days in the new year**. It is NOT "the first week containing a Monday." (Counter-example: when Jan 1 falls on a Friday/Saturday/Sunday, the week containing that first Monday is still week 1 only if it also contains the first Thursday — otherwise the early-January days belong to week 52/53 of the PRIOR ISO year.) The SQL the engineer will run (`week_of_year` / `EXTRACT(WEEK)`) is correct and produces correct ISO weeks regardless of this explanatory slip — so this is weighed as a **minor accuracy nit on the rationale only**, not a query defect.
+**Q4 — 4.875 — CORRECT.** `SELECT EXTRACT(DAY FROM order_date) AS day_of_month, AVG(order_value) AS avg_value FROM ... GROUP BY EXTRACT(DAY FROM order_date) ORDER BY avg_value DESC LIMIT 1`.
+- VERIFIED functions/datetime.html: `day(x)` "Returns the **day of the month** from x"; `day_of_month(x)` is an alias for `day()`; `EXTRACT(DAY FROM x)` maps to `day()` and returns day-of-month (1-31). The grouping/aggregate/order/limit pattern is idiomatic Trino 467. `AVG(order_value)` over the per-day groups + `ORDER BY avg_value DESC LIMIT 1` correctly returns the single highest-average day.
+- Minor completeness nit only (−0.5 Comp): on an exact tie (two calendar days with identical average), `LIMIT 1` returns an **arbitrary** one with no deterministic tiebreaker. A one-line "ties → arbitrary pick; add a tiebreaker or use RANK() to surface all tied days" note would bulletproof it. Minor only — not an accuracy defect.
 
 ---
 
-## NAMED GAP for a possible iter894 LIGHT FIX-A
+## Verdict & directive for iter895
 
-**ONE findable-but-wrong explanatory claim (Q4 ISO-week-1 boundary):**
-- Defect: a resource (or the responder's synthesis) frames ISO-8601 **week 1 as "the first week that contains a Monday."** Correct framing: **week 1 is the week containing the year's first Thursday (equivalently the week containing January 4 / the first week with ≥4 days in the new year); weeks start on Monday.**
-- Scope check before any edit (iter882 lesson — verify-first, do NOT defect-mark correct content): if a `resources/` week-of-year card already states the Thursday/Jan-4 rule correctly, this is a RESPONDER SYNTHESIS SLIP, not a resource gap → NO edit (NO-OP). If a card carries the "first Monday" framing, that is the precise line to correct in place (reconcile, don't append) + a keyword anchor (ISO week 1 / week containing first Thursday / week containing Jan 4 / why is early January sometimes week 52/53).
-- Either way: the `week_of_year` / `EXTRACT(WEEK FROM x)` SQL itself is correct — do NOT add a "wrong" card around the function, do NOT churn it, do NOT touch the Monday-week-start fact.
-
-**No other gaps.** Q1/Q2/Q3 are dialect-clean (Q2 tie-determinism + Q3 `cardinality(regexp_extract_all/split)` are completeness micro-nits only — optional one-line anchors, skip if they churn a pin). Did NOT flag any doc-correct claim as a defect (Q3 length-diff trick is correct; verified vs trino.io/docs/467 first).
-
----
-
-## Directive for iter894
-
-- **Default = NO-OP.** Overall 4.86 STRONG PASS; all 4 cores correct and actionable.
-- **OPTIONAL LIGHT FIX-A (Q4 only), gated on the scope check above:** correct any "ISO week 1 = first week containing a Monday" framing in `resources/` to the Thursday/Jan-4 rule IN PLACE; if no such card exists, it was a responder slip → NO-OP. Do NOT add a "wrong" card; do NOT touch `week_of_year`/`EXTRACT(WEEK)` SQL or the Monday-week-start fact.
-- Do NOT add "wrong" cards for Q1/Q2/Q3.
-- Do NOT touch any iter534–892 pin.
-- **PIN Trino 467. NO federation edits. DO NOT bump training/state.json (already passed).**
+- **PASS — overall 4.94, margin +1.44.** All 4 dialect-clean against trino.io/docs/467.
+- **Q1 week-of-year slip = ONE-OFF; week-of-year CONFIRMED CLEAN.** The iter893 "first Monday" rationale did NOT recur; the responder gave the correct first-Thursday/ISO-8601 framing unaided.
+- **NO genuine findable-but-missing gap and NO dialect defect surfaced.** **iter895 = DEFAULT NO-OP.** Teacher: ZERO edits.
+- Optional findability micro-anchors only (skip if they churn any pin): (Q2) "single-word name → split_part(...,2) returns NULL" near a split_part card; (Q4) "ties → LIMIT 1 arbitrary; use RANK() to surface all" near a top-N card. Neither is required.
+- Per the iter882 lesson: did NOT flag any correct claim as a defect — every fact was verified vs trino.io/docs/467 (datetime / string / regexp .html) + WebSearch ISO-8601 first. Do NOT add any "wrong" card for Q1-Q4. Do NOT touch any iter534-893 pin. PIN Trino 467. NO federation edits.
+- **DO NOT bump training/state.json** (already passed).
