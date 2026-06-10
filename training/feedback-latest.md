@@ -1,51 +1,55 @@
-# Judge Feedback — iter924 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — iter925 (NO-OP durability sweep)
 
-**Overall: 4.985 PASS** (per-Q 5.00 / 5.00 / 4.94 / 5.00 = 19.94 / 4 = 4.985; margin +1.485; OVERALL AVERAGE governs — no per-Q veto). All 4 answers dialect-verified clean against Trino 467. **DEFAULT NO-OP — teacher ZERO edits recommended. DO NOT touch training/state.json (already passed).** FEDERATION NOT PROBED (4.49944/310 row UNCHANGED — still the only thin/under-probed row).
+**Overall: 4.50 PASS** (Q1 5.00 / Q2 3.50 / Q3 5.00 / Q4 5.00 = 18.00/4). OVERALL AVERAGE governs — no per-Q veto. Threshold 3.5 met.
 
----
-
-## VERIFIED DIALECT VERDICT — timestamp MINUS timestamp (Q1, both directions)
-
-**TRUTH (verified vs trino.io/docs/467 functions/datetime.html "Date and time operators" section via WebFetch, 2026-06-10, PINNED Trino 467):**
-
-Trino 467 does **NOT** support `timestamp - timestamp` (subtracting one timestamp from another). The documented arithmetic operators are:
-- Addition (`+`): `date + interval`, `time + interval`, `timestamp + interval`, `interval + interval`
-- Subtraction (`-`): `date - interval`, `time - interval`, `timestamp - interval`, `interval - interval`
-
-The minus operator works ONLY for subtracting an **interval** from a date/time/timestamp (or interval − interval). There is **no** `timestamp − timestamp → interval` overload. The dedicated way to get elapsed time between two timestamps is `date_diff(unit, ts1, ts2)`, which returns a truncated whole-unit **bigint** (`ts2 − ts1` expressed in `unit`), NOT an interval.
-
-**→ The responder's Q1 claim ("Trino has NO `timestamp - timestamp` operator — date_diff is the way to compute elapsed time") is CORRECT.** This is a verified-true rationale, scored as a BONUS, NOT a minor inaccuracy. The date_diff('minute', opened_at, first_response_at) answer is correct and the supporting reasoning is also correct.
-
-Secondary Q1 confirmations (all verified):
-- `date_diff('minute', earlier, later)` returns whole-minute **truncated** elapsed time as bigint (drops fractional minutes — day-aware/complete-units, consistent with pinned date_diff behavior). Confirmed.
-- Arg order `(opened_at, first_response_at)` = `(earlier, later)` yields a **positive** value. Confirmed (returns ts2 − ts1).
-- `AVG(...)` over the per-ticket minute values = correct mean response time per agent. Confirmed.
-- `WHERE first_response_at IS NOT NULL` correctly excludes un-responded tickets from both numerator and denominator. Confirmed.
+Trino 467 PINNED. All dialect claims verified vs trino.io/docs/467 functions/aggregate.html + WebSearch/WebFetch 2026-06-10 (NOT against resources/). Multi-source.
 
 ---
 
-## Per-question
+## Q2 MULTI-ARG COUNT(DISTINCT a,b) VERDICT — EXPLICIT
 
-**Q1 — avg ticket response time (minutes) per agent — 5.00 CLEAN.**
-`SELECT agent_id, AVG(date_diff('minute', opened_at, first_response_at)) ... WHERE first_response_at IS NOT NULL GROUP BY agent_id`. Correct fn, correct arg order (positive), correct AVG-over-per-ticket-minutes shape, correct NULL filter. The "no timestamp−timestamp operator, date_diff required" rationale is VERIFIED TRUE (bonus, see verdict above). Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+**CONFIRMED SYNTAX DEFECT (Approach 2 only).** Verified BOTH directions per iter882 lesson.
 
-**Q2 — count free-shipping orders — 5.00 CLEAN.**
-`SELECT COUNT(*) FROM orders WHERE shipping_fee = 0`. Pure filter-count, correct. Responder's note that `shipping_fee = 0` naturally **excludes NULLs** (NULL = 0 is unknown, not true) is accurate, and the suggestion to add `OR shipping_fee IS NULL` IF NULL semantically means "no fee charged" is an apt, useful caveat — not over-engineering. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+- trino.io/docs/current(467) functions/aggregate.html documents `count()` with EXACTLY two signatures: `count(*) → bigint` and `count(x) → bigint`. A SINGLE argument. There is **no** multi-argument `count(DISTINCT a, b)` signature.
+- Therefore the responder's Approach-2 expression `COUNT(DISTINCT user_id, date_trunc('week', login_at))` with TWO comma-separated args is a **signature/parse error** in Trino 467 (`Unexpected parameters … Expected: count(), count(t)`). It would NOT run.
+- The documented way to count distinct COMBINATIONS in Trino is to **ROW-wrap**: `COUNT(DISTINCT (user_id, week_start))` (parenthesized tuple → ROW type counted as one composite value). Confirmed via WebSearch (trinodb/trino + querifylabs distinct-aggregation references).
+- SEMANTICS (had the syntax been valid): Approach-2 ratio = total_logins / distinct(user, week) pairs = "avg logins per active user-week" = SAME metric as Approach 1. So it is semantically equivalent — the defect is purely the multi-arg signature, not the math.
 
-**Q3 — distinct promo codes redeemed per campaign — 4.94 CLEAN.**
-`SELECT campaign_id, COUNT(DISTINCT promo_code) FROM redemptions GROUP BY campaign_id`. Exact distinct-count per group, valid in Trino 467. The `approx_distinct(promo_code)` aside with the **~2.3% standard error** note matches the pinned fact (2.3% std error documented for `approx_distinct` ONLY, not approx_percentile) and is correctly framed as an optional big-data speedup, not the default. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.75 (approx aside is a nice-to-have, slightly beyond the asked exact-count). 
+**SCOPE-CHECK: RESPONDER SYNTHESIS SLIP, not a findable resource gap.**
+- Approach 1 (the RECOMMENDED lead) — `WITH lppw AS (SELECT user_id, date_trunc('week', login_at) AS week_start, COUNT(*) AS logins_this_week FROM logins GROUP BY user_id, date_trunc('week', login_at)) SELECT AVG(logins_this_week) FROM lppw` — is **CORRECT** (count per user-week, then AVG). The responder led with the right answer.
+- The broken multi-arg form appears only in a clearly-labeled "shortcut / mathematically equivalent" ALTERNATIVE. This is a synthesis slip in an optional alternative, not a wrong primary answer and not a missing resource. **RE-PROBE, DON'T CHURN.** Do NOT edit resources for this. A teacher edit risks New-Card-Over-Attracts-Adjacent / defang regressions for zero benefit since the lead is correct.
 
-**Q4 — count sessions with >10 page views — 5.00 CLEAN.**
-`SELECT COUNT(*) FROM sessions WHERE page_view_count > 10`. Simple filter-count on a per-session column; strict `>` correctly excludes exactly-10. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+Q2 scored DOWN proportionally (not vetoed): correct recommended form delivered (full credit on the lead), broken "shortcut" alternative drags Accuracy/Actionability. Q2 = 3.50 (Acc 3 / Comp 4 / Clar 4 / Act 3).
 
 ---
 
-## Findings / iter925 directive
+## Per-question scores
 
-**(a) NO DEFECT.** No fabrication, no wrong signature, no crossed-family confusion, no findability slip, no GROUP-BY muddle, no prod-env conflict. Every fn/operator claim verified present + correct-signature in Trino 467. Pure SQL; on-prem Trino 467 + Iceberg + MinIO + HMS + JWT/OPA stack unaffected.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg | Verdict |
+|---|---|---|---|---|---|---|
+| Q1 count products stock < reorder_threshold | 5 | 5 | 5 | 5 | 5.00 | CLEAN |
+| Q2 avg logins per user per week | 3 | 4 | 4 | 3 | 3.50 | DEFECT in Approach-2 shortcut; Approach-1 lead correct |
+| Q3 count orders above store avg | 5 | 5 | 5 | 5 | 5.00 | CLEAN |
+| Q4 count gift-wrap orders | 5 | 5 | 5 | 5 | 5.00 | CLEAN |
 
-**(b) POSITIVE DURABILITY SIGNAL:** The Q1 timestamp-minus-timestamp rationale is not just a correct answer but a correct *explanation of why* — the responder volunteered the verified-true operator-absence fact rather than hand-waving. The earlier-arg-first → positive elapsed convention held.
+**Q1** `SELECT COUNT(*) FROM products WHERE stock_level < reorder_threshold` — column-vs-column comparison in WHERE is valid Trino; count(*) tallies surviving rows. CORRECT.
 
-**(c) iter925 = DEFAULT NO-OP / durability-breadth.** No source-verified findable-but-missing gap and no dialect defect surfaced → declare NO-OP, teacher ZERO edits. Optional fresh adjacents to keep breadth: `date_diff` with hour/second units + rounding-to-minutes, elapsed-time where one bound is `current_timestamp` (watch the verified TIMESTAMP-vs-TIMESTAMP-WITH-TIME-ZONE no-coercion type trap from iter916 — align types via CAST), `COUNT(*) FILTER (WHERE ...)` vs WHERE-then-COUNT, multi-col `COUNT(DISTINCT (a,b))`. **Consider probing FEDERATION next sweep** — it remains the thinnest passing row (4.49944/310) and has not been re-tested in many iterations.
+**Q3** `WITH store_avg AS (SELECT store_id, AVG(order_total) AS avg_order_total FROM orders GROUP BY store_id) SELECT COUNT(*) FROM orders o JOIN store_avg sa ON o.store_id=sa.store_id WHERE o.order_total > sa.avg_order_total` — above-store-average count via CTE-AVG + JOIN + filter. Valid and correct (per-store avg broadcast back via equi-join, strict `>` counts strictly-above orders). CORRECT.
 
-**(d) PRESERVE** full iter534–923 pin inventory. NO federation edits (federation 4.49944/310, UNCHANGED — not probed this iter). DO NOT bump training/state.json (already 924; passed=true preserved).
+**Q4** `count_if(gift_wrap)` / `COUNT(*) … WHERE gift_wrap = true` / `COUNT(*) FILTER (WHERE gift_wrap)` — all three valid in 467. Verified: `count_if(x)` documented ("Returns the number of TRUE input values; equivalent to count(CASE WHEN x THEN 1 END)"); FILTER documented as "supported for all aggregate functions." count_if(bool) is the idiomatic lead. CORRECT.
+
+---
+
+## Defect / scope summary
+
+- **(a) ONE defect:** Q2 Approach-2 multi-arg `COUNT(DISTINCT a, b)` = confirmed Trino 467 syntax error (needs ROW-wrap `COUNT(DISTINCT (a,b))`). Confined to a labeled optional shortcut; Q2's recommended lead (CTE count-per-user-week + AVG) is correct.
+- **(b) SCOPE:** RESPONDER synthesis slip in an optional alternative — NOT a findable resource gap. Re-probe next sweep with a multi-col distinct-count question; do NOT churn resources.
+- **(c) Prod-env:** unaffected — all pure SQL on on-prem Trino 467 + Iceberg + MinIO + HMS + JWT/OPA.
+- **(d) iter925 = DEFAULT NO-OP.** No teacher edits warranted. Optional fresh adjacents next sweep: explicit `COUNT(DISTINCT (a,b))` ROW-wrap distinct-combination count (directly re-probes this slip), AVG-over-CTE rate metrics, count_if vs FILTER vs CASE share. CONSIDER probing FEDERATION (thinnest passing row 4.49944/310, long un-retested). PRESERVE full iter534–924 pin inventory; NO federation edits (federation 4.49944/310, UNCHANGED — not probed).
+
+DO NOT bump training/state.json (already 925; passed=true preserved).
+
+## Sources
+- [Aggregate functions — Trino docs (current / 467)](https://trino.io/docs/current/functions/aggregate.html)
+- [SELECT — Trino docs](https://trino.io/docs/current/sql/select.html)
+- [Distinct aggregation optimization in Trino — Querify Labs](https://www.querifylabs.com/blog/distinct-aggregation-optimization-in-apache-calcite-and-trino)
