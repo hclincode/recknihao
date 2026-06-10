@@ -1,49 +1,77 @@
-# Judge Feedback — Iter 908 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — Iter 909 (EXTENDED PHASE, durability sweep)
 
-**Overall: 4.84 PASS** — per-Q 5.00 / 5.00 / 5.00 / 4.375 = 19.375 / 4 = 4.84 (margin +1.34 over 3.5).
-Overall average governs — no per-Q veto. **NO-OP confirmed: zero defects, zero edits.**
+**Overall: 4.094 PASS** (per-Q 2.75 / 4.5 / 4.125 / 5.00 = 16.375 / 4 = 4.094; margin +0.594; OVERALL AVERAGE governs — no per-Q veto). Federation NOT probed (4.49944/310 row UNCHANGED). **1 confirmed Q1 DIALECT DEFECT (broken GROUP BY, responder synthesis muddle) + 1 Q3 prose-mechanism mischaracterization on otherwise-correct SQL. Both → re-probe-don't-churn (resources correct). Teacher ZERO edits.**
 
-Federation NOT probed (4.49944 / 310 row UNCHANGED — still the only un-passed row).
-
-All four dialect facts VERIFIED vs trino.io/docs/467 (aggregate.html, window.html, select.html, comparison.html, datetime.html) + WebSearch 2026-06-10. PIN 467.
+All facts VERIFIED vs trino.io/docs/467 (aggregate/datetime/select/comparison .html) + Trino 467 git-tag source (DateTimeFunctions.java / Joda DurationField) + WebSearch 2026-06-10. iter882 verify-first applied in BOTH directions (did not bless a doc-wrong claim, did not flag a doc-correct one).
 
 ---
 
-## Q1 — cheapest + most expensive order per region, same row → 5.00
-`SELECT region, MIN(order_value) AS cheapest_order, MAX(order_value) AS most_expensive_order FROM orders GROUP BY region`
+## Q1 — top-10 customers' revenue as % of total (one number) — 2.75 (DEFECT, partial credit)
 
-CORRECT. VERIFIED aggregate.html: multiple aggregate functions (MIN and MAX) in a single GROUP BY query are valid and computed in a **single pass / single scan** over the grouped data — no self-join, no two-query UNION needed. Two aggregates land on the **same output row per region** exactly as asked. The "one query, two aggregates, no join" framing is accurate and the most efficient form. Acc 5 / Comp 5 / Clar 5 / Act 5.
+**VERDICT: BROKEN as written — CONFIRMED on BOTH counts.** The query:
+```
+SELECT ROUND(100.0 * SUM(CASE WHEN customer_rank <= 10 THEN order_value ELSE 0 END) / SUM(order_value), 2) AS top_10_revenue_pct
+FROM (SELECT customer_id, order_value, ROW_NUMBER() OVER (ORDER BY SUM(order_value) DESC) AS customer_rank
+      FROM orders GROUP BY customer_id)
+GROUP BY 1
+```
+**(a) INNER query INVALID.** `SELECT customer_id, order_value, ROW_NUMBER() OVER (ORDER BY SUM(order_value) DESC) ... FROM orders GROUP BY customer_id`: the bare `order_value` in the SELECT list is NEITHER in GROUP BY NOR wrapped in an aggregate → Trino 467 rejects with `'order_value' must be an aggregate expression or appear in GROUP BY clause` (VERIFIED select.html GROUP-BY-output rule, pinned across 13 resource files). The `ROW_NUMBER() OVER (ORDER BY SUM(order_value) DESC)` part is itself fine (SUM is an aggregate, legal in a windowed ORDER BY over a grouped set) — the defect is the bare `order_value` projection.
 
-## Q2 — count of a customer's orders above that customer's own average → 5.00 (WINDOW FUNCTION USED CORRECTLY)
-`SELECT COUNT(*) AS orders_above_customer_average FROM (SELECT customer_id, order_value, AVG(order_value) OVER (PARTITION BY customer_id) AS customer_avg FROM orders) WHERE order_value > customer_avg`
+**(b) OUTER `GROUP BY 1` INVALID.** `GROUP BY 1` groups by the first output column, which is the `ROUND(...)` aggregate expression — grouping by an aggregate is rejected. The outer query is a single scalar aggregate and needs NO GROUP BY at all.
 
-CORRECT — **clean, canonical window-function pattern.** VERIFIED window.html: `AVG(order_value) OVER (PARTITION BY customer_id)` materializes the per-customer average onto every row in the inner subquery; the outer `WHERE order_value > customer_avg` filters on `customer_avg`, which is a **REAL materialized subquery column**, NOT a window function in WHERE. This is the textbook "compute window value in subquery, filter in outer query" rewrite (Trino has no QUALIFY). `COUNT(*)` then counts the surviving rows = orders above their own customer's average. Semantics exactly correct.
+**Correct form** (intent is right — rank customers by total spend, take top-10 share):
+```
+SELECT ROUND(100.0 * SUM(CASE WHEN customer_rank <= 10 THEN total_spend ELSE 0 END) / SUM(total_spend), 2) AS top_10_revenue_pct
+FROM (SELECT customer_id, SUM(order_value) AS total_spend,
+             ROW_NUMBER() OVER (ORDER BY SUM(order_value) DESC) AS customer_rank
+      FROM orders GROUP BY customer_id)
+```
+(inner aggregates `order_value` into `total_spend`; outer has no GROUP BY).
 
-**EXPLICIT NOTE: the iter904/906 over-reach pattern did NOT appear.** This is the *correct* use of a window function — there is NO window-fn-in-WHERE (the iter904 Q1 slip) and NO window-over-grouped-column muddle (the iter906 Q2 slip). The responder produced the clean subquery+outer-filter form with no broken lead query. Acc 5 / Comp 5 / Clar 5 / Act 5.
+**Score:** Acc 2.0 (unrunnable, two errors) / Comp 3.5 (approach delivered, intent correct) / Clar 3.0 / Act 2.5 (non-expert copies → analyzer error) = **2.75**. Partial credit not zero — the ranking approach is sound.
 
-## Q3 — average basket size (avg distinct products per order) → 5.00
-`SELECT AVG(product_count) AS avg_basket_size FROM (SELECT order_id, COUNT(DISTINCT product_id) AS product_count FROM line_items GROUP BY order_id)`
-
-CORRECT. VERIFIED aggregate.html: two-level aggregation is valid — inner `COUNT(DISTINCT product_id) GROUP BY order_id` gives the distinct-product count per order; outer `AVG(product_count)` averages those counts. `AVG` over an integer count returns a **double** in Trino (documented integer→double promotion for AVG), so fractional basket sizes (e.g. 2.7) are preserved — correct for an "average basket size" metric. DISTINCT correctly de-dupes the same product appearing on multiple line items within one order. Acc 5 / Comp 5 / Clar 5 / Act 5.
-
-## Q4 — count orders placed on a holiday date → 4.375 (Comp 3.5)
-`SELECT COUNT(DISTINCT o.order_id) AS orders_on_holidays FROM orders o INNER JOIN holidays h ON o.order_date = h.holiday_date`
-
-CORRECT & RUNS. VERIFIED select.html + comparison.html: INNER JOIN on date equality is valid; `COUNT(DISTINCT o.order_id)` correctly guards against an order being counted multiple times if the holidays table has duplicate rows for a date. Semantics right — only orders whose date matches a holiday survive the inner join.
-
-**Deduction = COMPLETENESS NUANCE, NOT an accuracy defect.** If `order_date` is a **timestamp** (time-of-day component) and `holiday_date` is a **date**, the equality `o.order_date = h.holiday_date` will almost never match: Trino implicitly casts the DATE to a timestamp at **midnight** (zero time), so only orders placed at exactly 00:00:00 join (VERIFIED issue #12729 / comparison coercion behavior). The robust form is `ON CAST(o.order_date AS date) = h.holiday_date` (or `date_trunc('day', o.order_date)`). The answer is fully correct when both columns are date-typed, but did not flag the timestamp-vs-date matching caveat that a SaaS engineer with a timestamped `order_date` would hit. Acc 5 / Comp 3.5 / Clar 4.5 / Act 4.5 = 4.375.
+**SCOPE CHECK → RESPONDER SYNTHESIS MUDDLE, NOT a resource gap.** The GROUP-BY-output rule ("must be aggregate or in GROUP BY") is taught in 13 resource files; rank-by-aggregate + top-N-share patterns are pinned in r07/r23/r27 (183 occurrences of ROW_NUMBER/top-N/rank). The responder simply forgot to aggregate `order_value` in the inner query and bolted on a needless `GROUP BY 1`. A FIX-A "wrong card" would duplicate existing pins and risk defang-backfire. **NO resource edit. Re-probe "top-N entities' share of a total (rank by an aggregate, take share)" with fresh phrasing next sweep to confirm one-off.**
 
 ---
 
-## Verdict: NO-OP — teacher ZERO edits
+## Q2 — per-order yes/no whether EVERY line item shipped — 4.5
 
-- All 4 queries are dialect-clean and semantically correct for Trino 467.
-- **Q2 confirms the window-function-in-subquery + outer-filter pattern is internalized correctly** — the iter904 (window-fn-in-WHERE) and iter906 (window-over-grouped-column) one-off slips did NOT recur. No findability anchor / no "wrong" card needed for those (would risk defang-backfire + duplicate the existing window-eval-order / GROUP-BY-output pins).
-- No genuine findable-but-missing gap rose to FIX-A. The Q4 timestamp-vs-date JOIN coercion caveat is a real-world nuance but is a **completeness nuance, not a dialect defect** and not worth a card (the answer is correct as written for date-typed columns; a CAST(... AS date) tip would be the only optional micro-addition, and only if it touches NO existing date/JOIN pin — **SKIP**, churn risk).
+**VERDICT: min(boolean) IS VALID — answer CORRECT (if non-idiomatic). bool_and/every is the cleaner idiom (completeness nuance, NOT a defect).** `CASE WHEN MIN(shipped) = true THEN 'yes' ELSE 'no' END ... GROUP BY order_id`: VERIFIED aggregate.html + WebSearch 2026-06-10 — boolean IS orderable in Trino 467 (`TRUE > FALSE`), so `min(shipped)` is accepted and returns `false` iff any input is false, else `true`. The responder's logic is exactly right.
 
-### Directives for iter909
-- **DEFAULT NO-OP.** Do NOT add any "wrong" card for Q1–Q4 (all correct). Do NOT mark Q1 multi-aggregate-one-GROUP-BY, Q2 window-in-subquery+outer-filter, Q3 two-level AVG-of-COUNT(DISTINCT), or Q4 INNER-JOIN-on-date+COUNT(DISTINCT) wrong.
-- OPTIONAL micro-anchor ONLY if it touches NO existing pin: a 1-line "joining a TIMESTAMP order_date to a DATE holiday_date needs `CAST(order_date AS date)` (raw `=` only matches midnight)" near a date-comparison/JOIN card — **SKIP if it churns or duplicates any date-coercion / JOIN-key pin** (Q4 is correct as-is for date columns).
-- Re-probe fresh adjacents next sweep. Federation (4.49944 / 310) is the only un-passed row — bulletproofed angles only.
-- Do NOT touch any iter534–907 pin. PIN 467. NO federation edits.
-- **DO NOT bump training/state.json** (already passed; overall 4.84 PASS holds).
+**Completeness nuance (the deduction):** Trino 467 has the purpose-built `bool_and(shipped)` (returns true iff every input true) and its alias `every(shipped)` — the idiomatic "all shipped" test (VERIFIED aggregate.html). `CASE WHEN bool_and(shipped) THEN 'yes' ELSE 'no' END` is the cleaner one-liner. The responder's min(boolean) form is fully correct but did not mention the idiom.
+
+Edge nuances correctly implicit: LEFT-JOIN variant → order with zero line items → MIN(NULL)=NULL → 'no'; a line item with shipped=NULL is skipped by MIN (minor, not scored as a defect).
+
+**Score:** Acc 5.0 (min(boolean) valid + correct) / Comp 4.0 (missed bool_and/every idiom) / Clar 4.5 / Act 4.5 = **4.5**.
+
+---
+
+## Q3 — whole hours between placed_at and shipped_at (2h45m → 2) — 4.125
+
+**VERDICT: SQL `date_diff('hour', placed_at, shipped_at)` is CORRECT for the question's "whole duration hours" intent — Trino 467 uses TRUNCATED-ELAPSED (interpretation A), NOT boundary-crossing.** VERIFIED via Trino 467 git-tag DateTimeFunctions.java (date_diff delegates to Joda field difference) + Joda DurationField.getDifferenceAsLong: for FIXED-duration fields (hour/minute/second) the difference is integer division of the millisecond delta by the unit's fixed duration with fractional units DROPPED (truncated toward zero). So a 2h45m gap ALWAYS = 2 regardless of minute alignment — exactly the question's "2h45m → 2" requirement. (Calendar-boundary semantics apply only to VARIABLE-duration fields month/year per pinned reference_trino_datediff_dayaware; hour is fixed-duration = pure elapsed division.) Docs example `date_diff('hour', '2020-03-01 00:00', '2020-03-02 00:00') = 24` is consistent.
+
+**Accuracy/clarity nuance (the deduction):** the responder's PROSE — "returns the number of complete hour boundaries crossed" and the "2:15 PM to 5:45 PM returns 3" gloss — MISCHARACTERIZES the mechanism. The actual mechanism is truncated elapsed (floor of total seconds / 3600), NOT field-boundary counting. (The 2:15→5:45 number, 3, happens to be right because that gap is 3h30m → floor = 3 — coincidence of magnitude, not vindication of the "boundaries crossed" model. The "boundaries crossed" framing would give a WRONG mental model for a 2h45m gap aligned across an hour boundary.) The SQL is right; the explanation of WHY is wrong.
+
+**Score:** Acc 4.0 (correct SQL, wrong mechanism prose) / Comp 4.5 / Clar 3.5 (mischaracterized mechanism could mislead) / Act 4.5 = **4.125**.
+
+**SCOPE CHECK → re-probe-don't-churn.** date_diff truncated-elapsed/day-aware semantics are pinned (reference_trino_datediff_dayaware). This is a responder prose slip on correct SQL, not a resource gap. NO edit. Optionally, if it touches NO pin, a 1-line "date_diff('hour') = truncated elapsed (floor seconds/3600), NOT hour-boundary count" near a date_diff card — SKIP if it churns the day-aware pin.
+
+---
+
+## Q4 — repeat-purchase flag (1st order 'no', 2nd+ 'yes') — 5.00
+
+**VERDICT: CLEAN & CORRECT.** `SELECT order_id, customer_id, order_date, CASE WHEN ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date) = 1 THEN 'no' ELSE 'yes' END AS is_repeat_purchase FROM orders`: VERIFIED select.html + window.html — a window function in a CASE in the SELECT list is legal (windows evaluate in SELECT/ORDER BY context); ROW_NUMBER PARTITION BY customer_id ORDER BY order_date assigns 1 to each customer's earliest order → 'no', 2+ → 'yes'. Correctly flags first vs repeat. No window-fn-in-WHERE, no GROUP-BY muddle.
+
+**Score:** Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = **5.00**.
+
+---
+
+## Directive for iter910
+
+- **DEFAULT NO-OP / re-probe-don't-churn. Teacher ZERO edits.** Both issues are responder slips on top of correct, well-taught resources:
+  - Q1 broken GROUP BY = synthesis muddle (forgot to aggregate inner `order_value`, added needless `GROUP BY 1`); GROUP-BY-output rule + rank-by-aggregate/top-N-share patterns already pinned across 13 files + r07/r23/r27. **Do NOT add a "wrong" card** (duplicates pins, defang-backfire risk).
+  - Q3 = correct SQL with wrong mechanism prose; date_diff truncated-elapsed is pinned. **Do NOT churn the date_diff day-aware pin.**
+- **Do NOT mark wrong:** Q2 min(boolean) (VALID), Q3 date_diff('hour') SQL (CORRECT — truncated elapsed), Q4 ROW_NUMBER-in-CASE (CORRECT). Q1's APPROACH (rank by total spend, top-10 share) is correct — only the SQL execution is broken.
+- **Re-probe next sweep (fresh adjacents):** (1) "top-N entities' share of a total" to confirm the responder reaches the aggregate-in-inner + no-outer-GROUP-BY form (Q1 one-off check); (2) "all/every X true" to confirm bool_and/every idiom uptake; (3) a date_diff('hour') minute-misaligned case to confirm truncated-elapsed prose.
+- Federation (4.49944/310) remains the only un-passed row — bulletproofed angles only.
+- Do NOT touch any iter534–908 pin. PIN Trino 467. NO federation edits. **DO NOT bump training/state.json** (already passed; overall 4.094 PASS holds).
