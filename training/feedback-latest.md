@@ -1,43 +1,52 @@
-# Judge Feedback — iter902 (NO-OP durability sweep)
+# Judge Feedback — iter903 (NO-OP durability sweep)
 
-**Verdict: 5.00 STRONG PASS overall** (per-Q 5.00 / 5.00 / 5.00 / 5.00 = 20.00 / 4 = 5.00; margin +1.50; overall average governs, no per-Q veto).
-**Federation NOT probed** — the 4.49944/310 federation row is UNCHANGED this iteration.
-All 4 answers dialect-clean and doc-verified → **iter903 = DEFAULT NO-OP**.
+**Overall: 5.00 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 5.00 = 20.00 / 4 = 5.00; margin +1.50 over the 3.5 bar). Overall average governs — no per-Q veto. **DEFAULT NO-OP for iter904 — teacher makes ZERO edits.** Do NOT bump `training/state.json` (already passed).
 
-## Two existence-check verdicts (verified BEFORE judging, iter882 verify-first)
+Federation (4.49944/310) was NOT probed this sweep — that row is UNCHANGED and remains the only un-passed topic.
 
-1. **json_array_length EXISTS in Trino 467 — VERDICT: YES.** Verified vs trino.io/docs/467/functions/json.html: `json_array_length(json) -> bigint` — "Returns the array length of json (a string containing a JSON array)"; doc example `SELECT json_array_length('[1, 2, 3]'); -- 3`. It accepts a JSON-array STRING (the `cart` column case). The nested form `json_array_length(json_extract(cart,'$.items'))` is valid because `json_extract` returns a JSON value that `json_array_length` accepts. **Q1 is correct.** (Aside: for a NATIVE Iceberg `ARRAY` column you would use `cardinality()`; the responder correctly treated `cart` as a JSON string and used `json_array_length` — right call.)
+---
 
-2. **left()/right() EXIST in Trino 467 — VERDICT: NO, they do NOT exist.** Verified vs trino.io/docs/467/functions/string.html + WebSearch of the 467 string-function list: Trino 467 has `substring`/`substr` and `upper` but NO `left(string,n)` / `right(string,n)` convenience functions (those are MySQL/SQL-Server/Spark). So the responder's parenthetical aside in Q3 ("Trino does not have a LEFT() function — use SUBSTRING(col,1,N)") is **CORRECT — a bonus accuracy point, NOT an inaccuracy.**
+## Q1 BACKSLASH VERDICT — THE RUN-PROMPT PREMISE IS REFUTED; `'\\s+'` IS CORRECT, NOT OVER-ESCAPED
 
-## Per-question scoring (Accuracy / Completeness / Clarity / Actionability)
+The directive asked me to confirm that the secondary query's DOUBLE-backslash `regexp_replace(feedback, '\\s+', ' ')` is over-escaped/wrong and that the single-backslash `'\s+'` is the correct Trino form. **Verified against source first (iter882 discipline) — and the premise is the OPPOSITE of the truth:**
 
-**Q1 — count items in a JSON array column — 5/5/5/5 (5.00).**
-`json_array_length(cart) AS num_items` for `cart = ["prod_1","prod_2","prod_3"]`, plus nested `json_array_length(json_extract(cart,'$.items'))`. VERIFIED correct (see existence verdict 1). Treats the column as a JSON string (correct) and offers the nested path-extract form for arrays buried under a key. Clean, complete, directly usable.
+- The OFFICIAL Trino 467 `regexp.html` examples consistently use **DOUBLE backslash** for regex metacharacters and they WORK:
+  - `regexp_replace('1a 2b 14m', '\\d+[ab] ')` → `'14m'`
+  - `regexp_like('1a 2b 14m', '\\d+b')` → `true`
+  - `regexp_replace('new york', '(\\w)(\\w*)', x -> upper(x[1]) || lower(x[2]))` → `'New York'`
+- Multiple authoritative sources agree on the double-backslash convention: Trino current docs, the cited GitHub discussions (#17673 / #17474), and the Medium "Comprehensive Guide to Regular Expressions in Trino" (which uses `'\\d+'` and `'\\bworld\\b'`).
+- Yes — Trino SQL string literals do not process backslash *as a SQL escape* (only single-quote-doubling escapes a quote). But the documented, working convention for regex metacharacters in Trino is nonetheless **double backslash** `'\\d'` / `'\\s'` / `'\\w'`, exactly as the responder wrote.
 
-**Q2 — sum margins per product treating negatives as zero, no pre-filter — 5/5/5/5 (5.00).**
-`SUM(GREATEST(unit_margin, 0)) ... GROUP BY product_id` floors each value at 0 before summing (no WHERE pre-filter needed) — correct. The responder's WARNING that **GREATEST returns NULL if ANY argument is NULL** in Trino 467 is VERIFIED CORRECT vs comparison.html ("Like most other functions in Trino, they return null if any argument is null" — NOT the Postgres skip-NULL rule), and the fix `SUM(GREATEST(COALESCE(unit_margin,0),0))` is the right guard. A strong, complete answer that anticipates a real footgun. (SUM itself skips NULL rows, so without the COALESCE a NULL `unit_margin` would propagate through GREATEST to NULL and drop that row from the sum; the COALESCE makes the floor-at-zero apply even to NULL inputs, matching the "treat negatives as zero" intent.)
+**Conclusion: the responder's `'\\s+'` matches the official 467 documented form. It is NOT over-escaped, it is NOT a defect, and there is NO Accuracy deduction.** The run-prompt's framing (and its "iter894 single-backslash was correct" contrast) is contradicted by the 467 docs.
 
-**Q3 — first character uppercased, one expression — 5/5/5/5 (5.00).**
-`UPPER(SUBSTRING(company_name, 1, 1)) AS first_letter` — core answer correct and idiomatic. The aside "Trino does not have a LEFT() function — use SUBSTRING(col,1,N)" is CORRECT (existence verdict 2), adding accurate dialect-portability value rather than introducing an error.
+**SCOPE-CHECK consequence:** Because there is no Q1 defect, there is NO escalation, NO iter904 re-probe on backslash form, and NO FIX-A. Critically — **do NOT "correct" any resource toward the single-backslash `'\s+'` form.** Doing so would push resources AWAY from the official Trino 467 double-backslash convention and could introduce a real defect. Leave the regexp_replace collapse-whitespace canonical untouched.
 
-**Q4 — % of rows where notes is NULL or '' (blank) — 5/5/5/5 (5.00).**
-`SUM(CASE WHEN notes IS NULL OR notes = '' THEN 1 ELSE 0 END)` with `100.0 * ... / COUNT(*)` correctly counts both NULL and empty-string as blank, and the `100.0 *` DECIMAL literal forces non-integer division (avoids the integer-truncate-to-0 trap) — valid in 467. The alternative `COUNT(CASE WHEN notes IS NULL OR notes='' THEN 1 END)` two-column form is also correct (COUNT ignores the NULL ELSE branch, counting only matching rows). Both forms valid and complete.
+(This is exactly the iter882 trap: a doc-CORRECT responder claim must not be flagged as a defect just because a directive suspected it. Verify-first paid off.)
 
-## Defect / gap scan
+---
 
-**NO genuine findable-but-missing gap and NO dialect defect surfaced.** All four answers are doc-verified correct against trino.io/docs/467 (json/string/comparison .html) + the 467 function list. Both existence claims (json_array_length present, left()/right() absent) are TRUE in 467 — do NOT flag either as wrong in EITHER direction.
+## Per-question verdicts (all VERIFIED vs trino.io/docs/467)
 
-## Directive for iter903 (teacher)
+- **Q1 — count words (5.00).** PRIMARY `cardinality(split(trim(feedback), ' ')) AS word_count` — split → array, cardinality → length; trim() strips leading/trailing whitespace first. Valid (string.html `split`, array.html `cardinality`). SECONDARY multi-space-collapse variant with `'\\s+'` — correct double-backslash form (see verdict above).
+- **Q2 — status_code → label (5.00).** Simple-CASE form `CASE status_code WHEN 1 THEN ... ELSE 'Unknown' END` confirmed valid (conditional.html). GROUP BY `status_label` on a subquery-wrapped CASE is legal — it groups on a REAL materialized outer-query column, not a same-level SELECT alias.
+- **Q3 — active in BOTH Jan AND Feb (5.00).** `WHERE order_date >= DATE '2026-01-01' AND order_date < DATE '2026-03-01' GROUP BY customer_id HAVING COUNT(DISTINCT date_trunc('month', order_date)) = 2`. date_trunc('month',...) → first-of-month midnight; half-open range confines to Jan+Feb only; `= 2` distinct months ⇒ rows in BOTH months. Logic and dialect both sound.
+- **Q4 — purely alphabetic (5.00).** `regexp_like(code, '^[A-Za-z]+$')` returns boolean; anchored `^...$` and the inline `(?i)` case-insensitive flag are both documented/supported. Used the correct Trino FUNCTION — no Postgres `~`-operator regression.
 
-**iter903 = DEFAULT NO-OP — teacher ZERO edits.**
+---
+
+## Instructions for the teacher (iter904)
+
+- **DEFAULT NO-OP. Make zero resource edits.**
 - Do NOT add any "wrong" card for Q1–Q4.
-- Do NOT mark `json_array_length(cart)` / the nested `json_array_length(json_extract(...))` form wrong (correct).
-- Do NOT mark the Q2 GREATEST-returns-NULL-if-any-arg-NULL warning or the `SUM(GREATEST(COALESCE(unit_margin,0),0))` fix wrong (correct).
-- Do NOT mark the Q3 "Trino has no LEFT()" aside wrong (correct — 467 truly lacks left()/right()).
-- Do NOT churn the json_array_length, GREATEST-NULL/COALESCE, SUBSTRING-first-char, or CASE-blank-percent cards.
-- Re-probe fresh adjacents next sweep. **Federation (4.49944/310) is the only un-passed row** — probe ONLY bulletproofed federation angles.
-- Do NOT touch any iter534–901 pin. PIN Trino 467. NO federation edits.
-- **DO NOT bump training/state.json** (already passed; overall 5.00 PASS holds).
+- Do NOT mark the `'\\s+'` double-backslash regexp_replace form wrong — it is the official 467 form.
+- Do NOT migrate any resource to single-backslash `'\s+'`.
+- Do NOT churn the split/cardinality word-count, regexp_replace collapse-whitespace, simple-CASE status-label, date_trunc/COUNT(DISTINCT) both-months, or regexp_like alphabetic-check cards.
+- Re-probe fresh adjacents next sweep. Federation (4.49944/310) is the only un-passed row — probe only bulletproofed angles there.
+- Do NOT touch any iter534–902 pin. PIN Trino 467. NO federation edits. DO NOT bump `training/state.json`.
 
-All facts VERIFIED vs trino.io/docs/467 (json/string/comparison .html) + 467 function list via WebFetch/WebSearch 2026-06-10.
+Sources:
+- [Trino 467 regexp functions](https://trino.io/docs/467/functions/regexp.html)
+- [Trino 467 conditional expressions](https://trino.io/docs/467/functions/conditional.html)
+- [Trino 467 date/time functions](https://trino.io/docs/467/functions/datetime.html)
+- [Trino data types / string literals](https://trino.io/docs/467/language/types.html)
+- [Trino discussion #17673 — backslash handling in string literals](https://github.com/trinodb/trino/discussions/17673)
