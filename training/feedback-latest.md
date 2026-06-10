@@ -1,42 +1,51 @@
-# Judge Feedback — iter923 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — iter924 (EXTENDED PHASE, NO-OP durability sweep)
 
-**Overall: 4.969 PASS** (per-Q 5.00 / 5.00 / 4.875 / 5.00 = 19.875 / 4 = 4.969; margin +1.469; overall average governs — no per-Q veto). All 4 answers dialect-verified clean against Trino 467. **DEFAULT NO-OP — teacher ZERO edits. DO NOT touch training/state.json (already passed).** FEDERATION NOT PROBED (4.49944/310 row UNCHANGED — still the only un-passed row).
-
----
-
-## Per-question scoring
-
-### Q1 — average items per order — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
-`SELECT AVG(items_per_order) FROM (SELECT order_id, COUNT(*) AS items_per_order FROM order_items GROUP BY order_id)`. Two-level aggregation CORRECT: inner GROUP BY order_id COUNT(*) yields one per-order line-count row, outer AVG averages those per-order counts. VERIFIED select.html GROUP BY + aggregate.html AVG/COUNT(*). The shape is right — averaging the inner per-group counts answers "average items PER ORDER" (not items/total-orders done as one flat aggregate). avg() returns double, ignores NULLs (no NULLs here since COUNT(*) per group is always ≥1). FROM-subquery alias optional per pin. CORRECT.
-
-### Q2 — count of reviews per star rating — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
-`SELECT star_rating, COUNT(*) FROM reviews GROUP BY star_rating` (+ `histogram(star_rating)` map alternative). BOTH forms valid. VERIFIED aggregate.html: **histogram() IS a built-in Trino 467 aggregate** — "Returns a map containing the count of the number of times each input value occurs," return type `map<K,bigint>` (value→count). GROUP BY + COUNT(*) is the canonical row-per-rating form; histogram() collapses the same answer into a single map row. CORRECT.
-
-### Q3 — total tax per state, decimal-summing gotchas — 4.875 (Acc 4.75 / Comp 5 / Clar 4.75 / Act 5)
-`SELECT state, SUM(shipping_tax) FROM ... GROUP BY state`. **Q3 DECIMAL-SUM VERDICT (all three claims source-verified):**
-
-- **(a) `SUM(DECIMAL(10,2))` → `DECIMAL(38,2)` widening — CORRECT.** VERIFIED via Trino 467 source `DecimalSumAggregation.java`: `@OutputFunction("decimal(38,s)")` — sum over a DECIMAL(p,s) input returns DECIMAL(38, s): precision widened to the max (38), input **scale preserved**. Matches the documented signature `sum(decimal(p,s)) returns decimal(38,s)`. The responder's claim is exactly right.
-- **(b) Overflow RAISES (not silent wrap/truncate) — CORRECT.** VERIFIED `DecimalSumAggregation.java` throws `TrinoException` with error code **`NUMERIC_VALUE_OUT_OF_RANGE`** (message "Decimal overflow") on two checks (`state.getOverflow() != 0` and `Decimals.overflows(rawHigh, rawLow)`). Trino fails fast — it does NOT silently wrap around or truncate. The responder's claim is exactly right and the named error code is correct (cf. Trino issue #20227 documents this overflow-on-decimal-sum behavior).
-- **(c) "NULLs — SUM treats as zero and skips" — TINY WORDING IMPRECISION, NOT a defect.** VERIFIED aggregate.html: SUM **ignores** NULL inputs (a NULL does not contribute), and an **all-NULL group returns NULL, not 0**. So "treats as zero" is slightly imprecise phrasing — the precise statement is "SUM ignores NULLs (doesn't add them); all-NULL group → NULL." The practical effect the responder conveys (NULLs don't contribute to the sum) is correct, so this is a small clarity/accuracy ding (Acc 4.75 / Clar 4.75), NOT a flagged dialect defect. Claims (a)+(b) are substantive and fully correct, making this a strong answer.
-
-### Q4 — count orders per payment type — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
-`SELECT payment_type, COUNT(*) FROM orders GROUP BY payment_type` (+ `histogram(payment_type)` map form). Same verified histogram() map<K,bigint> form as Q2; both valid. VERIFIED aggregate.html. CORRECT.
+**Overall: 4.985 PASS** (per-Q 5.00 / 5.00 / 4.94 / 5.00 = 19.94 / 4 = 4.985; margin +1.485; OVERALL AVERAGE governs — no per-Q veto). All 4 answers dialect-verified clean against Trino 467. **DEFAULT NO-OP — teacher ZERO edits recommended. DO NOT touch training/state.json (already passed).** FEDERATION NOT PROBED (4.49944/310 row UNCHANGED — still the only thin/under-probed row).
 
 ---
 
-## Verification trail
-All facts VERIFIED vs trino.io/docs/467 (functions/aggregate.html, language/types.html) + **Trino git-tag 467 source `DecimalSumAggregation.java`** + WebSearch (decimal sum signature/overflow, issue #20227) + WebFetch 2026-06-10. iter882 verify-first applied BOTH directions:
-- histogram() built-in returning map<K,bigint> → CONFIRMED ⇒ Q2/Q4 NOT flagged.
-- AVG-over-per-group-COUNT-subquery valid two-level aggregation → CONFIRMED ⇒ Q1 NOT flagged.
-- SUM(DECIMAL(p,s)) → DECIMAL(38,s) widening + overflow-raises-NUMERIC_VALUE_OUT_OF_RANGE → CONFIRMED from source ⇒ Q3 (a)+(b) NOT flagged (source-CORRECT, not blessed-wrong).
-- SUM ignores NULLs / all-NULL→NULL not zero → CONFIRMED ⇒ Q3(c) noted as tiny wording imprecision only, NOT escalated to defect.
-- No doc-CORRECT claim flagged; no doc-WRONG claim blessed.
+## VERIFIED DIALECT VERDICT — timestamp MINUS timestamp (Q1, both directions)
 
-## Disposition — iter923 = DEFAULT NO-OP
-All 4 dialect-clean; the lone Q3(c) "treats as zero" phrasing is a tiny wording imprecision on an otherwise strong, source-verified decimal answer (the substantive (a) widening + (b) overflow-raises claims are both correct). This is NOT a findable resource gap and NOT a dialect defect — **no FIX-A, no "wrong" card, no escalation.** Teacher writes ZERO edits.
+**TRUTH (verified vs trino.io/docs/467 functions/datetime.html "Date and time operators" section via WebFetch, 2026-06-10, PINNED Trino 467):**
 
-Do NOT mark wrong: Q1 AVG-over-per-order-COUNT-subquery, Q2 GROUP-BY-star_rating-COUNT + histogram-map, Q3 SUM-decimal→DECIMAL(38,s)/overflow-raises/NULLs-skipped, or Q4 GROUP-BY-payment_type-COUNT + histogram-map (all correct).
+Trino 467 does **NOT** support `timestamp - timestamp` (subtracting one timestamp from another). The documented arithmetic operators are:
+- Addition (`+`): `date + interval`, `time + interval`, `timestamp + interval`, `interval + interval`
+- Subtraction (`-`): `date - interval`, `time - interval`, `timestamp - interval`, `interval - interval`
 
-OPTIONAL future re-probe (NO pin touch, SKIP if duplicative): a question whose phrasing could tempt "SUM returns 0 for an all-NULL/empty group" to confirm the responder states NULL-not-zero precisely. Low priority — the practical guidance was already right.
+The minus operator works ONLY for subtracting an **interval** from a date/time/timestamp (or interval − interval). There is **no** `timestamp − timestamp → interval` overload. The dedicated way to get elapsed time between two timestamps is `date_diff(unit, ts1, ts2)`, which returns a truncated whole-unit **bigint** (`ts2 − ts1` expressed in `unit`), NOT an interval.
 
-Federation (4.49944/310) is the only un-passed row — probe only bulletproofed angles. Do NOT touch any iter534-922 pin. PIN Trino 467. NO federation edits. DO NOT bump training/state.json (already passed; overall 4.969 PASS holds).
+**→ The responder's Q1 claim ("Trino has NO `timestamp - timestamp` operator — date_diff is the way to compute elapsed time") is CORRECT.** This is a verified-true rationale, scored as a BONUS, NOT a minor inaccuracy. The date_diff('minute', opened_at, first_response_at) answer is correct and the supporting reasoning is also correct.
+
+Secondary Q1 confirmations (all verified):
+- `date_diff('minute', earlier, later)` returns whole-minute **truncated** elapsed time as bigint (drops fractional minutes — day-aware/complete-units, consistent with pinned date_diff behavior). Confirmed.
+- Arg order `(opened_at, first_response_at)` = `(earlier, later)` yields a **positive** value. Confirmed (returns ts2 − ts1).
+- `AVG(...)` over the per-ticket minute values = correct mean response time per agent. Confirmed.
+- `WHERE first_response_at IS NOT NULL` correctly excludes un-responded tickets from both numerator and denominator. Confirmed.
+
+---
+
+## Per-question
+
+**Q1 — avg ticket response time (minutes) per agent — 5.00 CLEAN.**
+`SELECT agent_id, AVG(date_diff('minute', opened_at, first_response_at)) ... WHERE first_response_at IS NOT NULL GROUP BY agent_id`. Correct fn, correct arg order (positive), correct AVG-over-per-ticket-minutes shape, correct NULL filter. The "no timestamp−timestamp operator, date_diff required" rationale is VERIFIED TRUE (bonus, see verdict above). Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+
+**Q2 — count free-shipping orders — 5.00 CLEAN.**
+`SELECT COUNT(*) FROM orders WHERE shipping_fee = 0`. Pure filter-count, correct. Responder's note that `shipping_fee = 0` naturally **excludes NULLs** (NULL = 0 is unknown, not true) is accurate, and the suggestion to add `OR shipping_fee IS NULL` IF NULL semantically means "no fee charged" is an apt, useful caveat — not over-engineering. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+
+**Q3 — distinct promo codes redeemed per campaign — 4.94 CLEAN.**
+`SELECT campaign_id, COUNT(DISTINCT promo_code) FROM redemptions GROUP BY campaign_id`. Exact distinct-count per group, valid in Trino 467. The `approx_distinct(promo_code)` aside with the **~2.3% standard error** note matches the pinned fact (2.3% std error documented for `approx_distinct` ONLY, not approx_percentile) and is correctly framed as an optional big-data speedup, not the default. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.75 (approx aside is a nice-to-have, slightly beyond the asked exact-count). 
+
+**Q4 — count sessions with >10 page views — 5.00 CLEAN.**
+`SELECT COUNT(*) FROM sessions WHERE page_view_count > 10`. Simple filter-count on a per-session column; strict `>` correctly excludes exactly-10. Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5.
+
+---
+
+## Findings / iter925 directive
+
+**(a) NO DEFECT.** No fabrication, no wrong signature, no crossed-family confusion, no findability slip, no GROUP-BY muddle, no prod-env conflict. Every fn/operator claim verified present + correct-signature in Trino 467. Pure SQL; on-prem Trino 467 + Iceberg + MinIO + HMS + JWT/OPA stack unaffected.
+
+**(b) POSITIVE DURABILITY SIGNAL:** The Q1 timestamp-minus-timestamp rationale is not just a correct answer but a correct *explanation of why* — the responder volunteered the verified-true operator-absence fact rather than hand-waving. The earlier-arg-first → positive elapsed convention held.
+
+**(c) iter925 = DEFAULT NO-OP / durability-breadth.** No source-verified findable-but-missing gap and no dialect defect surfaced → declare NO-OP, teacher ZERO edits. Optional fresh adjacents to keep breadth: `date_diff` with hour/second units + rounding-to-minutes, elapsed-time where one bound is `current_timestamp` (watch the verified TIMESTAMP-vs-TIMESTAMP-WITH-TIME-ZONE no-coercion type trap from iter916 — align types via CAST), `COUNT(*) FILTER (WHERE ...)` vs WHERE-then-COUNT, multi-col `COUNT(DISTINCT (a,b))`. **Consider probing FEDERATION next sweep** — it remains the thinnest passing row (4.49944/310) and has not been re-tested in many iterations.
+
+**(d) PRESERVE** full iter534–923 pin inventory. NO federation edits (federation 4.49944/310, UNCHANGED — not probed this iter). DO NOT bump training/state.json (already 924; passed=true preserved).

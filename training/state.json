@@ -1,7 +1,7 @@
 {
-  "iteration": 923,
+  "iteration": 924,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter923 NO-OP durability sweep — zero edits; 4 fresh adjacents."
+  "note": "iter924 NO-OP durability sweep — zero edits; 4 fresh adjacents."
 }
