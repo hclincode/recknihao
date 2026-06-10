@@ -3223,6 +3223,32 @@ The Trino 467 analyzer source confirms WRONG #1: `ExpressionAnalyzer.java` extra
 **Variants.**
 
 - **Streak as of a target date / current streak.** After Layer 2, filter to the streak that contains the latest `active_date` per user: find each user's max `active_date`, take its `streak_id`, and `COUNT(*)` the rows in that `(user_id, streak_id)` island.
+- **Count the OTHER event type in the run right before a boundary event (declines before a `paid`, failures before a `success`, scans before a `delivered`).** Count the other-type over the FULL streak FIRST (per `streak_id`, with NO pre-filter to the target event), and only THEN reduce to the streak that ENDS in the target row. **Do NOT `WHERE` down to the target event before counting** — `WHERE` runs before GROUP BY *and* before window functions, so the rows you wanted to count are stripped first and the answer is 0 on every row (a silent wrong result, not an error):
+
+```sql
+-- ❌ WRONG (returns 0 every time — WHERE strips the counted 'declined' rows before GROUP BY / the window):
+SELECT order_id, streak_id,
+       COUNT(*) FILTER (WHERE status = 'declined') AS declines_before  -- nothing left to count
+FROM streaks
+WHERE status = 'paid'                 -- <-- runs FIRST, removes every 'declined' row
+GROUP BY order_id, streak_id;         -- -- DO NOT COPY
+-- (same bug if you swap GROUP BY for COUNT(*) OVER (PARTITION BY streak_id) — windows also run AFTER WHERE.)
+
+-- ✅ CORRECT — count the other type over the WHOLE streak, THEN keep streaks that END in the target:
+WITH per_streak AS (
+  SELECT streak_id,
+         COUNT(*) FILTER (WHERE status = 'declined') AS declines_in_run,  -- counts over the FULL run
+         MAX(event_time)                              AS streak_end,
+         max_by(status, event_time) AS ending_status  -- status of the latest row in the streak
+  FROM streaks
+  GROUP BY streak_id                  -- NO pre-filter — every row of the run is still here
+)
+SELECT streak_id, declines_in_run
+FROM per_streak
+WHERE ending_status = 'paid';         -- reduce AFTER the per-streak aggregate, not before
+```
+
+  **The rule:** to count type-A events that precede a type-B boundary, aggregate over the full streak (no pre-filter), then filter to the target AFTER aggregating. Filtering to the target with `WHERE` before the COUNT — whether the COUNT is a GROUP BY aggregate or a window function — deletes exactly the rows you meant to count and returns 0 every time.
 - **Longest streak meeting a condition (e.g. consecutive days with revenue > 0).** Build the `events`-equivalent base as `SELECT DISTINCT user_id, active_date FROM daily WHERE revenue > 0`, then the three layers are unchanged.
 - **Consecutive WEEKS / MONTHS instead of days.** Change the gap unit and the "1" accordingly: for months, derive a month index and test `month_index - LAG(month_index) <> 1` (calendar-month arithmetic, not `date_diff('month', ...)` on raw dates which can mis-count partial months). Keep the same 3-layer skeleton.
 - **Return the streak's start/end dates too.** In Layer 3's inner subquery add `MIN(active_date) AS streak_start, MAX(active_date) AS streak_end`; in the outer, pick the row with the max length per user via `ROW_NUMBER()` instead of `MAX()` if you need the dates alongside the length.
