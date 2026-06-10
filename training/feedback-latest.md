@@ -1,76 +1,76 @@
-# iter962 Judge Feedback — 2026-06-11 (EXTENDED PHASE)
+# iter963 Judge Feedback — 2026-06-11 (EXTENDED PHASE)
 
-**Overall: 4.328125 PASS** (margin +0.828). Per-Q: Q1 4.6875 / Q2 4.0 / Q3 3.625 / Q4 4.6875 = 17.3125/4 = 4.328125. OVERALL AVERAGE governs (no per-Q veto). FEDERATION NOT PROBED (r22 §13.x hard-locked, 4.49944/310 UNCHANGED).
+**OVERALL: 4.59375 PASS** (margin +1.09375; OVERALL AVERAGE governs, NO per-Q veto)
 
-All dialect/logic verified BOTH directions (present AND absent) vs trino.io/docs/467 (functions/datetime.html, functions/window.html, functions/aggregate.html, sql/select.html grammar) + git-tag 467 + WebSearch 2026-06-11 — NOT against resources/.
+Per-Q: Q1 4.4375 / Q2 4.625 / Q3 4.75 / Q4 4.5625 = 18.375 / 4 = **4.59375**
 
----
-
-## ★★★ iter961 Q1 QUALIFY/LAG-AS-OF SLIP = CONFIRMED ONE-OFF (RE-PROBE CLEAN) ★★★
-
-iter961 Q1 shipped TWO real defects on a temporal as-of question: (1) `QUALIFY ROW_NUMBER()... = 1` (parse error — Trino 467 has NO QUALIFY) and (2) `LAG(...)` used as a stand-in for as-of state. iter962 Q1 is the targeted re-probe (price AS OF Jan 1 from price_history).
-
-**iter962 Q1 used the CORRECT Trino-valid as-of pattern:**
-```
-SELECT product_id, price FROM (
-  SELECT product_id, price, effective_date,
-         ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY effective_date DESC) AS rn
-  FROM price_history
-  WHERE effective_date <= DATE '2026-01-01'
-) WHERE rn = 1
-```
-- NO QUALIFY (subquery + outer `WHERE rn = 1` instead — the Trino-correct form).
-- NO LAG (filter-to-cutoff-BEFORE-ranking is the genuine as-of pattern; LAG was correctly NOT reached for).
-- Filter `effective_date <= DATE '2026-01-01'` applied BEFORE the window, then keep most-recent-per-product via `ROW_NUMBER() DESC = 1`. TRACE: product P with rows Dec-1-2025 ($10), Jan-1-2026 ($12), Feb-1-2026 ($15) → cutoff filter keeps Dec-1 & Jan-1; DESC rank → Jan-1 ($12) = rn 1 = correct price in effect as-of Jan 1. CORRECT.
-
-**DISPOSITION FOR ORCHESTRATOR: the iter961 Q1 QUALIFY-parse + LAG-not-as-of slip is a CONFIRMED ONE-OFF responder synthesis miss. The re-probe is CLEAN. Resources teach the opposite extensively (r23 QUALIFY-not-Trino canonical, r27 §7A.2 QUALIFY landmine, max_by/as-of idioms). No resource defect, no findability gap. Do NOT churn QUALIFY/as-of content (adjacent over-attraction risk per feedback_new_card_over_attracts_adjacent.md).**
+All dialect/logic verified BOTH directions vs trino.io/docs/467 (sql/select.html INTERSECT DISTINCT-default + GROUPING bitmask + ROLLUP + NULLS-LAST-default; functions/array.html contains; functions/json.html json_parse + JSON→ARRAY cast) + git-tag 467 source (SetOperationNodeTranslator) + WebSearch 2026-06-11 — NOT against resources/. iter882 verify-BOTH-directions discipline. FEDERATION NOT PROBED (4.49944/310 row UNCHANGED; r22 §13.x hard-locked, OVERRIDDEN per run-prompt).
 
 ---
 
-## Per-Q scores
+## ★★★ HEADLINE: iter962-Q3 dropped-stated-constraint slip = CONFIRMED ONE-OFF (re-probe CLEAN) ★★★
 
-### Q1 (price AS OF Jan 1) — 4.6875 (Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.25)
-Textbook-correct as-of. Filter-before-rank + ROW_NUMBER()=1 subquery; correctly labeled the "first row per group" canonical. No QUALIFY, no LAG. Clean clear explanation of why filter-before-rank gives the as-of price. Minor: did not note tie-on-effective_date edge (two prices same date → ROW_NUMBER picks one arbitrarily) but that's a trivial edge for this question.
+iter962-Q3 dropped the question's explicit "last 30 days" window (counted all-time both-platform users). iter963-Q1 was the deliberate re-probe: a BOTH-CONDITIONS-WITHIN-A-TIME-WINDOW question ("salespeople who hit Q1 quota AND closed >=1 enterprise deal IN THE LAST 90 DAYS"). The responder CARRIED the 90-day filter through:
 
-### Q2 (% of category revenue from single biggest product) — 4.0 (Acc 4.25 / Comp 4.25 / Clar 3.0 / Act 4.5)
-Final forms CORRECT: 3-CTE form (product_revenue / RANK() ranked_products / category_totals → JOIN → WHERE rank=1 → ROUND(100.0*revenue/total,2)) and single-pass `ROUND(100.0 * SUM(revenue) FILTER (WHERE rank=1) / SUM(revenue), 2) ... GROUP BY category`. VERIFIED: FILTER(WHERE) supported on all aggregates (functions/aggregate.html); 100.0 decimal promotion standard; RANK() valid.
+```
+SELECT sales_rep_id FROM quota_performance WHERE q1_quota_met = true
+INTERSECT
+SELECT sales_rep_id FROM deals WHERE deal_type = 'enterprise'
+  AND deal_closed_date >= current_date - INTERVAL '90' DAY
+```
 
-Two knocks:
-- **CLARITY ding: visible thinking-out-loud churn.** Showed a `SUM(CASE WHEN rank=1...)` form, wrote "Wait — that's overcomplicating it," then pivoted. Messy stream-of-consciousness in a delivered answer; reader has to discard a false start. NOT an accuracy issue (the discarded form wasn't wrong per se), purely presentation.
-- **ACCURACY minor: RANK() vs ROW_NUMBER() TIE risk.** VERIFIED vs functions/window.html: RANK() assigns the SAME rank to tied rows. If two products TIE for top revenue in a category, both get rank=1, and `SUM(revenue) FILTER (WHERE rank=1)` sums BOTH — slightly OVER-stating "single biggest product's share." For "single biggest" strictly, ROW_NUMBER() (unique, picks one) is the safer choice; RANK() answers "co-top products' share." Minor because exact-revenue ties are rare and arguably "co-top" is defensible — NOTED not heavily penalized.
+The `deal_closed_date >= current_date - INTERVAL '90' DAY` predicate IS present on the deals side (the side the window applies to — Q1-quota is a season flag, not a recency event). VERDICT: **iter962-Q3 dropped-stated-constraint slip is a CONFIRMED ONE-OFF responder synthesis miss — NOT a resource/findability defect, NOT systemic.** This matters for orchestrator disposition: no FIX-A trigger fires.
 
-### Q3 (users active on BOTH web AND mobile in last 30 days) — 3.625 (Acc 4.5 / Comp 2.0 / Clar 4.0 / Act 4.0)
-Logic CORRECT for both-platforms: `GROUP BY user_id HAVING COUNT(DISTINCT platform) = 2` (single-arg COUNT(DISTINCT) valid 467; HAVING after aggregation valid). Correctly framed as the avoid-two-subqueries-and-join answer; IN-subquery-to-recover-sessions form + "IN = semi-join" note both correct.
+---
 
-- **COMPLETENESS MISS (-): DROPPED the explicit "last 30 days" filter.** The question says "active on both web AND mobile **in the last 30 days**." The answer counts ALL-TIME both-platform users, not last-30-days. Missing `WHERE session_start >= current_date - INTERVAL '30' DAY` (or equivalent on the sessions timestamp column). A user who used web 2 years ago and mobile today would be wrongly included. This is a real semantic miss — the answer solves a slightly different question than asked. The COUNT(DISTINCT platform)=2 logic is correct, but the answer is INCOMPLETE without the date predicate.
+## ★★★ INTERSECT "semi-join" claim = FALSE-MECHANISM PADDING (iter960 family); lead itself CORRECT ★★★
 
-### Q4 (avg tenure days, active employees, Trino vs Postgres gotchas) — 4.6875 (Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.25)
-`SELECT AVG(date_diff('day', hire_date, current_date)) AS avg_tenure_days FROM employees WHERE end_date IS NULL`. ALL gotcha claims VERIFIED vs functions/datetime.html:
-- date_diff is unit-first: `date_diff('day', a, b)` with quoted unit then two args — CONFIRMED.
-- current_date / current_timestamp are keywords with NO parens; `current_date()` WITH parens is INVALID — CONFIRMED ("SQL-standard functions do not use parenthesis").
-- AVG skips NULL hire_date — correct (aggregates ignore NULLs).
-- date_diff preferred over raw timestamp subtraction / to_unixtime for readability + DST — sound.
-- CAST-to-DOUBLE variant — fine.
-Clean and accurate; the Postgres-contrast framing (no `current_date()`, unit-first not `age()`) is exactly the kind of dialect gotcha the question wanted.
+Two mechanism asides on Q1, verified against trino.io/docs/467 + git-tag 467 source:
+
+**(a) "INTERSECT is NULL-safe — unlike a join with a NULL"** = ROUGHLY TRUE. Trino set operations (INTERSECT/EXCEPT/UNION) dedup with NOT-DISTINCT (null-equals-null) semantics, so two NULL rep_ids would match each other in the intersection — unlike an equi-join where `NULL = NULL` is UNKNOWN. The framing is a tangent (rep_id is almost never NULL in practice) but it is not technically wrong. No ding.
+
+**(b) "Trino plans it as a semi-join (a special efficient operator), cheaper than two subqueries joined"** = **FALSE / imprecise mechanism.** Verified: Trino's `SetOperationNodeTranslator` rewrites INTERSECT (and EXCEPT) as a **UNION ALL of the inputs (each tagged with a source-marker column), followed by an aggregation that counts distinct source markers, then a filter** — NOT a SemiJoinNode. The SemiJoin operator backs IN / EXISTS subqueries, not set operations. This is the SAME false-mechanism padding family as iter960-Q2 ("conditional aggregation decorrelates to SemiJoin") and iter960-Q1 ("LEFT JOIN/IS NULL decorrelates into SemiJoin"). Minor Accuracy ding (-1.0 on Q1 Acc) — NOT a per-Q veto; the LEAD is correct.
+
+**Lead correctness:** INTERSECT IS a valid, clean both-conditions answer. It returns DISTINCT rep_ids (correct for "which salespeople"), is more readable than a two-subquery JOIN, and carried the 90-day window. The "cleaner than two queries joined" thrust of the question is answered correctly.
+
+---
+
+## Per-question detail
+
+### Q1 — both-conditions-in-90-days → INTERSECT — **4.4375** (Acc 4.0 / Comp 4.75 / Clar 4.5 / Act 4.5)
+Lead CORRECT; 90-day window CARRIED (re-probe clean); INTERSECT DISTINCT-default verified (sql/select.html); NULL-safe aside roughly true. Acc -1.0 for the false "planned as a semi-join" mechanism padding. Strong otherwise.
+
+### Q2 — rolling 3-week avg → window frame — **4.625** (Acc 4.75 / Comp 4.5 / Clar 4.75 / Act 4.5)
+`AVG(weekly_sales) OVER (PARTITION BY sales_rep_id ORDER BY week_date ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)` — VERIFIED valid Trino 467 window-frame syntax; current + 2 preceding = 3 rows = correct trailing average; stays at row grain; "in SQL not app code" correct. Minor note (NOT a ding): ROWS counts PHYSICAL rows, so a rep with a missing/skipped week would pull a non-adjacent earlier week into the frame (RANGE INTERVAL would be calendar-aware). Acceptable canonical answer for a weekly-grain table; responder did not flag the gap-sensitivity nuance — trivial completeness gap only.
+
+### Q3 — orders-by-status + grand-total in one query → ROLLUP — **4.75** (Acc 5.0 / Comp 4.75 / Clar 4.75 / Act 4.5)
+`GROUP BY ROLLUP(status)` + `CASE GROUPING(status) WHEN 0 THEN 'Detail' WHEN 1 THEN 'GRAND TOTAL' END` — VERIFIED: ROLLUP valid 467, GROUPING() returns a bitmask (0 = column included/detail, 1 = column rolled-up/grand-total NULL), NULLS LAST is the documented default. One scan vs UNION two scans claim is sound. The simpler `GROUP BY ROLLUP(status) ORDER BY status NULLS LAST` variant is also correct. Highest-scoring answer.
+
+### Q4 — array contains specific product without exploding → contains() — **4.5625** (Acc 4.75 / Comp 4.5 / Clar 4.5 / Act 4.5)
+`WHERE contains(product_ids, 42)` — VERIFIED `contains(array(T), element) -> boolean` exists in 467 (functions/array.html); no UNNEST needed (directly answers "without exploding the array"). The JSON-varchar fallback `CAST(json_parse(product_ids) AS ARRAY(BIGINT))` is a valid idiom (json_parse returns JSON; JSON→ARRAY(BIGINT) cast supported). Solid and complete.
 
 ---
 
 ## Scope notes
-- Q1: iter961 QUALIFY/LAG-as-of slip CONFIRMED ONE-OFF — re-probe clean. No action.
-- Q2: correct final forms; CLARITY ding for visible "Wait — overcomplicating it" churn (messy-thinking presentation, NOT a resource defect); RANK()-vs-ROW_NUMBER() tie over-count is a minor NOTED accuracy nuance (ties rare/co-top defensible). Per-instance, NOT a resource fix.
-- Q3: COUNT(DISTINCT platform)=2 logic correct BUT dropped the question's "last 30 days" date filter — real COMPLETENESS miss. Single-instance responder omission (dropped a stated constraint), consistent with the broken-secondary/incomplete-synthesis meta-pattern family (iter936/943/948/950/954/958/959/960/961). NOT a resource/findability gap — the date-filter pattern is taught extensively (every recent INTERVAL '30' DAY probe passed). Re-probe-don't-churn: re-probe a both-conditions Q with an explicit recency window next sweep to confirm one-off.
-- Q4: clean and accurate; all dialect gotchas verified.
-- NO resource defect / NO findability gap this sweep.
+- Q1 lead correct + 90-day carried (iter962-Q3 slip = CONFIRMED ONE-OFF) + INTERSECT "semi-join" = false-mechanism padding (iter960 family, per-instance Haiku slip, NO resource fix — adjacent over-attraction risk per feedback_new_card_over_attracts_adjacent.md).
+- Q2/Q3/Q4 all clean across distinct families (window frame / ROLLUP+GROUPING / array contains). No resource defect, no findability gap anywhere this sweep.
 
-## RECOMMENDATION = DEFAULT NO-OP
-Overall 4.328 PASS, margin +0.828. iter961 Q1 slip confirmed one-off (the headline outcome). Q2 churn and Q3 dropped-constraint are per-instance Haiku synthesis/presentation slips against correct, findable resources — no single resource fix; adding content risks adjacent over-attraction. NEXT SWEEP PROBES: re-probe a both-conditions-WITH-recency-window Q (confirm Q3 dropped-30-day-filter is one-off — verify responder carries ALL stated constraints into the query); RANK-vs-ROW_NUMBER "single top" with a deliberate tie (confirm responder picks ROW_NUMBER for strict single); window-frame BETWEEN N PRECEDING AND N FOLLOWING; GROUPING SETS/ROLLUP/CUBE; lateral JOIN UNNEST. Do NOT re-probe gaps-and-islands streak-construction. Federation (4.49944/310) bulletproofed angles only.
+## iter964 RECOMMENDATION = DEFAULT NO-OP
+- overall 4.59375 PASS, margin +1.09375 comfortable;
+- iter962-Q3 dropped-constraint slip CONFIRMED ONE-OFF (re-probe clean) — no FIX-A trigger;
+- INTERSECT "semi-join" is the recurring false-mechanism-padding meta-pattern (iter936/943/948/950/954/958/959/960/961 family) — per-instance, no single resource fix; do NOT add an INTERSECT-plan card (risks pulling adjacent set-op / IN-EXISTS questions to a wrong/over-specific mechanism canonical);
+- optional LIGHT FIX-A ONLY if (i) false-SemiJoin/false-plan-mechanism padding recurs on a set-op or IN/EXISTS surface in next 2 sweeps OR (ii) a stated-constraint drop recurs on a different both-conditions/recency-window surface;
+- NEXT SWEEP PROBES: GROUPING SETS / CUBE (extend the ROLLUP angle); window frame BETWEEN N PRECEDING AND N FOLLOWING (centered) and RANGE INTERVAL (gap-aware); lateral JOIN UNNEST (the complement of Q4's no-explode); EXCEPT / anti-membership; do NOT re-probe gaps-and-islands streak-construction.
 
-PINS REINFORCED:
-- **as-of / point-in-time = filter ts <= cutoff BEFORE ranking, then ROW_NUMBER() OVER (PARTITION BY key ORDER BY ts DESC) = 1 in a SUBQUERY (NO QUALIFY — parse error in 467; NO LAG — LAG returns the preceding CHANGE not the state-in-effect). iter961 QUALIFY/LAG-as-of slip CONFIRMED ONE-OFF.**
-- **RANK() assigns SAME rank to tied rows (functions/window.html) — for STRICT "single biggest" use ROW_NUMBER() (unique); RANK()=1 FILTER-share OVER-states on a top-revenue tie (co-top); ROW_NUMBER() picks exactly one.**
-- **FILTER (WHERE cond) supported on ALL aggregates (functions/aggregate.html); 100.0 * x / y forces decimal/double promotion.**
-- **COUNT(DISTINCT platform) = 2 (single-arg) for "active on both of two platforms" via GROUP BY user HAVING — BUT carry the question's recency window: WHERE <ts_col> >= current_date - INTERVAL '30' DAY; dropping a stated time filter answers all-time not last-30-days.**
-- **date_diff('day', a, b) unit-first; current_date / current_timestamp keywords NO parens, current_date() WITH parens INVALID (functions/datetime.html); AVG ignores NULL; date_diff preferred over raw ts subtraction for readability/DST.**
-- **default NULLS LAST in 467.**
+## DO NOT TOUCH
+r22 §13.x federation (hard-locked, OVERRIDDEN) / r07 L3226-3263 B-Streak defang + L37 HAVING-perf + L1624 anti-nesting / r23 QUALIFY-not-Trino + argmax + COUNT(DISTINCT) + HAVING-vs-WHERE + regexp_like + fan-out card + geometric/harmonic mean + percentile/percentile_cont footgun / r09 partition DDL strings + bucket(col,N) column-first / r28 DATE-literal + UnwrapDateTruncInComparison / r13 json_exists strict path + 'partitioning' Iceberg key / r27 QUALIFY landmine §7A.2 / INTERVAL qualifier cards / format_datetime-vs-to_char / NULLS-LAST default / price-suffix canonical / MAX_BY-nested defang.
 
-DO NOT TOUCH (hard-locked): r22 §13.x federation / r23 QUALIFY-not-Trino canonical + argmax + COUNT(DISTINCT) + HAVING-vs-WHERE + regexp_like + fan-out card + geometric/harmonic mean + percentile/percentile_cont footgun cards / r07 L3226-3263 B-Streak defang + L37 HAVING-perf + L1624 anti-nesting / r09 partition DDL strings + bucket(col,N) column-first / r28 DATE-literal + UnwrapDateTruncInComparison / r13 json_exists strict path + 'partitioning' Iceberg key / r27 QUALIFY landmine §7A.2 / INTERVAL qualifier cards / format_datetime-vs-to_char / NULLS-LAST default / price-suffix canonical / MAX_BY-nested defang. PIN 467. DO NOT bump training/state.json (already 962; passed=true; final_iterations_remaining 0).
+## PINS REINFORCED
+- **INTERSECT returns DISTINCT rows by default (sql/select.html); set ops dedup with NOT-DISTINCT / null-equals-null semantics (so "NULL-safe" is roughly true vs an equi-join's UNKNOWN); INTERSECT is NOT planned as a SemiJoin — SetOperationNodeTranslator rewrites it to UNION ALL + marker-counting aggregation + filter; SemiJoin backs IN/EXISTS only ("planned as a semi-join" = false-mechanism padding).**
+- **Rolling-N trailing average = `AVG(x) OVER (PARTITION BY k ORDER BY t ROWS BETWEEN N-1 PRECEDING AND CURRENT ROW)`; ROWS counts physical rows (gap-insensitive); RANGE INTERVAL is calendar-aware for missing-period gaps.**
+- **Grand-total-in-same-query = `GROUP BY ROLLUP(col)` + `GROUPING(col)` bitmask (0=detail, 1=rolled-up/NULL grand-total row); one scan vs UNION two scans; default NULLS LAST.**
+- **Array membership without UNNEST = `contains(array(T), element) -> boolean` (functions/array.html); JSON-varchar column → `CAST(json_parse(col) AS ARRAY(BIGINT))` then contains.**
+- **Carry ALL stated constraints (esp. recency windows) into the query — iter962-Q3 dropped-30-day slip CONFIRMED ONE-OFF on the iter963-Q1 90-day re-probe.**
+- **Broken-secondary / false-mechanism padding meta-pattern (iter936/943/948/950/954/958/959/960/961/963 family) persists — LEADS correct, tacked-on mechanism aside ships an imprecise claim; per-instance Haiku slip, NOT a resource defect.**
+
+Federation (4.49944/310) only un-passed-margin row — bulletproofed angles only. PRESERVE full iter534-962 pin inventory; NO federation edits. PIN 467. DO NOT bump training/state.json (already 963; passed=true preserved; overall 4.59375 PASS holds; final_iterations_remaining 0).
