@@ -1,74 +1,63 @@
-# Judge Feedback — iter926 (re-probe sweep: distinct-combination-count one-off confirm + 3 fresh adjacents)
+# Judge Feedback — iter927 (NO-OP durability sweep: 4 fresh adjacents — GROUP BY COUNT / two-level ROW_NUMBER / CASE-comparison / conditional-AVG before-after)
 
-**Overall: 5.00 STRONG PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 5.00 = 20.00/4 = 5.00). OVERALL AVERAGE governs — no per-Q veto. Threshold 3.5 met by +1.50.
+**Overall: 4.594 PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 3.375 = 18.375/4 = 4.594). OVERALL AVERAGE governs — no per-Q veto. Threshold 3.5 met by +1.094.
 
-Trino 467 PINNED. All dialect claims verified vs trino.io/docs/467 (functions/aggregate.html, language/types.html, functions/comparison.html) + git-tag 467 source signals (PR #4647 comparable/orderable type operators; issue #20227 decimal/bigint SUM overflow) + WebSearch/WebFetch 2026-06-10 — NOT against resources/. Multi-source, iter882 verify-first applied BOTH directions.
-
----
-
-## ★ Q1 VERDICT — iter925 MULTI-ARG COUNT(DISTINCT) SLIP: ONE-OFF CONFIRMED / CLOSED
-
-**The responder CORRECTLY ROW-WRAPPED. The multi-arg slip did NOT recur. iter925 slip = ONE-OFF CONFIRMED, CLOSED. NO findability-anchor FIX-A needed.**
-
-- iter926-Q1 answer: `COUNT(DISTINCT (user_id, CAST(event_time AS date)))`.
-- The `(user_id, CAST(event_time AS date))` is an **anonymous ROW literal** (parenthesized 2-field tuple), making this a **SINGLE-argument** `COUNT(DISTINCT <row>)` — VALID in Trino 467.
-- Contrast with the iter925 defect, which was the unsupported **multi-arg** form `COUNT(DISTINCT user_id, date)` (two comma-separated args = signature/parse error: `count()` has exactly `count(*)` and `count(x)`, no `count(x, y)`). That form did NOT reappear here.
-- Why the ROW-wrap is valid: DISTINCT requires a **comparable** type. A ROW is comparable/orderable when all its fields are comparable/orderable (Trino's comparable/orderable type-operator machinery, PR #4647). Fields here are `bigint` (user_id) and `date` (CAST(event_time AS date)) — both comparable — so the ROW is comparable and DISTINCT over it works. It correctly counts distinct **(user, day) pairs** (CAST-to-date collapses each user's multiple same-day events to one).
-- Q1 = 5.00 (clean). Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0.
+Trino 467 PINNED. All dialect claims verified vs trino.io/docs/467 (functions/comparison.html, language/types.html) + WebSearch (AWS re:Post `Cannot apply operator: date < varchar(10)`, Dataminded "7 lessons migrating dbt Snowflake→Trino", Trino issue #7334) 2026-06-10 — NOT against resources/. iter882 verify-first applied BOTH directions.
 
 ---
 
-## Q2 — same-day fulfillment count (VERIFIED CORRECT)
+## ★ Q4 VERDICT — BARE-STRING DATE LITERAL = CONFIRMED DIALECT DEFECT (structure correct, literal wrong)
 
-`SELECT COUNT(*) FROM ... WHERE CAST(order_date AS date) = CAST(ship_date AS date)`.
-- Casting BOTH timestamps to `date` for same-CALENDAR-DAY comparison is correct. VERIFIED CAST(ts AS date) date-equality (standing pin).
-- The responder's gotcha is RIGHT: raw `order_date = ship_date` (timestamp equality) requires the **same instant** (down to fractional seconds), which almost never matches for placed-vs-shipped; date-casting both sides is the same-day fix.
-- `CAST(col AS date)` UNWRAPS for partition pruning per the pinned Unwrap-temporal fact (UnwrapCastInComparison) — bare-column range pruning preserved.
-- Q2 = 5.00. Acc/Comp/Clar/Act 5.0.
+**VERIFIED VERDICT: Trino 467 does NOT implicitly coerce a bare VARCHAR string literal to DATE when compared to a DATE column.** Comparing `review_date` (DATE) `< '2026-05-15'` (bare varchar) raises `TYPE_MISMATCH: Cannot apply operator: date < varchar(10)`. The query as written WILL NOT RUN.
 
----
+Evidence (multi-source, 2026-06-10):
+- trino.io/docs/467 functions/comparison.html: comparison operators require operands of the same/coercible orderable type; BETWEEN operands "must be the same type"; NO varchar→date implicit coercion documented.
+- AWS re:Post (Athena/Trino engine): exact error `TYPE_MISMATCH: Cannot apply operator: date < varchar(10)`; fix = `DATE '...'` or `CAST('...' AS DATE)`.
+- Dataminded "7 lessons migrating dbt from Snowflake to Trino": "Trino does not do implicit type coercion … instead of `WHERE date_column = '2021-01-01'` you write `WHERE date_column = DATE '2021-01-01'`."
+- Trino issue #7334 (timestamp vs varchar) confirms the same strict-typing family.
 
-## ★ Q3 — total storage bytes per tenant: BIGINT-SUM-OVERFLOW + NO-BYTE-FORMATTER, BOTH CONFIRMED CORRECT
+So the run-prompt's understanding is **CONFIRMED**: bare string requires `DATE '2026-05-15'` (or `CAST('2026-05-15' AS DATE)`). If `review_date` were a TIMESTAMP instead of DATE, the same rule applies — needs `TIMESTAMP '...'` (or `DATE '...'` with the documented date→timestamp coercion). Either way the bare string fails.
 
-`SELECT tenant_id, SUM(file_size_bytes) FROM files GROUP BY tenant_id`.
+**What the responder got RIGHT (the hard part):**
+- Conditional-aggregation STRUCTURE is fully correct: `AVG(CASE WHEN review_date < <cutoff> THEN star_rating END)` for the before window, `>=` for after, the difference column, `GROUP BY product_id`, and `HAVING <before> IS NOT NULL AND <after> IS NOT NULL`.
+- `AVG(CASE WHEN … THEN x END)` correctly SKIPS the NULLs produced when the CASE has no ELSE (rows outside the window contribute NULL, AVG ignores NULLs) — conditional-average semantics are right (pinned).
+- HAVING both-not-null correctly drops products that have reviews on only one side of the cutoff.
 
-**(a) BIGINT SUM overflow RAISES, does NOT silently wrap — responder's "no surprises at typical scale" is ACCURATE.** VERIFIED: Trino bigint/integer arithmetic and SUM RAISE on overflow past 2^63 (`NUMERIC_VALUE_OUT_OF_RANGE`, cf. issue #20227 which is about the error being surfaced as internal vs user error — detection itself is correct, NO silent Java-style wraparound). At terabyte scale (~1e12, far below the 9.2e18 BIGINT ceiling) there is genuinely no overflow, so "Trino handles it without overflow surprises at typical scales (terabytes)" is correct. At exabyte scale it would RAISE (not silently corrupt) — the responder did NOT claim otherwise, so this is fine. Optional completeness nuance (NOT a defect): for extreme/aggregate scale one could `CAST(file_size_bytes AS DECIMAL(38,0))` before SUM to lift the ceiling.
+**The single defect:** the literal `'2026-05-15'` must be `DATE '2026-05-15'`. One token per occurrence (two occurrences). Structure-correct, literal-wrong → proportional down-score, NOT a hard zero.
 
-**(b) "No built-in human-readable byte formatter" — CONFIRMED CORRECT.** Matches the pinned fact: `format_data_size` is an EXAMPLE SQL UDF, NOT a built-in; only `format_number` ('1M'-style) exists as a built-in. "No built-in, format in the app or with a CASE/UDF" is the correct answer.
+**Q4 per-dimension:** Accuracy 2.5 (query raises TYPE_MISMATCH, will not execute as written) / Completeness 4.0 (full structure, only the DATE keyword missing) / Clarity 4.0 (clear explanation but ships a non-runnable literal) / Actionability 3.0 (engineer pastes it, hits an error, must self-fix). Q4 = (2.5+4.0+4.0+3.0)/4 = **3.375**.
 
-- Q3 = 5.00. Acc/Comp/Clar/Act 5.0. Both claims source-verified.
+### SCOPE-CHECK: RESPONDER SYNTHESIS SLIP, NOT a findable resource gap → re-probe-don't-churn
 
----
+Resources teach the CORRECT form and explicitly warn against this exact bare-string mistake:
+- `resources/28-complex-sql-performance-trino-dbt.md:1047`: table row `WHERE event_date >= '2026-05-30'` (string compared to date) → "Type mismatch — Trino does NOT push when types don't match." → fix `Use DATE '2026-05-30' literal.`
+- `resources/28-…:1044`: companion row on `CAST(event_date AS varchar) = '...'` → canonical `WHERE event_date = DATE '2026-05-30'`.
+- `DATE '20YY-MM-DD'` correct literals appear **189 times across 16 resource files** (r07 ×35, r22 ×32, r23 ×38, r28 ×19, r27 ×23, …) — the canonical, copy-attractive Trino form.
 
-## Q4 — distinct IPs per account last 30 days (VERIFIED CORRECT)
+The bare-string `< '20YY-..'` occurrences that exist in resources are in Spark/ingestion watermark prose, Postgres-pushdown JDBC pass-through, or partition-value illustration (r13, r26, r17) — NOT presented as the canonical Trino DATE-column comparison pattern. The responder synthesized the bare-string form despite the dominant `DATE '...'` canon and r28's explicit WRONG-marking. This is a RESPONDER SYNTHESIS SLIP, not a resource gap.
 
-`SELECT account_id, COUNT(DISTINCT ip_address) FROM ... WHERE requested_at >= current_date - INTERVAL '30' DAY GROUP BY account_id` + `approx_distinct(ip_address)` alternative (~2.3% std error).
-- COUNT(DISTINCT ip_address) per account = correct exact one-pass distinct count, one row per account.
-- `approx_distinct ~2.3% standard error` = DOC-CORRECT, VERIFIED verbatim aggregate.html ("standard error of 2.3%, the standard deviation of the approximately normal error distribution"); figure is for approx_distinct SPECIFICALLY (per standing pin — NOT an approx_percentile figure). Appropriate at-scale HLL guidance.
-- `current_date - INTERVAL '30' DAY` is a query-constant on the bare column → UNWRAPS / prunes partitions correctly (sargable).
-- Q4 = 5.00. Acc/Comp/Clar/Act 5.0.
-
----
-
-## SCORES
-
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 distinct (user, day) COUNT(DISTINCT ROW) | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-| Q2 same-day fulfillment CAST-to-date equality | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-| Q3 bytes/tenant SUM(BIGINT)+no-byte-formatter | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-| Q4 distinct IPs/account 30d + approx_distinct | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-
-**Overall = 20.00 / 4 = 5.00 STRONG PASS.**
+**Action: re-probe-don't-churn. NO teacher edit, NO "wrong" card (duplicates r28's existing WRONG-marked row + risks defang-backfire). Re-probe a before/after date-window question fresh next sweep to confirm the responder reaches for `DATE '...'`; if the bare string recurs, escalate to a findability anchor (the type-safe-predicate canon may not be keyword-reachable from a plain "average rating before vs after <date>" phrasing).** This is the 1st occurrence of the bare-string-date slip in the recent sweep series — treat as one-off pending re-probe.
 
 ---
 
-## VERDICT — iter927 DIRECTIVE = DEFAULT NO-OP
+## Q1 — count customers per acquisition source — 5.00
 
-- **(1) Q1 multi-arg COUNT(DISTINCT) slip = ONE-OFF CONFIRMED, CLOSED.** Responder correctly ROW-wrapped `COUNT(DISTINCT (user_id, CAST(event_time AS date)))` (single-arg over an anonymous comparable ROW = valid, counts distinct (user,day) pairs); the iter925 unsupported multi-arg form did NOT recur. NO findability-anchor FIX-A. Do NOT add a "wrong" card for this family (defang-backfire + duplicates pins).
-- **(2) Q3 BIGINT-SUM-overflow-RAISES (not silent wrap) + no-built-in-byte-formatter — BOTH CONFIRMED CORRECT** (source-verified; matches pinned SUM-overflow-raises and format_data_size-is-a-UDF facts).
-- All 4 dialect-clean. NO source-verified findable-but-missing gap, NO dialect defect surfaced. **NO-OP — teacher ZERO edits.**
-- Do NOT mark any of Q1 COUNT(DISTINCT ROW), Q2 CAST-to-date same-day equality, Q3 SUM(BIGINT)+no-byte-formatter, or Q4 COUNT(DISTINCT)+approx_distinct-2.3% wrong (all correct).
-- Optional re-probe (NO pin touch, low priority, SKIP if duplicative): exabyte-scale bytes phrasing to confirm responder reaches for CAST-to-DECIMAL(38,0) before SUM; or a distinct-3-column-combination ask to keep the ROW-wrap durable.
-- Federation (4.49944/310) remains the only un-passed row — bulletproofed angles only. PIN decimal/bigint SUM-overflow-raises, ROW-comparable→COUNT(DISTINCT ROW)-valid (vs multi-arg parse error), no-built-in-byte-formatter, approx_distinct-2.3%, CAST(ts AS date)-equality+unwrap facts.
-- Do NOT touch any iter534-925 pin. PIN 467. NO federation edits. DO NOT bump training/state.json (already passed; overall 5.00 STRONG PASS holds).
+`SELECT acquisition_source, COUNT(*) AS customer_count FROM customers GROUP BY acquisition_source` + NULL-bucket caveat (rows with NULL acquisition_source form their own group, COUNT(*) counts them; COUNT(acquisition_source) would skip NULLs). VERIFIED select.html GROUP BY + aggregate.html COUNT(*); NULL-group behavior correct (pinned). One row per source. Acc/Comp/Clar/Act 5.0.
+
+## Q2 — highest single-day total sales per store — 5.00
+
+Two-level: `WITH daily_sales AS (SELECT store_id, sale_date, SUM(amount) AS daily_total FROM sales GROUP BY store_id, sale_date) SELECT … FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY daily_total DESC) AS rank FROM daily_sales) WHERE rank = 1` + the simpler `SELECT store_id, MAX(daily_total) FROM daily_sales GROUP BY store_id` form. VERIFIED window.html ROW_NUMBER OVER(PARTITION/ORDER) valid; select.html GROUP BY; no QUALIFY in 467 (correctly used the subquery+WHERE rewrite, not QUALIFY). Both forms answer "highest single-day total per store" — the MAX form returns just the value, the ROW_NUMBER form lets you also surface the sale_date. Tie note (multiple days at the max → ROW_NUMBER picks one) is apt. Acc/Comp/Clar/Act 5.0.
+
+## Q3 — flag accounts over licensed seat limit — 5.00
+
+`CASE WHEN active_seats > licensed_seats THEN 'over_limit' WHEN active_seats = licensed_seats THEN 'at_limit' ELSE 'under_limit' END` + COALESCE NULL-guard note + `WHERE active_seats > licensed_seats` filter-only variant. VERIFIED comparison.html: integer `>`/`=` comparison valid; three-valued-logic note CORRECT (if either column is NULL the comparison is UNKNOWN, the row falls through to ELSE/`under_limit`, so COALESCE(active_seats,0)/COALESCE(licensed_seats,…) is the right guard when NULLs are possible). Acc/Comp/Clar/Act 5.0.
+
+---
+
+## iter928 directive — DEFAULT NO-OP with ONE re-probe flag
+
+- **iter927 = DEFAULT NO-OP on resources.** Q1/Q2/Q3 dialect-clean. Q4 structure correct; the ONLY defect (bare-string date literal) is a RESPONDER SYNTHESIS SLIP on CLEAN resources (r28:1047 explicitly WRONG-marks it; `DATE '...'` canon ×189). Teacher ZERO edits. NO "wrong" card, NO FIX-A this iter (duplicates r28 + defang-backfire risk).
+- **DO re-probe** a before/after date-window / date-column comparison question next sweep (e.g. "revenue before vs after a launch date", "tickets opened after <date>") to confirm the responder emits `DATE '...'` not a bare string. If the bare string RECURS (2nd instance), THEN escalate to a findability anchor pulling the type-safe-predicate / `DATE '...'`-literal canon toward plain before/after-date phrasings.
+- **Do NOT mark wrong:** Q1 GROUP BY acquisition_source + COUNT(*) + NULL-bucket; Q2 daily-SUM CTE → ROW_NUMBER PARTITION BY store_id top-day OR MAX(daily_total) GROUP BY store_id; Q3 CASE seat-limit comparison + COALESCE/3VL guard; Q4 conditional-AVG before/after STRUCTURE + HAVING both-not-null (all correct). The ONLY thing wrong in Q4 is the missing `DATE` keyword on the literal.
+- **PIN (verified this iter):** Trino 467 requires `DATE '2026-05-15'` (or `CAST('2026-05-15' AS DATE)`) to compare against a DATE column — bare varchar literal raises `Cannot apply operator: date < varchar(10)`, NO implicit varchar→date coercion. Same applies to TIMESTAMP columns (`TIMESTAMP '...'`).
+- Federation (4.49944/310) remains the only un-passed row — bulletproofed angles only. Do NOT touch any iter534-926 pin. PIN 467. NO federation edits. DO NOT bump training/state.json (already passed; overall 4.594 PASS holds).
