@@ -1,157 +1,85 @@
-# Judge Feedback — iter958
+# iter959 Judge Feedback — RE-PROBE sweep (teacher ZERO edits)
 
-**Phase**: extended (final_iterations_remaining=0)
-**Mode**: DEFAULT NO-OP breadth sweep per iter957 recommendation; teacher made ZERO resource edits.
-**Verdict**: **4.109375 PASS** (margin +0.609 over 3.5 threshold; OVERALL AVERAGE governs, no per-Q veto).
+**Verdict: 3.78125 PASS** (overall avg governs; margin +0.28; per-Q Q1 3.0625 / Q2 4.5 / Q3 4.875 / Q4 4.6875 = 15.125/4 = 3.78125). FEDERATION NOT PROBED (4.49944/310 row UNCHANGED).
 
-Per-Q scores: Q1 4.75 / Q2 2.50 / Q3 4.8125 / Q4 4.375 = 16.4375 / 4 = 4.109375.
-
-Federation NOT probed (4.49944/310 row UNCHANGED per directive).
-All dialect verified vs trino.io/docs/467 (functions/aggregate.html, functions/window.html, sql/select.html, connector/iceberg.html) + WebSearch 2026-06-10 (ALTER TABLE EXECUTE optimize = Trino-native compaction; rewrite_data_files = Spark Iceberg procedure CONFIRMED) — NOT against resources/; iter882 verify-BOTH-directions discipline.
+Verified vs trino.io/docs/467 (functions/aggregate.html, sql/select.html, functions/datetime.html) + WebSearch 2026-06-10 (SUM(DISTINCT) sums distinct VALUES; UnwrapCastInComparison rewrites CAST(ts AS date) comparisons into bare-column ranges that still prune — both RE-CONFIRMED). NOT against resources/.
 
 ---
 
-## ★ ★ ★ Q2 VERDICT — RESPONDER SLIP ON MANY-SIDE-vs-ONE-SIDE FAN-OUT RULE ★ ★ ★
+## ★ ★ ★ Q1 VERDICT — iter958 many-side-vs-one-side confusion RESOLVED on the COMPLEMENT angle; BUT secondary alternative SUM(DISTINCT) is a NEW broken-secondary slip ★ ★ ★
 
-**The directive's critical check is confirmed.** Trace on O1 W1 [qty 2,3,5] + O2 W1 [qty 4]: after `orders JOIN order_line_items` on order_id, O1 produces 3 rows (W1, qty 2/3/5), O2 produces 1 row (W1, qty 4). `SUM(li.quantity) GROUP BY o.warehouse_id` = 2+3+5+4 = **14 = the correct total quantity for W1**. The join fan-out replicates the ORDER row (one-side) but each LINE-ITEM row (many-side) contributes its own quantity exactly once. Summing a MANY-side attribute after the join is CORRECT; over-counting from fan-out happens only when summing a ONE-side attribute (e.g., orders.order_total replicated per line item).
+**Q1 score: Acc 2.5 / Comp 3.25 / Clar 3.5 / Act 3.0 = 3.0625**
 
-**The responder's flow:**
-1. Shows the direct `SUM(li.quantity)` query.
-2. **Incorrectly marks it "WRONG — overcounts because of join inflation"** — this is a FALSE CLAIM.
-3. Offers an unnecessary pre-aggregate CTE (sum per order_id first, then per warehouse) as "RIGHT".
-4. Re-shows the original query, says "Wait — this is the same query I marked as wrong above," and self-corrects: "the sum IS correct because each line item contributes its quantity; the issue only arises if you sum order-LEVEL attributes (like order total) which get replicated per line item."
-5. Adds the rule-of-thumb about checking cardinality.
+### (a) DIAGNOSIS — CORRECT
+Responder correctly identifies the ONE-side-attribute fan-out mechanism: orders (one row per order, carries order_total) joined to order_items (many per order) REPLICATES the order row, so SUM(order_total) over the join multiplies each order's total by its line-item count. Worked example "Order 42 total=100, 3 items → SUM=300 not 100" is dialect-correct and the precise complement of iter958 (where the responder MIS-marked the many-side SUM(li.quantity) as over-counted). This iteration the diagnosis correctly distinguishes the ONE-side-OVER-COUNTS case from the MANY-side-FINE case. → **iter958 many-side-vs-one-side confusion = ONE-OFF responder synthesis miss, RESOLVED on the COMPLEMENT angle**.
 
-**Disposition**:
-- The FINAL conclusion is CORRECT (many-side SUM is fine; fan-out over-counts only ONE-side attributes).
-- The pre-aggregate CTE is a valid-if-unnecessary alternative.
-- BUT a reader is misled BEFORE the self-correction; the answer is muddled and self-contradictory.
-- The user's complaint ("different row count than expected" after the join) is a row-count observation (correct — fan-out replicates rows), which the responder does eventually clarify, but the WRONG-mark on a correct aggregate query damages trust and learning.
+### (b) Option A — CORRECT (lead fix)
+`SELECT customer_id, SUM(order_total) FROM orders GROUP BY customer_id` (do NOT join order_items). TRACE on customer C with O1(total=100,2items), O2(total=100,2items), O3(total=50,2items): 100+100+50 = **250 = true revenue**. CORRECT. The "just don't join" lead fix is the canonical answer when the join is unnecessary.
 
-**Scope**: RESPONDER SLIP on the many-side-vs-one-side fan-out rule. The user's question is exactly the place this rule should land cleanly. Not a clean "resource defect" verdict — see findability check below.
+### (c) Option B — BROKEN SUBTLE BUG (the SUM(DISTINCT) slip)
+`SUM(DISTINCT o.order_total) ... FROM orders o JOIN order_items oi ...` — labeled "if you MUST join to order_items".
 
-**Findability check for the many-side-vs-one-side rule**:
-- r23 (sql-best-practices-olap.md) covers JOIN cardinality and fan-out.
-- The PINNED DIALECT FACT from the directive ("JOIN fan-out over-counts ONLY when summing a replicated ONE-side attribute; summing a MANY-side attribute is correct") is the precise teaching needed.
-- Q2's "different row count than expected after the join" + asking for SUM(quantity) GROUP BY warehouse is a TEXTBOOK trigger for that rule.
-- The responder reached the correct rule mid-answer, demonstrating the resource is FINDABLE — but only after an incorrect first pass. This points to **responder synthesis slip**, not a routing failure: the keyword anchors took (eventually), but Haiku produced a false initial diagnosis ("any JOIN row replication → SUM over-counts") before retrieving and applying the more precise rule.
+**TRACE on customer C** with O1(total=100, 2 items), O2(total=100, 2 items), O3(total=50, 2 items):
+- After JOIN, the customer-C joined rows have order_total values: {100, 100, 100, 100, 50, 50} (6 rows).
+- DISTINCT VALUES = {100, 50}.
+- SUM(DISTINCT order_total) = **150 != 250**.
 
-**Slip vs gap?** Mostly slip with a borderline findability nuance: if r23's fan-out card LEADS with a copy-attractive CORRECT-then-WRONG block making the many-side-vs-one-side distinction explicit *at the top* (rather than embedded in prose), the responder is less likely to commit to the false initial mark. **Not warranting an immediate edit** per re-probe-don't-churn doctrine — re-probe on 1-2 more surfaces before escalating.
+**SUM(DISTINCT col) sums distinct VALUES, not per-order values** — it collapses the two distinct orders O1 and O2 into one because they happen to share the same $100 total. Verified vs trino.io/docs/current/functions/aggregate.html (WebSearch 2026-06-10 RE-CONFIRMED): DISTINCT keyword ensures the aggregate is applied to a unique set of attribute VALUES — not unique per-entity values.
 
----
+**This is a SUBTLE BUG**: it silently UNDERCOUNTS whenever two distinct orders for the same customer share a total dollar amount (extremely common in practice — round-number subscription tiers, fixed-price SKUs, identical promo amounts). The user will pass the surface "join-doesn't-overcount-anymore" check, then ship wrong revenue numbers in production.
 
-## ★ Q1 — 4.75 CLEAN
+The CORRECT "if you must join" fixes are:
+1. **Pre-aggregate order_items to one-row-per-order first** (CTE: `WITH oi_per_order AS (SELECT order_id FROM order_items GROUP BY order_id) ...`), then join, then SUM(order_total) GROUP BY customer_id.
+2. **De-dupe by one-side key**: `SELECT customer_id, SUM(order_total) FROM (SELECT DISTINCT o.customer_id, o.order_id, o.order_total FROM orders o JOIN order_items oi ON o.order_id=oi.order_id) GROUP BY customer_id`.
+3. **ROW_NUMBER() = 1 by order_id** to keep one row per order before SUM.
 
-`CASE WHEN year(current_date) - year(birth_date) BETWEEN 18 AND 24 THEN '18-24' ... ELSE 'unknown' END AS age_group, COUNT(*) FROM users WHERE birth_date IS NOT NULL GROUP BY (same CASE expression)`. Verified valid Trino 467:
-- `year(date)` returns year-field per functions/datetime.html.
-- Per-bucket count shape: GROUP BY the CASE expression ONLY (no unique key) + COUNT(*) returns rows per bucket — CORRECT.
-- CASE expression repeated in GROUP BY, NOT the alias — CORRECT per sql/select.html (Trino does NOT allow alias in GROUP BY).
-- WHERE birth_date IS NOT NULL runs before GROUP BY — CORRECT.
-- CTE variant offered — valid alternative.
+NOT SUM(DISTINCT order_total).
 
-**Year-difference vs precise age**: `year(current_date) - year(birth_date)` is a rough age (ignores whether the birthday has passed this year — a person born 1995-12-31 evaluated on 2026-01-01 shows as 31 not 30). This is the COMMON SIMPLIFICATION for bracket dashboards (precise age requires birthday-adjusted calc or `date_diff('year', birth_date, current_date)` which Trino computes as a year-field difference too). Acceptable for a bracket dashboard; minor knock for not flagging the approximation. Acc 4.75 / Comp 4.75 / Clar 4.75 / Act 4.75.
+### Defect scoping
+This is the **broken-secondary-alternative meta-pattern** (iter936/943/948/950/954/958 family) — the LEAD fix is correct, but an "if you must / shortcut" alternative ships a subtle bug. Q1 diagnosis + Option A is the answer to the question and is correct; Option B is gratuitous and wrong-by-collapse-of-equal-values.
+
+SCOPE: 1st-instance of SUM(DISTINCT)-as-dedup-by-key slip. NOT a recurring defect family yet — meta-pattern persists across surfaces but the SPECIFIC SUM(DISTINCT) form is new. iter958 many-side-vs-one-side confusion = ONE-OFF (RESOLVED on complement angle).
 
 ---
 
-## ★ Q2 — 2.50 SLIP
+## Q2 — Acc 5 / Comp 4 / Clar 4.5 / Act 4.5 = 4.5 CLEAN
 
-(See verdict section above.) Acc 2.5 (false initial WRONG-mark on a correct query, self-corrected) / Comp 3.0 (final conclusion correct + pre-aggregate CTE valid alternative + rule-of-thumb included) / Clar 2.0 (self-contradictory; reader misled before the correction) / Act 2.5 (final guidance is actionable but the path to it is messy; reader risks taking away "always pre-aggregate" instead of the precise many-vs-one-side rule).
+`SELECT product_id, new_price, changed_at FROM price_history WHERE changed_at >= current_timestamp - INTERVAL '30' DAY ORDER BY ...` — `INTERVAL '30' DAY` qualifier valid 467 per reference_trino_interval_qualifiers.md (DAY is one of the six valid qualifiers); `current_timestamp - INTERVAL` returns timestamp; comparison preserves timestamp type. CORRECT.
 
----
+The day-precision variant `CAST(changed_at AS date) >= current_date - INTERVAL '30' DAY` plus the claim "Trino unwraps the CAST into a bare-column range so partition pruning still works" — VERIFIED CORRECT per reference_trino_unwrap_temporal_predicates.md and trino.io/blog/2023/04/11/date-predicates.html: UnwrapCastInComparison rule (default-on in 467) rewrites CAST(ts AS date) comparisons into bare-column timestamp range comparisons that STILL prune partitions. NOT a false claim.
 
-## ★ Q3 — 4.8125 CLEAN
+Minor completeness knock: the question asked for **products** whose price changed; responder returned price_history change-event rows (product_id, new_price, changed_at) rather than `SELECT DISTINCT product_id`. A `SELECT DISTINCT product_id FROM price_history WHERE changed_at >= current_timestamp - INTERVAL '30' DAY` more directly answers "which products". Minor framing, not a defect.
 
-`WITH account_balances AS (SELECT account_id, ..., SUM(CASE WHEN entry_type='credit' THEN amount ELSE -amount END) OVER (PARTITION BY account_id ORDER BY created_at ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_balance FROM ledger_entries) SELECT DISTINCT account_id FROM account_balances WHERE running_balance < 0`.
+## Q3 — Acc 5 / Comp 4.75 / Clar 5 / Act 4.75 = 4.875 CLEAN
 
-Verified valid Trino 467:
-- Signed running SUM via CASE (credit +amount / debit -amount) — correct.
-- `SUM() OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` = canonical running-total window per functions/window.html.
-- WHERE on the CTE-materialized `running_balance` runs after the window (the window already computed inside the CTE; the outer WHERE filters the materialized rows) — CORRECT, no WHERE-before-window trap.
-- SELECT DISTINCT account_id returns each flagged account once even when multiple rows go negative — correct for "ever went below zero".
-- NOT a gaps-and-islands pattern; no filter-then-count always-zero trap (signed sum keeps all rows; window captures full running balance; any-row-<0 detection is straightforward).
-- Window-fn-not-app-code note adds appropriate framing.
+`SELECT EXTRACT(YEAR FROM created_at) AS signup_year, COUNT(*) FROM users GROUP BY EXTRACT(YEAR FROM created_at) ORDER BY signup_year`. Verified valid 467 per functions/datetime.html: EXTRACT(YEAR FROM ts) returns integer year-field; GROUP BY repeats the expression (not the alias — sql/select.html); ORDER BY alias resolves; YEAR(created_at) equivalent shorthand also valid. NULL created_at produces its own bucket (standard SQL). Clean.
 
-Acc 5.0 / Comp 4.75 (could optionally mention adding `, entry_id` to ORDER BY as a deterministic tie-breaker for same-instant ledger entries, but not required) / Clar 4.75 / Act 4.75.
+## Q4 — Acc 5 / Comp 4.5 / Clar 4.75 / Act 4.5 = 4.6875 CLEAN
+
+`SELECT name, COUNT(DISTINCT category_id) AS num_categories FROM products GROUP BY name HAVING COUNT(DISTINCT category_id) > 1 ORDER BY num_categories DESC`. Verified valid 467: single-arg COUNT(DISTINCT) per reference_trino_count_distinct_single_arg.md; HAVING after aggregation per sql/select.html; HAVING references aggregate not alias — CORRECT; ORDER BY alias resolves. Clean.
 
 ---
 
-## ★ Q4 — 4.375 MOSTLY CLEAN (minor completeness)
-
-`SHOW CREATE TABLE` to inspect partitioning — valid 467. Partition-aware WHERE (product_id=42 AND order_date >= current_date - INTERVAL '90' DAY) reduces scan via partition pruning — sound general advice. `ALTER TABLE ... SET PROPERTIES partitioning=ARRAY['day(order_date)']` valid 467 Iceberg DDL; responder correctly flags it affects **new writes only** (the iter925 partition-evolution semantics pin holds). `CALL iceberg.system.rewrite_data_files(...)` correctly attributed to a **Spark SQL session, not Trino** — verified vs trino.io/docs/current/connector/iceberg.html: Trino's Iceberg connector does NOT expose `rewrite_data_files`; Trino-native compaction is `ALTER TABLE <t> EXECUTE optimize`.
-
-**Minor completeness gaps**:
-- Should ideally have offered Trino-native `ALTER TABLE <t> EXECUTE optimize` as the in-stack-friendly compaction option (the production stack runs Trino 467 + Spark via Iceberg 1.5.2 ingest; both available, but Trino-native is the lower-friction choice for ad-hoc compaction). Currently the answer routes the user to a Spark session for old-data rewrites, which is workable but adds a context switch.
-- For a `product_id=42` lookup specifically, bucketing or sorting by product_id (or per-file min/max stats / per-file column-level skipping) helps the predicate directly. Date-partition-pruning is good general advice but tangential to a product-id point lookup if `order_date` is unfiltered or coarsely filtered.
-- Materialized table via dbt — fair suggestion for a hot query.
-
-Acc 4.5 / Comp 4.0 / Clar 4.5 / Act 4.5. No PARTITIONED BY footgun; no bucket(N, col) Spark-order footgun; clean 467 DDL throughout.
-
----
-
-## SCOPE SUMMARY
-
-- **Q1**: Clean per-bucket count via CASE bucketing; rough-age year-diff acceptable for bracket dashboard. NO defect.
-- **Q2**: RESPONDER SLIP on many-side-vs-one-side fan-out rule. False initial WRONG-mark on a CORRECT aggregate query; self-corrects mid-answer with the correct rule. Final conclusion is right. Damages mid-answer trust but final guidance lands. Borderline findability nuance: r23 fan-out card may benefit from a copy-attractive CORRECT-vs-WRONG block making many-side-vs-one-side distinction TOP-OF-CARD — but NO immediate edit warranted per re-probe-don't-churn.
-- **Q3**: Clean running-balance window. NOT a gaps-and-islands trap. Correct any-row-<0 detection. NO defect.
-- **Q4**: Mostly clean lakehouse-perf playbook. Minor completeness on Trino-native `ALTER TABLE EXECUTE optimize` (responder routed to Spark for compaction — workable, not wrong). NO dialect error; correct attribution of `rewrite_data_files` to Spark.
-
-**Overall pattern**: 3 of 4 questions clean (≥4.375); Q2 is the soft spot — a single-question responder slip muddling a question whose correct rule IS taught in r23. Margin +0.609 above PASS threshold remains comfortable.
-
----
-
-## iter959 RECOMMENDATION = DEFAULT NO-OP + optional LIGHT FIX-A only if many-side-vs-one-side fan-out slip recurs on different surface in next 2 sweeps
+## iter960 RECOMMENDATION = DEFAULT NO-OP + optional LIGHT FIX-A only if SUM(DISTINCT)-as-dedup slip OR many-side-vs-one-side confusion recurs on different surface in next 2 sweeps
 
 **Reasoning**:
-1. iter958 was a NO-OP DEFAULT breadth sweep and 4.109 PASS confirms breadth pivot still working; margin +0.609 above threshold.
-2. Q2 slip is a single-instance responder synthesis miss; the responder DID retrieve the correct rule mid-answer (demonstrating r23 fan-out content is findable on this surface). Adding a card right now risks pulling adjacent JOIN-cardinality questions (e.g., "SUM(order_total) with line-item join — same total appears in each row, is that wrong?" — that one IS over-counted) toward the wrong canonical, per `feedback_new_card_over_attracts_adjacent.md`.
-3. Q1/Q3 clean; Q4 has only minor Trino-native-compaction completeness — not warranting edits.
-4. NO federation probe per directive (4.49944/310 row hard-locked).
+1. Overall 3.78125 PASS (margin +0.28 — TIGHT but holds; overall average governs, no per-Q veto).
+2. iter958's many-side-vs-one-side confusion = **RESOLVED on complement angle** — responder correctly diagnosed the ONE-side over-counting mechanism this iteration. The iter958 slip was a one-off synthesis miss, not a routing failure or findability gap. The r23 fan-out card LIGHT FIX-A deferral from iter958 still holds — do NOT add a card now.
+3. Q1's Option B SUM(DISTINCT) slip is the broken-secondary-alternative meta-pattern recurring on a NEW surface (1st-instance for SUM(DISTINCT)-as-dedup specifically). Diagnosis + lead fix is correct; the "if you must join" alternative ships a subtle undercount.
+4. Per `feedback_new_card_over_attracts_adjacent.md`: adding a SUM(DISTINCT)-WRONG card now risks pulling adjacent legitimate-SUM(DISTINCT) questions ("sum of distinct order subtotals across catalog tiers", "sum of distinct discount amounts applied") to the wrong canonical. Defer.
+5. Q2/Q3/Q4 all clean across distinct families (temporal range + UnwrapCast / EXTRACT YEAR + GROUP BY / COUNT(DISTINCT) + HAVING > 1) — no other defects.
+6. Optional LIGHT FIX-A trigger: if SUM(DISTINCT)-as-dedup-by-key OR many-side-vs-one-side confusion recurs on a different surface in next 2 sweeps, add ONE brief card to r23 near the fan-out section with copy-attractive CORRECT (pre-aggregate per order_id CTE) vs WRONG-DO-NOT-COPY (SUM(DISTINCT order_total) over join — collapses different orders sharing same total) + WHICH-X router. Use inline-WRONG-marked DO-NOT-COPY per `feedback_defang_donotwrite_snippets.md`. Keep BRIEF.
+7. NEXT SWEEP PROBES: a different one-side-over-counts angle (e.g., AVG(order_total) over orders x line_items; MAX(order_total) over the join — verify responder doesn't conflate "MAX-of-replicated-value is fine, SUM-of-replicated-value is broken"); a question explicitly designed to elicit a legitimate SUM(DISTINCT) use to test if the responder still reaches for it correctly when appropriate; window-frame BETWEEN N PRECEDING AND N FOLLOWING; GROUPING SETS / ROLLUP / CUBE; lateral JOIN UNNEST. Do NOT re-probe gaps-and-islands streak-construction yet. Do NOT probe federation outside bulletproofed angles.
+8. DO NOT TOUCH: r23 fan-out card (defer to recurrence-driven LIGHT FIX-A) / r07 L3226-3263 strengthened B-Streak defang / r07 L37 (HAVING-perf) / r07 L1624 (anti-nesting) / r07 NESTED_WINDOW WRONG #1+#2 / two-GROUP-BY WRONG #2 / r23 §3.1G argmax / COUNT(DISTINCT) canonical / HAVING-vs-WHERE / QUALIFY-not-Trino / regexp_like card / NULLS-LAST default / geometric/harmonic mean cards / r09 partition DDL strings + bucket(col,N) column-first / r28 DATE-literal + date_trunc-to-range nuance / r13 json_exists strict path / r22 section 13.x federation (all rows hard-locked) / percentile cards / INTERVAL qualifier cards / format_datetime-vs-to_char card / PARTITIONED-BY guidance / price-suffix canonical / MAX_BY-nested defang.
 
-**Optional LIGHT FIX-A (only if Q2-style fan-out slip recurs on a different surface in next 2 sweeps)**:
-- In r23 fan-out / JOIN-cardinality section, lead with a copy-attractive CORRECT-vs-WRONG block:
-  - **CORRECT**: "Summing a many-side attribute (line-item quantity) after a one-to-many JOIN — `SUM(li.quantity) GROUP BY o.warehouse_id` — is NOT over-counted; each line-item row contributes its own value exactly once."
-  - **WRONG (DO NOT COPY)**: "Summing a one-side attribute (order_total) after the same JOIN — `SUM(o.order_total) GROUP BY o.warehouse_id` — IS over-counted because the order row replicates once per line item; pre-aggregate per order_id first."
-  - Plus a WHICH-X router: "Which side of the join produces the column you're summing? Many-side (per-row attribute): SUM is fine. One-side (replicated per join row): pre-aggregate or DISTINCT-anchor first."
-- Keep BRIEF; no isolated DO-NOT-WRITE snippet blocks per `feedback_defang_donotwrite_snippets.md`.
+**PINS REINFORCED**:
+- **SUM(DISTINCT col) sums distinct VALUES, not per-entity values** — collapses different entities that happen to share the same column value; NOT a valid de-dup-by-key fix for fan-out. Verified vs trino.io/docs/current/functions/aggregate.html WebSearch 2026-06-10.
+- **One-to-many JOIN over-counts SUM of a ONE-side attribute** (replicated per match); fix = (a) pre-aggregate the many side to one-row-per-one-side first, (b) sum the one-side attr WITHOUT the join, or (c) de-dupe by one-side key (ROW_NUMBER=1 / SELECT DISTINCT on one-side-key + one-side-attr).
+- **SUM of a MANY-side attribute over the one-to-many JOIN is FINE** (each many-side row contributes its value exactly once) — iter958 confusion RESOLVED on complement angle this iteration.
+- **INTERVAL '30' DAY** qualifier valid (DAY is one of six valid qualifiers per reference_trino_interval_qualifiers.md).
+- **UnwrapCastInComparison** rewrites CAST(ts AS date) comparisons to bare-column timestamp range comparisons that STILL prune partitions (default-on 467) per reference_trino_unwrap_temporal_predicates.md.
+- **EXTRACT(YEAR FROM ts)** / **YEAR(ts)** return integer year-field; GROUP BY repeats expression not alias per sql/select.html.
+- **HAVING COUNT(DISTINCT x) > 1** for "in more than one distinct group"; single-arg COUNT(DISTINCT) per reference_trino_count_distinct_single_arg.md.
+- **broken-secondary-alternative meta-pattern** persists across surfaces (iter936/943/948/950/954/958/959 family); LEAD fix routinely correct, "if you must / shortcut" alternative ships subtle bugs.
 
-**Next-sweep probes**:
-- A different many-side-vs-one-side fan-out surface (e.g., "SUM(o.order_total) on orders × line_items — totals look inflated" — should land "yes, one-side attribute IS over-counted, pre-aggregate") to test whether the rule is teachable in both directions.
-- Window-frame BETWEEN variants (`BETWEEN N PRECEDING AND N FOLLOWING`).
-- GROUPING SETS / ROLLUP / CUBE.
-- Lateral JOIN UNNEST.
-- Trino-native `ALTER TABLE EXECUTE optimize` vs Spark `rewrite_data_files` direct probe — does the responder LEAD with Trino-native compaction when asked "how do I compact old data in Iceberg"?
-- One IS DISTINCT FROM null-safe-inequality angle (recurring per iter957 nuance check).
-- Do NOT re-probe gaps-and-islands streak-construction yet.
-
-**DO NOT TOUCH**:
-- r23 fan-out card (defer to recurrence-driven LIGHT FIX-A).
-- r07 L3226-3263 strengthened B-Streak defang (3 iters old, holding).
-- r07 L37 HAVING-perf reword.
-- r07 L1624 anti-nesting.
-- r07 NESTED_WINDOW WRONG #1+#2 / two-GROUP-BY WRONG #2.
-- r23 §3.1G argmax / COUNT(DISTINCT) canonical / HAVING-vs-WHERE / QUALIFY-not-Trino / regexp_like card / NULLS-LAST default / geometric/harmonic mean cards.
-- r09 partition DDL strings + bucket(col,N) column-first.
-- r28 DATE-literal + date_trunc-to-range nuance.
-- r13 json_exists strict path.
-- r22 §13.x federation (all rows hard-locked).
-- Percentile cards / INTERVAL qualifier cards / format_datetime-vs-to_char card / PARTITIONED-BY guidance / price-suffix canonical / MAX_BY-nested defang.
-
----
-
-## PINS REINFORCED
-
-- **JOIN fan-out: many-side attribute (line-item quantity) SUM after one-to-many JOIN is NOT over-counted (each many-side row contributes its value exactly once); one-side attribute (order_total) SUM IS over-counted (the one-side row replicates per many-side row, value is counted multiple times). Pre-aggregate (CTE/subquery on order_id first) is required ONLY when summing one-side attributes; for many-side attributes, the direct JOIN+GROUP BY is correct.**
-- **Per-bucket count via CASE bucketing: `CASE WHEN ... THEN 'bucket-label' ... END AS bucket, COUNT(*) FROM t WHERE ... GROUP BY (same CASE expression)` — GROUP BY repeats the CASE expression (NOT the alias) per sql/select.html.**
-- **`year(date)` returns year-field per functions/datetime.html; year-difference (`year(a)-year(b)`) is a rough age (ignores whether the birthday has passed this year) — acceptable for bracket dashboards.**
-- **Running total: `SUM() OVER (PARTITION BY ... ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` per functions/window.html; signed sum via `CASE WHEN type='credit' THEN amount ELSE -amount END`.**
-- **Window functions run after WHERE per functions/window.html; WHERE on a CTE-materialized window-output column filters after the window — no filter-before-window trap when the window is computed inside the CTE.**
-- **Trino-native Iceberg compaction = `ALTER TABLE <t> EXECUTE optimize` per connector/iceberg.html; `rewrite_data_files` is a Spark Iceberg procedure (not exposed by Trino's Iceberg connector).**
-- **`ALTER TABLE <t> SET PROPERTIES partitioning=ARRAY['day(order_date)']` valid 467 Iceberg DDL — affects NEW WRITES ONLY (partition evolution semantics).**
-- **Partition pruning via bare-column WHERE (no function wrapper on partition column unless the unwrap rule applies) per `reference_trino_unwrap_temporal_predicates.md`.**
-- **`bucket(col, N)` column-first in Trino Iceberg (NOT Spark's `bucket(N, col)`) per `reference_trino_bucket_arg_order.md`.**
-- **Default NULLS LAST in 467 per `reference_trino_null_ordering_default.md`.**
-- **SELECT DISTINCT valid for "any row matched" deduplication.**
-
-PRESERVE full iter534-957 pin inventory; NO federation edits, NO percentile-card edits, NO PARTITIONED-BY defang card, NO INTERVAL-qualifier edits, NO HAVING-perf defang card, NO price-suffix canonical card, NO MAX_BY-nested defang card, NO B-Streak defang edits, NO r23 fan-out card edits (defer to recurrence-driven LIGHT FIX-A).
-
-PIN 467. DO NOT bump training/state.json (already 958; passed=true preserved; overall 4.109 PASS holds; final_iterations_remaining 0).
+PIN 467. DO NOT bump training/state.json (already 959; passed=true preserved; overall 3.78125 PASS holds; final_iterations_remaining 0).
