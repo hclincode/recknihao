@@ -1,52 +1,80 @@
-# Judge Feedback — iter903 (NO-OP durability sweep)
+# Judge Feedback — iter904 (NO-OP durability sweep, but ONE Q1 DEFECT)
 
-**Overall: 5.00 STRONG PASS** (per-Q 5.00 / 5.00 / 5.00 / 5.00 = 20.00 / 4 = 5.00; margin +1.50 over the 3.5 bar). Overall average governs — no per-Q veto. **DEFAULT NO-OP for iter904 — teacher makes ZERO edits.** Do NOT bump `training/state.json` (already passed).
+**Overall: 4.56 PASS** (per-Q 3.25 / 5.00 / 5.00 / 5.00 = 18.25 / 4 = 4.5625; margin +1.06 over the 3.5 bar). Overall average governs — no per-Q veto. Do NOT bump `training/state.json` (already passed).
 
 Federation (4.49944/310) was NOT probed this sweep — that row is UNCHANGED and remains the only un-passed topic.
 
----
-
-## Q1 BACKSLASH VERDICT — THE RUN-PROMPT PREMISE IS REFUTED; `'\\s+'` IS CORRECT, NOT OVER-ESCAPED
-
-The directive asked me to confirm that the secondary query's DOUBLE-backslash `regexp_replace(feedback, '\\s+', ' ')` is over-escaped/wrong and that the single-backslash `'\s+'` is the correct Trino form. **Verified against source first (iter882 discipline) — and the premise is the OPPOSITE of the truth:**
-
-- The OFFICIAL Trino 467 `regexp.html` examples consistently use **DOUBLE backslash** for regex metacharacters and they WORK:
-  - `regexp_replace('1a 2b 14m', '\\d+[ab] ')` → `'14m'`
-  - `regexp_like('1a 2b 14m', '\\d+b')` → `true`
-  - `regexp_replace('new york', '(\\w)(\\w*)', x -> upper(x[1]) || lower(x[2]))` → `'New York'`
-- Multiple authoritative sources agree on the double-backslash convention: Trino current docs, the cited GitHub discussions (#17673 / #17474), and the Medium "Comprehensive Guide to Regular Expressions in Trino" (which uses `'\\d+'` and `'\\bworld\\b'`).
-- Yes — Trino SQL string literals do not process backslash *as a SQL escape* (only single-quote-doubling escapes a quote). But the documented, working convention for regex metacharacters in Trino is nonetheless **double backslash** `'\\d'` / `'\\s'` / `'\\w'`, exactly as the responder wrote.
-
-**Conclusion: the responder's `'\\s+'` matches the official 467 documented form. It is NOT over-escaped, it is NOT a defect, and there is NO Accuracy deduction.** The run-prompt's framing (and its "iter894 single-backslash was correct" contrast) is contradicted by the 467 docs.
-
-**SCOPE-CHECK consequence:** Because there is no Q1 defect, there is NO escalation, NO iter904 re-probe on backslash form, and NO FIX-A. Critically — **do NOT "correct" any resource toward the single-backslash `'\s+'` form.** Doing so would push resources AWAY from the official Trino 467 double-backslash convention and could introduce a real defect. Leave the regexp_replace collapse-whitespace canonical untouched.
-
-(This is exactly the iter882 trap: a doc-CORRECT responder claim must not be flagged as a defect just because a directive suspected it. Verify-first paid off.)
+PIN Trino 467. All dialect facts verified vs trino.io/docs/467 (window/select/datetime/aggregate .html) + Trino error-message family via WebFetch/WebSearch 2026-06-10.
 
 ---
 
-## Per-question verdicts (all VERIFIED vs trino.io/docs/467)
+## Q1 WINDOW-FUNCTION-IN-WHERE VERDICT — CONFIRMED DEFECT in the FIRST query; the SECOND (CTE) query is CORRECT
 
-- **Q1 — count words (5.00).** PRIMARY `cardinality(split(trim(feedback), ' ')) AS word_count` — split → array, cardinality → length; trim() strips leading/trailing whitespace first. Valid (string.html `split`, array.html `cardinality`). SECONDARY multi-space-collapse variant with `'\\s+'` — correct double-backslash form (see verdict above).
-- **Q2 — status_code → label (5.00).** Simple-CASE form `CASE status_code WHEN 1 THEN ... ELSE 'Unknown' END` confirmed valid (conditional.html). GROUP BY `status_label` on a subquery-wrapped CASE is legal — it groups on a REAL materialized outer-query column, not a same-level SELECT alias.
-- **Q3 — active in BOTH Jan AND Feb (5.00).** `WHERE order_date >= DATE '2026-01-01' AND order_date < DATE '2026-03-01' GROUP BY customer_id HAVING COUNT(DISTINCT date_trunc('month', order_date)) = 2`. date_trunc('month',...) → first-of-month midnight; half-open range confines to Jan+Feb only; `= 2` distinct months ⇒ rows in BOTH months. Logic and dialect both sound.
-- **Q4 — purely alphabetic (5.00).** `regexp_like(code, '^[A-Za-z]+$')` returns boolean; anchored `^...$` and the inline `(?i)` case-insensitive flag are both documented/supported. Used the correct Trino FUNCTION — no Postgres `~`-operator regression.
+The run-prompt's central concern is confirmed.
+
+**(a) A window function (`LAG(...) OVER (...)`) in the WHERE clause is ILLEGAL in Trino 467.** VERIFIED vs trino.io/docs/467:
+- `window.html`: window functions "run after the `HAVING` clause but before the `ORDER BY` clause" — i.e. they evaluate AFTER WHERE filtering, so a window function cannot appear in WHERE.
+- `select.html`: window functions "are limited to SELECT and ORDER BY contexts only"; WHERE runs before windows are computed.
+- The Trino analyzer rejects this with an error in the "WHERE clause cannot contain aggregations, window functions or grouping operations" family (analyzer rejection / `mismatched input 'OVER'`).
+
+The FIRST query's `WHERE LAG(current_price) OVER (PARTITION BY product_id ORDER BY price_date) IS NOT NULL` is therefore a **genuine DIALECT DEFECT — it would not run.**
+
+**(b) The SELECT alias `price_jump` in `ORDER BY ABS(price_jump)` is FINE.** VERIFIED `select.html`: output aliases ARE referenceable in ORDER BY (unlike WHERE / GROUP BY-by-alias caveats). So the ORDER BY in the first query is not the problem — only the window-fn-in-WHERE is.
+
+**(c) The SECOND query (CTE) is fully CORRECT.** `WITH price_changes AS (... LAG(...) ... AS price_jump) SELECT ... WHERE price_jump IS NOT NULL ORDER BY ABS(price_jump) DESC LIMIT 1`: here `price_jump` is a REAL materialized CTE column, so `WHERE price_jump IS NOT NULL` is legal (filtering a CTE column, NOT a same-level SELECT alias and NOT a window function). LAG signature `lag(x[, offset[, default]])` confirmed; `ABS` + `DESC` + `LIMIT 1` correct for "biggest single jump". This query returns the right answer and runs.
+
+**Q1 scoring (partial credit, NOT zero — the correct CTE IS present):**
+- Accuracy **2.5** — the lead query is unrunnable (window-fn-in-WHERE); the CTE is correct.
+- Completeness **4.0** — a correct, complete answer to the question is delivered (CTE form).
+- Clarity **3.5** — both queries readable; but presenting a broken query first, unflagged, misleads.
+- Actionability **3.0** — a non-expert copies the FIRST query first and hits an analyzer error; they must scroll to the CTE to get a working query.
+- **Q1 = (2.5+4.0+3.5+3.0)/4 = 3.25.** A real copy-paste failure on the lead query, offset by the correct CTE.
+
+### SCOPE-CHECK — RESPONDER SYNTHESIS SLIP, NOT a resource defect → re-probe-don't-churn
+
+Resources ALREADY teach, abundantly and correctly, that window functions cannot appear in WHERE:
+- `r23` §3.1G LEADING CANONICAL + anti-pattern table L2007 (`WHERE RANK() OVER (...) = 2` → "Window function NOT allowed in WHERE … WHERE runs BEFORE windows are computed") + the migration-trap table L3259 (`WHERE ROW_NUMBER() OVER (...) = 1` → "NOT supported in any SQL dialect, including Trino" + the wrap-in-subquery rewrite) + L1779/L1806 ("window functions are illegal in WHERE in EVERY SQL dialect").
+- `r27` L793 ("you cannot reference ANY SELECT output alias — nor a window-function result — in WHERE … filter them in an outer query / CTE too") + L1988 (`DELETE … WHERE ROW_NUMBER() OVER (...) > 1` defang).
+- `r07` L3939 (NTILE: "window functions cannot go in WHERE … no QUALIFY") + L4722 (Top-N per group = window + outer WHERE).
+
+The resources are correct and well-anchored, and the responder even PRODUCED the correct CTE form itself in the same answer — so the broken lead query is a **RESPONDER SYNTHESIS SLIP** (it generated the illegal form on its own despite having the right pattern at hand), NOT a content gap.
+
+**iter905 = re-probe-don't-churn.** Re-probe "filter on a window-function result" / "find the row with the max windowed value" from a fresh phrasing next sweep to confirm the slip is a one-off. **Do NOT add any new "wrong" card and do NOT churn the §3.1G / L2007 / L3259 / r27-L793/L1988 / r07-L3939 window-in-WHERE guards — they are correct and comprehensive (a LIGHT FIX-A here would only duplicate existing pins).** No FIX-A this iter.
 
 ---
 
-## Instructions for the teacher (iter904)
+## Q2 — time-of-day order-volume bands — CORRECT (5.00)
 
-- **DEFAULT NO-OP. Make zero resource edits.**
-- Do NOT add any "wrong" card for Q1–Q4.
-- Do NOT mark the `'\\s+'` double-backslash regexp_replace form wrong — it is the official 467 form.
-- Do NOT migrate any resource to single-backslash `'\s+'`.
-- Do NOT churn the split/cardinality word-count, regexp_replace collapse-whitespace, simple-CASE status-label, date_trunc/COUNT(DISTINCT) both-months, or regexp_like alphabetic-check cards.
-- Re-probe fresh adjacents next sweep. Federation (4.49944/310) is the only un-passed row — probe only bulletproofed angles there.
-- Do NOT touch any iter534–902 pin. PIN Trino 467. NO federation edits. DO NOT bump `training/state.json`.
+`CASE WHEN EXTRACT(hour FROM created_at) >= 6 AND ... < 12 THEN 'morning' … ELSE 'night' END AS time_of_day, COUNT(*)`, `GROUP BY` the repeated CASE expression, `ORDER BY CASE time_of_day WHEN 'morning' THEN 1 …`.
+- VERIFIED `datetime.html`: `EXTRACT(hour FROM ts)` / `extract(field FROM x) → bigint` valid, HOUR supported (0–23).
+- GROUP BY repeats the CASE EXPRESSION (not an alias) → legal.
+- ORDER BY references the output alias `time_of_day` inside a CASE → VERIFIED legal (output aliases usable in ORDER BY).
+- CTE variant equivalent and correct.
+**Q2 = 5.00.**
 
-Sources:
-- [Trino 467 regexp functions](https://trino.io/docs/467/functions/regexp.html)
-- [Trino 467 conditional expressions](https://trino.io/docs/467/functions/conditional.html)
-- [Trino 467 date/time functions](https://trino.io/docs/467/functions/datetime.html)
-- [Trino data types / string literals](https://trino.io/docs/467/language/types.html)
-- [Trino discussion #17673 — backslash handling in string literals](https://github.com/trinodb/trino/discussions/17673)
+## Q3 — trailing-3-row rolling average per customer — CORRECT (5.00)
+
+`AVG(value) OVER (PARTITION BY customer_id ORDER BY metric_date ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS rolling_3row_avg`; tiebreaker `ORDER BY metric_date, metric_id` caveat noted.
+- VERIFIED (Trino docs + Trino blog "new window features"): `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` is a 3-row physical frame (current + 2 preceding) → exactly the trailing-3 average; documented Trino example `avg(x) OVER (... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)`.
+- ROW-count frame (ROWS, not RANGE) correctly chosen for "3 most recent readings (row-count, not date)".
+- Tiebreaker caveat (add `metric_id` to make ordering deterministic on duplicate dates) is the right nuance to raise.
+- Minor completeness note (NOT a defect): the windowed form computes trailing-3 on EVERY row; the value for each customer's LATEST row is the "3-most-recent" average — reasonable interpretation, not a deduction.
+**Q3 = 5.00.**
+
+## Q4 — distinct product categories per customer — CORRECT (5.00)
+
+`COUNT(DISTINCT category) AS num_categories … GROUP BY customer_id` (the one-number ask); plus `ARRAY_AGG(DISTINCT category ORDER BY category)` for the list.
+- VERIFIED `aggregate.html`: `count(DISTINCT x)` valid; `array_agg()` ordering "can be specified by writing an ORDER BY clause within the aggregate function". Combining `DISTINCT` with `ORDER BY` on the SAME aggregated column (`array_agg(DISTINCT category ORDER BY category)`) is established Trino behavior — the only constraint is that ORDER BY sort keys must be in the argument list when DISTINCT is used, which holds here (sorting on `category`, the aggregated column).
+- Correctly distinguishes the count (one number, the literal ask) from the optional list.
+**Q4 = 5.00.**
+
+---
+
+## iter905 directive
+
+**NO FIX-A. re-probe-don't-churn only.**
+- Q1 window-fn-in-WHERE is a RESPONDER SYNTHESIS SLIP — resources are correct and comprehensive. Do NOT add a "wrong" card; do NOT churn the §3.1G / r23-L2007 / r23-L3259 / r27-L793 / r27-L1988 / r07-L3939 window-in-WHERE guards.
+- iter905: re-probe "filter on / pick the row with a window-function result" from a fresh phrasing to confirm the slip is a one-off (it is well-guarded in resources, so expect a clean answer).
+- Did NOT flag Q2/Q3/Q4 as defects — all verified correct vs source first (iter882 discipline).
+- Federation (4.49944/310) is the only un-passed row — probe bulletproofed angles only.
+- Do NOT touch any iter534–903 pin. PIN 467. NO federation edits. DO NOT bump `training/state.json` (already passed; overall 4.56 PASS holds).
