@@ -3478,6 +3478,27 @@ The phrases you would type into a search bar for this pattern: **year over year*
 >
 > Note: the `day_*` family has `of-year`/`of-week` aliases (`day_of_week`/`dow`, `day_of_year`/`doy`, `week_of_year` = alias of `week`, `year_of_week`/`yow`), but **`quarter` has NO `quarter_of_year` alias** — it is just `quarter()` (or `EXTRACT(QUARTER FROM ...)`). Don't synthesize a `quarter_of_year` by analogy with `week_of_year` — it does not exist and fails at planning.
 
+> **ADD-A-QUARTER / ADD-A-WEEK to a date — `INTERVAL '1' QUARTER` and `INTERVAL '1' WEEK` are PARSE ERRORS in Trino 467** *(keyword anchors: add a quarter, advance by a quarter, INTERVAL QUARTER, INTERVAL WEEK, this quarter date range, quarter interval, add a week to a date, next quarter, plus one quarter, plus a week)* — Trino 467 INTERVAL literals accept **only 6 qualifiers**: `YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND` (verified in the 467 grammar `SqlBase.g4`, rule `intervalField : YEAR | MONTH | DAY | HOUR | MINUTE | SECOND ;`). There is **no `QUARTER` and no `WEEK` interval qualifier** — writing `+ INTERVAL '1' QUARTER` or `+ INTERVAL '1' WEEK` fails to parse with `mismatched input 'QUARTER'` (resp. `'WEEK'`).
+>
+> ```sql
+> -- ADD A QUARTER — use 3 months, OR date_add('quarter', ...):
+> date_trunc('quarter', current_date) + INTERVAL '3' MONTH   -- start of NEXT quarter
+> date_add('quarter', 1, current_date)                       -- same, function form
+>
+> -- ADD A WEEK — use 7 days, OR date_add('week', ...):
+> some_date + INTERVAL '7' DAY
+> date_add('week', 1, some_date)
+>
+> -- THIS-QUARTER half-open range (the whole current quarter, prunable bare-column form):
+> WHERE col >= date_trunc('quarter', current_date)
+>   AND col <  date_trunc('quarter', current_date) + INTERVAL '3' MONTH
+>
+> -- ❌ DO NOT COPY (parse error 'mismatched input QUARTER'/'WEEK'): the + INTERVAL '1' QUARTER
+> --    and + INTERVAL '1' WEEK forms do NOT exist — use '3' MONTH / '7' DAY (or date_add) above.
+> ```
+>
+> **TWO-SURFACES trap — don't over-correct.** `quarter` and `week` ARE perfectly valid **UNIT strings** for the date-part functions: `date_trunc('quarter', x)`, `date_trunc('week', x)`, `date_add('quarter', n, x)`, `date_add('week', n, x)`, `date_diff('quarter', a, b)`, `date_diff('week', a, b)` all work fine. It is **only the INTERVAL-LITERAL qualifier grammar** that excludes them. So `date_trunc('quarter', current_date)` is correct and stays; the *only* broken piece is appending `+ INTERVAL '1' QUARTER` to it — replace that tail with `+ INTERVAL '3' MONTH` (or wrap the whole thing in `date_add('quarter', 1, ...)`).
+
 > **DO-NOT-WRITE — period-total ratio specific (iter640 FIX-A — the iter639 Q2 responder miss):**
 >
 > | DO NOT write | Why it's wrong / silently-wrong | Correct form |

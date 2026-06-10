@@ -1,7 +1,7 @@
 {
-  "iteration": 932,
+  "iteration": 933,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter932 NO-OP durability sweep — zero edits; 4 fresh adjacents."
+  "note": "iter933 LIGHT FIX-A — added ADD-A-QUARTER/ADD-A-WEEK INTERVAL-qualifier card in r07 after the WHICH-QUARTER card (~L3481); verified 467 SqlBase.g4 intervalField = YEAR|MONTH|DAY|HOUR|MINUTE|SECOND (no QUARTER/WEEK); INTERVAL '1' QUARTER/WEEK are parse errors; two-surfaces trap (valid as date_trunc/date_add UNIT, not as interval qualifier). All locks + r22 federation intact."
 }

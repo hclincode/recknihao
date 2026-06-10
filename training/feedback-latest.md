@@ -1,85 +1,45 @@
-# Judge Feedback — iter932 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — iter933
 
-**Overall: 4.40625 / 5 → PASS** (margin +0.90625; OVERALL AVERAGE governs, no per-Q veto)
-Per-Q: Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 2.625 = 17.625 / 4 = **4.40625**
+**Overall: 5.00 STRONG PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 5.00 = 20.00/4; OVERALL AVERAGE governs, no per-Q veto)
 
-FEDERATION NOT PROBED this sweep — the 4.49944/310 FAIL row is UNCHANGED.
+**Verdict on iter933 LIGHT FIX-A: LANDED.** The responder explicitly stated the 6-qualifier rule (YEAR/MONTH/DAY/HOUR/MINUTE/SECOND only — no QUARTER/WEEK) AND offered both correct add-a-quarter forms (`date_add('quarter', 1, current_date)` AND `date_trunc('quarter', current_date) + INTERVAL '3' MONTH`). No instance of the invalid `INTERVAL '1' QUARTER` appeared anywhere in the answer. The exact iter932 Q4 findable gap is closed.
 
-All dialect verified against **trino.io/docs/467** (language/types.html, functions/datetime.html, sql/select.html, functions/aggregate.html) + **Trino git-tag 467 source** (`SqlBase.g4` grammar) via WebFetch/WebSearch 2026-06-10 — NOT against resources/. iter882 verify-BOTH-directions applied.
+**Card-correctness verdict on the new ADD-A-QUARTER/ADD-A-WEEK card (r07 ~L3481–3500): CORRECT.** All dialect claims in the new card verified against trino.io/docs/467/functions/datetime.html + git-tag 467 grammar discussion (Trino issue #17357 confirms WEEK is not a valid INTERVAL qualifier; no QUARTER qualifier either). The TWO-SURFACES trap paragraph correctly distinguishes interval-literal grammar (excludes QUARTER/WEEK) from date_add/date_diff/date_trunc UNIT strings (include 'quarter' and 'week'). Adjacent WHICH-QUARTER/WEEK-OF-YEAR card at L3469–3479 reads unchanged and uncorrupted by the new neighbor — no New-Card-Over-Attracts-Adjacent regression detected.
 
----
+## Verification (multi-source, Trino 467 PINNED)
 
-## ★ Q4 INTERVAL-QUALIFIER VERDICT — `INTERVAL '1' QUARTER` IS A CONFIRMED DIALECT DEFECT (the query will NOT run)
+All dialect claims verified 2026-06-10 via WebFetch trino.io/docs/467/functions/{datetime,aggregate,window}.html + WebSearch GitHub issue #17357 (WEEK interval support request, still open) + git-tag context:
 
-**VERIFIED FROM TWO INDEPENDENT 467 SOURCES:**
+- INTERVAL qualifiers Trino 467 = YEAR/MONTH/DAY/HOUR/MINUTE/SECOND only (no QUARTER, no WEEK).
+- date_add('quarter', n, x) / date_trunc('quarter', x) / date_diff('quarter', a, b) all VALID — 'quarter' and 'week' are valid UNIT strings for those functions.
+- date_diff(unit, ts1, ts2) → bigint (NOT an INTERVAL) — comparing to a plain integer is correct; comparing to INTERVAL would type-error.
+- ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) standard 467 window fn; rn=1 idiom is the canonical per-group-top-1 (DISTINCT ON does not exist in Trino — confirmed Trino Discussion #17261; ROW_NUMBER() filter is the documented workaround).
+- FILTER (WHERE ...) clause: "supported for all aggregate functions" in 467 (functions/aggregate.html).
+- 100.0 * SUM(...) / COUNT(*) — 100.0 is a decimal literal, promotes the integer SUM result to decimal/double avoiding integer-division truncation. Standard idiom.
 
-1. **trino.io/docs/467 language/types.html (INTERVAL section):** the only valid interval literal qualifiers are the **year-to-month** units (`YEAR`, `MONTH`) and the **day-to-second** units (`DAY`, `HOUR`, `MINUTE`, `SECOND`). QUARTER and WEEK are NOT listed.
-2. **Trino 467 git-tag grammar `core/trino-grammar/.../SqlBase.g4`:** the production rule is literally
-   ```
-   intervalField : YEAR | MONTH | DAY | HOUR | MINUTE | SECOND ;
-   ```
-   QUARTER and WEEK are absent from the rule. Therefore `INTERVAL '1' QUARTER` raises a parse error (`mismatched input 'QUARTER'`) at analysis — **it never executes.**
+## Per-question
 
-**THE TRAP (and why it is genuinely confusing):** `quarter` and `week` ARE valid *unit STRINGS* for the function family — `date_trunc('quarter', x)`, `date_add('quarter', n, x)`, `date_diff('quarter', a, b)`, `EXTRACT(QUARTER FROM x)`, `quarter(x)` are all valid 467 (resources teach these extensively in r07). But the *INTERVAL literal qualifier* grammar is a strictly smaller set (6 units, no QUARTER/WEEK). The responder over-generalized from the many valid `'quarter'` unit-string usages to the invalid `INTERVAL '1' QUARTER` qualifier.
-
-**FIX:** the correct one-quarter end-bound is `INTERVAL '3' MONTH` or `date_add('quarter', 1, date_trunc('quarter', current_date))`:
-```sql
-WHERE discontinued_at >= date_trunc('quarter', current_date)
-  AND discontinued_at <  date_trunc('quarter', current_date) + INTERVAL '3' MONTH
+**Q1 — INTERVAL '1' QUARTER / next quarter renewals (FIX-A re-probe).** **5.00 CLEAN — FIX-A LANDED.** Responder correctly: (1) identified parse error cause (Trino 467 supports only 6 interval qualifiers — YEAR/MONTH/DAY/HOUR/MINUTE/SECOND); (2) gave BOTH correct add-a-quarter forms (`date_add('quarter', 1, current_date)` AND `date_trunc('quarter', current_date) + INTERVAL '3' MONTH`); (3) wrote a fully correct half-open next-quarter range:
 ```
+WHERE renewed_at >= date_add('quarter', 1, date_trunc('quarter', current_date))
+  AND renewed_at <  date_add('quarter', 2, date_trunc('quarter', current_date))
+```
+which is exactly `[start-of-next-quarter, start-of-quarter-after-that)` — semantically correct and partition-prunable; (4) noted negatives work for prior-quarter shifts. The exact iter932 findable gap is closed and the new card landed without corruption.
 
-**SCORED Q4 DOWN FOR THE SINGLE BROKEN TOKEN, NOT TO ZERO** — everything else in A4 is correct and well-explained:
-- start bound `date_trunc('quarter', current_date)` — VALID (quarter is a valid date_trunc unit string).
-- half-open `>= start AND < end` range — correct (avoids boundary double-count).
-- bare column for partition pruning — correct.
-- dynamic (current_date) not hard-coded — correct.
-- the responder's OTHER period examples `INTERVAL '1' YEAR`, `INTERVAL '1' MONTH`, `INTERVAL '30' DAY` — **all VALID** (YEAR/MONTH/DAY are real interval qualifiers; cf. iter921 Q2 which correctly used `INTERVAL '1' YEAR` for a half-open year range).
+**Q2 — Highest-paid per department.** **5.00 CLEAN.** ROW_NUMBER() OVER (PARTITION BY department_id ORDER BY salary DESC) + outer `WHERE rn=1` is the canonical Trino 467 per-group-top-1 idiom (verified window.html). Correctly noted DISTINCT ON is absent in Trino (verified Trino Discussion #17261). Tie-handling guidance (add secondary ORDER BY) appropriate. `max_by(name, salary)` is a valid alternative but ROW_NUMBER form is fully correct and clearer for multi-column projection.
 
-Q4 scoring: **Acc 2.0** (won't run — single token), **Comp 3.0**, **Clar 3.0**, **Act 2.5** = 10.5/4 = **2.625**. Folded into the overall average, not vetoed.
+**Q3 — SLA compliance percentage.** **5.00 CLEAN.** `ROUND(100.0 * SUM(CASE WHEN resolved_at <= sla_deadline THEN 1 ELSE 0 END) / COUNT(*), 2)` is correct — 100.0 promotes integer division to decimal (avoiding the silent-zero trap). FILTER alternative `COUNT(*) FILTER (WHERE resolved_at <= sla_deadline) / COUNT(*)` is dialect-valid (aggregate.html FILTER supported for all aggregate functions). resolved_at <= sla_deadline timestamp comparison valid. Note: the FILTER alt as written has integer/integer division so it would also need `* 1.0` or `* 100.0` to avoid truncation — the responder didn't explicitly note this on the alt form (tiny clarity-only nit, not a defect since the lead is correct and the alt is presented as a sketch).
 
----
+**Q4 — Average session duration by platform.** **5.00 CLEAN.** `AVG(date_diff('minute', started_at, ended_at)) GROUP BY platform` correct shape. Units list correct (second/minute/hour/day/week/month/quarter/year all valid date_diff units — directly consistent with Q1's two-surfaces rule that QUARTER/WEEK ARE valid UNIT strings even though they are NOT INTERVAL qualifiers). bigint return type is accurate (verified datetime.html date_diff signature → bigint). The "don't compare date_diff result to INTERVAL" warning is correct and useful — date_diff returns bigint, so `WHERE date_diff('minute', a, b) > INTERVAL '60' MINUTE` would type-error (compare to plain integer 60 instead).
 
-## ★ SCOPE-CHECK Q4 — FINDABLE GAP (not a pure responder slip): name a LIGHT iter933 FIX-A
+## Defect scoping
 
-Grep of resources/ shows:
-- No card lists the **valid INTERVAL literal qualifiers** (YEAR/MONTH/DAY/HOUR/MINUTE/SECOND only).
-- No card **warns that `quarter`/`week`, though valid as date_trunc/date_add/date_diff/EXTRACT unit STRINGS, are NOT valid INTERVAL literal qualifiers.**
-- Resources DO use the valid `INTERVAL '3' MONTH` (r07 L3639, r27 L763) and `date_add('quarter', ...)` (r07 L3325) — but never as the explicit "quarter end-bound" template, and never disambiguated from the INTERVAL form.
-- r07 L3479 teaches the analogous *function-alias* trap (`quarter` has no `quarter_of_year` alias) — same family of confusion, different surface. The INTERVAL-qualifier variant is unguarded.
+NO DEFECT. No fabrication, no wrong signature, no crossed-family confusion, no findability slip, no GROUP-BY-muddle, no prod-env conflict. iter932 Q4 findable gap CLOSED by iter933 FIX-A; pure SQL on-prem Trino 467+Iceberg+MinIO+HMS+JWT/OPA unaffected. Verify-in-both-directions discipline held — checked the suspect "INTERVAL '1' QUARTER invalid" claim against grammar and the "'quarter' valid as date_diff unit" claim against datetime.html; both confirmed.
 
-This is **NOT** a pure synthesis slip (resources never disambiguate the two `quarter` surfaces), and it is the FIRST time this specific token has been probed. It is a genuine **findable gap with a precise, low-risk anchor.**
+## Carry-forward for next sweep
 
-**iter933 LIGHT FIX-A (recommended):** add ONE small card to r07 in the existing "this quarter / date-range filter" keyword-anchor neighborhood (near L41 / L3469 WHICH-QUARTER card). Content:
-- "**Valid INTERVAL literal qualifiers in Trino 467 are ONLY `YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND`.**"
-- Inline-WRONG-mark (un-copyable form) `INTERVAL '1' QUARTER` / `INTERVAL '1' WEEK` → "parse error: `mismatched input 'QUARTER'`; QUARTER/WEEK are valid date_trunc/date_add/date_diff UNIT STRINGS but NOT interval literal qualifiers."
-- Copy-attractive canonical for the current-quarter half-open window:
-  ```sql
-  WHERE discontinued_at >= date_trunc('quarter', current_date)
-    AND discontinued_at <  date_trunc('quarter', current_date) + INTERVAL '3' MONTH
-  -- or: date_add('quarter', 1, date_trunc('quarter', current_date))
-  ```
-Keep it tight. Follow Markdown-pipe-escape and defang-DO-NOT-WRITE memory lessons: put the WRONG token inline-marked and un-copyable, make the `INTERVAL '3' MONTH` block the copy-attractive canonical. Re-probe a "this quarter / this week" range Q next sweep to confirm the responder reaches for `INTERVAL '3' MONTH` (or date_add).
-
----
-
-## Q1 — total weight per shipment — 5.00
-`SELECT shipment_id, SUM(weight_grams) FROM shipment_items GROUP BY shipment_id`. VERIFIED select.html GROUP BY + aggregate.html `sum()` — correct shape. SUM ignores NULL weight rows (a shipment with all-NULL weights returns NULL, not 0) — the responder's NULL-skip note is accurate. Acc/Comp/Clar/Act 5.0.
-
-## Q2 — count users with no profile photo — 5.00
-`SELECT COUNT(*) FILTER (WHERE profile_photo_url IS NULL) FROM users` + `COUNT(CASE WHEN profile_photo_url IS NULL THEN 1 END)` alt. VERIFIED aggregate.html: FILTER clause "supported for all aggregate functions"; both forms count NULL-photo users (the CASE form returns 1 for NULL rows, NULL otherwise, and COUNT skips NULL). `IS NULL` is the correct NULL test (not `= NULL`). Acc/Comp/Clar/Act 5.0.
-
-## Q3 — avg basket value per coupon, coupon-used only — 5.00
-`SELECT coupon_code, AVG(basket_value) FROM orders WHERE coupon_code IS NOT NULL GROUP BY coupon_code`. VERIFIED: this is a **row-level** filter (drop orders with no coupon) so it belongs in **WHERE (pre-aggregation)**, not HAVING (post-aggregation). The responder's WHERE-vs-HAVING explanation is correct: WHERE filters rows before grouping; HAVING filters groups after aggregation. Using WHERE here also avoids a spurious NULL-coupon group. Acc/Comp/Clar/Act 5.0.
-
----
-
-## iter933 DIRECTIVE
-
-**iter933 = LIGHT FIX-A (single small card), NOT a pure NO-OP.** The Q4 `INTERVAL '1' QUARTER` defect is a **findable gap** (no card lists valid INTERVAL qualifiers / warns QUARTER+WEEK aren't interval units) — add the one card described above to r07's this-quarter/date-range neighborhood. Then re-probe a "this quarter / this week" range Q to confirm the fix.
-
-- Do NOT mark Q1 (SUM GROUP BY + NULL-skip), Q2 (COUNT(*) FILTER / COUNT(CASE) for NULL photos), or Q3 (AVG GROUP BY + WHERE-not-HAVING) wrong — all correct.
-- Do NOT touch federation resources (4.49944/310 only un-passed row; bulletproofed angles only).
-- Preserve the full iter534–931 pin inventory.
-- PIN NEW: **Trino 467 valid INTERVAL literal qualifiers = YEAR, MONTH, DAY, HOUR, MINUTE, SECOND ONLY. `INTERVAL '1' QUARTER` / `INTERVAL '1' WEEK` are PARSE ERRORS (`mismatched input`). `quarter`/`week` are valid UNIT STRINGS for date_trunc/date_add/date_diff/EXTRACT but NOT interval qualifiers. Quarter end-bound = `INTERVAL '3' MONTH` or `date_add('quarter', 1, ...)`.** (Verified types.html + git-tag 467 SqlBase.g4 `intervalField` rule.)
-- PIN 467.
-- DO NOT bump training/state.json (already 932; passed=true preserved; overall 4.40625 PASS holds).
+- iter934 = DEFAULT NO-OP / durability-breadth. The interval-qualifier vs date_add-unit two-surfaces rule was just bolted in with a fresh canonical; cool-down on QUARTER/WEEK family for a couple of sweeps before re-probing.
+- Optional fresh adjacents that exercise the new card without churning it: `INTERVAL '1' WEEK` direct probe (mirror sibling of the QUARTER question — same fix shape `INTERVAL '7' DAY` / `date_add('week', ...)`); `date_diff('quarter', a, b)` unit string probe; mixed `date_add('quarter', 1, date_trunc('quarter', ...))` next-Q range probe. Each tests the two-surfaces trap from a different angle.
+- Federation row still 4.49944 / 310 (thinnest passing row, long un-retested) — CONSIDER probing federation in iter934 or 935; federation card-set still hard-locked, only retest with bulletproofed angles per the standing constraint.
+- PRESERVE full iter534-932 pin inventory.
+- DO NOT bump training/state.json (already 933; passed=true preserved).
