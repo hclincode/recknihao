@@ -1,165 +1,103 @@
-# Judge Feedback — Iter 943
+# iter944 Judge Feedback — 2026-06-10 (EXTENDED PHASE, RE-PROBE sweep)
 
-**Sweep type**: DEFAULT NO-OP durability sweep (teacher ZERO resource edits this iter; iter943 spot-check only).
-**Phase**: extended (passed=true; final_iterations_remaining=0).
-**Pin**: Trino 467.
+## Overall Verdict: **4.5625 PASS** (margin +1.0625)
 
-## Per-question scores
+Per-Q breakdown (Accuracy / Completeness / Clarity / Actionability):
+- **Q1** (median deal size; exact PERCENTILE_CONT? approx published error?) — Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = **5.00**
+- **Q2** (AVG hours open→first_reply with NULL first_reply_at) — Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = **5.00**
+- **Q3** (suppliers with most products ranked) — Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = **5.00**
+- **Q4** (orders with MORE THAN 5 **DISTINCT** items) — Acc 3.0 / Comp 2.5 / Clar 4.0 / Act 3.0 = **3.125**
 
-| Q | Acc | Comp | Clar | Act | Avg | Notes |
-|---|---|---|---|---|---|---|
-| Q1 longest-gap (LAG+date_diff+MAX+IS NOT NULL) | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 | Clean textbook |
-| Q2 median + below-median users | 2.0 | 3.0 | 3.5 | 3.0 | 2.875 | LEAD correct, SECONDARY fabricated + misattributed-error figure |
-| Q3 day-of-week signups format_datetime+GROUP BY | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 | format_datetime(DATE, 'EEEE') OK via coercion |
-| Q4 refund rate via LEFT JOIN+COUNT(DISTINCT) | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 | Fan-out de-dup correct, COUNT(*) warning correct |
+Sum 18.25 / 4 = **4.5625 PASS** (per-Q veto deactivated per run-prompt — overall avg governs; Q4 floor 3.125 does not veto).
 
-**Overall avg**: (5.000 + 2.875 + 5.000 + 5.000) / 4 = **4.46875 PASS** (margin +0.96875 over 3.5; overall average GOVERNS, no per-Q veto).
-
-**Federation NOT probed this iter** — 4.49944 / 310 row UNCHANGED.
+Federation NOT probed (4.49944/310 row UNCHANGED).
+All dialect claims verified vs trino.io/docs/467 (functions/aggregate.html, functions/datetime.html, sql/select.html) on 2026-06-10 per iter882 verify-BOTH-directions discipline — NOT against resources/.
 
 ---
 
-## Q1 — longest gap between consecutive customer orders (5.000 clean)
+## Q1 RE-PROBE VERDICT — FABRICATION ONE-OFF / SLIP CLOSED + BONUS PEDAGOGY
 
-```sql
-WITH gaps AS (
-  SELECT customer_id,
-         date_diff('day', LAG(created_at) OVER (PARTITION BY customer_id ORDER BY created_at), created_at) AS days_since_prev_order
-  FROM orders
-)
-SELECT customer_id, MAX(days_since_prev_order) AS max_gap_days
-FROM gaps
-GROUP BY customer_id
-HAVING MAX(days_since_prev_order) IS NOT NULL  -- (responder used outer WHERE on the aliased result; functionally same)
-ORDER BY max_gap_days DESC;
-```
+The iter943 Q2 fabrication (PERCENTILE_CONT WITHIN GROUP + 2.3% misattribution) **DID NOT RECUR**. Responder cleanly:
 
-**Verified**:
-- `LAG(created_at) OVER (PARTITION BY customer_id ORDER BY created_at)` valid 467 (functions/window.html).
-- `date_diff('day', a, b)` day-aware difference returning bigint (functions/datetime.html). LAG first-row → NULL ⇒ date_diff(NULL, ...) → NULL ⇒ MAX skips NULL ⇒ single-order customers come out with NULL max_gap_days, correctly excluded by the outer `WHERE max_gap_days IS NOT NULL`.
-- Style nit only (not error): inlining the LAG expression inside date_diff vs naming it as a separate `prev_order_at` column — both compile to the same plan in Trino. No ding.
+1. **LED with approx_percentile(amount, 0.5)** as THE percentile function — VERIFIED against aggregate.html which lists ONLY four `approx_percentile` overloads and NO `percentile_cont`/`percentile_disc`/`median`/`WITHIN GROUP`-for-percentile (WITHIN GROUP exists in 467 ONLY for `listagg`).
+2. **Explicitly stated "no PERCENTILE_CONT()"** and **"no MEDIAN() function"** — DIALECT-ACCURATE per WebFetch 2026-06-10 (function-not-found family; both are foreign-dialect imports from Postgres/Snowflake/Oracle/SQL-Server).
+3. **Refused to attach a standard-error figure to approx_percentile** — "Trino's official docs do NOT publish a standard-error figure for approx_percentile()" matches aggregate.html verbatim (no figure listed; tunable accuracy parameter, no closed-form guarantee).
+4. **BONUS PEDAGOGY — explicit CORRECTION of the 2.3% misattribution**: "The 2.3% standard error you may have seen — that belongs to a different function (approx_distinct() for counting unique values), not approx_percentile()." This is the EXACT canonical disambiguation r23 percentile-inoculation L306/L312-313/L325-328 + glossary L3455-3456 teaches, and r05 CRITICAL SQL FOOTGUN card L2234-2266 reinforces. Responder didn't just AVOID the iter943 slip — it pre-emptively HEADED OFF the user's misconception. This is the durable application of the percentile pin family.
+5. Array form `approx_percentile(amount, ARRAY[0.5,0.95,0.99])` VALID per signature #2 (`approx_percentile(x, percentages) → array<same type>`).
+6. "Backed by quantile-digest / T-digest" — qdigest_agg/tdigest_agg EXIST as separate digest builders in 467; approx_percentile internally uses a digest-based sketch. Not a defect either way (general/architecturally accurate).
 
-## Q2 — users with MORE events than the MEDIAN user (2.875 — DIALECT DEFECT in SECONDARY)
-
-### LEAD form (CORRECT)
-
-```sql
-WITH user_event_counts AS (SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id),
-     percentile_summary AS (SELECT approx_percentile(event_count, 0.5) AS median_event_count FROM user_event_counts)
-SELECT uc.user_id, uc.event_count
-FROM user_event_counts uc CROSS JOIN percentile_summary ps
-WHERE uc.event_count > ps.median_event_count;
-```
-
-**LEAD verdict**: VALID Trino 467 (approx_percentile(x, 0.5) is the documented 50th-percentile form per functions/aggregate.html; single-row scalar broadcast via CROSS JOIN is canonical).
-
-### TWO DEFECTS IN THE SAME ANSWER
-
-**Defect A — fabricated SECONDARY "exact median" alternative.**
-> `SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY event_count) AS median_event_count FROM user_event_counts`
-
-This DOES NOT PARSE in Trino 467. Verified against trino.io/docs/467/functions/aggregate.html and git-tag 467 grammar:
-- Trino 467 has NO `percentile_cont`, NO `percentile_disc`, NO `median()` builtin.
-- `WITHIN GROUP (ORDER BY ...)` syntax exists ONLY for `listagg` — there is no ordered-set-aggregate registration for any percentile function.
-- Reader copy-pasting the secondary alternative gets a function-resolution / parse error. The form is a Postgres / Oracle / SQL Server / Snowflake import.
-
-**Defect B — misattributed standard-error figure.**
-The answer claims `approx_percentile` has "~2.3% standard error." Verified against trino.io/docs/467/functions/aggregate.html:
-- The 2.3% standard-error figure is documented for `approx_distinct` ONLY (HyperLogLog). The exact quoted doc text: *"This function should produce a standard error of 2.3%"* — that statement is in the `approx_distinct` block.
-- `approx_percentile` has NO published standard-error figure. It has a tunable accuracy / weight parameter, but no closed-form error guarantee in the docs.
-
-(Cross-check: WebSearch 2026-06-10 confirmed; an earlier WebFetch summary that conflated the two was hallucinated and contradicts both the actual docs and the standing pin in MEMORY.md `reference_trino_approx_percentile_error.md`.)
-
-### Disposition — Q2 SCOPE = RESPONDER SLIP (regression vs iter934)
-
-This is NOT a findable gap. Resources teach both facts findably and prominently:
-
-- **r23 (sql-best-practices) L267–273, L316, L2240** — explicit anchors *"no exact percentile-VALUE function (no percentile_cont / percentile_disc / median)"* + *"Trino's docs publish NO standard-error figure for"* approx_percentile (in the same paragraph). Anchor keywords include "exact percentile Trino", "PERCENTILE_CONT Trino", "approx_percentile accuracy parameter".
-- **r05 (multi-tenant-analytics) L2234 CRITICAL SQL FOOTGUN card** — a copy-magnetic WRONG-marked `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)` block paired with the CORRECT `approx_percentile(x, 0.5)` replacement and a one-liner *"WITHIN GROUP syntax is supported only for `listagg` — not for any percentile function. Writing it against Trino fails at parse time with a cryptic syntax error."* L2263 also explicitly states `MEDIAN(x)` does not exist.
-
-The responder got BOTH of these correct as recently as iter934 (rubric L72: *"NO percentile_cont/percentile_disc/percentile-WITHIN-GROUP CONFIRMED ABSENT in 467 ... refusing to fabricate a number is exactly right"*). The cards are dense, well-anchored, and copy-attractive. The LEAD this iter was correct; the slip is in the SECONDARY "by the way, here is the exact alternative" paragraph the responder synthesized as a courtesy — and it imported the foreign-dialect form the resource explicitly WRONG-marks, while also lifting the 2.3% number from the neighboring approx_distinct entry.
-
-This is the classic Haiku synthesis pattern: lead canonical correct, secondary "for completeness" import wrong. Resources already inoculate against this with copy-magnetic WRONG-marks; the inoculation is being applied in the LEAD but not in the SECONDARY.
-
-### iter944 recommendation — RE-PROBE-DON'T-CHURN, NO FIX-A
-
-**Do NOT add a new "percentile defang" card.** The defang already exists in r23 AND r05 in copy-magnetic prominent form, with the exact WRONG and CORRECT pair the responder needed. Adding a third copy risks:
-1. New-Card over-attracts-adjacent regression (the percentile defang is dense; another card could pull a neighbor like geometric_mean / harmonic_mean / approx_distinct itself into the wrong neighborhood).
-2. Defang-DO-NOT-WRITE backfire (the wrong form is already shown defanged in r05 L2241; copying it into a third card increases the surface area of the literal wrong-form text that the Haiku responder reads raw).
-
-**Recommended iter944**:
-- DEFAULT NO-OP / ZERO edits. State counter: **1st recurrence of percentile_cont/2.3% slip since iter934 clean**. Two further recurrences without intervening clean answer ⇒ escalate to a dedicated "percentile router" card.
-- **Targeted re-probe in iter944**: ask a median / percentile question phrased to elicit BOTH a primary AND a secondary alternative — e.g., *"Show me the median order value per tenant — give me both the approximate Trino-native form and any exact alternative if one exists."* Goal: verify whether the responder leads with `approx_percentile` AND correctly refuses the "exact alternative" (says "Trino has no exact percentile-value function; approx_percentile is it") rather than fabricating PERCENTILE_CONT WITHIN GROUP. If the responder again offers a fabricated exact form ⇒ 2nd recurrence ⇒ different recommendation may apply.
-- Also re-probe: standalone approx_percentile question asking "what is the error tolerance / accuracy" — see whether responder attaches "2.3%" again (which would be a 2nd recurrence of misattribution).
-
-## Q3 — day-of-week with most signups (5.000 clean)
-
-```sql
-SELECT format_datetime(signup_date, 'EEEE') AS day_of_week, COUNT(*) AS signup_count
-FROM signups
-GROUP BY format_datetime(signup_date, 'EEEE')
-ORDER BY signup_count DESC;
-```
-
-**Verified**:
-- `format_datetime(timestamp, format)` is documented in functions/datetime.html and uses JodaTime DateTimeFormat patterns; `'EEEE'` returns the full English day name ("Monday" … "Sunday"). Joda symbol confirmed.
-- `signup_date` typed as DATE works because Trino 467 has implicit DATE → TIMESTAMP coercion (per pinned reference_trino_timestamp_tz_coercion.md and the TypeCoercion git-tag source) — no explicit CAST needed.
-- GROUP BY repeats the day-name expression (not the alias) — required by select.html; correct.
-- Per-bucket-count shape is correct: 7 rows (one per weekday), each with COUNT(*) of signups that day. The pinned GROUP-BY-output-shape rule is honored — no unique key inside the GROUP BY (which would have collapsed COUNT(*) to 1).
-- Numeric variant adding `day_of_week(signup_date)` (returns 1=Mon..7=Sun, also accepts DATE) is a valid sort-stable alternative — both forms work.
-
-No ding. The pinned iter941/942 GROUP-BY-shape locks held cleanly here.
-
-## Q4 — refund rate per product (5.000 clean)
-
-```sql
-SELECT oi.product_id,
-       COUNT(DISTINCT oi.order_id) AS total_orders,
-       COUNT(DISTINCT CASE WHEN r.order_id IS NOT NULL THEN oi.order_id END) AS refunded_orders,
-       ROUND(100.0 * COUNT(DISTINCT CASE WHEN r.order_id IS NOT NULL THEN oi.order_id END)
-                   / COUNT(DISTINCT oi.order_id), 2) AS refund_rate_pct
-FROM order_items oi LEFT JOIN refunds r ON oi.order_id = r.order_id
-GROUP BY oi.product_id
-ORDER BY refund_rate_pct DESC;
-```
-
-**Verified**:
-- `COUNT(DISTINCT col)` single-arg form is the only valid 467 shape (pinned COUNT-DISTINCT-single-arg). The order_items fan-out (3 item-rows per 1 order) is correctly collapsed by COUNT(DISTINCT oi.order_id) — without DISTINCT, COUNT(*) would over-count the denominator 3x. Responder explicitly calls out this trap with the correct numerical example — strong pedagogy.
-- LEFT JOIN preserves rows in order_items with no refunds; refund_rate numerator uses `CASE WHEN r.order_id IS NOT NULL` to count only matched orders. COUNT(DISTINCT) on the CASE expression correctly de-dupes.
-- `100.0` decimal-promo correctly avoids integer division collapsing to 0 (Division pin).
-- `ROUND(x, 2)` half-up rounding (pinned CAST-to-integer-rounds family); produces percent-with-2-decimals.
-- LEFT JOIN + ON-clause join predicate is the canonical anti-join-preserving shape; no WHERE-on-right-side trap (which would convert it to inner join).
-
-Clean. No ding.
+**Q1 SCOPE = CLEAN, NO DEFECT, BONUS PEDAGOGY.** The iter943 Q2 fabrication is now CONFIRMED ONE-OFF. The percentile-family pins (r05 L2234 / r23 L267-293 / r23 L2240) are findable, copy-magnetic, and being applied correctly with the disambiguation surfacing unprompted. **Escalation threshold for a dedicated "percentile router = approx_percentile ONLY" FIX-A card REMAINS at 2+ further recurrences without intervening clean answer** — iter944 RESETS the counter.
 
 ---
 
-## Scope summary
+## Q2 — AVG NULL-skip + date_diff = CLEAN (5.00)
 
-- **No resource defect** in any of the 4 areas probed (Q1 LAG/date_diff/MAX, Q2 percentile family — resources r23 + r05 are excellent and findable, Q3 format_datetime+day-name, Q4 LEFT JOIN + COUNT(DISTINCT) fan-out).
-- **Responder slip on Q2 secondary**: fabricated PERCENTILE_CONT WITHIN GROUP alternative + 2.3% misattributed to approx_percentile. Both rules are findably taught and were applied correctly at iter934. 1st recurrence in the percentile family.
-- **No findable gap** — the percentile defang cards in r05 L2234 and r23 L267–293 are copy-magnetic and well-anchored.
+- `date_diff('hour', opened_at, first_reply_at)` — VERIFIED against datetime.html (`date_diff(unit, timestamp1, timestamp2) → bigint`; 'hour' supported with explicit example returning 24); arg-order `(earlier, later) → positive`, exactly as responder explained.
+- `AVG` ignores NULL — VERIFIED verbatim ("avg() does not include null values in the count"). `date_diff(...)` returns NULL when `first_reply_at` is NULL (NULL propagation through scalar fn) → AVG correctly skips those tickets.
+- "No timestamp-minus-timestamp operator" — CORRECT per WebFetch (interval arithmetic on timestamps exists, but timestamp-to-timestamp subtraction is NOT exposed; date_diff is the documented path).
+- `COUNT(*) FILTER (WHERE first_reply_at IS NOT NULL)` / `IS NULL` variant — VALID per aggregate.html (FILTER supported for all aggregates).
+- Optional WHERE redundancy `WHERE date_diff(...) IS NOT NULL` — equivalent to `WHERE first_reply_at IS NOT NULL`, slightly verbose but not wrong; AVG would have skipped anyway. Not a defect.
 
-## iter944 plan (recommended)
+---
 
-- **DEFAULT NO-OP — teacher ZERO edits.** Do NOT churn r05/r23 percentile cards; they are dense and dialect-correct. Adding a third percentile defang card risks New-Card / defang backfire (per markdown-pipe-trap + defang-DO-NOT-WRITE lessons).
-- **Targeted re-probe** of percentile family in iter944:
-  1. Median / percentile question explicitly asking for "approximate AND exact alternative if one exists" — verify responder declines to fabricate PERCENTILE_CONT.
-  2. Standalone approx_percentile accuracy-question — verify responder does NOT attach "2.3% standard error" (which is approx_distinct only).
-- **Escalation threshold**: a dedicated "Trino percentile = approx_percentile ONLY; no percentile_cont/disc/WITHIN-GROUP-except-listagg; no published error figure; 2.3% is approx_distinct-only" router card is warranted ONLY if the slip recurs across 2+ further sweeps without intervening clean answer.
-- Federation (4.49944 / 310) only un-passed row — bulletproofed angles only if probed, no edits.
-- Preserve the full iter534–942 pin inventory; NO federation edits, NO percentile-card edits.
-- PIN Trino 467.
-- DO NOT bump training/state.json (already at 943; passed=true; overall 4.46875 PASS holds).
+## Q3 — COUNT GROUP BY + ranking variants = CLEAN (5.00)
 
-## Pins reinforced this iter (no new pins)
+- `SELECT supplier_id, COUNT(*) AS product_count FROM products GROUP BY supplier_id ORDER BY product_count DESC` — VALID; ORDER BY can reference the SELECT alias `product_count` per select.html ("ORDER BY evaluated after any GROUP BY/HAVING").
+- `ROW_NUMBER() OVER (ORDER BY product_count DESC)` global ranking — VALID per window.html.
+- RANK() tie semantics 1,2,2,4 vs ROW_NUMBER 1,2,3 — CORRECT.
+- Default NULLS LAST honored implicitly; no explicit NULLS-LAST claim that could trip the iter941 direction-dependence pin.
 
-- Trino 467 percentile = `approx_percentile(x, p)` ONLY. NO `percentile_cont` / `percentile_disc` / `median()`. `WITHIN GROUP (ORDER BY …)` exists ONLY for `listagg`, not for any percentile function.
-- `approx_percentile` has NO published standard-error figure (tunable accuracy / weight param). 2.3% is documented for `approx_distinct` ONLY.
-- DATE → TIMESTAMP implicit coercion EXISTS in Trino 467 ⇒ `format_datetime(signup_date_DATE, 'EEEE')` and `day_of_week(signup_date_DATE)` both work without CAST.
-- GROUP-BY output shape — GROUP BY the bucket / grouping expression ONLY for per-bucket count; do not include a unique key.
-- LEFT JOIN fan-out de-dup via `COUNT(DISTINCT join_key)`; predicates on right-side belong in ON, not WHERE.
-- `100.0` decimal-promo on percent formulas (avoid integer-division → 0).
-- `ROUND(x, n)` half-up.
-- `date_diff(unit, a, b)` day-aware / complete-units (drops fractional).
-- LAG/LEAD: first-row LAG → NULL; date_diff(NULL, …) → NULL; MAX skips NULL.
+---
+
+## Q4 — DISTINCT-vs-ROWS interpretation slip (3.125)
+
+User EXPLICITLY emphasized "more than 5 **DISTINCT** items" / "more than 5 different things." Responder's Approach B uses `HAVING COUNT(*) > 5` over `order_line_items`, which counts **ROWS** not DISTINCT product_id.
+
+**The DIALECT is fine — both `COUNT(*) > 5` and `COUNT(DISTINCT product_id) > 5` are valid Trino 467 HAVING expressions** (aggregate.html `count(x)` with DISTINCT allowed; HAVING after aggregation per select.html). The defect is **interpretation/completeness**:
+
+- IF `order_line_items` is one-row-per-product-per-order (common schema), `COUNT(*) = COUNT(DISTINCT product_id)` and the two are equivalent.
+- IF `order_line_items` allows duplicate product_id rows (e.g., separate line entries for the same SKU added twice, OR a per-fulfillment line table), `COUNT(*) > 5` OVER-COUNTS vs "5 different things" — an order with 6 rows of the same product_id would qualify under COUNT(*) but NOT under "more than 5 distinct items."
+
+Given the user's explicit "DISTINCT" / "different" framing, the canonical lead should have been `HAVING COUNT(DISTINCT product_id) > 5`, OR responder should have flagged the rows-vs-distinct distinction. Neither happened. Approach A's `WHERE line_items > 5` over a pre-aggregated `line_items` count column is fine if that column already means "distinct products" — also not flagged.
+
+- **Acc 3.0**: Query runs, valid Trino 467 dialect, correct in the common schema; wrong-result risk only when product_id can repeat across rows. Not a parse error, but reads the question imprecisely.
+- **Comp 2.5**: Missed the explicit "DISTINCT" cue; no `COUNT(DISTINCT product_id)` variant offered; no rows-vs-distinct trap call-out.
+- **Clar 4.0**: Two approaches A/B are clearly separated; HAVING-after-GROUP-BY pedagogy clean.
+- **Act 3.0**: An engineer with a one-row-per-line schema with possible duplicates would ship Approach B as-is and silently over-count.
+
+**SCOPE = RESPONDER INTERPRETATION SLIP**, NOT a findable resource gap and NOT a dialect defect. Resources teach `COUNT(DISTINCT x)` as the canonical for "distinct things" (reference_trino_count_distinct_single_arg.md pin + r05/r23 distinct-count cards); pinned fact "COUNT(DISTINCT x) single-arg, COUNT(DISTINCT *) invalid" is durable. Responder applied `COUNT(DISTINCT)` correctly on Q1-style probes in iter938/940 (LEFT JOIN fan-out de-dup) and Q3 of iter939 (`COUNT(DISTINCT visitor_id)`). This is a one-off READING-COMPREHENSION miss on the word "DISTINCT" in the prompt, not a missing card.
+
+**iter945 = DEFAULT NO-OP / RE-PROBE-DON'T-CHURN.** Do NOT add a "distinct vs rows in HAVING" FIX-A card on a single occurrence — risks New-Card-over-attracts-adjacent (the per-bucket-count, anti-join, and refund-rate neighbors all use COUNT(*) and COUNT(DISTINCT x) at different layers; defang risks confusion) + defang-DO-NOT-WRITE backfire. **RE-PROBE Q4 next sweep** via a fresh "orders with more than N distinct products" question where the schema is explicit about duplicate line entries — verify responder leads with `COUNT(DISTINCT product_id)` when "distinct" is in the prompt. Escalate to a dedicated "distinct-vs-rows HAVING router" card ONLY if slip recurs across 2+ further sweeps without intervening clean answer.
+
+---
+
+## Pin status (all confirmed intact against 2026-06-10 docs)
+
+- Trino 467 percentile = `approx_percentile(x, p)` ONLY (4 overloads); NO `percentile_cont` / `percentile_disc` / `median()`; WITHIN GROUP exists ONLY for `listagg` ✓
+- `approx_percentile` has NO published std-error figure (tunable accuracy param) ✓
+- 2.3% = `approx_distinct` ONLY (HyperLogLog standard error verbatim quote) ✓
+- `approx_percentile(x, ARRAY[...])` array form VALID ✓
+- AVG ignores NULL ✓
+- `date_diff(unit, a, b) → bigint` day/hour-aware ✓; NO `TIMESTAMP - TIMESTAMP` operator ✓
+- `COUNT(*) FILTER (WHERE)` VALID for all aggregates ✓
+- COUNT GROUP BY + ORDER BY alias (ORDER BY after GROUP BY/HAVING) ✓
+- ROW_NUMBER 1,2,3 / RANK 1,2,2,4 semantics ✓
+- HAVING after aggregation; both `COUNT(*) > N` and `COUNT(DISTINCT x) > N` VALID ✓
+- COUNT(DISTINCT x) single-arg; COUNT(DISTINCT *) invalid ✓
+- "distinct items" → `COUNT(DISTINCT product_id)` (NEW emphasis: prompt-cue → idiom mapping)
+- Default NULLS LAST regardless of direction ✓
+- No QUALIFY ✓
+
+---
+
+## Verdict & next actions
+
+**iter944 = DEFAULT NO-OP, RE-PROBE-DON'T-CHURN.** Teacher should make ZERO resource edits.
+
+- Q1 RE-PROBE PASSED CLEANLY with BONUS pedagogy (explicit 2.3% misattribution correction surfaced unprompted) — iter943 fabrication CONFIRMED ONE-OFF.
+- Q4 distinct-vs-rows interpretation slip is a 1st-instance responder reading-comprehension miss, NOT a findable resource gap and NOT a dialect defect. Resources already teach `COUNT(DISTINCT)` as canonical for "distinct" questions.
+- Federation (4.49944/310) only un-passed row — NOT probed this iter (resources/22 §13.x hard-locked per standing constraint).
+- PRESERVE full iter534-942 pin inventory; NO federation edits; NO percentile-card edits; NO distinct-vs-rows-HAVING router card.
+- Next sweep: RE-PROBE Q4 via "orders with more than N distinct products" with EXPLICIT duplicate-line-entry schema framing; escalate to dedicated FIX-A ONLY if slip recurs across 2+ further sweeps without intervening clean answer.
+
+PIN 467. Do NOT bump training/state.json (orchestrator handles).
