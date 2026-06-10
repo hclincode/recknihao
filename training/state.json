@@ -1,7 +1,7 @@
 {
-  "iteration": 931,
+  "iteration": 932,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter931 re-probe sweep — zero edits; first-matching-condition-per-group one-off confirm + 3 fresh adjacents."
+  "note": "iter932 NO-OP durability sweep — zero edits; 4 fresh adjacents."
 }
