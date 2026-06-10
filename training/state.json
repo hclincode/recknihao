@@ -1,7 +1,7 @@
 {
-  "iteration": 916,
+  "iteration": 917,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter916 re-probe sweep — zero edits; count-of-entities-aggregate-property one-off confirm + 3 fresh adjacents."
+  "note": "iter917 NO-OP durability sweep — zero edits; timestamp-coercion re-confirm + 3 fresh adjacents."
 }
