@@ -1,41 +1,42 @@
-# iter922 Judge Feedback — NO-OP Durability Sweep
+# Judge Feedback — iter923 (EXTENDED PHASE, NO-OP durability sweep)
 
-**Verdict: PASS — overall average 4.875 / 5 (19.5/4). NO-OP. Zero edits warranted for iter923.**
+**Overall: 4.969 PASS** (per-Q 5.00 / 5.00 / 4.875 / 5.00 = 19.875 / 4 = 4.969; margin +1.469; overall average governs — no per-Q veto). All 4 answers dialect-verified clean against Trino 467. **DEFAULT NO-OP — teacher ZERO edits. DO NOT touch training/state.json (already passed).** FEDERATION NOT PROBED (4.49944/310 row UNCHANGED — still the only un-passed row).
 
-Phase: extended. Teacher made ZERO edits this iteration (durability/breadth sweep). All four probes are simple GROUP BY / aggregate / LEFT JOIN-CTE adjacents. Every dialect claim verified against trino.io/docs/467 (functions/aggregate.html + sql/select.html) via WebFetch 2026-06-10, Trino 467 PINNED. NOT verified against resources/.
+---
 
-## Per-question scores
+## Per-question scoring
 
-| Q | Topic | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | late shipments per carrier | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | subscriptions per renewal_status | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | avg discount per product category | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q4 | count partially-refunded orders | 5 | 4.5 | 4.5 | 4.5 | 4.625 |
+### Q1 — average items per order — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
+`SELECT AVG(items_per_order) FROM (SELECT order_id, COUNT(*) AS items_per_order FROM order_items GROUP BY order_id)`. Two-level aggregation CORRECT: inner GROUP BY order_id COUNT(*) yields one per-order line-count row, outer AVG averages those per-order counts. VERIFIED select.html GROUP BY + aggregate.html AVG/COUNT(*). The shape is right — averaging the inner per-group counts answers "average items PER ORDER" (not items/total-orders done as one flat aggregate). avg() returns double, ignores NULLs (no NULLs here since COUNT(*) per group is always ≥1). FROM-subquery alias optional per pin. CORRECT.
 
-**Overall = (5.00 + 5.00 + 4.875 + 4.625) / 4 = 4.875 STRONG PASS.** OVERALL AVERAGE governs (no per-Q veto).
+### Q2 — count of reviews per star rating — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
+`SELECT star_rating, COUNT(*) FROM reviews GROUP BY star_rating` (+ `histogram(star_rating)` map alternative). BOTH forms valid. VERIFIED aggregate.html: **histogram() IS a built-in Trino 467 aggregate** — "Returns a map containing the count of the number of times each input value occurs," return type `map<K,bigint>` (value→count). GROUP BY + COUNT(*) is the canonical row-per-rating form; histogram() collapses the same answer into a single map row. CORRECT.
 
-## Verification notes (Trino 467, docs-verified)
+### Q3 — total tax per state, decimal-summing gotchas — 4.875 (Acc 4.75 / Comp 5 / Clar 4.75 / Act 5)
+`SELECT state, SUM(shipping_tax) FROM ... GROUP BY state`. **Q3 DECIMAL-SUM VERDICT (all three claims source-verified):**
 
-- **Q1** `SELECT carrier, COUNT(*) AS late_shipments FROM shipments WHERE actual_delivery_date > promised_date GROUP BY carrier` — CLEAN. WHERE filters late-delivery rows BEFORE grouping; GROUP BY carrier yields one row per distinct carrier; COUNT(*) ("Returns the number of input rows", aggregate.html) tallies late rows per carrier. select.html confirms GROUP BY "divides the output into groups of rows containing matching values" and the `count(*) ... GROUP BY nationkey` example. Correct.
-- **Q2** `SELECT renewal_status, COUNT(*) FROM subscriptions GROUP BY renewal_status` — CLEAN. Grouping by the STATUS LABEL gives one row per status with per-bucket totals. Responder's note that putting a row-id (unique key) in GROUP BY would degenerate to COUNT(*)=1 per group is correct and a useful clarification. Correct.
-- **Q3** `SELECT product_category, AVG(discount_amount) FROM order_lines GROUP BY product_category` — CLEAN. AVG GROUP BY valid; aggregate.html: "avg() does not include null values in the count" → rows with NULL discount_amount are skipped (numerator and denominator both exclude them), reasonable for "average discount given." Treating no-discount as 0 (COALESCE(discount_amount,0)) is a legitimate ALTERNATIVE interpretation, not a defect. Minor completeness ding (-0.5 Comp) for not surfacing the NULL-vs-zero interpretation choice explicitly — informative-not-wrong.
-- **Q4** `WITH order_refunds AS (SELECT o.order_id, o.order_total, SUM(r.refund_amount) AS total_refunded FROM orders o LEFT JOIN refunds r ON r.order_id=o.order_id GROUP BY o.order_id, o.order_total) SELECT COUNT(*) FROM order_refunds WHERE total_refunded > 0 AND total_refunded < order_total` — CLEAN. CTE pre-aggregates multi-row refunds per order (SUM over the LEFT-JOINed refund rows). LEFT JOIN keeps no-refund orders (select.html: unmatched right columns → NULL); SUM of all-NULL = NULL (aggregate.html: "sum() returns null rather than zero"). Outer `total_refunded > 0` → NULL>0 yields NULL/not-true so no-refund orders are excluded; `total_refunded < order_total` excludes full refunds (=order_total). Net: isolates PARTIAL refunds exactly. Correct. Minor ding (-0.5 Comp/Clar/Act) only for not flagging the edge case where over-refunds (total_refunded > order_total) fall outside both partial and full buckets — a real-data nuance, not a logic error.
+- **(a) `SUM(DECIMAL(10,2))` → `DECIMAL(38,2)` widening — CORRECT.** VERIFIED via Trino 467 source `DecimalSumAggregation.java`: `@OutputFunction("decimal(38,s)")` — sum over a DECIMAL(p,s) input returns DECIMAL(38, s): precision widened to the max (38), input **scale preserved**. Matches the documented signature `sum(decimal(p,s)) returns decimal(38,s)`. The responder's claim is exactly right.
+- **(b) Overflow RAISES (not silent wrap/truncate) — CORRECT.** VERIFIED `DecimalSumAggregation.java` throws `TrinoException` with error code **`NUMERIC_VALUE_OUT_OF_RANGE`** (message "Decimal overflow") on two checks (`state.getOverflow() != 0` and `Decimals.overflows(rawHigh, rawLow)`). Trino fails fast — it does NOT silently wrap around or truncate. The responder's claim is exactly right and the named error code is correct (cf. Trino issue #20227 documents this overflow-on-decimal-sum behavior).
+- **(c) "NULLs — SUM treats as zero and skips" — TINY WORDING IMPRECISION, NOT a defect.** VERIFIED aggregate.html: SUM **ignores** NULL inputs (a NULL does not contribute), and an **all-NULL group returns NULL, not 0**. So "treats as zero" is slightly imprecise phrasing — the precise statement is "SUM ignores NULLs (doesn't add them); all-NULL group → NULL." The practical effect the responder conveys (NULLs don't contribute to the sum) is correct, so this is a small clarity/accuracy ding (Acc 4.75 / Clar 4.75), NOT a flagged dialect defect. Claims (a)+(b) are substantive and fully correct, making this a strong answer.
 
-## Defect scan
+### Q4 — count orders per payment type — 5.00 (Acc 5 / Comp 5 / Clar 5 / Act 5)
+`SELECT payment_type, COUNT(*) FROM orders GROUP BY payment_type` (+ `histogram(payment_type)` map form). Same verified histogram() map<K,bigint> form as Q2; both valid. VERIFIED aggregate.html. CORRECT.
 
-No fabricated functions. No wrong signatures. No crossed-family idioms. No findability slips. No GROUP-BY muddle (contrast iter909/iter915 — those slips remain one-off/CLOSED; Q1/Q2 here lead with the correct shape). No prod-env conflict — pure standard SQL, on-prem Trino 467 + Iceberg 1.5.2 + MinIO + Hive Metastore + JWT/OPA unaffected.
+---
 
-## Directive for iter923
+## Verification trail
+All facts VERIFIED vs trino.io/docs/467 (functions/aggregate.html, language/types.html) + **Trino git-tag 467 source `DecimalSumAggregation.java`** + WebSearch (decimal sum signature/overflow, issue #20227) + WebFetch 2026-06-10. iter882 verify-first applied BOTH directions:
+- histogram() built-in returning map<K,bigint> → CONFIRMED ⇒ Q2/Q4 NOT flagged.
+- AVG-over-per-group-COUNT-subquery valid two-level aggregation → CONFIRMED ⇒ Q1 NOT flagged.
+- SUM(DECIMAL(p,s)) → DECIMAL(38,s) widening + overflow-raises-NUMERIC_VALUE_OUT_OF_RANGE → CONFIRMED from source ⇒ Q3 (a)+(b) NOT flagged (source-CORRECT, not blessed-wrong).
+- SUM ignores NULLs / all-NULL→NULL not zero → CONFIRMED ⇒ Q3(c) noted as tiny wording imprecision only, NOT escalated to defect.
+- No doc-CORRECT claim flagged; no doc-WRONG claim blessed.
 
-**iter923 = DEFAULT NO-OP / durability-breadth.** No open defect, no source-verified findable-but-missing gap, no dialect defect. Do NOT churn the passing aggregate/GROUP-BY/LEFT-JOIN cards.
+## Disposition — iter923 = DEFAULT NO-OP
+All 4 dialect-clean; the lone Q3(c) "treats as zero" phrasing is a tiny wording imprecision on an otherwise strong, source-verified decimal answer (the substantive (a) widening + (b) overflow-raises claims are both correct). This is NOT a findable resource gap and NOT a dialect defect — **no FIX-A, no "wrong" card, no escalation.** Teacher writes ZERO edits.
 
-Optional fresh adjacents to probe next sweep (confirm durability from new phrasings):
-- COUNT(*) FILTER (WHERE …) vs WHERE-then-COUNT (single-pass conditional count).
-- AVG with COALESCE(x,0) "treat absent as zero" phrasing (confirm responder surfaces the NULL-vs-zero choice).
-- LEFT JOIN + SUM where over-refund (total_refunded > order_total) edge appears — confirm responder flags it.
-- Multi-bucket CASE-aggregation (count partial/full/none refunds in one query via SUM(CASE)).
+Do NOT mark wrong: Q1 AVG-over-per-order-COUNT-subquery, Q2 GROUP-BY-star_rating-COUNT + histogram-map, Q3 SUM-decimal→DECIMAL(38,s)/overflow-raises/NULLs-skipped, or Q4 GROUP-BY-payment_type-COUNT + histogram-map (all correct).
 
-PRESERVE full iter534-921 pin inventory. NO federation edits (federation 4.49944/310, UNCHANGED — not probed this sweep).
+OPTIONAL future re-probe (NO pin touch, SKIP if duplicative): a question whose phrasing could tempt "SUM returns 0 for an all-NULL/empty group" to confirm the responder states NULL-not-zero precisely. Low priority — the practical guidance was already right.
 
-**DO NOT bump training/state.json (already 922; passed=true preserved).**
+Federation (4.49944/310) is the only un-passed row — probe only bulletproofed angles. Do NOT touch any iter534-922 pin. PIN Trino 467. NO federation edits. DO NOT bump training/state.json (already passed; overall 4.969 PASS holds).
