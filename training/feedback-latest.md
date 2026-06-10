@@ -1,61 +1,76 @@
-# iter968 Judge Feedback — EXTENDED PHASE, NO-OP breadth sweep
+# Judge Feedback — iter969
 
-**OVERALL 4.75 STRONG PASS** (Q1 4.94 / Q2 4.94 / Q3 4.81 / Q4 4.31 = 19.00/4 = 4.75; margin +1.25; OVERALL AVERAGE governs, no per-Q veto).
+**Date**: 2026-06-11 (EXTENDED PHASE, NO-OP breadth sweep)
+**Overall**: 4.0625 PASS (margin +0.5625; OVERALL AVERAGE governs, no per-Q veto)
 
-All dialect/logic claims verified BOTH directions vs trino.io/docs/467 + git-tag 467 source + WebSearch 2026-06-11 — NOT against resources/.
+Per-Q: Q1 3.0625 / Q2 4.875 / Q3 4.875 / Q4 3.4375 = 16.25/4 = 4.0625
 
----
-
-## Per-question scores
-
-### Q1 — p95 per API endpoint over hundreds of millions of rows — 4.94 (Acc 4.75 / Comp 5 / Clar 5 / Act 5)
-`approx_percentile(response_ms, 0.95) GROUP BY api_endpoint` + array form `approx_percentile(response_ms, ARRAY[0.5,0.95,0.99])`.
-- VERIFIED both forms exist in 467 (functions/aggregate.html): `approx_percentile(x, percentage) -> [same as x]` AND `approx_percentile(x, percentages) -> array<[same as x]>`. CORRECT.
-- VERIFIED the accuracy attribution is EXACTLY RIGHT: the "2.3% standard error" sentence belongs to **approx_distinct ONLY**, NOT approx_percentile. Confirmed via two independent WebFetch passes against aggregate.html. The responder's "Trino publishes NO fixed error % for approx_percentile; the 2.3% is for approx_distinct (count-distinct)" is CORRECT and matches our pin (reference_trino_approx_percentile_error.md). This is the exact figure an earlier judge (iter842) misread — the responder got it right.
-- "Exact percentile requires sorting all rows = prohibitive" — sound.
-- MINOR (-0.25 Acc only): responder labels the backing structure "quantile-digest (T-digest)". Trino actually has TWO distinct sketch types — `qdigest` AND `tdigest` are separate types/function families; approx_percentile is T-digest-backed. Conflating them under one hyphenated label is a small mechanism imprecision in a tangential aside, NOT a defect — approx_percentile itself is the correct answer and the user-facing guidance is right.
-
-### Q2 — NULL manager_id + full reporting chain (self-referential) — 4.94 (Acc 5 / Comp 5 / Clar 4.75 / Act 5)
-Part A `WHERE manager_id IS NULL`; Part B `WITH RECURSIVE`.
-- **THE KEY FACTUAL CHECK — max_recursion_depth VERDICT: RESPONDER IS CORRECT.** VERIFIED against trino.io/docs/467/sql/select.html: WITH RECURSIVE is supported; the session property is named exactly `max_recursion_depth` and its **default value is 10**; doc note "recursion depth is fixed, defaults to 10, and doesn't depend on the actual query results" + "the size of the query plan growth is quadratic with the recursion depth" + experimental warning. The responder's claim ("default recursion depth limit of 10", error "Recursion depth limit exceeded (10)", fix `SET SESSION max_recursion_depth = 50` run BEFORE the query) is FULLY ACCURATE — exact property name AND exact default both correct. This is NOT a fabricated-property slip; it is a real, correctly-named, correctly-defaulted Trino session property.
-- Recursive-CTE structure is valid Trino form: base `SELECT emp_id,emp_name,manager_id,1 AS depth` UNION ALL recursive `SELECT rc.emp_id, rc.emp_name, m.manager_id, rc.depth+1 FROM reporting_chain rc JOIN employees m ON m.emp_id=rc.manager_id WHERE rc.manager_id IS NOT NULL AND rc.depth<50`. Column list is structurally sound — it carries the ORIGINAL employee (rc.emp_id/rc.emp_name) forward while walking the ancestor pointer (m.manager_id) upward.
-- TRACE 3-level chain E3->E2->E1->NULL: base rows {E3@d1,E2@d1,E1@d1}; recursive walks E3 join m.emp_id=E2 -> (E3, mgr=E1, d2), then join m.emp_id=E1 -> (E3, mgr=NULL, d3), stops on rc.manager_id IS NULL. Produces the full upward ancestor chain per employee. Logic CORRECT.
-- depth<50 guard is sensible defense even though default cap is 10 (and the SET SESSION raises it). Single-employee upward variant correct.
-- -0.25 Clar only: the two stop conditions (rc.manager_id IS NOT NULL AND rc.depth<50) plus the SET SESSION cap interplay is slightly dense for a beginner, but each piece is explained.
-
-### Q3 — product PAIRS bought together (order_items self-join) — 4.81 (Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.75)
-Self-join `order_items oi1 JOIN order_items oi2 ON oi1.order_id=oi2.order_id AND oi1.product_id < oi2.product_id`, `GROUP BY product_a, product_b`, `COUNT(*) AS times_bought_together`, `WHERE >=10`, `ORDER BY DESC LIMIT 100`.
-- VERIFIED `product_id < product_id` is the canonical standard market-basket dedup: the strict inequality both (a) eliminates self-pairs (A,A) and (b) collapses (A,B)+(B,A) to one ordered pair — load-bearing and correctly explained. CORRECT direction (self-join IS the right tool here).
-- Threshold (>=10) + LIMIT 100 keep output bounded — directly answers "will it blow up". Broadcast hash join on order_id note is reasonable.
-- "specific product" variant `oi1.product_id='x' AND oi2.product_id != 'x'` is a valid co-purchase-with-X form.
-- Minor: the genuine blow-up risk is per-ORDER fan-out (an order with k items yields k*(k-1)/2 pairs) — responder addresses output cardinality via threshold/LIMIT but is light on the intra-order quadratic fan-out itself; not wrong, slight completeness shade.
-
-### Q4 — active accounts per plan tier RIGHT NOW from plan_history change-log — 4.31 (Acc 4.75 / Comp 4.75 / Clar 3.25 / Act 4.5)
-Final answer CORRECT: Option A `ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY changed_at DESC) AS rn ... WHERE rn=1 ... GROUP BY plan_tier`; corrected nested `max_by(plan_tier, changed_at)` subquery then `GROUP BY plan_tier_current`; Option B dbt incremental current-state table.
-- **CONFIRMED: iter964-Q3 MAX(varchar)-as-latest mislabel did NOT recur.** The latest-per-account core uses `max_by(plan_tier, changed_at)` (value-at-max-timestamp) AND `ROW_NUMBER() ORDER BY changed_at DESC` — both are TEMPORAL latest, NOT lexicographic MAX(plan_tier). The prior trap is absent here. Good.
-- **CLARITY DING (-1.75 Clar): visible mid-answer churn + BROKEN INTERMEDIATE.** Responder wrote an invalid double-GROUP-BY query `SELECT max_by(plan_tier, changed_at), COUNT(*) FROM plan_history GROUP BY account_id GROUP BY max_by(...)` — TWO GROUP BY clauses is a parse error (CONFIRMED invalid Trino: a single SELECT permits only one GROUP BY) — then said "Wait, that's slightly wrong syntax" and corrected to the valid nested form. The broken query is a self-corrected INTERMEDIATE, NOT the final answer; the final answer is correct. But the visible thinking-out-loud + shipped-then-retracted broken SQL hurts beginner clarity (a novice could copy the broken line before reaching the correction).
-- CLASSIFICATION: this is a PRESENTATION TIC (broken-secondary / mid-answer-churn family — also iter962-Q2 "Wait, that's overcomplicating it", iter964-Q3 "Wait, that's not quite right"). It is NOT a resource defect — no resource teaches double-GROUP-BY, and the correct nested max_by + ROW_NUMBER()=1 forms are findable and were reached. Per-instance Haiku synthesis-padding slip; re-probe-don't-churn (feedback_responder_broken_secondary_alternative.md). NO resource fix.
+All dialect/logic verified BOTH directions vs trino.io/docs/467 (aggregate.html FILTER (WHERE) + count(); window.html RANK() OVER (PARTITION BY ... ORDER BY ...); language/types.html INTERVAL '30' DAY) + WebSearch 2026-06-11 — NOT against resources/. Column-scope traced on Q1 and Q4-first-form.
 
 ---
 
-## Scope notes
+## Q1 — Rank reps by quota attainment (division + ranking) — 3.0625 (Acc 2.0 / Comp 3.5 / Clar 3.75 / Act 3.0)
 
-- ALL FOUR LEADS CORRECT. Overall 4.75 STRONG PASS, margin +1.25.
-- **max_recursion_depth VERDICT: CORRECT** — property name `max_recursion_depth` + default `10` both verified exactly right vs trino.io/docs/467/sql/select.html. NOT a fabricated-property slip.
-- **iter964-Q3 MAX(varchar)-as-latest STAYS A ONE-OFF** — Q4 latest-per-group used max_by + ROW_NUMBER (temporal), the lexicographic mislabel did NOT recur. Confirmed clean.
-- **Q4 mid-answer churn + broken double-GROUP-BY intermediate = PRESENTATION TIC (broken-secondary/synthesis-padding family), NOT a resource defect.** Final answer correct; no resource fix; per-instance one-off re-probe.
-- NO QUALIFY / NO semi-join-mislabel / NO percent_rank-inversion / NO MAX(varchar)-as-latest / NO fabricated-rule slips this set.
-- approx_percentile accuracy attribution (2.3% = approx_distinct only) CORRECT — matches our pin; the iter842 judge misread does not appear in the responder.
-- NO resource defect / NO findability gap / NO resource edits warranted.
+**APPROACH CORRECT, QUERY WON'T COMPILE.** `100.0 * SUM(amount) / q.target` for decimal division and `RANK() OVER (PARTITION BY quarter ORDER BY pct_of_quota DESC)` single-pass ranking are the right tools (RANK syntax VERIFIED window.html; 100.0* decimal promotion correct).
 
-## iter969 RECOMMENDATION = DEFAULT NO-OP
-Re-probe from fresh angles to confirm one-offs: (a) another self-referential/recursive-hierarchy Q (e.g. bill-of-materials / category tree) to re-confirm WITH RECURSIVE + max_recursion_depth handling; (b) a multi-percentile / weighted approx_percentile angle; (c) a latest-state-from-changelog Q to confirm max_by/ROW_NUMBER stays clean and the Q4 broken-intermediate churn is one-off. LIGHT FIX-A only if the double-GROUP-BY broken-intermediate or any tic RECURS in next 2 sweeps. Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
+**CONFIRMED BUG — MISSING-COLUMN-IN-CTE-PROJECTION (column-scope slip):** The `rep_performance` CTE SELECT list is `(rep_id, actual_revenue, quota_target, pct_of_quota)`. `q.quarter` appears in the CTE's `GROUP BY rep_id, q.target, q.quarter` but is **NOT projected** in the SELECT list. The outer query references `quarter` in BOTH `RANK() OVER (PARTITION BY quarter ...)` AND `ORDER BY quarter`. Since `quarter` is not an output column of the CTE, this **FAILS with an unresolved/column-not-found error in Trino**. TRACED: outer query can only see {rep_id, actual_revenue, quota_target, pct_of_quota} — `quarter` resolves to nothing. Fix is trivial: add `q.quarter` to the CTE SELECT.
+
+**RESOURCE-vs-SLIP = PURE RESPONDER SYNTHESIS SLIP.** r07 L3812 teaches `RANK() OVER (PARTITION BY tenant_id ORDER BY amount DESC)` correctly; L2829 teaches Top-N-per-group RANK with a partition column properly carried. No resource teaches a CTE that omits its partition/order column from the projection. The responder dropped a column from the projection while writing — a per-instance assembly slip, NOT a content/findability defect. NO resource edit.
+
+Acc 2.0 for the won't-compile query (real error, not cosmetic); structure/approach is right, so not a 1. Clarity/Act dinged because an engineer who copies this hits an error before getting value.
+
+---
+
+## Q2 — % invoices unpaid past due, by month (one query or two) — 4.875 (Acc 5.0 / Comp 4.75 / Clar 4.75 / Act 5.0)
+
+**CLEAN + CORRECT.** Answers the "one query" thrust directly: a single GROUP BY with `COUNT(*)` total + `COUNT(*) FILTER (WHERE due_date < CURRENT_DATE AND is_paid = false)` for past-due-unpaid + `ROUND(100.0 * .../COUNT(*), 2)` for the percentage — no two-query/self-join needed.
+
+VERIFIED: `COUNT(*) FILTER (WHERE ...)` valid in 467 (aggregate.html — "FILTER keyword removes rows from aggregation with a WHERE clause"); `is_paid = false` boolean comparison valid; `DATE_TRUNC('month', due_date)` valid grouping; `100.0*` decimal promotion; `ROUND(x, 2)`. Correctly notes CASE WHEN is an equivalent alternative (correct secondary this time, matches r07 L1317 guidance). Trivial -0.25 Comp: did not mention a NULL `is_paid` edge case, immaterial.
+
+---
+
+## Q3 — DISTINCT carriers per order (count unique within a group) — 4.875 (Acc 5.0 / Comp 4.75 / Clar 4.75 / Act 5.0)
+
+**CLEAN + CORRECT.** `COUNT(DISTINCT p.carrier) ... LEFT JOIN parcels ... GROUP BY o.order_id` is exactly right. VERIFIED: COUNT(DISTINCT col) is single-arg/valid in 467; LEFT JOIN preserves orders with no parcels, and `COUNT(DISTINCT)` of an all-NULL group returns **0** (count is a NULL-exception aggregate), so no-parcel orders correctly show 0. Correctly volunteers the LEFT-JOIN-keeps-zero-count rationale. Directly answers "count unique within a group." Trivial -0.25 Comp only.
+
+---
+
+## Q4 — Fraction of active users with >=5 distinct login days (two passes or one) — 3.4375 (Acc 2.75 / Comp 4.0 / Clar 3.0 / Act 4.0)
+
+**CORRECT CONCISE FORM PRESENT; FIRST FORM BROKEN (over-complicated/broken-secondary tic).**
+
+The SECOND "more concise" form is **CORRECT**: `SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE distinct_login_days >= 5) / COUNT(*), 2) FROM (SELECT user_id, COUNT(DISTINCT login_date) AS distinct_login_days FROM daily_logins WHERE login_date >= CURRENT_DATE - INTERVAL '30' DAY GROUP BY user_id)`. TRACED: inner subquery yields one row per user active in the window with their distinct-day count (denominator COUNT(*) = active users with >=1 login in window); numerator = those with >=5 distinct days; `INTERVAL '30' DAY` VERIFIED valid (types.html). A copyable correct answer exists.
+
+**CONFIRMED BUG — BROKEN FIRST MULTI-CTE FORM (column-scope + malformed aggregate):** The final SELECT is `SELECT ROUND(100.0 * five_plus_days.active_with_5plus_days / COUNT(active_users.user_id), 2) FROM five_plus_days, (SELECT COUNT(*) AS active_users FROM active_users) active_users`. Two problems:
+1. The cross-joined subquery aliased `active_users` is `(SELECT COUNT(*) AS active_users FROM active_users)` — it exposes ONLY a column named `active_users` (a bigint count), NOT `user_id`. So `COUNT(active_users.user_id)` references a **non-existent column → unresolved-column error**.
+2. `COUNT(active_users.user_id)` is an aggregate applied in a final SELECT over a 2-row cross join (each side a single-row count) with NO GROUP BY alongside the bare scalar `five_plus_days.active_with_5plus_days` — malformed aggregation. The denominator should just be the scalar `active_users` count column, no COUNT() wrapper.
+
+So the first form WON'T RUN. The responder over-built a 3-CTE + cross-join scaffold, mis-wired the column reference, then offered the genuinely-correct compact form as an afterthought.
+
+**RESOURCE-vs-SLIP = PURE RESPONDER SYNTHESIS SLIP.** r07 L1317 teaches the `COUNT(*) FILTER (WHERE ...)` conditional-count idiom; the count-distinct-then-fraction pattern is well-supported. The broken first form is the recurring broken-secondary / over-complication / mid-answer-churn tic (iter936/943/948/950/954/958/959/960/961/962/963/964/965/966/968 family), NOT a content/findability defect. NO resource edit (re-probe-don't-churn; adjacent over-attraction risk).
+
+Acc 2.75 (broken first form ships an unresolved-column error and malformed aggregate) but recognizes a correct copyable concise form is present, so above a 2. Clarity 3.0 for leading with the broken complex form before the correct simple one.
+
+---
+
+## SCOPE / VERDICTS
+
+- **Q1 missing-quarter-column verdict**: REAL won't-compile bug — `quarter` used in outer PARTITION BY + ORDER BY but never projected by the `rep_performance` CTE. PURE RESPONDER SLIP (resources teach RANK-over-divided-metric correctly at r07 L3812/L2829; approach is right, projection slip on assembly). NO resource defect.
+- **Q4 broken-first-form-but-correct-concise-form verdict**: First multi-CTE form WON'T RUN (`active_users.user_id` unresolved on the count-only aliased subquery + malformed aggregate over no-GROUP-BY cross join). The "more concise" second form IS CORRECT and copyable. PURE RESPONDER SLIP (broken-secondary/over-complication tic; r07 L1317 FILTER idiom findable + correct). NO resource defect.
+- Q2 / Q3 CLEAN + CORRECT, score high.
+- Known tics check: NO QUALIFY, NO semi-join mislabel, NO MAX(varchar)-as-latest, NO percent_rank inversion, NO fabricated rule/property names this sweep. NEW pattern instances: missing-column-in-CTE-projection (Q1) + over-complicated-broken-first-form (Q4) — both column-scope/assembly slips in the broken-secondary family.
+
+## RECOMMENDATION — DEFAULT NO-OP
+
+Overall 4.0625 PASS (margin +0.5625, weaker than recent 4.5-4.9 sweeps due to TWO won't-compile queries, but Q2/Q3 clean and Q1-approach/Q4-concise-form correct). Both bugs are per-instance Haiku synthesis slips against correct/findable resources — no single resource fix, and adding cards risks adjacent over-attraction (feedback_new_card_over_attracts_adjacent.md). Per feedback_synthesis_ceiling_stop_churning.md + feedback_responder_broken_secondary_alternative.md these are the residual Haiku assembly ceiling, not gaps.
+
+LIGHT FIX-A ONLY IF a column-scope slip (partition/order column omitted from a CTE projection, OR a cross-joined scalar subquery column referenced that isn't exposed) RECURS on a different surface in the next 2 sweeps. Until then: re-probe (a) another rank-over-ratio Q (confirm the partition column is carried into the CTE projection), (b) another fraction-meeting-threshold Q (confirm the responder reaches the clean COUNT(*) FILTER form without the broken cross-join scaffold).
 
 PINS REINFORCED:
-- **approx_percentile(x, fraction) + approx_percentile(x, ARRAY[...]) both valid 467; NO published fixed error % for approx_percentile (the 2.3% standard error is approx_distinct ONLY); exact percentile = full sort = prohibitive; backing structure is T-digest (qdigest and tdigest are DISTINCT types — don't conflate the label).**
-- **WITH RECURSIVE supported in 467; session property `max_recursion_depth` DEFAULT = 10; raise via SET SESSION max_recursion_depth=N BEFORE the query; query-plan growth is quadratic in depth; recursive CTE carries the original key forward (rc.emp_id) while walking the parent pointer (m.manager_id) up, stop on rc.parent IS NULL + a depth guard.**
-- **product-pair co-purchase = self-join on order_id with strict `oi1.product_id < oi2.product_id` (kills self-pairs AND (A,B)/(B,A) dupes); GROUP BY pair + COUNT(*) + threshold + LIMIT bounds output; intra-order fan-out is k*(k-1)/2.**
-- **latest-state-from-changelog = max_by(value, ts) GROUP BY key, OR ROW_NUMBER() OVER (PARTITION BY key ORDER BY ts DESC)=1 subquery — both TEMPORAL latest, NOT MAX(varchar) lexicographic; a single SELECT allows ONLY ONE GROUP BY (double-GROUP-BY = parse error).**
-- **broken-secondary/mid-answer-churn meta-pattern persists (iter936/943/948/950/954/958/959/960/961/963/964/965/966 family) — LEADS correct, a visible self-corrected broken intermediate or tacked-on aside dings CLARITY; per-instance Haiku tic, NOT a resource defect.**
+- **rank-by-attainment = `100.0*SUM(metric)/target` (decimal promotion) + `RANK() OVER (PARTITION BY <grp> ORDER BY ratio DESC)`; CARRY the partition/order column INTO the CTE SELECT projection — a column used in outer PARTITION BY/ORDER BY but only in the CTE GROUP BY (not projected) is an UNRESOLVED-COLUMN error in 467**
+- **one-query count + % = `COUNT(*)` total + `COUNT(*) FILTER (WHERE cond)` subset + `ROUND(100.0*subset/total, 2)`; FILTER valid on all aggregates (aggregate.html); no two-query/self-join needed**
+- **distinct-within-group = `COUNT(DISTINCT col) ... GROUP BY grp`; LEFT JOIN preserves empty groups and COUNT(DISTINCT) of an all-NULL group = 0**
+- **fraction-meeting-threshold = `COUNT(*) FILTER (WHERE per_user_metric >= N) / COUNT(*)` over a `(SELECT user_id, COUNT(DISTINCT day) ... WHERE window GROUP BY user_id)` subquery — one pass over the per-user rollup; a cross-joined scalar count subquery exposes ONLY its aliased count column (referencing `.user_id` on it = unresolved column); INTERVAL '30' DAY valid (types.html)**
+- **broken-secondary / over-complication / column-scope-slip meta-pattern persists — leads/concise-forms correct, the elaborate alternative ships a won't-compile error; per-instance Haiku synthesis slip NOT a resource defect**
 
-DO NOT bump training/state.json (already 968; passed=true preserved; overall 4.75 PASS holds; final_iterations_remaining 0).
+Federation r22 §13.x hard-locked, NOT probed (OVERRIDDEN). MUST NOT bump training/state.json (already 969; passed=true preserved; final_iterations_remaining 0).
