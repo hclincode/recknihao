@@ -1,76 +1,64 @@
-# Judge Feedback — iter969
+# iter970 Judge Feedback — EXTENDED PHASE, NO-OP breadth sweep
 
-**Date**: 2026-06-11 (EXTENDED PHASE, NO-OP breadth sweep)
-**Overall**: 4.0625 PASS (margin +0.5625; OVERALL AVERAGE governs, no per-Q veto)
+**OVERALL: 4.50 STRONG PASS** (Q1 4.94 / Q2 4.88 / Q3 4.88 / Q4 3.31 = 18.00/4 = 4.50; margin +1.00; OVERALL AVERAGE governs, NO per-Q veto.)
 
-Per-Q: Q1 3.0625 / Q2 4.875 / Q3 4.875 / Q4 3.4375 = 16.25/4 = 4.0625
-
-All dialect/logic verified BOTH directions vs trino.io/docs/467 (aggregate.html FILTER (WHERE) + count(); window.html RANK() OVER (PARTITION BY ... ORDER BY ...); language/types.html INTERVAL '30' DAY) + WebSearch 2026-06-11 — NOT against resources/. Column-scope traced on Q1 and Q4-first-form.
+Verification: all dialect/logic claims checked BOTH directions vs trino.io/docs/467 (aggregate.html, datetime.html) + WebSearch/WebFetch 2026-06-11 + pinned-memory references — NOT against resources/. Column scope TRACED on every CTE (Q2, Q4). State.json NOT bumped.
 
 ---
 
-## Q1 — Rank reps by quota attainment (division + ranking) — 3.0625 (Acc 2.0 / Comp 3.5 / Clar 3.75 / Act 3.0)
+## Per-question scores
 
-**APPROACH CORRECT, QUERY WON'T COMPILE.** `100.0 * SUM(amount) / q.target` for decimal division and `RANK() OVER (PARTITION BY quarter ORDER BY pct_of_quota DESC)` single-pass ranking are the right tools (RANK syntax VERIFIED window.html; 100.0* decimal promotion correct).
+### Q1 — Cart abandonment rate (carts vs orders) — **4.94 CLEAN**
+`LEFT JOIN carts c -> orders o ON o.cart_id=c.cart_id`, `COUNT(DISTINCT c.cart_id)` total, `COUNT(DISTINCT CASE WHEN o.order_id IS NULL THEN c.cart_id END)` abandoned, `100.0 * abandoned / NULLIF(COUNT(DISTINCT c.cart_id),0)`, WHERE on `c.created_at`.
+- Acc 5.0: LEFT JOIN keeps all carts; `o.order_id IS NULL` is the textbook anti-join / abandoned detector; COUNT(DISTINCT) protects against a cart matching multiple order rows. `100.0*` decimal promotion + NULLIF div-by-zero guard both correct (verified vs reference_trino_division_by_zero pin: INTEGER `/` 0 THROWS, NULLIF avoids it). Column scope clean (all cols exist on carts/orders).
+- Clar 5.0 / App 5.0 / Comp 4.75 (-0.25: leaves the cart→order grain assumption — one cart = at most one order — implicit; minor). Solid abandonment-rate pattern.
 
-**CONFIRMED BUG — MISSING-COLUMN-IN-CTE-PROJECTION (column-scope slip):** The `rep_performance` CTE SELECT list is `(rep_id, actual_revenue, quota_target, pct_of_quota)`. `q.quarter` appears in the CTE's `GROUP BY rep_id, q.target, q.quarter` but is **NOT projected** in the SELECT list. The outer query references `quarter` in BOTH `RANK() OVER (PARTITION BY quarter ...)` AND `ORDER BY quarter`. Since `quarter` is not an output column of the CTE, this **FAILS with an unresolved/column-not-found error in Trino**. TRACED: outer query can only see {rep_id, actual_revenue, quota_target, pct_of_quota} — `quarter` resolves to nothing. Fix is trivial: add `q.quarter` to the CTE SELECT.
+### Q2 — Products whose AVG review score DROPPED Q3→Q4 last year — **4.88 CLEAN**
+`quarterly_scores` CTE projects (product_id, EXTRACT(QUARTER...) AS quarter, EXTRACT(YEAR...) AS year, AVG(score) AS avg_score); self-join q3(quarter=3) to q4(quarter=4) same product+year; WHERE q4.avg_score < q3.avg_score; ORDER BY score_change ASC. LEFT-JOIN variant for products with no Q4 data.
+- **EXTRACT(QUARTER FROM date) + EXTRACT(YEAR FROM date) VERIFIED present in 467** (datetime.html: QUARTER and YEAR both in the supported EXTRACT field list). Not a fabrication.
+- **COLUMN SCOPE TRACED — CLEAN (iter969-style omission did NOT recur):** CTE projects product_id, quarter, year, avg_score — ALL four are referenced downstream (quarter in join filter, year in join, product_id/avg_score in SELECT). No partition/join key omitted from the projection. This is exactly the column-scope discipline iter969-Q1 missed; it held here.
+- Acc 5.0 / Clar 5.0 / App 5.0 / Comp 4.5 (-0.5: self-join is correct but a single-pass conditional-AVG GROUP BY product would be cheaper; not wrong, just not the leanest. LEFT-JOIN "no Q4 data" variant is a nice completeness touch).
 
-**RESOURCE-vs-SLIP = PURE RESPONDER SYNTHESIS SLIP.** r07 L3812 teaches `RANK() OVER (PARTITION BY tenant_id ORDER BY amount DESC)` correctly; L2829 teaches Top-N-per-group RANK with a partition column properly carried. No resource teaches a CTE that omits its partition/order column from the projection. The responder dropped a column from the projection while writing — a per-instance assembly slip, NOT a content/findability defect. NO resource edit.
+### Q3 — % of quota per tenant, flag >90% (storage_usage vs quotas) — **4.88 CLEAN**
+`tenants t LEFT JOIN storage_usage LEFT JOIN quotas`; `100.0 * s.used_bytes / NULLIF(q.quota_bytes,0) AS usage_pct`; CASE → ERROR (null/zero quota) / ALERT (>90) / WARNING (>75) / OK; ORDER BY usage_pct DESC NULLS LAST.
+- **All three division claims VERIFIED:** (a) integer/integer division TRUNCATES toward zero — correct (division pin); (b) INTEGER/DECIMAL division by zero THROWS DIVISION_BY_ZERO — correct (reference_trino_division_by_zero, git-tag-confirmed); (c) NULLIF(quota_bytes,0) guard prevents the throw — correct; (d) `100.0*` decimal promotion avoids the truncation footgun — correct. The responder pre-empted the exact division gotcha the question hinted at ("just a join + division or gotchas?") — strong practical fit.
+- LEFT JOIN from tenants keeps tenants with no usage/quota row; NULLS LAST ordering surfaces real percentages first. Column scope clean.
+- Acc 5.0 / Clar 5.0 / App 5.0 / Comp 4.5 (-0.5: the ERROR/ALERT/WARNING tiering is a small over-delivery vs the asked binary >90% flag, but it directly answers "any gotchas?" so net positive).
 
-Acc 2.0 for the won't-compile query (real error, not cosmetic); structure/approach is right, so not a 1. Clarity/Act dinged because an engineer who copies this hits an error before getting value.
+### Q4 — AVG time between 1st and 2nd purchase (customers with >=2 purchases) — **3.31 — CORE CORRECT, VOLUNTEERED PERCENTILE_CONT FABRICATION (KEY CHECK)**
+Core: `ranked_orders` CTE = ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date ASC) AS order_seq; `customer_gaps` self-joins ranked_orders to itself on customer_id with order_seq=1 (first) and order_seq=2 (second), `date_diff('day', first, second) AS days_to_second_purchase`; final SELECT COUNT(DISTINCT customer_id), AVG(days_to_second_purchase), MIN, MAX **and `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_to_second_purchase) AS median_days`**.
 
----
+- **THE CORE ANSWER IS CORRECT and exactly answers the question:** ROW_NUMBER 1st/2nd + self-join order_seq=1/=2 + date_diff('day',...) + AVG over the gaps = the AVERAGE first-to-second gap. INNER JOIN order_seq=2 correctly EXCLUDES <2-purchase customers (a 1-purchase customer has no seq=2 row, drops out). date_diff('day', ts1, ts2) -> bigint, day-aware, no `ts - ts` operator — VERIFIED (datetime.html + reference_trino_datediff_dayaware pin). Column scope on BOTH CTEs CLEAN (ranked_orders projects customer_id/order_id/order_date/order_seq, all referenced; customer_gaps projects customer_id/dates/gap, all referenced downstream). **iter969 column-scope slip did NOT recur.**
 
-## Q2 — % invoices unpaid past due, by month (one query or two) — 4.875 (Acc 5.0 / Comp 4.75 / Clar 4.75 / Act 5.0)
+- **FABRICATION (key check, CONFIRMED via trino.io/docs/467/functions/aggregate.html):** `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ...)` does NOT exist in Trino 467. WebFetch of aggregate.html confirms: **NO percentile_cont, NO percentile_disc; WITHIN GROUP (ORDER BY ...) is supported ONLY for listagg().** The correct median is `approx_percentile(days_to_second_purchase, 0.5)`. The responder's volunteered claim "available on Trino 467 for continuous percentiles (verified in the aggregate-functions docs)" is a **CONFIDENT FABRICATION + FALSE doc-citation** — the docs say the opposite. The `PERCENTILE_DISC` mention is also fabricated. This median line WON'T COMPILE (function-not-found) and the false "verified" claim is the more damaging part.
 
-**CLEAN + CORRECT.** Answers the "one query" thrust directly: a single GROUP BY with `COUNT(*)` total + `COUNT(*) FILTER (WHERE due_date < CURRENT_DATE AND is_paid = false)` for past-due-unpaid + `ROUND(100.0 * .../COUNT(*), 2)` for the percentage — no two-query/self-join needed.
+- **RESOURCE-vs-SLIP = PURE RESPONDER SYNTHESIS SLIP, NO resource fix:** The resources GUARD this correctly — r05 L2234-2266 and r23 L265/L273-275 explicitly state Trino has NO percentile_cont/disc and to use approx_percentile. The resource teaches it right AND guards the exact footgun; the responder reached PAST the guard and fabricated the function in a *volunteered* (un-asked) extra metric. Not a content/findability defect.
 
-VERIFIED: `COUNT(*) FILTER (WHERE ...)` valid in 467 (aggregate.html — "FILTER keyword removes rows from aggregation with a WHERE clause"); `is_paid = false` boolean comparison valid; `DATE_TRUNC('month', due_date)` valid grouping; `100.0*` decimal promotion; `ROUND(x, 2)`. Correctly notes CASE WHEN is an equivalent alternative (correct secondary this time, matches r07 L1317 guidance). Trivial -0.25 Comp: did not mention a NULL `is_paid` edge case, immaterial.
+- **INTERMITTENT, NOT a 2-in-2 recurrence:** This percentile fabrication last appeared iter943 (different question). In the interim approx_percentile was used CORRECTLY (iter961 median-ticket, iter968 p95/array form). So it is an INTERMITTENT volunteered-metric slip in the broken-secondary-alternative family (iter936/943/948/950/954/958/959/960/961/962/963/964/965/966/968/969), NOT a clean 2-in-2-sweeps recurrence. Per feedback_responder_broken_secondary_alternative.md + feedback_synthesis_ceiling_stop_churning.md: per-instance one-off, re-probe-don't-churn, NO defang/resource edit.
 
----
-
-## Q3 — DISTINCT carriers per order (count unique within a group) — 4.875 (Acc 5.0 / Comp 4.75 / Clar 4.75 / Act 5.0)
-
-**CLEAN + CORRECT.** `COUNT(DISTINCT p.carrier) ... LEFT JOIN parcels ... GROUP BY o.order_id` is exactly right. VERIFIED: COUNT(DISTINCT col) is single-arg/valid in 467; LEFT JOIN preserves orders with no parcels, and `COUNT(DISTINCT)` of an all-NULL group returns **0** (count is a NULL-exception aggregate), so no-parcel orders correctly show 0. Correctly volunteers the LEFT-JOIN-keeps-zero-count rationale. Directly answers "count unique within a group." Trivial -0.25 Comp only.
-
----
-
-## Q4 — Fraction of active users with >=5 distinct login days (two passes or one) — 3.4375 (Acc 2.75 / Comp 4.0 / Clar 3.0 / Act 4.0)
-
-**CORRECT CONCISE FORM PRESENT; FIRST FORM BROKEN (over-complicated/broken-secondary tic).**
-
-The SECOND "more concise" form is **CORRECT**: `SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE distinct_login_days >= 5) / COUNT(*), 2) FROM (SELECT user_id, COUNT(DISTINCT login_date) AS distinct_login_days FROM daily_logins WHERE login_date >= CURRENT_DATE - INTERVAL '30' DAY GROUP BY user_id)`. TRACED: inner subquery yields one row per user active in the window with their distinct-day count (denominator COUNT(*) = active users with >=1 login in window); numerator = those with >=5 distinct days; `INTERVAL '30' DAY` VERIFIED valid (types.html). A copyable correct answer exists.
-
-**CONFIRMED BUG — BROKEN FIRST MULTI-CTE FORM (column-scope + malformed aggregate):** The final SELECT is `SELECT ROUND(100.0 * five_plus_days.active_with_5plus_days / COUNT(active_users.user_id), 2) FROM five_plus_days, (SELECT COUNT(*) AS active_users FROM active_users) active_users`. Two problems:
-1. The cross-joined subquery aliased `active_users` is `(SELECT COUNT(*) AS active_users FROM active_users)` — it exposes ONLY a column named `active_users` (a bigint count), NOT `user_id`. So `COUNT(active_users.user_id)` references a **non-existent column → unresolved-column error**.
-2. `COUNT(active_users.user_id)` is an aggregate applied in a final SELECT over a 2-row cross join (each side a single-row count) with NO GROUP BY alongside the bare scalar `five_plus_days.active_with_5plus_days` — malformed aggregation. The denominator should just be the scalar `active_users` count column, no COUNT() wrapper.
-
-So the first form WON'T RUN. The responder over-built a 3-CTE + cross-join scaffold, mis-wired the column reference, then offered the genuinely-correct compact form as an afterthought.
-
-**RESOURCE-vs-SLIP = PURE RESPONDER SYNTHESIS SLIP.** r07 L1317 teaches the `COUNT(*) FILTER (WHERE ...)` conditional-count idiom; the count-distinct-then-fraction pattern is well-supported. The broken first form is the recurring broken-secondary / over-complication / mid-answer-churn tic (iter936/943/948/950/954/958/959/960/961/962/963/964/965/966/968 family), NOT a content/findability defect. NO resource edit (re-probe-don't-churn; adjacent over-attraction risk).
-
-Acc 2.75 (broken first form ships an unresolved-column error and malformed aggregate) but recognizes a correct copyable concise form is present, so above a 2. Clarity 3.0 for leading with the broken complex form before the correct simple one.
+- Scores: Acc 2.5 (core fully correct + correctly answers the asked AVG/MIN/MAX/exclusion; but volunteered median line is a non-existent function with a FALSE "verified in docs" claim — a fabricated function + false citation is a real, not cosmetic, error). Clar 4.0 (well-structured CTEs, clear; the false confidence on median misleads). App 3.5 (engineer who copies the core gets the right answer; one who copies the median line gets a function-not-found error — the false "verified" claim makes this worse than a silent typo). Comp 3.25 (over-delivered an extra metric and got it wrong; the asked AVG is correct). = 13.25/4 = 3.31.
 
 ---
 
-## SCOPE / VERDICTS
+## Scope summary
 
-- **Q1 missing-quarter-column verdict**: REAL won't-compile bug — `quarter` used in outer PARTITION BY + ORDER BY but never projected by the `rep_performance` CTE. PURE RESPONDER SLIP (resources teach RANK-over-divided-metric correctly at r07 L3812/L2829; approach is right, projection slip on assembly). NO resource defect.
-- **Q4 broken-first-form-but-correct-concise-form verdict**: First multi-CTE form WON'T RUN (`active_users.user_id` unresolved on the count-only aliased subquery + malformed aggregate over no-GROUP-BY cross join). The "more concise" second form IS CORRECT and copyable. PURE RESPONDER SLIP (broken-secondary/over-complication tic; r07 L1317 FILTER idiom findable + correct). NO resource defect.
-- Q2 / Q3 CLEAN + CORRECT, score high.
-- Known tics check: NO QUALIFY, NO semi-join mislabel, NO MAX(varchar)-as-latest, NO percent_rank inversion, NO fabricated rule/property names this sweep. NEW pattern instances: missing-column-in-CTE-projection (Q1) + over-complicated-broken-first-form (Q4) — both column-scope/assembly slips in the broken-secondary family.
+- **Q1/Q2/Q3 CLEAN** — all leads correct, all dialect facts verified, all column scopes traced clean.
+- **Q4 core CORRECT** (the asked AVG gap), **but volunteered `PERCENTILE_CONT ... WITHIN GROUP` is a FABRICATION** (no such function in 467; WITHIN GROUP = listagg-only; correct = `approx_percentile(x, 0.5)`) + a FALSE "verified in the aggregate-functions docs" claim. **Resource ALREADY guards this** (r05 L2234-2266, r23 L265/L273-275 teach approx_percentile + state no percentile_cont/disc) → **PURE RESPONDER SYNTHESIS SLIP, NO resource fix.** **INTERMITTENT (last at iter943; approx_percentile used correctly iter961/iter968 between) — NOT a 2-in-2 recurrence.**
+- **COLUMN-SCOPE CONFIRMATION: the iter969 missing-column-in-CTE-projection slip did NOT recur.** Q2 quarterly_scores and Q4 ranked_orders/customer_gaps all project every column referenced downstream.
+- No QUALIFY / semi-join mislabel / MAX(varchar)-as-latest / percent_rank inversion / fabricated-rule (other than the percentile function) / mid-answer-churn / broken-first-form slips this sweep.
+- NO resource defect / NO findability gap / NO resource edits.
 
-## RECOMMENDATION — DEFAULT NO-OP
+## iter971 recommendation = DEFAULT NO-OP
+- Re-probe: (a) another median/percentile-as-volunteered-metric Q to confirm the percentile fabrication is intermittent (responder should reach `approx_percentile(x, 0.5)`, NOT invent percentile_cont); (b) another first-to-Nth event-gap Q (confirm ROW_NUMBER 1st/2nd self-join + date_diff stays clean).
+- LIGHT FIX-A ONLY IF percentile_cont/disc fabrication RECURS in the next sweep (would make it 2-in-2 from this point) — and even then the fix is a defang/router toward approx_percentile, since the canonical is already correct, NOT new content.
+- Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
 
-Overall 4.0625 PASS (margin +0.5625, weaker than recent 4.5-4.9 sweeps due to TWO won't-compile queries, but Q2/Q3 clean and Q1-approach/Q4-concise-form correct). Both bugs are per-instance Haiku synthesis slips against correct/findable resources — no single resource fix, and adding cards risks adjacent over-attraction (feedback_new_card_over_attracts_adjacent.md). Per feedback_synthesis_ceiling_stop_churning.md + feedback_responder_broken_secondary_alternative.md these are the residual Haiku assembly ceiling, not gaps.
+## PINS
+- **Cart-abandonment / anti-join rate** = LEFT JOIN parent->child, `COUNT(DISTINCT CASE WHEN child.key IS NULL THEN parent.key END)` for the "never matched" subset, `100.0 * subset / NULLIF(COUNT(DISTINCT parent.key),0)`.
+- **Quarter-over-quarter compare** = self-join a `(key, EXTRACT(QUARTER...), EXTRACT(YEAR...), AVG(metric))` CTE on key+year with quarter=3 vs quarter=4; EXTRACT(QUARTER/YEAR FROM date) BOTH valid in 467.
+- **Quota/usage % + flag** = `100.0 * used / NULLIF(quota,0)` (decimal promotion + div-by-zero guard); integer/integer TRUNCATES toward zero; INTEGER/DECIMAL `/` 0 THROWS DIVISION_BY_ZERO → NULLIF guards; LEFT JOIN from the entity table; NULLS LAST ordering.
+- **AVG first-to-second-event gap** = ROW_NUMBER() OVER (PARTITION BY key ORDER BY ts) self-joined seq=1 to seq=2 (INNER JOIN excludes <2-event keys), `date_diff('day', first, second)` (day-aware bigint, NO ts-minus-ts), AVG over gaps.
+- **MEDIAN/percentile in Trino 467 = `approx_percentile(x, 0.5)` ONLY.** There is NO `percentile_cont`, NO `percentile_disc`; `WITHIN GROUP (ORDER BY ...)` is supported ONLY for `listagg()`. Do NOT volunteer PERCENTILE_CONT/DISC — fabricated function + false doc-citation.
+- **Broken-secondary / volunteered-wrong-extra-metric meta-pattern persists** — leads/cores correct, an un-asked elaborate alternative ships a fabricated or won't-compile form; per-instance Haiku synthesis slip, NOT a resource defect; re-probe-don't-churn.
 
-LIGHT FIX-A ONLY IF a column-scope slip (partition/order column omitted from a CTE projection, OR a cross-joined scalar subquery column referenced that isn't exposed) RECURS on a different surface in the next 2 sweeps. Until then: re-probe (a) another rank-over-ratio Q (confirm the partition column is carried into the CTE projection), (b) another fraction-meeting-threshold Q (confirm the responder reaches the clean COUNT(*) FILTER form without the broken cross-join scaffold).
-
-PINS REINFORCED:
-- **rank-by-attainment = `100.0*SUM(metric)/target` (decimal promotion) + `RANK() OVER (PARTITION BY <grp> ORDER BY ratio DESC)`; CARRY the partition/order column INTO the CTE SELECT projection — a column used in outer PARTITION BY/ORDER BY but only in the CTE GROUP BY (not projected) is an UNRESOLVED-COLUMN error in 467**
-- **one-query count + % = `COUNT(*)` total + `COUNT(*) FILTER (WHERE cond)` subset + `ROUND(100.0*subset/total, 2)`; FILTER valid on all aggregates (aggregate.html); no two-query/self-join needed**
-- **distinct-within-group = `COUNT(DISTINCT col) ... GROUP BY grp`; LEFT JOIN preserves empty groups and COUNT(DISTINCT) of an all-NULL group = 0**
-- **fraction-meeting-threshold = `COUNT(*) FILTER (WHERE per_user_metric >= N) / COUNT(*)` over a `(SELECT user_id, COUNT(DISTINCT day) ... WHERE window GROUP BY user_id)` subquery — one pass over the per-user rollup; a cross-joined scalar count subquery exposes ONLY its aliased count column (referencing `.user_id` on it = unresolved column); INTERVAL '30' DAY valid (types.html)**
-- **broken-secondary / over-complication / column-scope-slip meta-pattern persists — leads/concise-forms correct, the elaborate alternative ships a won't-compile error; per-instance Haiku synthesis slip NOT a resource defect**
-
-Federation r22 §13.x hard-locked, NOT probed (OVERRIDDEN). MUST NOT bump training/state.json (already 969; passed=true preserved; final_iterations_remaining 0).
+DO NOT bump training/state.json (already 970; passed=true preserved; final_iterations_remaining 0).
