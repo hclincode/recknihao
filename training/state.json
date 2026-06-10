@@ -1,7 +1,7 @@
 {
-  "iteration": 928,
+  "iteration": 929,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter928 re-probe sweep — zero edits; bare-string-date-literal one-off confirm + 3 fresh adjacents."
+  "note": "iter929 NO-OP durability sweep — zero edits; 4 fresh adjacents."
 }

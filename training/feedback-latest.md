@@ -1,89 +1,57 @@
-# Judge Feedback — iter928 (EXTENDED PHASE, re-probe sweep)
+# Judge Feedback — iter929 (NO-OP durability sweep)
 
-## Verdict: PASS — overall 4.969 (per-Q 5.00 / 4.875 / 5.00 / 5.00 = 19.875/4); margin +1.469. DEFAULT NO-OP. Teacher ZERO edits.
-
-Overall average governs (no per-Q veto). FEDERATION NOT PROBED this sweep (4.49944/310 row UNCHANGED — still the only un-passed row; probe bulletproofed angles only).
+**Overall: 4.375 PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 2.50 = 17.50/4). OVERALL AVERAGE governs — no per-Q veto. Trino 467 PINNED. All dialect claims verified vs trino.io/docs/467 (select.html, window.html, array.html) + Trino GitHub (#16533 alias scoping, NESTED_WINDOW analyzer behavior) via WebFetch + multi-source WebSearch 2026-06-10. DO NOT bump training/state.json (already 929; passed=true preserved).
 
 ---
 
-## ★ Q1 BARE-STRING-DATE-LITERAL SLIP VERDICT = ONE-OFF CONFIRMED / SLIP CLOSED — NO FIX-A
+## Per-question scores
 
-The iter927 Q4 bare-string-date-literal defect did **NOT recur**. A1 wrote:
+### Q1 — avg delivery distance per zone — 5.00 CLEAN
+`SELECT zone, AVG(distance_km) FROM deliveries GROUP BY zone` + columnar/file-skipping note.
+- AVG + GROUP BY valid (verified aggregate.html: avg() ignores NULLs in count; select.html GROUP BY divides input into groups). One row per distinct zone, correct shape.
+- Partition-pruning / columnar file-skipping commentary reasonable and correctly framed for Iceberg+Trino.
+- Acc 5 / Comp 5 / Clar 5 / Act 5.
 
-```sql
-SELECT
-  SUM(CASE WHEN signup_date <  DATE '2026-03-01' THEN 1 ELSE 0 END) AS signups_before,
-  SUM(CASE WHEN signup_date >= DATE '2026-03-01' THEN 1 ELSE 0 END) AS signups_on_or_after
-FROM signups
-```
+### Q2 — count pending refunds — 5.00 CLEAN
+`SELECT COUNT(*) FROM refund_requests WHERE status = 'pending'`.
+- Filter-then-count valid; `= 'pending'` naturally excludes NULL status. Correct.
+- Acc 5 / Comp 5 / Clar 5 / Act 5.
 
-The responder used the **CORRECT `DATE '2026-03-01'` literal** (DATE keyword present) on BOTH comparison branches — the iter927 bare-string `'2026-03-01'` slip did NOT repeat.
+### Q3 — count products with 'clearance' tag in array — 5.00 CLEAN
+`SELECT COUNT(*) FROM products WHERE contains(tags, 'clearance')` + contrast with UNNEST(CROSS JOIN)+COUNT(DISTINCT).
+- VERIFIED: `contains(x, element) → boolean` "Returns true if the array x contains the element" (array.html). Correct, idiomatic array-membership test in Trino 467. Each product evaluated once → COUNT(*) tallies products, NOT tag occurrences.
+- UNNEST + CROSS JOIN alternative correctly noted as ROW-EXPLODING (one row per tag), requiring COUNT(DISTINCT product_id) to avoid double-counting multi-tag products. Accurate contrast; `contains` is the right lead.
+- Acc 5 / Comp 5 / Clar 5 / Act 5.
 
-- VERIFIED Trino 467 does NOT implicitly coerce varchar→date in comparisons (trino.io/docs/467 functions/comparison.html + WebSearch 2026-06-10: "Trino does not do implicit type coercion … will not convert between character and numeric types"; bare `date < varchar` raises `Cannot apply operator`). The DATE keyword is REQUIRED — and the responder supplied it. Query RUNS.
-- SUM(CASE WHEN cond THEN 1 ELSE 0 END) two-bucket before/after conditional-count is CORRECT (pinned valid). `<` cutoff vs `>=` cutoff cleanly partitions every non-NULL signup_date into exactly one of the two buckets; the boundary 2026-03-01 falls into `signups_on_or_after` (correct "on/after" semantics). NULL signup_date counts in neither (reasonable).
+### Q4 — avg attempts before success per order — 2.50 (approach right, implementation INVALID/won't run)
+`WITH attempts_ranked AS (SELECT order_id, attempt_at, succeeded, ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY attempt_at ASC) AS attempt_num, MAX(CASE WHEN succeeded THEN attempt_num ELSE NULL END) OVER (PARTITION BY order_id) AS final_success_attempt FROM payment_attempts), ... SELECT AVG(final_success_attempt) ...`
 
-**→ iter927 bare-string slip = ONE-OFF CONFIRMED, slip CLOSED, NO findability-anchor FIX-A, NO "wrong" card.** Resources are clean (r28 already WRONG-marks the bare-string form; `DATE '20YY-MM-DD'` canon appears ~189× across 16 files). The iter927 occurrence was a responder synthesis slip; one clean re-probe confirms it does not need a teacher edit.
+**VERIFIED Q4 VERDICT — CONFIRMED STRUCTURAL DEFECT (verified BOTH directions per iter882 protocol). The inner SELECT is INVALID and would NOT run.** Two independent, mutually-reinforcing grounds:
 
-**Q1 = 5.0** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0).
+1. **Alias-not-resolvable-in-same-SELECT.** `MAX(CASE WHEN succeeded THEN attempt_num ELSE NULL END) OVER (...)` references `attempt_num`, the ROW_NUMBER() output ALIAS defined in the SAME SELECT list. Trino 467 output-column aliases are visible ONLY in the outer ORDER BY (after projection) — NOT in sibling SELECT-list expressions, NOT in GROUP BY/WHERE/HAVING (verified select.html: aliases usable in ORDER BY only; confirmed by Trino GitHub #16533 "Using alias in group by is not supported" — same pre-projection scoping rule). → `Column 'attempt_num' cannot be resolved`.
 
----
+2. **Nested-window (even if `attempt_num` were inlined).** Replacing `attempt_num` with the inline `ROW_NUMBER() OVER (...)` puts a window function inside another window aggregate's argument → Trino analyzer (`ExpressionAnalyzer.java`) throws `NESTED_WINDOW`: *"Cannot nest window functions or row pattern measures inside window specification."* (Same rule resources already document at r07 L3209/L3221.)
 
-## ★ Q2 INTERPRETATION-NUANCE VERDICT = TECHNIQUE DIALECT-CORRECT, INTERPRETATION NARROW (completeness nuance, NOT a defect)
+Either way the query errors at analysis time. The CONCEPT (rank attempts per order by time, find the attempt number of the first success, average those across orders) is CORRECT. The single-level implementation is broken. **Correct shape:** compute `attempt_num` (+ `succeeded`) in CTE-1; in a SEPARATE outer layer aggregate `MIN(attempt_num) WHERE succeeded` (or `MAX(CASE WHEN succeeded THEN attempt_num END)`) per order; then `AVG(...)` across orders. You cannot reference the window alias OR nest the windows in one SELECT.
 
-A2:
-```sql
-WITH ticket_sequence AS (
-  SELECT ticket_id, event_type, event_at,
-         LAG(event_type) OVER (PARTITION BY ticket_id ORDER BY event_at) AS prev_event_type
-  FROM ticket_events
-)
-SELECT COUNT(DISTINCT ticket_id)
-FROM ticket_sequence
-WHERE event_type = 'reopened' AND prev_event_type = 'closed'
-```
-
-- (a) **`LAG(...) OVER (PARTITION BY ticket_id ORDER BY event_at)` is dialect-VALID** in Trino 467 (standard ANSI window function; pinned valid, window.html). Per-ticket ordering by event_at, prior event type = correct mechanism.
-- (b) Detects an **ADJACENT** closed→reopened transition (the event IMMEDIATELY preceding a 'reopened' is 'closed'). COUNT(DISTINCT ticket_id) correctly collapses tickets with multiple such transitions to one.
-
-**Interpretation nuance:** the question is "ever reopened after being closed at least once." The LAG-adjacent approach catches the common direct close→reopen, but would MISS a 'reopened' with intervening events between the close and the reopen (e.g. closed→escalated→reopened). A broader reading (reopen with ANY prior close) would need EXISTS / a running-count-of-prior-closes.
-
-This is a **minor COMPLETENESS / interpretation nuance**, NOT a dialect/accuracy error: LAG-adjacent is a defensible reading of "reopened after closed" and the technique is dialect-correct. Weighed proportionally — small Comp ding only.
-
-**Q2 = 4.875** (Acc 5.0 / Comp 4.5 / Clar 5.0 / Act 5.0).
+- Acc 2 (query will not execute) / Comp 3 (approach + CTE skeleton present, success-isolation logic sound) / Clar 3 / Act 2 (engineer who pastes this hits an analysis error). = 2.50.
 
 ---
 
-## Q3 = 5.0 — `AVG(cardinality(tags))`
+## (a) DEFECT — confirmed
+ONE defect: Q4 inner SELECT references a window-fn output alias (`attempt_num`) inside a sibling window aggregate in the same SELECT (alias-not-resolvable), and would also be a NESTED_WINDOW error if inlined. Confirmed it would NOT run. Approach conceptually correct; needs two CTE layers.
 
-VERIFIED trino.io/docs/467 functions/array.html: `cardinality(x) → bigint` returns the array element count. AVG over rows = average tags per article. NULL/empty-array handling reasonable: `cardinality(NULL)=NULL` (skipped by AVG), empty array `=0` (counted). Correct.
+## (b) SCOPE — RESPONDER synthesis slip → RE-PROBE-DON'T-CHURN (NO FIX-A)
+Both root causes are ALREADY TAUGHT, findably and prominently, in resources:
+- **Alias-not-visible-to-sibling-SELECT**: r07 L4448, L4506–L4514 ("output column aliases are visible ONLY [in ORDER BY]"; explicit DO-NOT-WRITE example of referencing a SELECT alias in a sibling SELECT expression), L2806.
+- **NESTED_WINDOW illegal**: r07 §B-Streak L3155/L3209/L3221 — quotes the exact analyzer error and prescribes the 3-layer materialize-then-consume fix.
 
-**Q3 = 5.0** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0).
+The responder had BOTH rules available and failed to apply them when synthesizing a novel multi-step query — it collapsed two CTE layers into one. This is a SYNTHESIS slip on rules already covered, NOT a findable content gap. **No iter930 FIX-A.** Churning r07 (already dense with these cards) risks New-Card-over-attracts / defang regressions for zero benefit. RE-PROBE next sweep with an explicit "rank-then-aggregate-first-success per group / average" question to confirm the responder can compose the two-CTE-layer pattern. Only escalate to a dedicated FIX-A router card ("first-success / first-matching-rank per group = TWO CTE layers; never alias-in-sibling, never nested window") if the slip recurs across 2+ sweeps.
 
----
+## (c) prod-env
+Unaffected — pure analytical SQL. On-prem Trino 467 + Iceberg + MinIO + Hive Metastore + JWT/OPA all untouched. No federation probed (federation 4.49944/310, thinnest passing row, UNCHANGED).
 
-## Q4 = 5.0 — `COUNT(DISTINCT user_id)`
+## (d) iter930 = DEFAULT NO-OP / durability-breadth
+Optional fresh adjacents: (1) RE-PROBE the Q4 slip — "average rank of first qualifying event per group" forcing the two-CTE-layer split (does responder avoid alias-in-sibling + nested-window?); (2) `contains(array, element)` vs `any_match`/`element_at` array predicates; (3) AVG GROUP BY with COALESCE(x,0) treat-absent-as-zero interpretation; (4) CONSIDER probing FEDERATION (thinnest passing row, long un-retested). PRESERVE full iter534–928 pin inventory; NO federation edits.
 
-Correct for a one-row-per-change table — COUNT(DISTINCT user_id) gives the number of distinct users who made ≥1 plan change. Responder's caveat that COUNT(DISTINCT) is essential if the table is one-row-per-change (vs COUNT(*) which would count changes, not users) is apt. COUNT(DISTINCT) verified valid (aggregate.html, pinned).
-
-**Q4 = 5.0** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0).
-
----
-
-## Source verification (NOT against resources/; iter882 verify-first BOTH directions, PIN 467)
-
-- DATE literal vs DATE column: VERIFIED no implicit varchar→date coercion → `DATE '2026-03-01'` required (comparison.html + WebSearch 2026-06-10) ⇒ Q1 CORRECT, slip did NOT recur.
-- `cardinality(array) → bigint` element count: VERIFIED array.html ⇒ Q3 CORRECT.
-- LAG OVER PARTITION/ORDER BY: standard window fn, pinned valid ⇒ Q2 technique CORRECT (interpretation narrow, not a defect).
-- COUNT(DISTINCT): pinned valid ⇒ Q4 CORRECT.
-- No doc-CORRECT claim falsely flagged; no doc-WRONG form blessed.
-
----
-
-## iter929 directive — DEFAULT NO-OP
-
-- **NO-OP. Teacher ZERO edits. NO FIX-A. NO "wrong" card. NO escalation.**
-- Q1 bare-string-date-literal slip = ONE-OFF CONFIRMED / CLOSED (responder emitted `DATE '...'` correctly). Do NOT add a findability anchor — resources already correct (r28 WRONG-marks bare-string, DATE-canon ×189). Do NOT re-probe this exact angle again unless a NEW bare-string occurrence surfaces (would be 2nd instance → only then escalate).
-- Q2 LAG-adjacent vs reopen-after-any-prior-close = interpretation nuance on a DEFENSIBLE reading + dialect-correct technique. RESPONDER synthesis interpretation, NOT a resource gap. NO card (count-of-entities / interpretation-shape family already pinned). OPTIONAL low-priority re-probe (SKIP if duplicative): "reopened after being closed at ANY earlier point (intervening events allowed)" to see if responder reaches for EXISTS / running-count-of-prior-closes vs LAG-adjacent.
-- Do NOT mark Q1 SUM(CASE)+DATE-literal two-bucket, Q2 LAG-adjacent closed→reopened detection, Q3 AVG(cardinality), or Q4 COUNT(DISTINCT) wrong — all correct.
-- Federation (4.49944/310) only un-passed row — bulletproofed angles only. Do NOT touch any iter534-927 pin. PIN 467. NO federation edits.
-- **DO NOT bump training/state.json** (already passed; overall 4.969 PASS holds).
+DO NOT touch state.json.
