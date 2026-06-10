@@ -1,94 +1,75 @@
-# Judge Feedback — Iter 938 (EXTENDED PHASE, DEFAULT NO-OP durability sweep)
+# Iter939 Judge Feedback — DEFAULT NO-OP durability sweep
 
-**Overall: 4.9375 PASS** (per-Q 5.00 / 5.00 / 4.875 / 4.875 = 19.75/4 = 4.9375; margin +1.4375 above 3.5 threshold; OVERALL AVERAGE governs, no per-Q veto)
+**Iteration**: 939 (EXTENDED PHASE, ZERO resource edits)
+**Date**: 2026-06-10
+**Verdict**: PASS — overall avg **4.9375** / margin +1.4375 (overall-avg governs, no per-Q veto)
+**Federation**: NOT PROBED (4.49944/310 row UNCHANGED)
+**Phase / passed flags**: preserved (no state.json bump from judge)
 
-FEDERATION NOT PROBED (4.49944/310 row UNCHANGED). All dialect verified vs trino.io/docs/467 (functions/window.html, functions/aggregate.html, functions/datetime.html, functions/comparison.html, sql/select.html) + WebSearch 2026-06-10 — NOT against resources/; iter882 verify-BOTH-directions applied throughout.
-
-Teacher made ZERO resource edits this iteration (durability sweep). All four answers are dialect-clean.
-
----
-
-## Per-question scores
-
-### Q1 (oldest unfulfilled order per warehouse): 5.00
-Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0
-
-`SELECT warehouse_id, order_id, created_at FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY warehouse_id ORDER BY created_at ASC NULLS LAST) AS rn FROM orders WHERE fulfilled_at IS NULL) WHERE rn=1` — fully correct top-1-per-group idiom in Trino 467.
-
-- **ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ... ASC NULLS LAST)** valid (window.html confirms row_number + PARTITION/ORDER syntax; NULLS LAST is the documented Trino 467 default for ORDER BY regardless of direction per standing pin, so explicit `NULLS LAST` is harmless/redundant but not wrong — pedagogically useful to be explicit).
-- **Subquery + outer `WHERE rn=1`** is the canonical workaround for "no QUALIFY in 467" (confirmed: SELECT spec has no QUALIFY clause, window fn not allowed in WHERE) — responder explicitly explains this.
-- **`WHERE fulfilled_at IS NULL` pre-window** correctly restricts the partition before ranking — earliest unshipped order per warehouse semantics exactly.
-- One row per warehouse guaranteed by ROW_NUMBER ties=1 (the tiebreaker nuance for equal created_at is mentioned implicitly via "earliest").
-
-No defect.
+All dialect verified vs trino.io/docs/467 (functions/aggregate.html, sql/select.html, optimizer.html) + WebFetch 2026-06-10 — NOT against resources/; iter882 verify-BOTH-directions applied throughout.
 
 ---
 
-### Q2 (% orders returned in last 90 days): 5.00
-Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0
+## Per-question scoring
 
-`SELECT ROUND(100.0 * COUNT(DISTINCT o.order_id) FILTER (WHERE r.order_id IS NOT NULL) / COUNT(DISTINCT o.order_id), 2) ... FROM orders o LEFT JOIN returns r ON o.order_id=r.order_id WHERE o.created_at >= current_date - INTERVAL '90' DAY` — fully correct.
+### Q1 — Count DISTINCT carriers per region — 5.00
 
-- **`COUNT(DISTINCT x) FILTER (WHERE ...)`** valid per aggregate.html verbatim "FILTER ... supported for all aggregate functions" (covers COUNT(DISTINCT) variant).
-- **LEFT JOIN fan-out** correctly handled: a returned order can have multiple `returns` rows, which would inflate `COUNT(*)`, but `COUNT(DISTINCT o.order_id)` collapses to one-per-order on both denominator and FILTER numerator.
-- **`current_date - INTERVAL '90' DAY`** valid (DAY is a documented INTERVAL qualifier per types.html: YEAR/MONTH/DAY/HOUR/MINUTE/SECOND — pin from iter932/933).
-- **`100.0 *`** load-bearing decimal promotion (avoids BIGINT/BIGINT integer truncation; standing Division pin).
-- **CTE-alt** `COUNT(DISTINCT o.order_id) AS total, COUNT(DISTINCT r.order_id) AS returned, ROUND(100.0 * returned/total, 2)` is logically equivalent (r.order_id is NULL for unmatched outer rows → COUNT(DISTINCT) skips NULL → same numerator); responder correctly notes both forms are sound.
-- Responder explicitly warns "after LEFT JOIN use COUNT(right_col) not COUNT(*)" — that's the canonical anti-fan-out trap and is correctly framed.
+`SELECT region, COUNT(DISTINCT carrier_name) AS num_carriers FROM carrier_assignments GROUP BY region`. Notes COUNT(DISTINCT) ignores NULLs; COUNT(*) counts all rows.
 
-No defect.
+- Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0
+- VERIFIED against trino.io/docs/467 functions/aggregate.html (WebFetch 2026-06-10): `count(x)` returns count of non-null input values (ignores NULLs); single-arg COUNT(DISTINCT carrier_name) signature valid. `count(*)` returns number of input rows (includes nulls in the count of rows themselves; correctly described).
+- Responder's "COUNT(DISTINCT) ignores NULLs" + "COUNT(*) for row count" exposition matches docs verbatim.
+- Clean canonical answer.
 
----
+### Q2 — Count UNIQUE visitors per landing page — 5.00
 
-### Q3 (products with declining MoM sales): 4.875
-Acc 5.0 / Comp 4.5 / Clar 5.0 / Act 5.0
+`SELECT landing_page, COUNT(DISTINCT visitor_id) AS unique_visitors FROM page_views GROUP BY landing_page`. Notes COUNT(DISTINCT *) is a syntax error — must name the column.
 
-CTE-1 monthly_revenue (`DATE_TRUNC('month', order_date)` + `SUM(quantity)` GROUP BY product_id+month), CTE-2 with `LAG(total_qty) OVER (PARTITION BY product_id ORDER BY month)`, final filter `WHERE prev_month_qty IS NOT NULL AND total_qty < prev_month_qty` — fully dialect-correct.
+- Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0
+- VERIFIED COUNT(DISTINCT *) IS invalid in Trino 467 — aggregate.html lists only two count signatures: `count(*)` (no DISTINCT permitted) and `count(x)` (DISTINCT-able with column expr). The wildcard form is NOT a documented signature ⇒ responder's warning is correct, NOT a fabrication. (This claim matches the pinned `count() single-arg / no DISTINCT *` rule.)
+- COUNT(DISTINCT visitor_id) over GROUP BY landing_page correctly dedups repeat visits per page.
+- Clean canonical answer with helpful explicit syntax warning.
 
-- **DATE_TRUNC('month', order_date)** valid (datetime.html; pin).
-- **LAG(total_qty) OVER (PARTITION BY product_id ORDER BY month)** valid (window.html: default offset=1 returns prior row in partition, NULL when no prior row exists).
-- **Filtering on LAG alias `prev_month_qty`** correctly requires the CTE/subquery wrap (window fn output not allowed in WHERE of same level) — responder structures this correctly.
-- **`WHERE prev_month_qty IS NOT NULL`** excludes the first month per product (no prior month).
-- **`total_qty < prev_month_qty`** is the decline test; the `<prev*0.95` variant for "decline by >=5%" is a useful adjacent.
+### Q3 — Orders with NO matching invoice (anti-join) — 4.75
 
-**Minor completeness nuance (-0.5 on Comp):** LAG default offset=1 returns the prior ROW in the partition — which is the prior calendar month ONLY if every month is present. If a product skips a month (no sales in February, sales return in March), LAG of March yields January, not February-NULL. That's a defensible MoM interpretation (comparing adjacent NON-EMPTY months) but the answer doesn't flag the gap-month nuance for the engineer. For strict "compare to the literal previous calendar month even when absent" semantics, a calendar-spine LEFT JOIN or a `LAG ... ON month = prev_month + INTERVAL '1' MONTH` join would be needed. Not a dialect error — a teaching nuance worth a small Comp ding.
+LEFT JOIN ... WHERE i.order_id IS NULL form + NOT EXISTS alternative; says LEFT JOIN form often runs faster on Trino.
 
----
+- Acc 4.5 / Comp 5.0 / Clar 5.0 / Act 4.5 = **4.75**
+- LEFT JOIN ... WHERE i.order_id IS NULL: CORRECT canonical anti-join idiom for "orders with no invoice"; using the JOIN KEY (i.order_id) for IS NULL test is the standard, sound pattern (true negative match implies all joined right cols are NULL, including the key).
+- NOT EXISTS equivalent: CORRECT, NULL-safe alternative.
+- "LEFT JOIN often runs faster on Trino" claim: weak/overstated — Trino's optimizer typically lowers BOTH LEFT-JOIN/IS-NULL and NOT EXISTS to the SAME semi-join (anti-join) physical operator (per iter934-pinned equivalence). Preferring one for perf is folklore, not documented behavior. Defensible as a colloquial hedge, not a dialect error → small Acc/Act ding only. Practical guidance still sound (both correct, both NULL-safe).
+- Standing NOT IN nullable-column 3VL trap not raised (not asked, but worth flagging if a future probe uses a nullable join key) — no Comp ding here.
 
-### Q4 (avg days from signup to first purchase): 4.875
-Acc 5.0 / Comp 5.0 / Clar 4.5 / Act 5.0
+### Q4 — Products priced ABOVE their category's average price — 5.00
 
-CTE `customer_first_purchase` with `DATE_DIFF('day', c.created_at, MIN(o.order_date))` + `GROUP BY c.customer_id, c.created_at` + INNER JOIN, outer `AVG(days_to_first_purchase)` — fully dialect-correct.
+CTE `category_avg AS (SELECT category_id, AVG(price) FROM products GROUP BY category_id)` + JOIN + `WHERE p.price > ca.avg_price`. Notes "aggregate not allowed in WHERE".
 
-**Verified BOTH directions:**
-
-- **(a) `date_diff('day', GROUP-BY-col, MIN(aggregate-col))` mixing GROUP BY column and aggregate in ONE scalar expression is VALID** in Trino 467. The select.html rule "all output expressions must be either aggregate functions or columns present in the GROUP BY clause" permits GROUP BY column REFERENCES nested inside scalar functions alongside aggregates (both resolve at aggregate level). Confirmed by docs WebFetch 2026-06-10. Not an error.
-- **(b) date_diff arg order**: signature is `date_diff(unit, x1, x2) -> x2 - x1`, so `date_diff('day', signup, MIN(order_date))` is positive when order >= signup (correct semantics; responder explicitly explains the arg order).
-- **(c) Mixed TIMESTAMP / DATE types in date_diff**: Trino 467 HAS implicit DATE->TIMESTAMP coercion (standing pin `reference_trino_timestamp_tz_coercion.md` — TypeCoercion.java in 467 source confirms; comparison.html shows `DATE '...' < TIMESTAMP '...'` works without CAST). So `date_diff('day', timestamp_col, date_col)` runs without explicit CAST. The responder's "CAST if needed" caveat is **unnecessary** — slight clarity imprecision (-0.5 on Clar) but **NOT a dialect error** (the CAST is harmless / would not break the query; the responder didn't say "this fails without CAST"). The caveat hedges rather than misleads.
-- **(d) AVG over derived column + APPROX_PERCENTILE(...,0.5) median variant**: both valid (aggregate.html confirms AVG ignores NULL, approx_percentile scalar form documented; no median() builtin in 467 — variant is the right tool, standing pin).
-- **INNER JOIN keeps only converters** — responder correctly contrasts this with LEFT JOIN for conversion-rate-style questions; useful guidance.
-
-Minor: responder's framing "date_diff MUST be computed inside the CTE — column-scope discipline rule" is loose (you COULD compute MIN in the CTE and date_diff outside; both are valid) but not wrong as a recommended pattern. Folded into the Clar ding above.
+- Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0
+- VERIFIED against trino.io/docs/467 sql/select.html (WebFetch 2026-06-10): aggregate functions cannot appear in WHERE; "HAVING filters groups after groups and aggregates are computed" — responder's "you can't put AVG(price) in WHERE directly (aggregate not allowed in WHERE); CTE computes per-category avg first" is CORRECT.
+- CTE+JOIN form for per-category-comparison is the standard idiom; AVG(price) GROUP BY category_id + p.price > ca.avg_price logically answers "above own category average."
+- Minor completeness nuance per run-prompt explicit guidance: window-fn alternative `AVG(price) OVER (PARTITION BY category_id)` + outer filter ALSO valid (one-pass, no join). Responder omitted it → run-prompt says "only a tiny completeness nuance, not a defect" → no Comp ding.
 
 ---
 
-## Scope verdict
+## Overall
 
-- **NO RESOURCE DEFECT.** All four answers use canonical patterns already taught.
-- **NO RESPONDER SLIP** on taught content. The only sub-perfect items are (Q3) a defensible MoM-with-gap-months interpretation nuance and (Q4) an unnecessary CAST caveat — neither breaks the query.
-- **NO FINDABLE GAP.** Q3 gap-month nuance is a teaching subtlety not a missing card; Q4 mixed-type-coercion is taught via the TIMESTAMP-TZ + comparison pins.
+- Per-Q: Q1 5.00 / Q2 5.00 / Q3 4.75 / Q4 5.00 = **19.75 / 4 = 4.9375 PASS**
+- Margin to 3.5 threshold: **+1.4375**
+- PIN 467; OVERALL AVERAGE governs.
 
----
+## Defect scope
 
-## iter939 plan
+**NO RESOURCE DEFECT / NO RESPONDER SLIP on taught content / NO FINDABLE GAP.**
 
-**DEFAULT NO-OP** — all 4 dialect-clean, zero new defects. Teacher should make ZERO resource edits.
+The Q3 "LEFT JOIN often runs faster" wording is a soft-heuristic colloquialism (proportionally small Acc/Act ding 0.5 each on one Q) — not a dialect/correctness defect. The pinned LEFT-JOIN/IS-NULL ≈ NOT EXISTS equivalence (iter934) makes this folklore, but resources already cover both forms correctly and emphasize correctness + NULL-safety; churning to add an "approximately equivalent perf" hedge risks New-Card/defang regression for zero correctness benefit.
+
+## Recommendation for iter940
+
+**DEFAULT NO-OP** — all 4 dialect-clean, zero new defects, all pinned facts honored.
 
 Optional re-probes (NO pin touch, SKIP if duplicative):
-- MoM with explicit gap months (Feb missing, Jan->Mar) to test whether responder reaches for calendar-spine join vs LAG-on-adjacent-present-rows.
-- date_diff with TIMESTAMP-vs-DATE crossover to confirm responder doesn't introduce a spurious "must CAST" hard-error claim.
-- Per-warehouse oldest unfulfilled with deterministic tiebreaker (warehouse_id, created_at, order_id) — does responder add the tiebreaker?
+- Anti-join with explicitly NULLABLE join key to confirm responder warns the NOT IN 3VL trap unprompted (and keeps LEFT-JOIN-IS-NULL / NOT EXISTS as the safe canonicals).
+- "Above own group average" with HAVING (post-aggregation) vs CTE+JOIN to keep "aggregate not in WHERE → put in HAVING/CTE" rule durable.
+- Per-category top-N comparison forcing window-fn `AVG OVER (PARTITION BY ...)` alternative.
 
-Federation (4.49944/310) only un-passed row — bulletproofed angles only if probed.
-
-PRESERVE full iter534-937 pin inventory; NO federation edits. PIN 467. DO NOT bump training/state.json (already 938; passed=true preserved; overall 4.9375 PASS holds).
+Federation (4.49944/310) still the only thin-passing row — bulletproofed angles only. PRESERVE full iter534-937 pin inventory; NO federation edits. PIN 467. DO NOT bump training/state.json (already 939; passed=true preserved; overall 4.9375 PASS holds).
