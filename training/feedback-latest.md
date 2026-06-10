@@ -1,50 +1,57 @@
-# Judge Feedback — iter917 (NO-OP durability sweep)
+# Judge Feedback — iter918 (NO-OP durability sweep)
 
-**Overall: 5.00 STRONG PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 5.00 = 20.00 / 4 = 5.00).
-OVERALL AVERAGE governs — no per-Q veto.
+**Overall: 4.84 PASS** (Q1 5.00 / Q2 5.00 / Q3 4.375 / Q4 5.00 = 19.375 / 4 = 4.84; margin +1.34). OVERALL AVERAGE governs — no per-Q veto.
 
-All dialect claims verified vs trino.io/docs/467 (datetime.html, select.html) + git-tag 467 `DateTimeFunctions.java` / `timestamp/DateDiff.java` + Joda `BaseDateTimeField`/`DateTimeField` javadoc, multi-source WebSearch/WebFetch, 2026-06-10. Trino 467 PINNED. Teacher made ZERO edits — pure durability re-confirm sweep. **NO-OP declared (no defect, no FIX-A).**
+All dialect claims verified vs trino.io/docs/467 (datetime.html, select.html) + Trino 467 git-tag source (DateTimeFunctions/timestamp DateDiff) + standing pins (`reference_trino_datediff_dayaware`), multi-source WebSearch/WebFetch, 2026-06-10. Trino 467 PINNED. Teacher made ZERO edits — pure durability re-confirm sweep. **iter919 = re-probe-don't-churn (DEFAULT NO-OP on the Q3 alternative — RESPONDER SYNTHESIS SLIP on CLEAN resources, correct lead form delivered; NOT a resource gap).**
 
 ---
 
 ## Per-question scores
 
-### Q1 — days since last heartbeat per device — **5.00 CLEAN**
-`SELECT device_id, date_diff('day', last_seen, current_timestamp) AS days_since_last_heartbeat FROM heartbeats` + precision note.
+### Q1 — count customers with total spend > average customer total — **5.00 CLEAN**
+`SELECT customer_id, SUM(order_value) AS total_spent FROM orders GROUP BY customer_id HAVING SUM(order_value) > (SELECT AVG(total) FROM (SELECT SUM(order_value) AS total FROM orders GROUP BY customer_id))`.
 
-**(1) TIMESTAMP -> TIMESTAMP WITH TIME ZONE COERCION HOLDS — RE-CONFIRMED, NOT a type error.** `last_seen` is TIMESTAMP, `current_timestamp` is TIMESTAMP WITH TIME ZONE. Trino 467 has implicit TIMESTAMP -> TIMESTAMP WITH TIME ZONE coercion (git-tag `TypeCoercion.java`: `case StandardTypes.TIMESTAMP -> case TIMESTAMP_WITH_TIME_ZONE returns createTimestampWithTimeZoneType(precision)`). So `last_seen` coerces to timestamp-with-tz at the session zone and `date_diff('day', last_seen, current_timestamp)` is VALID and RUNS. This is the standing PINNED FACT (iter882-onward); it is explicitly NOT a defect.
+VERIFIED CORRECT, both directions:
+- **Scalar subquery in HAVING is VALID in 467** (standing pin; select.html scalar-subquery = non-correlated, returns ≤1 row; the inner `AVG(total)` over the per-customer-total derived table yields exactly one scalar). `SUM(order_value) > <scalar>` is a legal HAVING comparison.
+- **Inner derived table needs NO alias** — Trino's grammar treats the FROM-relation alias as OPTIONAL (`aliasedRelation : relationPrimary (AS? identifier ...)?`); standing iter882 pin "FROM-subquery alias optional in Trino." (Note: the select.html prose shows aliased examples and a doc-extracted reading could *suggest* an alias is required — that is a doc-vs-grammar discrepancy; the grammar/pin governs, alias is optional. Did NOT flag this as a defect.)
+- Semantics: inner-most groups per customer → per-customer totals; AVG over those = average customer total; outer HAVING keeps customers whose own total exceeds it = above-average spenders. Correct. Acc/Comp/Clar/Act 5.0.
 
-**(2) PRECISION NOTE IS CORRECT — VERIFIED date_diff('day') is TRUNCATED-ELAPSED, not calendar-boundary.** The responder claims `date_diff('day', ts1, ts2)` between two timestamps counts whole elapsed days from the time components (last_seen 23:00, now 01:00 next calendar day -> `date_diff('day')` = **0**), and that calendar-day differences require casting both to date: `date_diff('day', date(last_seen), date(current_timestamp))`. **This is the verified truth.**
+### Q2 — distinct shipping countries per customer — **5.00 CLEAN**
+`SELECT customer_id, COUNT(DISTINCT shipping_country) FROM orders GROUP BY customer_id`.
 
-VERIFICATION CHAIN (BOTH directions, settled from git-tag source — NOT from the doc's DATE example, which does not disambiguate):
-- git-tag 467 timestamp `date_diff` -> `getTimestampField(ISOChronology.getInstanceUTC(), unit).getDifferenceAsLong(epochMillis2, epochMillis1)`.
-- Joda `BaseDateTimeField.getDifferenceAsLong` delegates to `getDurationField().getDifferenceAsLong(...)`; the day duration field in the UTC/fixed-offset ISO chronology is a **precise** fixed-86,400,000 ms duration -> the difference is the millis-delta divided into whole day-units with **"any fractional units are dropped"** (Joda `DateTimeField` javadoc). This is duration/elapsed-based, NOT a boundary-crossing count.
-- Inverse-property proof: Joda guarantees `getDifference(add(instant, v), instant) == v`. `add('day', 1, 2020-03-01 23:00) = 2020-03-02 23:00`, so `date_diff('day', 2020-03-01 23:00, 2020-03-02 23:00) = 1`; but `2020-03-01 23:00 -> 2020-03-02 01:00` is only +2h, which cannot reach one full day-unit -> **0**. Confirms truncated-elapsed.
-- The trino.io datetime.html example `date_diff('day', DATE '2020-03-01', DATE '2020-03-02') = 1` returns 1 ONLY because DATE inputs sit at midnight (exactly 24h elapsed), so it coincides with both interpretations and does NOT disambiguate the time-of-day case. An interim WebFetch that inferred "1" for the 23:00->01:00 timestamp case extrapolated from that DATE example and is **REJECTED**; the git-tag + Joda mechanism governs.
-- Consistent with verified memory `reference_trino_datediff_dayaware` (calendar+fixed-duration date_diff families both "drop the fractional remainder / complete-units"; sub-day units are millis-division-elapsed, NOT boundary crossings).
+VERIFIED aggregate.html: `COUNT(DISTINCT x)` supported in 467; per-customer GROUP BY yields one row per customer with the distinct-country count. Correct shape, no dialect concern. Acc/Comp/Clar/Act 5.0.
 
-So the responder's precision note (23:00->01:00 = 0; `date()`-cast for calendar diff) is an accurate sophisticated nuance, not an inaccuracy. **Q1 = 5.00.**
+### Q3 — count orders with >5 line items in last 30 days — **4.375 (Acc 4.0 / Comp 5.0 / Clar 4.0 / Act 4.5)**
+The responder gave TWO forms. SHAPE CHECK resolved:
 
-### Q2 — each channel's revenue split weekend vs weekday, one query — **5.00 CLEAN**
-`SUM(CASE WHEN day_of_week(order_date) IN (6,7) THEN order_value ELSE 0 END) AS weekend_revenue, SUM(CASE WHEN day_of_week(order_date) IN (1,2,3,4,5) THEN order_value ELSE 0 END) AS weekday_revenue ... GROUP BY sales_channel`.
+**(1) FIRST form is CORRECT and LEADS:**
+`SELECT COUNT(*) AS complex_orders FROM (SELECT order_id, COUNT(*) AS line_count FROM line_items GROUP BY order_id HAVING COUNT(*) > 5) subquery JOIN orders o ON subquery.order_id = o.order_id WHERE o.order_date >= current_date - INTERVAL '30' DAY`.
+- Inner = orders with >5 line items, ONE row per such order (GROUP BY order_id + HAVING COUNT(*)>5).
+- JOIN orders to bring in `order_date`; `current_date - INTERVAL '30' DAY` is a VALID 467 date expression (standing pin) and a query-constant, so the date filter is sargable.
+- Outer `COUNT(*)` collapses the surviving qualifying-order rows to a **single total** = how many complex orders in the last 30 days. Correct answer to the question.
 
-VERIFIED datetime.html: `day_of_week(x)` returns "the ISO day of the week ... 1 (Monday) to 7 (Sunday)" -> Sat = 6, Sun = 7 correct; weekday = 1-5 correct. Conditional-aggregation pivot computes both columns in one pass over the GROUP BY sales_channel. Correct and idiomatic.
+**(2) SECOND "alternative" (labeled "slightly simpler") is WRONG-SHAPE:**
+`SELECT COUNT(DISTINCT li.order_id) AS complex_orders FROM line_items li JOIN orders o ON li.order_id = o.order_id WHERE o.order_date >= current_date - INTERVAL '30' DAY GROUP BY li.order_id HAVING COUNT(*) > 5`.
+- `GROUP BY li.order_id` makes each group exactly one order ⇒ `COUNT(DISTINCT li.order_id)` = **1 per group**.
+- `HAVING COUNT(*) > 5` keeps qualifying orders, so the query returns **ONE ROW PER qualifying order, each value = 1** — a list of 1's, NOT a single total count. It does NOT answer "how many orders." Same family as the recurring muddled-middle slip (iter913 Q1, iter909 Q1): grouping by the key then COUNT(DISTINCT key) per group yields per-row 1's instead of a wrapped total.
+- It is mislabeled "slightly simpler" (it is not simpler AND it is wrong-shape). To return a single total it would need to drop the GROUP BY and wrap, e.g. `SELECT COUNT(*) FROM (SELECT li.order_id FROM line_items li JOIN orders o ON ... WHERE ... GROUP BY li.order_id HAVING COUNT(*) > 5)`.
 
-### Q3 — new customers per quarter (year included) — **5.00 CLEAN**
-`CONCAT(CAST(year(signup_date) AS VARCHAR), ' Q', CAST(quarter(signup_date) AS VARCHAR)) AS quarter_label, COUNT(*) ... GROUP BY year(signup_date), quarter(signup_date)`.
+**Verdict:** correct form LEADS and is delivered, so partial deduction only — NOT a hard fail. Acc 4.0 (a wrong-shape secondary query presented as an equivalent alternative) / Comp 5.0 (question fully answered by the lead) / Clar 4.0 (the mislabeled "simpler" alternative could mislead a non-expert who copies the second) / Act 4.5 (copying the LEAD works; copying the alternative returns a column of 1's). = 4.375.
 
-VERIFIED datetime.html: `year(x)` -> bigint, `quarter(x)` -> bigint ranging 1-4; **no `quarter_of_year` function exists** (matches the standing WHICH-QUARTER pin; only `quarter()`/`EXTRACT(QUARTER FROM ...)`). Responder correctly notes the absence of any `quarter_of_year` alias. `CAST(... AS VARCHAR)` + `CONCAT` valid; GROUP BY repeats the **expressions** (not the SELECT alias) — correct (Trino does not allow grouping by output alias for computed expressions reliably; repeating the expr is the safe form). Correct.
+### Q4 — complete months subscribed (2mo3wk → 2) — **5.00 CLEAN**
+`SELECT customer_id, date_diff('month', signup_date, current_date) AS complete_months_subscribed FROM subscribers`.
 
-### Q4 — count items sold below cost — **5.00 CLEAN**
-`SELECT COUNT(*) FROM order_items WHERE sale_price < unit_cost`. Simple filter-count; single scalar; correct shape. No dialect concerns.
+VERIFIED against the pinned fact (`reference_trino_datediff_dayaware`, git-tag 467 DateDiff): `date_diff('month', a, b)` is **DAY-AWARE / complete-units** — it counts whole month-units and DROPS the fractional remainder (Jan15→Feb14 = 0, Jan15→Feb15 = 1, Jan15→Mar20 = 2). The responder's worked example `date_diff('month', DATE '2026-01-15', DATE '2026-03-20') = 2` is CORRECT (Jan15→Feb15=1, Feb15→Mar15=2, Mar15→Mar20 incomplete → dropped), and "2 months 3 weeks → 2" holds. `current_date` valid, DATE−DATE inputs fine.
+- The responder's wording "complete month boundaries crossed" is slightly loose versus the precise day-aware complete-units mechanism, but the function call + result are correct ⇒ weighed as at most a tiny clarity nuance, NOT a defect. Acc/Comp/Clar/Act 5.0.
 
 ---
 
 ## Verdict
 
-- **Q1 TIMESTAMP -> TIMESTAMP WITH TIME ZONE coercion HOLDS** — `date_diff('day', last_seen, current_timestamp)` is VALID and RUNS; re-confirmed, NOT a type error.
-- **date_diff('day', ts, ts) is TRUNCATED-ELAPSED** (whole 24h-periods between the two instants, fractional dropped; 23:00->01:00-next-day = 0), NOT calendar-date-boundary — verified from git-tag 467 source + Joda mechanism. The responder's precision note (cast to `date()` for calendar-day diff) is CORRECT.
-- **NO DEFECT** — no fabrication, no wrong signature, no crossed family, no findability slip, no GROUP-BY muddle, no prod-env conflict. Every function verified present + correct-signature in Trino 467. All four answers are pure SQL; on-prem Trino 467 + Iceberg 1.5.2 + MinIO + Hive Metastore + JWT/OPA stack unaffected.
-- **iter918 = DEFAULT NO-OP / durability-breadth.** Re-probe truncated-elapsed `date_diff` from a different angle to keep the precision nuance durable (e.g. `date_diff('hour'/'minute', ts, ts)` elapsed-vs-alignment; `date_diff('day', date(a), date(b))` calendar-diff form; `date_diff('month', signup, current_date)` complete-months). Optional fresh adjacents: `day_of_week` Sunday-start variants, `EXTRACT(QUARTER FROM ...)` mirror of Q3, FILTER (WHERE ...) form of the weekend/weekday pivot. PRESERVE full iter534-916 pin inventory; NO federation edits (federation 4.49944 / 310, UNCHANGED — not probed this sweep).
+- **(1) Q3 FIRST form is CORRECT and LEADS** (wrapped `COUNT(*)` over the >5-line-item subquery JOIN orders WHERE last-30-days = single total). **The SECOND "alternative" is WRONG-SHAPE** — `GROUP BY li.order_id` + `COUNT(DISTINCT li.order_id)` returns one row per qualifying order (each = 1), per-order rows NOT a single count, and is mislabeled "slightly simpler." Partial deduction (Q3 = 4.375), not a hard fail, because the correct answer leads.
+- **(2) Q4 `date_diff('month')` complete-months result is CORRECT** — day-aware/complete-units, Jan15→Mar20 = 2 verified against the pinned git-tag fact; "2mo3wk → 2" holds.
+- **Q1 (scalar subquery in HAVING + unaliased inner FROM-subquery) and Q2 (COUNT(DISTINCT) per customer) are fully correct.** No doc-CORRECT claim flagged; no doc-WRONG claim blessed (iter882 verify-first applied both directions).
+- **SCOPE CHECK on the Q3 wrong-shape alternative: RESPONDER SYNTHESIS SLIP on CLEAN resources, NOT a resource gap.** The responder produced the correct wrapped-COUNT lead and endorsed it; the defect is an unnecessary mislabeled wrong-shape alternative synthesized on top (same family as iter913-Q1 / iter909-Q1 muddled-middle, which the lead form correctly avoided). A "wrong card" would only duplicate the existing wrapped-COUNT / GROUP-BY-output / muddled-middle pins and risk defang-backfire ⇒ **NO resource edit. Re-probe-don't-churn:** re-probe "count orders satisfying a per-group HAVING threshold" fresh next sweep to confirm the responder reliably wraps to a single total and does NOT offer a per-group-COUNT(DISTINCT-key) alternative.
+- **iter919 = DEFAULT NO-OP.** No FIX-A, no escalation; teacher ZERO edits. PRESERVE full iter534-917 pin inventory. Federation (4.49944 / 310) is the only un-passed row — NOT probed this sweep, row UNCHANGED; bulletproofed angles only. PIN 467. NO federation edits.
 
-DO NOT bump training/state.json (already 917).
+DO NOT bump training/state.json (already passed at iter918; overall 4.84 PASS holds).
