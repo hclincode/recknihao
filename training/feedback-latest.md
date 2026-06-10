@@ -1,59 +1,62 @@
-# Judge Feedback — Iter 913 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — iter914 (EXTENDED PHASE, NO-OP durability sweep)
 
-## Verdict: 4.75 PASS — NO-OP CONFIRMED (teacher ZERO edits)
+**Overall: 4.875 PASS** (per-Q 4.5 / 5.0 / 5.0 / 5.0 = 19.5/4 = 4.875; margin +1.375; overall average governs, no per-Q veto)
+**FEDERATION NOT PROBED** — the 4.49944/310 row is UNCHANGED this iteration.
+**Verdict: NO-OP CONFIRMED — all 4 answers dialect-clean. Teacher ZERO edits.**
 
-Per-Q: 4.5 / 5.0 / 5.0 / 4.5 = 19.0 / 4 = **4.75** (margin +1.25 over 3.5; overall average governs, no per-Q veto).
-
-All 4 answers dialect-clean. No genuine findable-but-missing gap and no Trino-467 dialect defect surfaced → **DEFAULT NO-OP, no FIX-A for iter914.** Federation (4.49944/310 row) NOT probed this sweep — UNCHANGED.
-
----
-
-## Per-question scoring
-
-### Q1 — count orders with exactly one line item — 4.5
-SQL: `SELECT COUNT(*) FROM (SELECT order_id FROM line_items GROUP BY order_id HAVING COUNT(*)=1)` — **CORRECT and endorsed as "best."**
-- VERIFIED: `GROUP BY order_id HAVING COUNT(*)=1` filters to orders with exactly one line-item row; wrapping in `SELECT COUNT(*) FROM (...)` collapses the qualifying-order list to a single total. Standard ANSI form, valid in Trino 467 (select.html GROUP BY/HAVING; no QUALIFY needed).
-- NUANCE (minor clarity, NOT a hard defect): the responder also shows a muddled middle form `SELECT COUNT(DISTINCT order_id) ... GROUP BY order_id HAVING COUNT(*)=1`, which returns **one row per qualifying order** (each value =1), not a single total. It is shown as an alternative and NOT endorsed; the correct wrapped form is delivered AND explicitly labeled "best." Weighed as a clarity nuance per iter913 directive.
-- Acc 4.5 / Comp 5.0 / Clar 4.0 / Act 4.5.
-
-### Q2 — shortest SKU per brand; does MIN find shortest? — 5.0  ★ KEY DURABILITY CHECK PASSED
-**The responder CORRECTLY AVOIDED the MIN-string trap.** It said NO — `MIN(sku)` returns the **lexicographically smallest** (alphabetically first) string, NOT the shortest — and for the actual shortest-by-length it used `MIN_BY(sku, LENGTH(sku)) ... GROUP BY brand`.
-- VERIFIED vs trino.io/docs/467 aggregate.html + WebSearch 2026-06-10:
-  - `min(x)` on varchar = lexicographically smallest (standard varchar comparison; "10" before "2"), NOT length-based — **responder correct.**
-  - `min_by(x, y)` = "Returns the value of `x` associated with the minimum value of `y`" → `min_by(sku, length(sku))` returns the sku with the smallest length = the SHORTEST sku (ties arbitrary) — **responder used the right form.**
-- This is a strong durability signal: the MIN-on-text length misconception was correctly rejected and the idiomatic min_by length form was delivered.
-- Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0.
-
-### Q3 — duplicate product names — 5.0
-SQL: `SELECT product_name, COUNT(*) ... GROUP BY product_name HAVING COUNT(*) > 1` (list of dup names + their counts) + wrapped `SELECT COUNT(*) FROM (...)` for the count-of-duplicate-names. **Both valid.**
-- VERIFIED: HAVING COUNT(*) > 1 keeps only names appearing 2+ times; wrapping in COUNT(*) yields how many distinct names are duplicated. Standard Trino 467 form.
-- Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0.
-
-### Q4 — % users who upgraded within 30 days of signup — 4.5
-SQL: `LEFT JOIN signups s` to `upgrades u`, `ROUND(100.0 * COUNT(DISTINCT CASE WHEN date_diff('day', s.signup_date, u.upgrade_date) BETWEEN 1 AND 30 THEN s.user_id END) / COUNT(DISTINCT s.user_id), 2)`. **CORRECT.**
-- VERIFIED vs datetime.html (date_diff('day') = day count, bigint) + select.html:
-  - LEFT JOIN keeps non-upgraders; NULL upgrade_date → `date_diff` NULL → fails BETWEEN → correctly excluded from numerator but still counted in denominator.
-  - `COUNT(DISTINCT CASE...)` counts each qualifying user once (handles multiple upgrade rows).
-  - `100.0 *` forces decimal division (avoids integer-truncation to 0).
-  - The `first_upgrade` CTE variant (`MIN(upgrade_date)` per user) for "first upgrade within 30d" is valid.
-- NUANCE (debatable-interpretation completeness, NOT a hard defect): `BETWEEN 1 AND 30` **excludes a same-day (day 0) upgrade**. "Within 30 days" arguably should be `BETWEEN 0 AND 30`. This is a reasonable interpretation either way (some funnels treat signup-day conversions separately) — weighed proportionally as a minor completeness nuance.
-- PRESENTATION (minor): responder showed a `GROUP BY 1` then self-corrected by removing it; final query is correct. Minor messiness, no scoring veto.
-- Acc 5.0 / Comp 4.0 / Clar 4.5 / Act 4.5.
+All facts VERIFIED vs trino.io/docs/467 (datetime / select / aggregate .html) + WebSearch 2026-06-10 (LEFT-JOIN/anti-join predicate placement). iter882 verify-first applied in BOTH directions: no doc-CORRECT claim flagged as a defect; no doc-WRONG claim blessed.
 
 ---
 
-## iter882 verify-first applied (BOTH directions)
-- Q2 `MIN(varchar)` lexicographic + `min_by(sku, length(sku))` shortest — VERIFIED CORRECT (aggregate.html + WebSearch), NOT falsely flagged; explicitly blessed as the right answer.
-- Q1/Q3 wrapped-subquery `COUNT(*)` over `GROUP BY ... HAVING` — VERIFIED valid, NOT flagged.
-- Q4 `date_diff('day')` = bigint day count, `COUNT(DISTINCT CASE...)`, `100.0*` decimal division — VERIFIED valid (datetime.html/select.html), NOT flagged.
-- No doc-CORRECT claim flagged as defect; no doc-WRONG claim blessed.
+## Q1 — avg days signup→first purchase — 4.5
 
-## Directive for iter914
-- **DEFAULT NO-OP.** No "wrong" card, no findability anchor, no churn.
-  - Do NOT add a "MIN doesn't find shortest" warning card as a *defect fix* — the responder already answered this correctly; adding a negative-example card risks defang-backfire and duplicates the min_by/min-lexicographic content already present and working.
-  - Do NOT mark Q1 wrapped-subquery, Q2 MIN-lexicographic+min_by-length, Q3 HAVING COUNT(*)>1+wrapped-COUNT, or Q4 LEFT-JOIN+COUNT(DISTINCT CASE)+date_diff('day') wrong — all correct.
-  - The Q1 muddled-middle COUNT(DISTINCT) form and the Q4 BETWEEN-1-AND-30 day-0 edge are responder-side presentation/interpretation nuances, NOT resource gaps — re-probe-don't-churn.
-- OPTIONAL micro re-probe (only if it touches NO pin): "within N days" inclusive-of-day-0 (`BETWEEN 0 AND N`) vs `BETWEEN 1 AND N` boundary intent — fresh adjacent next sweep; SKIP if it duplicates any date-window/funnel pin.
-- Federation (4.49944/310) is the only un-passed row — bulletproofed angles only.
-- Do NOT touch any iter534-912 pin. PIN Trino 467. NO federation edits.
-- **DO NOT bump training/state.json** (already passed; overall 4.75 PASS holds).
+`SELECT AVG(date_diff('day', s.created_at, fo.order_date)) FROM signups s JOIN (SELECT user_id, MIN(order_date) AS order_date FROM orders GROUP BY user_id) fo ON s.user_id = fo.user_id`
+
+CORRECT and runnable.
+- VERIFIED datetime.html: `date_diff('day', ts1, ts2)` = `ts2 - ts1` as a **bigint** day count; arg order (unit, from, to) correct so result = first_order − signup.
+- Inner `MIN(order_date) GROUP BY user_id` = each user's FIRST order; INNER JOIN to signups keeps only users who have ordered (correct denominator for "signup→first purchase").
+- `created_at` is TIMESTAMP, `order_date` is DATE: Trino coerces DATE→TIMESTAMP at **midnight**, `date_diff('day', ...)` valid across the mixed types, AVG over the resulting bigints returns DOUBLE (preserves fractional average). Single-query, no window fn needed.
+
+Deduction = COMPLETENESS NUANCE (NOT a defect): if `created_at` carries an intra-day time component, `date_diff('day', TIMESTAMP, DATE-at-midnight)` measures whole-day calendar boundaries from the signup time to midnight of the order date, which can be off-by-one vs a "calendar-day" intent (e.g. signup 2026-01-01 23:00 → order 2026-01-02 09:00 yields 0 not 1). Reasonable either way and matches the day-aware pin; responder did not flag the time-component caveat. Acc 5.0 / Comp 4.0 / Clar 4.5 / Act 4.5 = 4.5.
+
+## Q2 — count tickets opened+resolved same day — 5.0
+
+`COUNT(*) ... WHERE date_trunc('day', opened_at) = date_trunc('day', resolved_at)` (+ per-day GROUP BY variant).
+
+CORRECT.
+- VERIFIED datetime.html: `date_trunc('day', timestamp)` truncates to midnight (time portion → 00:00:00.000); comparing two truncated timestamps = same calendar day test.
+- `CAST(x AS date)` equality would be an equally-valid alternative — both fine; responder's date_trunc form is correct as written. Per-day GROUP BY variant valid.
+Acc / Comp / Clar / Act 5.0.
+
+## Q3 — customers whose 2025 spend ≥ 2× 2024 spend — 5.0
+
+One-pass YoY pivot, no join:
+`SUM(order_value) FILTER (WHERE year(order_date)=2024) AS revenue_2024`, `SUM(...) FILTER (WHERE year(order_date)=2025) AS revenue_2025`, ratio `SUM(...2025) * 1.0 / NULLIF(SUM(...2024), 0)`, `GROUP BY customer_id`, `HAVING (repeated full ratio expression) >= 2.0`.
+
+CORRECT.
+- VERIFIED aggregate.html: `FILTER (WHERE condition)` is "supported for all aggregate functions" — valid on both SUMs; per-aggregate scoping gives a one-query YoY pivot with no self-join/UNION.
+- VERIFIED datetime.html: `year(order_date)` valid (returns bigint).
+- `* 1.0` forces DECIMAL division (avoids integer truncation); `NULLIF(SUM(...2024), 0)` guards DIVISION_BY_ZERO on customers with no 2024 spend (returns NULL → HAVING comparison NULL → row excluded, correct).
+- VERIFIED select.html: HAVING **cannot** reference a SELECT output alias — responder correctly **repeated the full ratio expression** in HAVING rather than referencing `yoy_ratio`. This is exactly right and a positive durability signal (the HAVING-alias trap was avoided).
+Acc / Comp / Clar / Act 5.0.
+
+## Q4 — products with zero 'West' sales, KEEP products that sold elsewhere — 5.0 (KEY CHECK)
+
+**EXPLICIT VERDICT: the responder placed the region predicate CORRECTLY — in the ON clause (Approach A) and inside the correlated subquery (Approach B), NOT in the outer WHERE. The anti-join predicate-placement trap was AVOIDED. Positive durability signal.**
+
+- Approach A: `LEFT JOIN order_line_items oli ON oli.product_id = p.product_id AND oli.region = 'West' WHERE oli.product_id IS NULL`. VERIFIED (select.html + WebSearch 2026-06-10): a right-side predicate (`oli.region='West'`) in the **ON** clause filters which right rows are eligible to match, but left rows that find no eligible match are **still preserved with NULLs**. So a product that sold only in other regions finds no West match → its joined row is all-NULL → kept by `WHERE oli.product_id IS NULL`. Correctly returns "products with zero West sales" while preserving other-region products.
+- Approach B: `NOT EXISTS (SELECT 1 FROM order_line_items oli WHERE oli.product_id = p.product_id AND oli.region = 'West')`. Region filter scoped **inside** the correlated subquery; NOT EXISTS is true iff the product has zero West line items, regardless of sales elsewhere. Correct decorrelatable anti-join form.
+- The responder explicitly AVOIDED putting `region='West'` in the outer WHERE, which would have demoted the LEFT JOIN to an effective inner join and wrongly dropped products selling only in other regions — exactly the trap the question warned about ("without accidentally filtering out products that sold in other regions").
+Acc / Comp / Clar / Act 5.0 → **Q4 = 5.0**.
+
+---
+
+## Scope / action
+
+- **NO defect, NO dialect error, NO findable-but-missing gap surfaced.** All four are correct Trino 467.
+- **iter915 = DEFAULT NO-OP.** Teacher ZERO edits.
+- Do NOT add any "wrong" card. Do NOT mark wrong: Q1 date_diff('day')+MIN-first-order INNER JOIN, Q2 date_trunc('day') same-day equality, Q3 FILTER-aggregate YoY pivot + NULLIF div-guard + HAVING-repeated-expression, Q4 ON-clause/NOT-EXISTS region-scoped anti-join — all correct.
+- Q1 TIMESTAMP-vs-DATE day-boundary off-by-one = responder-side completeness nuance, NOT a resource gap (day-aware date_diff pinned). Re-probe-don't-churn; do NOT touch the date_diff / date-coercion pins.
+- Optional micro re-probe (NO pin touch): "avg days signup→first order" where created_at carries a non-midnight time — confirm whether the responder reaches for `date_diff('day', CAST(created_at AS date), order_date)` when calendar-day intent matters. SKIP if it duplicates a date-window/coercion pin.
+- Federation (4.49944/310) remains the only un-passed row — bulletproofed angles only.
+- Do NOT touch any iter534-913 pin. PIN 467. NO federation edits. **DO NOT bump training/state.json** (already passed; overall 4.875 PASS holds).
