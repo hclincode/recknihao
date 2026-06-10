@@ -1,68 +1,56 @@
-# Judge Feedback — iter915 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — iter916 (re-probe sweep)
 
-**Overall: 4.54 PASS** (per-Q 3.40 / 5.00 / 5.00 / 4.75 = 18.15/4 = 4.5375; margin +1.04; OVERALL AVERAGE governs — no per-Q veto, no per-Q override)
-**FEDERATION NOT PROBED** — the 4.49944/310 row is UNCHANGED this iteration.
-**Verdict: PASS with ONE confirmed Q1 SHAPE slip on the LEAD form (correct concise form WAS delivered). Teacher ZERO edits — this is a RESPONDER synthesis slip on CLEAN resources → re-probe-don't-churn, NOT a resource gap.**
+**Overall: 4.40 PASS** (Q1 5.00 / Q2 5.00 / Q3 3.00 / Q4 4.75 = 17.75 / 4 = 4.4375).
+OVERALL AVERAGE governs — no per-Q veto.
 
-Trino 467 PINNED. All dialect claims docs-verified vs trino.io/docs/467 (aggregate/window/types .html) via WebFetch 2026-06-10, multi-source. Verified, NOT against resources/.
-
----
-
-## Per-question verdicts
-
-### Q1 — count customers with orders from >1 shipping address — 3.40 **SHAPE DEFECT on LEAD form (partial)**
-The responder gave TWO forms.
-
-**FIRST form (the muddled LEAD):**
-```sql
-SELECT COUNT(*) AS customers_with_multiple_addresses FROM (
-  SELECT customer_id FROM orders
-  GROUP BY customer_id, shipping_address
-  HAVING COUNT(*) >= 1
-) deduped
-GROUP BY customer_id
-HAVING COUNT(*) > 1
-```
-**SHAPE VERDICT — WRONG SHAPE (confirmed, NOT a dialect error — a logic/shape mistake):**
-- Inner subquery `GROUP BY customer_id, shipping_address` yields **one row per (customer_id, shipping_address) pair** (the `HAVING COUNT(*) >= 1` is a no-op — every group has ≥1 row). Projects `customer_id` only.
-- Outer `SELECT COUNT(*) ... GROUP BY customer_id HAVING COUNT(*) > 1` groups by customer and returns **one row PER qualifying customer**, each value = that customer's distinct-address count — NOT a single total. So it emits MULTIPLE rows, every one mislabeled `customers_with_multiple_addresses`.
-- It is valid SQL that RUNS, but does NOT answer "how many customers" — it would need a further outer `SELECT COUNT(*)` wrap to collapse to one number.
-
-**SECOND form (correct, labeled "more concise"):**
-```sql
-SELECT COUNT(*) FROM (
-  SELECT customer_id, COUNT(DISTINCT shipping_address) AS address_count
-  FROM orders GROUP BY customer_id
-) WHERE address_count > 1
-```
-**CORRECT** — one number: count of customers with >1 distinct shipping address. `COUNT(DISTINCT x)` valid in 467.
-
-**Net:** partial, not zero — the correct concise form IS delivered and IS labeled "more concise," so an engineer who picks it lands correctly. Scored DOWN for leading with a wrong-shape form that a beginner could copy and get a mislabeled multi-row result.
-
-### Q2 — % of orders with a coupon — 5.00 CLEAN
-`ROUND(100.0 * COUNT_IF(coupon_code IS NOT NULL) / COUNT(*), 2)`. Verified: `count_if(x)->bigint` EXISTS in 467 (aggregate.html, "number of TRUE input values"); `100.0` is a DECIMAL literal (types.html) → promotes the BIGINT counts to decimal division, NO integer truncation. `SUM(CASE WHEN coupon_code IS NOT NULL THEN 1 ELSE 0 END)` equivalent offered. Correct.
-
-### Q3 — orders where shipping_cost > 20% of subtotal — 5.00 CLEAN
-`SELECT COUNT(*) FROM orders WHERE shipping_cost > 0.2 * order_subtotal`. `0.2` is a DECIMAL literal so `0.2 * order_subtotal` is non-integer; pure comparison, no division → responder correctly says NO special handling needed. Correct.
-
-### Q4 — count customers who churned then reactivated — 4.75 CLEAN
-```sql
-WITH ranked_subs AS (
-  SELECT customer_id, status, created_at,
-         LAG(status) OVER (PARTITION BY customer_id ORDER BY created_at) AS prev_status
-  FROM subscriptions)
-SELECT COUNT(DISTINCT customer_id) FROM ranked_subs
-WHERE prev_status = 'cancelled' AND status = 'active'
-```
-Verified: `lag(x[,offset[,default]])` valid in 467 with `OVER (PARTITION BY ... ORDER BY ...)` (window.html). `cancelled`→`active` transition correctly detects reactivation; `COUNT(DISTINCT customer_id)` counts each reactivating customer once. The COUNT(*)-for-events note and the tiebreaker caveat (ties on `created_at`) are apt. Correct; tiny clarity-not-correctness margin only.
+All dialect claims verified vs trino.io/docs/467 (datetime.html, types.html, select.html) + multi-source WebSearch on Trino timestamp coercion, 2026-06-10. Trino 467 PINNED.
 
 ---
 
-## Scope check & directives
+## Per-question scores
 
-- **(a) Q1 first-form shape issue CONFIRMED** — returns per-customer rows not a single count; second form correct. It is a **RESPONDER synthesis slip**, NOT a resource gap: the responder DID deliver a correct concise form (COUNT(DISTINCT…)>1 over a single subquery). Resources are clean. → **RE-PROBE, DON'T CHURN.** No FIX-A. Do NOT add/edit cards; a defang on a clean dedup/distinct-count card risks regressing the many passing COUNT(DISTINCT)/GROUP BY-HAVING neighbors (e.g. iter910/912 dup-detect, iter909 muddle already one-off-CLOSED).
-- **(b) NO other defect** — no fabrication / wrong-signature / crossed-family / findability-slip / prod-env conflict. Every fn verified present + correct-signature in Trino 467; pure SQL, on-prem Trino 467 + Iceberg + MinIO + HMS + JWT/OPA unaffected.
-- **(c) iter916 = DEFAULT NO-OP / durability-breadth.** Re-probe the "count-of-customers-with->1-distinct-X" family from a DIFFERENT phrasing (e.g. customers ordering >1 distinct product category; products sold to >1 distinct region) to confirm the Q1 lead-form muddle is a ONE-OFF and the responder LEADS with the COUNT(DISTINCT…)>1 form. Optional fresh adjacents: `COUNT(DISTINCT) FILTER (WHERE …)`, multi-col `COUNT(DISTINCT (a,b))`, `HAVING COUNT(DISTINCT x) > 1` dup-detect, RANK()=1 vs ROW_NUMBER()=1 ties.
-- **(d) PRESERVE full iter534–914 pin inventory; NO federation edits (federation 4.49944/310, UNCHANGED — not probed this iter).**
+### Q1 — count products ordered by >3 distinct customers (single number) — **5.00 CLEAN**
+`SELECT COUNT(*) FROM (SELECT product_id, COUNT(DISTINCT customer_id) AS num_customers FROM order_items GROUP BY product_id HAVING COUNT(DISTINCT customer_id) > 3) grouped_products`
 
-**DO NOT bump training/state.json (already 915).**
+**SHAPE ANALYSIS:** Inner query produces exactly one row per product whose distinct-customer count exceeds 3 (HAVING `COUNT(DISTINCT customer_id) > 3` filters on the inner group's OWN aggregate — valid Trino 467, verified select.html "HAVING used in conjunction with aggregate functions and GROUP BY to control which groups are selected"). The OUTER `SELECT COUNT(*)` collapses that set to ONE number = the count of qualifying products. This is the CORRECT shape (a single scalar), NOT the iter915 muddle (which returned one row per entity).
+
+**WRONG-SHAPE SLIP: ONE-OFF CONFIRMED — did NOT recur. iter915 slip CLOSED. NO findability-anchor FIX-A needed.** Responder LED with the correct single-count form (outer COUNT(*) over the GROUP BY...HAVING subquery), no per-entity-row leak. COUNT(DISTINCT) + GROUP BY + HAVING-on-own-aggregate + outer COUNT(*) all valid → returns one number. Clean.
+
+### Q2 — count refunds where refund_amount > original_order_amount — **5.00 CLEAN**
+`SELECT COUNT(*) FROM refunds WHERE refund_amount > original_order_amount`
+Simple two-column comparison filter-count. Valid Trino 467, correct. No division/NULL/type gotcha.
+
+### Q3 — average days active subscriptions have run — **3.00 DEFECT (type mismatch)**
+`SELECT AVG(date_diff('day', started_at, current_timestamp)) FROM subscriptions WHERE status='active'`
+
+**Q3 TIMESTAMP-vs-TIMESTAMPTZ VERDICT: HARD TYPE ERROR (no implicit coercion).**
+- `current_timestamp` returns `TIMESTAMP(3) WITH TIME ZONE` (verified datetime.html: "current timestamp with time zone as of the start of the query, with 3 digits of subsecond precision").
+- `started_at` is most plausibly a plain `TIMESTAMP` (without time zone).
+- **Trino REMOVED implicit coercion from TIMESTAMP to TIMESTAMP WITH TIME ZONE** because the conversion is session/environment-dependent (verified multi-source: trino types.html documents them as distinct types with NO coercion note; trinodb/trino issue #37 + #7450 + release notes confirm implicit TIMESTAMP→TIMESTAMP WITH TIME ZONE coercion was intentionally removed for SQL-standard compliance).
+- `date_diff` is a polymorphic scalar with separate `timestamp(p)` and `timestamp(p) with time zone` registrations; with mixed args there is NO common super-type and NO implicit coercion → function resolution FAILS ("Unexpected parameters / cannot be applied"). **The query as written does NOT run.**
+
+**This is a REAL dialect defect, not a stylistic nit.** The CONCEPT is correct (`AVG(date_diff('day', started_at, <now>)) WHERE status='active'` is the right approach), which is why this is scored 3.00 (partial) not lower — the structure/intent is sound and a small type alignment fixes it. **Fix (align types):**
+- Cleanest for "days": `AVG(date_diff('day', CAST(started_at AS date), current_date))` (both DATE), OR
+- `AVG(date_diff('day', started_at, CAST(current_timestamp AS timestamp)))` (drop tz to match plain TIMESTAMP), OR
+- `AVG(date_diff('day', CAST(started_at AS timestamp with time zone), current_timestamp))` (promote started_at).
+
+### Q4 — avg rating per product (1 decimal), only products with reviews — **4.75 CLEAN**
+`SELECT p.product_id, ROUND(AVG(r.star_rating), 1) FROM products p INNER JOIN reviews r ON p.product_id=r.product_id GROUP BY p.product_id`
+INNER JOIN correctly EXCLUDES products with zero reviews (matches "only products with >=1 review"). `ROUND(AVG(star_rating), 1)` valid Trino 467; one row per product via GROUP BY product_id. Correct. Minor ding only for not noting the INNER-vs-LEFT contrast (LEFT would include no-review products with NULL avg) — informative nicety, not a defect.
+
+---
+
+## Defect / gap summary
+
+- **Q3 timestamp-vs-timestamptz date_diff = HARD TYPE ERROR** (no implicit coercion in Trino 467). This is a genuine, findable dialect defect. The responder mixed a plain-TIMESTAMP column with `current_timestamp` (TIMESTAMP WITH TIME ZONE) inside `date_diff`.
+- **Q1 wrong-shape slip: ONE-OFF CONFIRMED, did NOT recur, iter915 slip CLOSED.** No FIX-A for shape.
+
+## iter917 recommendation — **LIGHT FIX-A (Q3 type alignment)**
+Add/strengthen a small fenced "days-active / age-in-days" canonical in the datetime card that uses **type-aligned** forms:
+- For a DATE answer: `date_diff('day', CAST(started_at AS date), current_date)`.
+- Explicitly note: **`current_timestamp` is TIMESTAMP WITH TIME ZONE; a plain TIMESTAMP column does NOT implicitly coerce to it — `date_diff('day', plain_ts, current_timestamp)` is a TYPE ERROR. Use `current_date` (date answer) or `CAST(current_timestamp AS timestamp)` to match a without-tz column.**
+- Keyword-land on "days active", "age in days", "how long has X run", "since started_at". Inline-mark the mixed-type form WRONG/un-copyable (per the defang-DO-NOT-WRITE lesson); make the type-aligned form the copy-attractive block.
+
+Re-probe the days-since / age-in-days family next sweep from a different phrasing to confirm the fix lands and the responder LEADS with a type-aligned form.
+
+PRESERVE full iter534-915 pin inventory. NO federation edits (federation 4.49944/310, UNCHANGED — not probed this iter). DO NOT bump training/state.json (already 916).
