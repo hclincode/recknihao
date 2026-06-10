@@ -1,46 +1,70 @@
-# Judge Feedback — iter900 (NO-OP durability sweep)
+# Judge Feedback — iter901 (NO-OP durability sweep)
 
-**Overall: 4.98 STRONG PASS** (per-Q 5.00 / 5.00 / 4.9375 / 5.00 = 19.9375 / 4 = 4.984; margin +1.48; overall average governs — no per-Q veto). All 4 answers dialect-clean. **FEDERATION NOT PROBED** — the 4.49944/310 row is UNCHANGED.
+**Phase**: extended. **Overall**: 5.00 STRONG PASS (per-Q 5.00 / 5.00 / 5.00 / 5.00 = 20.00/4 = 5.00; margin +1.50; overall average governs, no per-Q veto). **Verdict: DEFAULT NO-OP — all 4 dialect-clean, ZERO teacher edits.** Federation NOT probed (4.49944/310 row UNCHANGED). DO NOT bump state.json.
 
-**Verdict: DEFAULT NO-OP.** Zero defects, zero findable-but-missing gaps. Teacher makes ZERO edits. Do NOT bump training/state.json (already passed).
-
-All dialect facts VERIFIED vs trino.io/docs/467 (aggregate.html, datetime.html, types.html, comparison.html) + git-tag 467 source (RowType orderability) + my pinned date_diff day-aware reference, on 2026-06-10. iter882 verify-first applied: every structurally-suspicious claim (Q1 ROW ordering key, Q3 day-aware semantics) was VERIFIED CORRECT before judgment — none flagged.
+All dialect facts VERIFIED vs trino.io/docs/467 (conversion/window/math/datetime/reserved .html) + git-tag 467 source (DoubleOperators.java) via WebFetch/WebSearch 2026-06-10. iter882 verify-first applied to the one structurally-suspicious claim (Q1 CAST-rounds) — VERIFIED CORRECT before judgment, NOT flagged.
 
 ---
 
-## Per-question
+## Q1 — flag whole-dollar `order_total` (50.00, no cents) — 5.00
 
-**Q1 — 5.00. Most expensive product NAME per category (MAX + companion name), with tie-break.**
-`MAX(price) AS max_price, max_by(product_name, price) AS product_at_max_price ... GROUP BY category`; tie-break `max_by(product_name, ROW(price, product_name))`.
-- VERIFIED aggregate.html: `max_by(x, y)` "Returns the value of `x` associated with the maximum value of `y` over all input values." So `max_by(product_name, price)` returns the name at the max price — exactly the companion-value idiom MAX(price) alone cannot give. CORRECT.
-- Tie-break `max_by(product_name, ROW(price, product_name))`: VERIFIED a ROW IS orderable in Trino 467 when all its fields are orderable (confirmed vs git-tag 467 RowType — ROW comparison is field-by-field lexicographic; the only caveat is ROW comparison errors on NULL fields, irrelevant here with non-NULL price/name). So the ordering key breaks ties by price first, then product_name — a valid, idiomatic deterministic tie-break. CORRECT.
-- Docs show only scalar `y` examples and do NOT explicitly state ROW-as-ordering-key, but the orderability rule makes it valid. This is a (correct) advanced flourish, not a defect.
+**A1**: `WHERE order_total = CAST(order_total AS INTEGER)` [noted CAST rounds half-up: 50.50→51, 50.00→50] OR `WHERE order_total = FLOOR(order_total)`.
 
-**Q2 — 5.00. Last-30-days vs prior-30-days order counts side by side, one query.**
-`count_if(order_date >= CURRENT_DATE - INTERVAL '30' DAY) AS orders_last_30_days, count_if(order_date < CURRENT_DATE - INTERVAL '30' DAY AND order_date >= CURRENT_DATE - INTERVAL '60' DAY) AS orders_prior_30_days FROM orders` + SUM(CASE...) equivalent.
-- VERIFIED aggregate.html: `count_if(x) -> bigint` "Returns the number of TRUE input values… equivalent to `count(CASE WHEN x THEN 1 END)`." Two `count_if` expressions in one SELECT with no GROUP BY produce two scalar counts side by side in one row. CORRECT.
-- VERIFIED datetime.html: `date '2012-08-08' - interval '2' day` is valid date arithmetic, so `CURRENT_DATE - INTERVAL '30' DAY` is valid. The prior-30 window is correctly bounded `[CURRENT_DATE-60, CURRENT_DATE-30)` (half-open, no overlap with last-30). CORRECT.
-- SUM(CASE WHEN cond THEN 1 ELSE 0 END) equivalent is a correct, more-portable alternative. Good completeness.
+CORRECT on both the rounding claim and the logic.
 
-**Q3 — 4.9375 (Completeness ~4.75). Days a subscription was active (start to end).**
-`date_diff('day', start_date, end_date) AS days_active`; explained day-aware/complete-units, `date_diff('day', same, same)=0`, +1 day → 1.
-- VERIFIED datetime.html: `date_diff(unit, timestamp1, timestamp2) -> bigint` "Returns timestamp2 - timestamp1 expressed in terms of unit" (doc example `date_diff('second', 2020-03-01, 2020-03-02)=86400`, `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')=1`). Argument order `(unit, from, to)` = to − from. CORRECT.
-- Day-aware/complete-units for the 'day' unit (drops fractional) is consistent with my pinned 467 reference (date_diff month/year/day = complete-units, day-boundary aware). The responder's "Jan 15 2am → Feb 14 3pm = 30 (complete days)" is consistent: Jan 15 → Feb 14 is 30 calendar days, and the +13h intra-day gain neither adds nor subtracts a complete day. For pure DATE args it's the exact calendar-day difference. CORRECT.
-- **Minor completeness nuance (NOT a defect, weighed proportionally):** "days active" is ambiguous between exclusive (end − start, what date_diff gives) and inclusive (+1, counting both endpoints). The responder used the exclusive form without flagging the inclusive alternative. This is a single unstated nuance on an otherwise fully-correct answer → Completeness ~4.75, no accuracy deduction. Not findability-actionable; do NOT churn.
+- **CAST-rounds claim VERIFIED CORRECT (the critical check).** trino.io/docs/467 conversion.html does NOT document the rounding mode, and a stray web blog claimed "truncate" — but the git-tag 467 source is dispositive: `io/trino/type/DoubleOperators.java` `castToInteger` returns `toIntExact((long) MathFunctions.round(value))` (likewise castToSmallint/castToTinyint use `MathFunctions.round`). `MathFunctions.round` = round-half-up. So `CAST(50.50 AS INTEGER)=51`, `CAST(47.89 AS INTEGER)=48`, `CAST(50.00 AS INTEGER)=50`. Truncation-toward-zero is `truncate(x)` (math.html: "rounded to integer by dropping digits after decimal point"), a different function. The responder's claim is right; the blog prose was wrong. (Consistent with the pinned reference_trino_cast_to_integer_rounds memory — git-tag source settles dialect disputes, not blog prose.)
+- **LOGIC holds REGARDLESS of round-vs-truncate.** `order_total = CAST(order_total AS INTEGER)` is TRUE iff order_total is a whole number: a decimal with a nonzero fractional part can never equal ANY integer (50.50 ≠ 51 and 50.50 ≠ 50), so the equality is only satisfied when the fraction is zero. The test is correct whether CAST rounds or truncates.
+- **FLOOR form unambiguously correct**: `order_total = FLOOR(order_total)` is TRUE iff fractional part is zero. Clean, mode-independent, the more defensively obvious form.
 
-**Q4 — 5.00. Total quantity per product counting only line items > $10.**
-`SUM(quantity) FILTER (WHERE line_value > 10) AS total_quantity_above_10 ... GROUP BY product_id` + SUM(CASE WHEN line_value>10 THEN quantity ELSE 0 END) + multiple FILTER aggregates.
-- VERIFIED aggregate.html: "The FILTER keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause. This is evaluated for each row before it is used in the aggregation and is supported for all aggregate functions." So `SUM(quantity) FILTER (WHERE line_value > 10)` is valid and applies PER-aggregate. CORRECT.
-- SUM(CASE ... ELSE 0 END) equivalent correct. Multiple FILTER aggregates with the same/different conditions in one SELECT is a correct, idiomatic showcase (each FILTER scoped to its own aggregate). Excellent completeness.
+NO defect. Q1 = 5.0 exactly as the run-prompt anticipated.
+
+## Q2 — average order value per category EXCLUDING the single most expensive per category — 5.00
+
+**A2**: CTE with `ROW_NUMBER() OVER (PARTITION BY category ORDER BY order_total DESC) AS rank`, then `SELECT category, ROUND(AVG(order_total),2) FROM ranked WHERE rank > 1 GROUP BY category`.
+
+CORRECT.
+
+- ROW_NUMBER (window.html) is "a unique, sequential number for each row… starting with one" — it assigns distinct numbers even on ties, so `rank = 1` picks exactly ONE row (the single most-expensive; on a tie one is chosen arbitrarily but still exactly one), and `WHERE rank > 1` excludes exactly that one per category. Matches "EXCLUDING the single most expensive order."
+- `WHERE rank > 1` filters a REAL materialized CTE column (legal) — NOT a same-level SELECT-alias-in-WHERE (correctly avoids that trap). Window function correctly projected in the CTE first (can't go in WHERE / no QUALIFY in 467).
+- `rank` as a bare unquoted column alias is VALID: RANK is NOT in the Trino 467 reserved-keywords list (reserved.html) — an unquoted `rank` identifier is fine.
+- `ROUND(AVG(order_total),2)` + `GROUP BY category` over the surviving rows = correct average of the rest.
+
+NO defect. Q2 = 5.0.
+
+## Q3 — yes/no whether `signup_date` and `first_order_date` are in the same calendar month — 5.00
+
+**A3**: `CASE WHEN date_trunc('month', signup_date) = date_trunc('month', first_order_date) THEN 'yes' ELSE 'no' END`; plus the `EXTRACT(YEAR)=… AND EXTRACT(MONTH)=…` equivalent.
+
+CORRECT — both forms.
+
+- date_trunc('month', date) (datetime.html) truncates to the first day of that month; two dates in the same calendar month truncate to the SAME value, so equality returns 'yes'. Crucially year-aware (Jan-2025 ≠ Jan-2026), as a true same-calendar-month test requires.
+- EXTRACT(YEAR FROM …) and EXTRACT(MONTH FROM …) are valid for DATE types (datetime.html: extract fields "support all date and time types"), and comparing both year AND month equal is the correct decomposed equivalent.
+
+NO defect. Q3 = 5.0.
+
+## Q4 — count orders sharing a `created_timestamp` with ≥1 other order (collision) — 5.00
+
+**A4**: CTE `tc AS (SELECT order_id, created_timestamp, COUNT(*) OVER (PARTITION BY created_timestamp) AS collision_count FROM orders)`, then `SELECT COUNT(*) FROM tc WHERE collision_count > 1`.
+
+CORRECT.
+
+- `COUNT(*) OVER (PARTITION BY created_timestamp)` (all aggregates usable as window fns via OVER, window.html) broadcasts the per-timestamp row count onto every row. A row whose timestamp is unique gets `collision_count = 1`; a row sharing its timestamp with ≥1 other gets `> 1`.
+- Filtering `collision_count > 1` in the OUTER query is legal — it is a REAL CTE column (window fns can't go in WHERE; correctly projected first).
+- `COUNT(*)` over the surviving rows = the number of orders that are part of a same-timestamp collision (each such order counted once). Matches "≥1 other order at the same timestamp." Valid in 467.
+
+NO defect. Q4 = 5.0.
 
 ---
 
-## Teacher directives for iter901
+## Findability / defect scan — NONE
 
-- **DEFAULT NO-OP.** Do NOT add any "wrong" card for Q1–Q4. Every form is dialect-correct.
-- Do NOT mark `max_by(v, ROW(k1, k2))` wrong — Trino 467 ROW IS orderable (lexicographic, all-fields-orderable), so it is a valid tie-break key.
-- Do NOT churn the max_by companion-value, count_if-rate-window, date_diff day-aware, or FILTER-aggregate cards (all confirmed correct).
-- OPTIONAL micro-anchor ONLY if it touches NO pin: a 1-line "days active: date_diff gives exclusive end−start; +1 for inclusive both-endpoints" note near a date_diff day-count card. SKIP if it churns/duplicates a date_diff pin. This is the only (tiny) completeness seam observed.
-- Re-probe fresh adjacents next sweep. **Federation (4.49944/310) is the only un-passed row** — probe only bulletproofed federation angles when probed at all.
-- Do NOT touch any iter534–899 pin. PIN Trino 467. NO federation edits.
-- **DO NOT bump training/state.json** (already passed; overall 4.98 PASS holds).
+No findable-but-missing gap and no dialect defect surfaced. The single structurally-suspicious claim (Q1 CAST rounds half-up) was VERIFIED CORRECT against git-tag 467 DoubleOperators.java BEFORE judgment — NOT flagged (iter882 lesson honored; the contrary web-blog "truncate" claim was the wrong source).
+
+**iter902 directive: DEFAULT NO-OP. ZERO teacher edits.**
+- Do NOT add any "wrong" card for Q1–Q4.
+- Do NOT mark the Q1 `order_total = CAST(order_total AS INTEGER)` whole-number test wrong — it is correct, AND the responder's "CAST rounds half-up (50.50→51)" claim is correct (git-tag 467 source). Do NOT churn the CAST-rounds / FLOOR whole-dollar content.
+- Do NOT churn the ROW_NUMBER-exclude-top-N (rank>1 in CTE), date_trunc/EXTRACT same-calendar-month, or COUNT(*) OVER collision-detection cards.
+- `rank` as a bare alias is valid (not reserved) — do NOT add a defang.
+- Re-probe fresh adjacents next sweep. Federation (4.49944/310) is the only un-passed row — bulletproofed angles only.
+- Do NOT touch any iter534–900 pin. PIN Trino 467. NO federation edits.
+- DO NOT bump training/state.json (already passed; overall 5.00 PASS holds).
