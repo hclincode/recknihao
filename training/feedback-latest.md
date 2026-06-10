@@ -1,63 +1,89 @@
-# Judge Feedback — iter927 (NO-OP durability sweep: 4 fresh adjacents — GROUP BY COUNT / two-level ROW_NUMBER / CASE-comparison / conditional-AVG before-after)
+# Judge Feedback — iter928 (EXTENDED PHASE, re-probe sweep)
 
-**Overall: 4.594 PASS** (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 3.375 = 18.375/4 = 4.594). OVERALL AVERAGE governs — no per-Q veto. Threshold 3.5 met by +1.094.
+## Verdict: PASS — overall 4.969 (per-Q 5.00 / 4.875 / 5.00 / 5.00 = 19.875/4); margin +1.469. DEFAULT NO-OP. Teacher ZERO edits.
 
-Trino 467 PINNED. All dialect claims verified vs trino.io/docs/467 (functions/comparison.html, language/types.html) + WebSearch (AWS re:Post `Cannot apply operator: date < varchar(10)`, Dataminded "7 lessons migrating dbt Snowflake→Trino", Trino issue #7334) 2026-06-10 — NOT against resources/. iter882 verify-first applied BOTH directions.
-
----
-
-## ★ Q4 VERDICT — BARE-STRING DATE LITERAL = CONFIRMED DIALECT DEFECT (structure correct, literal wrong)
-
-**VERIFIED VERDICT: Trino 467 does NOT implicitly coerce a bare VARCHAR string literal to DATE when compared to a DATE column.** Comparing `review_date` (DATE) `< '2026-05-15'` (bare varchar) raises `TYPE_MISMATCH: Cannot apply operator: date < varchar(10)`. The query as written WILL NOT RUN.
-
-Evidence (multi-source, 2026-06-10):
-- trino.io/docs/467 functions/comparison.html: comparison operators require operands of the same/coercible orderable type; BETWEEN operands "must be the same type"; NO varchar→date implicit coercion documented.
-- AWS re:Post (Athena/Trino engine): exact error `TYPE_MISMATCH: Cannot apply operator: date < varchar(10)`; fix = `DATE '...'` or `CAST('...' AS DATE)`.
-- Dataminded "7 lessons migrating dbt from Snowflake to Trino": "Trino does not do implicit type coercion … instead of `WHERE date_column = '2021-01-01'` you write `WHERE date_column = DATE '2021-01-01'`."
-- Trino issue #7334 (timestamp vs varchar) confirms the same strict-typing family.
-
-So the run-prompt's understanding is **CONFIRMED**: bare string requires `DATE '2026-05-15'` (or `CAST('2026-05-15' AS DATE)`). If `review_date` were a TIMESTAMP instead of DATE, the same rule applies — needs `TIMESTAMP '...'` (or `DATE '...'` with the documented date→timestamp coercion). Either way the bare string fails.
-
-**What the responder got RIGHT (the hard part):**
-- Conditional-aggregation STRUCTURE is fully correct: `AVG(CASE WHEN review_date < <cutoff> THEN star_rating END)` for the before window, `>=` for after, the difference column, `GROUP BY product_id`, and `HAVING <before> IS NOT NULL AND <after> IS NOT NULL`.
-- `AVG(CASE WHEN … THEN x END)` correctly SKIPS the NULLs produced when the CASE has no ELSE (rows outside the window contribute NULL, AVG ignores NULLs) — conditional-average semantics are right (pinned).
-- HAVING both-not-null correctly drops products that have reviews on only one side of the cutoff.
-
-**The single defect:** the literal `'2026-05-15'` must be `DATE '2026-05-15'`. One token per occurrence (two occurrences). Structure-correct, literal-wrong → proportional down-score, NOT a hard zero.
-
-**Q4 per-dimension:** Accuracy 2.5 (query raises TYPE_MISMATCH, will not execute as written) / Completeness 4.0 (full structure, only the DATE keyword missing) / Clarity 4.0 (clear explanation but ships a non-runnable literal) / Actionability 3.0 (engineer pastes it, hits an error, must self-fix). Q4 = (2.5+4.0+4.0+3.0)/4 = **3.375**.
-
-### SCOPE-CHECK: RESPONDER SYNTHESIS SLIP, NOT a findable resource gap → re-probe-don't-churn
-
-Resources teach the CORRECT form and explicitly warn against this exact bare-string mistake:
-- `resources/28-complex-sql-performance-trino-dbt.md:1047`: table row `WHERE event_date >= '2026-05-30'` (string compared to date) → "Type mismatch — Trino does NOT push when types don't match." → fix `Use DATE '2026-05-30' literal.`
-- `resources/28-…:1044`: companion row on `CAST(event_date AS varchar) = '...'` → canonical `WHERE event_date = DATE '2026-05-30'`.
-- `DATE '20YY-MM-DD'` correct literals appear **189 times across 16 resource files** (r07 ×35, r22 ×32, r23 ×38, r28 ×19, r27 ×23, …) — the canonical, copy-attractive Trino form.
-
-The bare-string `< '20YY-..'` occurrences that exist in resources are in Spark/ingestion watermark prose, Postgres-pushdown JDBC pass-through, or partition-value illustration (r13, r26, r17) — NOT presented as the canonical Trino DATE-column comparison pattern. The responder synthesized the bare-string form despite the dominant `DATE '...'` canon and r28's explicit WRONG-marking. This is a RESPONDER SYNTHESIS SLIP, not a resource gap.
-
-**Action: re-probe-don't-churn. NO teacher edit, NO "wrong" card (duplicates r28's existing WRONG-marked row + risks defang-backfire). Re-probe a before/after date-window question fresh next sweep to confirm the responder reaches for `DATE '...'`; if the bare string recurs, escalate to a findability anchor (the type-safe-predicate canon may not be keyword-reachable from a plain "average rating before vs after <date>" phrasing).** This is the 1st occurrence of the bare-string-date slip in the recent sweep series — treat as one-off pending re-probe.
+Overall average governs (no per-Q veto). FEDERATION NOT PROBED this sweep (4.49944/310 row UNCHANGED — still the only un-passed row; probe bulletproofed angles only).
 
 ---
 
-## Q1 — count customers per acquisition source — 5.00
+## ★ Q1 BARE-STRING-DATE-LITERAL SLIP VERDICT = ONE-OFF CONFIRMED / SLIP CLOSED — NO FIX-A
 
-`SELECT acquisition_source, COUNT(*) AS customer_count FROM customers GROUP BY acquisition_source` + NULL-bucket caveat (rows with NULL acquisition_source form their own group, COUNT(*) counts them; COUNT(acquisition_source) would skip NULLs). VERIFIED select.html GROUP BY + aggregate.html COUNT(*); NULL-group behavior correct (pinned). One row per source. Acc/Comp/Clar/Act 5.0.
+The iter927 Q4 bare-string-date-literal defect did **NOT recur**. A1 wrote:
 
-## Q2 — highest single-day total sales per store — 5.00
+```sql
+SELECT
+  SUM(CASE WHEN signup_date <  DATE '2026-03-01' THEN 1 ELSE 0 END) AS signups_before,
+  SUM(CASE WHEN signup_date >= DATE '2026-03-01' THEN 1 ELSE 0 END) AS signups_on_or_after
+FROM signups
+```
 
-Two-level: `WITH daily_sales AS (SELECT store_id, sale_date, SUM(amount) AS daily_total FROM sales GROUP BY store_id, sale_date) SELECT … FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY store_id ORDER BY daily_total DESC) AS rank FROM daily_sales) WHERE rank = 1` + the simpler `SELECT store_id, MAX(daily_total) FROM daily_sales GROUP BY store_id` form. VERIFIED window.html ROW_NUMBER OVER(PARTITION/ORDER) valid; select.html GROUP BY; no QUALIFY in 467 (correctly used the subquery+WHERE rewrite, not QUALIFY). Both forms answer "highest single-day total per store" — the MAX form returns just the value, the ROW_NUMBER form lets you also surface the sale_date. Tie note (multiple days at the max → ROW_NUMBER picks one) is apt. Acc/Comp/Clar/Act 5.0.
+The responder used the **CORRECT `DATE '2026-03-01'` literal** (DATE keyword present) on BOTH comparison branches — the iter927 bare-string `'2026-03-01'` slip did NOT repeat.
 
-## Q3 — flag accounts over licensed seat limit — 5.00
+- VERIFIED Trino 467 does NOT implicitly coerce varchar→date in comparisons (trino.io/docs/467 functions/comparison.html + WebSearch 2026-06-10: "Trino does not do implicit type coercion … will not convert between character and numeric types"; bare `date < varchar` raises `Cannot apply operator`). The DATE keyword is REQUIRED — and the responder supplied it. Query RUNS.
+- SUM(CASE WHEN cond THEN 1 ELSE 0 END) two-bucket before/after conditional-count is CORRECT (pinned valid). `<` cutoff vs `>=` cutoff cleanly partitions every non-NULL signup_date into exactly one of the two buckets; the boundary 2026-03-01 falls into `signups_on_or_after` (correct "on/after" semantics). NULL signup_date counts in neither (reasonable).
 
-`CASE WHEN active_seats > licensed_seats THEN 'over_limit' WHEN active_seats = licensed_seats THEN 'at_limit' ELSE 'under_limit' END` + COALESCE NULL-guard note + `WHERE active_seats > licensed_seats` filter-only variant. VERIFIED comparison.html: integer `>`/`=` comparison valid; three-valued-logic note CORRECT (if either column is NULL the comparison is UNKNOWN, the row falls through to ELSE/`under_limit`, so COALESCE(active_seats,0)/COALESCE(licensed_seats,…) is the right guard when NULLs are possible). Acc/Comp/Clar/Act 5.0.
+**→ iter927 bare-string slip = ONE-OFF CONFIRMED, slip CLOSED, NO findability-anchor FIX-A, NO "wrong" card.** Resources are clean (r28 already WRONG-marks the bare-string form; `DATE '20YY-MM-DD'` canon appears ~189× across 16 files). The iter927 occurrence was a responder synthesis slip; one clean re-probe confirms it does not need a teacher edit.
+
+**Q1 = 5.0** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0).
 
 ---
 
-## iter928 directive — DEFAULT NO-OP with ONE re-probe flag
+## ★ Q2 INTERPRETATION-NUANCE VERDICT = TECHNIQUE DIALECT-CORRECT, INTERPRETATION NARROW (completeness nuance, NOT a defect)
 
-- **iter927 = DEFAULT NO-OP on resources.** Q1/Q2/Q3 dialect-clean. Q4 structure correct; the ONLY defect (bare-string date literal) is a RESPONDER SYNTHESIS SLIP on CLEAN resources (r28:1047 explicitly WRONG-marks it; `DATE '...'` canon ×189). Teacher ZERO edits. NO "wrong" card, NO FIX-A this iter (duplicates r28 + defang-backfire risk).
-- **DO re-probe** a before/after date-window / date-column comparison question next sweep (e.g. "revenue before vs after a launch date", "tickets opened after <date>") to confirm the responder emits `DATE '...'` not a bare string. If the bare string RECURS (2nd instance), THEN escalate to a findability anchor pulling the type-safe-predicate / `DATE '...'`-literal canon toward plain before/after-date phrasings.
-- **Do NOT mark wrong:** Q1 GROUP BY acquisition_source + COUNT(*) + NULL-bucket; Q2 daily-SUM CTE → ROW_NUMBER PARTITION BY store_id top-day OR MAX(daily_total) GROUP BY store_id; Q3 CASE seat-limit comparison + COALESCE/3VL guard; Q4 conditional-AVG before/after STRUCTURE + HAVING both-not-null (all correct). The ONLY thing wrong in Q4 is the missing `DATE` keyword on the literal.
-- **PIN (verified this iter):** Trino 467 requires `DATE '2026-05-15'` (or `CAST('2026-05-15' AS DATE)`) to compare against a DATE column — bare varchar literal raises `Cannot apply operator: date < varchar(10)`, NO implicit varchar→date coercion. Same applies to TIMESTAMP columns (`TIMESTAMP '...'`).
-- Federation (4.49944/310) remains the only un-passed row — bulletproofed angles only. Do NOT touch any iter534-926 pin. PIN 467. NO federation edits. DO NOT bump training/state.json (already passed; overall 4.594 PASS holds).
+A2:
+```sql
+WITH ticket_sequence AS (
+  SELECT ticket_id, event_type, event_at,
+         LAG(event_type) OVER (PARTITION BY ticket_id ORDER BY event_at) AS prev_event_type
+  FROM ticket_events
+)
+SELECT COUNT(DISTINCT ticket_id)
+FROM ticket_sequence
+WHERE event_type = 'reopened' AND prev_event_type = 'closed'
+```
+
+- (a) **`LAG(...) OVER (PARTITION BY ticket_id ORDER BY event_at)` is dialect-VALID** in Trino 467 (standard ANSI window function; pinned valid, window.html). Per-ticket ordering by event_at, prior event type = correct mechanism.
+- (b) Detects an **ADJACENT** closed→reopened transition (the event IMMEDIATELY preceding a 'reopened' is 'closed'). COUNT(DISTINCT ticket_id) correctly collapses tickets with multiple such transitions to one.
+
+**Interpretation nuance:** the question is "ever reopened after being closed at least once." The LAG-adjacent approach catches the common direct close→reopen, but would MISS a 'reopened' with intervening events between the close and the reopen (e.g. closed→escalated→reopened). A broader reading (reopen with ANY prior close) would need EXISTS / a running-count-of-prior-closes.
+
+This is a **minor COMPLETENESS / interpretation nuance**, NOT a dialect/accuracy error: LAG-adjacent is a defensible reading of "reopened after closed" and the technique is dialect-correct. Weighed proportionally — small Comp ding only.
+
+**Q2 = 4.875** (Acc 5.0 / Comp 4.5 / Clar 5.0 / Act 5.0).
+
+---
+
+## Q3 = 5.0 — `AVG(cardinality(tags))`
+
+VERIFIED trino.io/docs/467 functions/array.html: `cardinality(x) → bigint` returns the array element count. AVG over rows = average tags per article. NULL/empty-array handling reasonable: `cardinality(NULL)=NULL` (skipped by AVG), empty array `=0` (counted). Correct.
+
+**Q3 = 5.0** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0).
+
+---
+
+## Q4 = 5.0 — `COUNT(DISTINCT user_id)`
+
+Correct for a one-row-per-change table — COUNT(DISTINCT user_id) gives the number of distinct users who made ≥1 plan change. Responder's caveat that COUNT(DISTINCT) is essential if the table is one-row-per-change (vs COUNT(*) which would count changes, not users) is apt. COUNT(DISTINCT) verified valid (aggregate.html, pinned).
+
+**Q4 = 5.0** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0).
+
+---
+
+## Source verification (NOT against resources/; iter882 verify-first BOTH directions, PIN 467)
+
+- DATE literal vs DATE column: VERIFIED no implicit varchar→date coercion → `DATE '2026-03-01'` required (comparison.html + WebSearch 2026-06-10) ⇒ Q1 CORRECT, slip did NOT recur.
+- `cardinality(array) → bigint` element count: VERIFIED array.html ⇒ Q3 CORRECT.
+- LAG OVER PARTITION/ORDER BY: standard window fn, pinned valid ⇒ Q2 technique CORRECT (interpretation narrow, not a defect).
+- COUNT(DISTINCT): pinned valid ⇒ Q4 CORRECT.
+- No doc-CORRECT claim falsely flagged; no doc-WRONG form blessed.
+
+---
+
+## iter929 directive — DEFAULT NO-OP
+
+- **NO-OP. Teacher ZERO edits. NO FIX-A. NO "wrong" card. NO escalation.**
+- Q1 bare-string-date-literal slip = ONE-OFF CONFIRMED / CLOSED (responder emitted `DATE '...'` correctly). Do NOT add a findability anchor — resources already correct (r28 WRONG-marks bare-string, DATE-canon ×189). Do NOT re-probe this exact angle again unless a NEW bare-string occurrence surfaces (would be 2nd instance → only then escalate).
+- Q2 LAG-adjacent vs reopen-after-any-prior-close = interpretation nuance on a DEFENSIBLE reading + dialect-correct technique. RESPONDER synthesis interpretation, NOT a resource gap. NO card (count-of-entities / interpretation-shape family already pinned). OPTIONAL low-priority re-probe (SKIP if duplicative): "reopened after being closed at ANY earlier point (intervening events allowed)" to see if responder reaches for EXISTS / running-count-of-prior-closes vs LAG-adjacent.
+- Do NOT mark Q1 SUM(CASE)+DATE-literal two-bucket, Q2 LAG-adjacent closed→reopened detection, Q3 AVG(cardinality), or Q4 COUNT(DISTINCT) wrong — all correct.
+- Federation (4.49944/310) only un-passed row — bulletproofed angles only. Do NOT touch any iter534-927 pin. PIN 467. NO federation edits.
+- **DO NOT bump training/state.json** (already passed; overall 4.969 PASS holds).
