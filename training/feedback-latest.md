@@ -1,70 +1,70 @@
-# Judge Feedback — iter906 (NO-OP durability sweep)
+# Judge Feedback — iter907 (EXTENDED PHASE, re-probe sweep)
 
-**Overall: 4.58 / 5.00 — PASS** (per-Q 4.9375/3.375/5.00/5.00 = 18.3125/4 = 4.578). Overall average governs; no per-Q veto. Margin +1.08 over the 3.5 threshold.
+## Verdict: PASS — overall average 4.84 / 5 (margin +1.34 over 3.5 threshold)
 
-**Verdict: iter907 = re-probe-don't-churn on the Q2 first query (RESPONDER SYNTHESIS MUDDLE, resources correct).** Three of four answers dialect-clean vs Trino 467; the Q2 FIRST query is broken but the CORRECT clean 2nd query IS delivered and even labeled "simpler." Teacher: ZERO edits. Do NOT touch state.json (already passed).
+Per-Q: Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 4.375 = 19.375 / 4 = **4.84**. Overall average governs (no per-Q veto). All four answers are dialect-clean and runnable in Trino 467.
 
-All dialect facts VERIFIED vs trino.io/docs/467 (select/window .html) + Trino error-message family via WebFetch/WebSearch 2026-06-10. iter882 verify-first applied: the Q2 first query was verified against the GROUP-BY + window-evaluation-order rule BEFORE judging, and the three clean queries (Q1/Q3 ROW_NUMBER-nesting, Q4 MAX OVER + NULLIF) were verified correct and NOT flagged.
-
----
-
-## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
-
-### Q1 — flag the single cheapest line item per order — 4.9375 (5 / 5 / 4.75 / 5)
-Subquery `ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY price ASC) AS rn`, then outer `WHERE rn = 1` (or keep all rows + `CASE WHEN rn = 1 THEN true ELSE false END` flag). CORRECT and valid in Trino 467.
-
-VERIFIED window.html: window functions evaluate after HAVING but before ORDER BY (i.e. after WHERE), so a ROW_NUMBER reference cannot go in WHERE directly — nesting in a subquery/CTE then filtering the materialized `rn` column in the OUTER query is the required form (Trino 467 has NO QUALIFY — confirmed via WebSearch). `WHERE rn = 1` filters a REAL inner column (legal). `ROW_NUMBER ... ORDER BY price ASC` correctly assigns 1 to the single cheapest line item per order; both the filter mode (one row per order) and the flag mode (keep all rows, mark the cheapest) are correctly distinguished.
-
-Tiny clarity nuance (NOT a defect, weighed proportionally → Clar 4.75): the shown query carries BOTH `WHERE rn = 1` AND the `CASE WHEN rn = 1 ...` flag, which is slightly redundant if presented as one statement — but the responder explains both modes, so this reads as "here are two ways," not an error. No accuracy deduction.
-
-### Q2 — boolean per customer: lifetime spend >= \$1000 — 3.375 (3.0 / 4.0 / 3.0 / 3.5)
-**Q2 FIRST-QUERY VERDICT: CONFIRMED DEFECT — the window-over-grouped-column form is INVALID in Trino 467.** Partial credit, not zero, because the CORRECT clean 2nd query IS delivered and even labeled "simpler."
-
-FIRST query (muddled / invalid):
-```
-SELECT customer_id, CASE WHEN total_spend >= 1000 THEN true ELSE false END
-FROM (
-  SELECT customer_id, SUM(order_value) OVER (PARTITION BY customer_id) AS total_spend
-  FROM orders GROUP BY customer_id
-)
-GROUP BY customer_id, total_spend
-```
-The inner query has `GROUP BY customer_id`. VERIFIED vs trino.io/docs/467 select.html: "When a GROUP BY clause is used in a SELECT statement all output expressions must be either aggregate functions or columns present in the GROUP BY clause." Window functions evaluate AFTER GROUP BY (window.html: after HAVING, before ORDER BY), so `SUM(order_value) OVER (PARTITION BY customer_id)` operates on the post-GROUP-BY result set — and there `order_value` is NEITHER a grouped column NOR an aggregate. Trino's analyzer rejects this with the "must be an aggregate expression or appear in GROUP BY clause" / "must be aggregated or appear in GROUP BY clause" error family (confirmed via WebSearch). The inner query is therefore UNRUNNABLE. (Even if it parsed, mixing a window aggregate with a GROUP BY and then re-grouping on `total_spend` is conceptually muddled — windowed SUM and grouped SUM are different shapes.)
-
-SECOND query (clean / correct):
-```
-SELECT customer_id, SUM(order_value) AS lifetime_spend, SUM(order_value) >= 1000 AS crossed_1000
-FROM orders GROUP BY customer_id
-```
-CORRECT — plain `SUM(order_value)` grouped by `customer_id` + boolean comparison `SUM(order_value) >= 1000` projected directly as a boolean column. Valid in Trino 467 (a comparison on an aggregate in the SELECT list is legal; a window function is not even needed for a per-customer scalar). This is the right, minimal answer and the responder explicitly flagged it as "simpler."
-
-Scoring: Acc 3.0 (the lead query is unrunnable; the second is correct), Comp 4.0 (the question IS fully answered by the clean 2nd query), Clar 3.0 (leading with a broken, over-complicated query muddles the explanation for a non-expert), Act 3.5 (a non-expert who copies the FIRST query hits an analyzer error; the labeled-"simpler" 2nd query rescues actionability).
-
-### Q3 — second-earliest signup date per company — 5.0 (5 / 5 / 5 / 5)
-Subquery `ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY created_at ASC) AS rn`, then outer `WHERE rn = 2`. CORRECT and valid in Trino 467.
-
-VERIFIED window.html: row_number assigns a unique sequential number starting at 1 per partition; `ORDER BY created_at ASC` orders earliest-first, so rn=2 is the second-earliest signup per company. Nesting + outer-`WHERE rn = 2` on a REAL materialized column is the required form (no QUALIFY in 467). Ties at the earliest timestamp resolve arbitrarily (row_number is non-deterministic across equal sort keys) — a minor nuance, NOT a defect (the question does not specify tie handling; an explicit tiebreaker like `ORDER BY created_at ASC, company_record_id` would make it deterministic if needed).
-
-### Q4 — each order's share vs that customer's biggest order — 5.0 (5 / 5 / 5 / 5)
-`ROUND(order_value / MAX(order_value) OVER (PARTITION BY customer_id), 2) AS share_of_biggest`, plus the div-by-zero guard `NULLIF(MAX(order_value) OVER (PARTITION BY customer_id), 0)`. CORRECT and valid in Trino 467.
-
-VERIFIED window.html: all aggregates (incl. MAX) usable as window functions via OVER, so `MAX(order_value) OVER (PARTITION BY customer_id)` broadcasts each customer's largest order onto every one of that customer's rows; `order_value / that-max` = share-of-customer-max, ROUND(,2) to 2 dp. The `NULLIF(max, 0)` guard is apt: NULLIF returns NULL when the max is 0, turning a would-be DIVISION_BY_ZERO into a NULL result (note — for DOUBLE/REAL operands division by zero yields Infinity per IEEE-754 rather than throwing, but for DECIMAL/INTEGER it throws, so the NULLIF guard is the safe, dialect-correct choice regardless of column type). A thoughtful, footgun-anticipating answer.
+**FEDERATION NOT PROBED** — the federation row (4.49944 / 310) is UNCHANGED this iter.
 
 ---
 
-## SCOPE CHECK — is the Q2 first-query defect a resource gap or a responder synthesis muddle?
+## Q1 — per-product yes/no flag, total units sold >= 500, one row per product — 5.00
 
-**RESPONDER SYNTHESIS MUDDLE — NOT a resource gap.** The responder DID produce the correct, minimal `SUM(order_value) >= 1000` GROUP BY query (the 2nd query) and even labeled it "simpler," demonstrating the resources teach the right pattern. The defect is that the responder ALSO synthesized an unnecessary, invalid window-over-grouped-column lead query — a synthesis slip, not a missing/incorrect resource. The GROUP-BY-output-must-be-grouped-or-aggregate rule and the window-evaluate-after-GROUP-BY rule are already taught correctly (and the responder's own 2nd query proves the simple GROUP BY form is well-internalized). A FIX-A "wrong card" would only duplicate existing pins and risks the defang-backfire pattern (banned-form snippet getting copied).
+Answer: `SELECT product_id, CASE WHEN SUM(units_sold) >= 500 THEN 'yes' ELSE 'no' END AS has_500_units FROM sales GROUP BY product_id;` (plus the boolean-column variant `SUM(units_sold) >= 500`).
 
-**iter907 = re-probe-don't-churn.** Re-probe a fresh phrasing of "per-customer boolean / scalar threshold (e.g. lifetime spend >= X)" next sweep to confirm the muddle is a one-off and that the responder reliably reaches for the plain GROUP BY + boolean-comparison form (not a needless window function). Do NOT add a "wrong" card; do NOT churn any GROUP-BY / window-evaluation-order pin.
+**WINDOW-OVER-GROUPED-COLUMN MUDDLE = ONE-OFF CONFIRMED — DID NOT RECUR. The iter906 slip is CLOSED.** The responder LED with the CLEAN, minimal form: a plain grouped aggregate with NO window function. There is no `SUM(...) OVER (...)` nested over a `GROUP BY`, no re-group on a windowed scalar. This is NOT a 3rd window-fn over-reach (after the iter904 window-in-WHERE and iter906 window-over-grouped-column slips). **NO findability-anchor FIX-A needed.**
+
+VERIFIED vs trino.io/docs/467 select.html + aggregate.html + WebSearch 2026-06-10:
+- `CASE WHEN SUM(units_sold) >= 500 THEN 'yes' ELSE 'no' END` is a SCALAR expression *over* an aggregate. `units_sold` appears ONLY inside `SUM()`, so the whole CASE is itself an aggregate expression — LEGAL in a GROUP BY query (the select.html rule "output expressions must be aggregate functions or GROUP BY columns" governs the *leaf column references*, which are all aggregated/grouped here). WebSearch explicitly confirmed: `SELECT CASE WHEN SUM(col) > value THEN result ELSE other END ... GROUP BY` is **legal**.
+- The boolean-column form `SUM(units_sold) >= 500 AS ...` (comparison over an aggregate → boolean) is equally valid 467.
+- `GROUP BY product_id` yields exactly one row per product. Correct shape for the ask.
+
+(iter882 verify-first applied: an initial small-model WebFetch misread claimed "comparison over aggregate in SELECT is prohibited" — that is WRONG and contradicted by aggregate-wrapping precedent from iter899 Q3 / iter900–905; a targeted WebSearch confirmed the CASE-over-aggregate form is legal. I did NOT flag the doc-correct responder answer as a defect.)
+
+## Q2 — how many orders include product 42 — 5.00
+
+Answer: `SELECT COUNT(DISTINCT order_id) AS orders_with_product_42 FROM line_items WHERE product_id = 42;`
+
+VERIFIED vs trino.io/docs/467 aggregate.html: `COUNT(DISTINCT x)` is supported (the docs reference it as the exact form `approx_distinct` approximates). The DISTINCT rationale — a product appearing on two line items within the SAME order would otherwise double-count that order — is CORRECT; counting distinct `order_id` gives the number of *orders* containing product 42, not the number of *line items*. The `WHERE product_id = 42` pre-filter is correct. Clean, idiomatic, exactly answers the question.
+
+## Q3 — how many customers haven't ordered in the last 90 days — 5.00
+
+Answer: `SELECT COUNT(DISTINCT c.customer_id) FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id AND o.order_date >= current_date - INTERVAL '90' DAY);` (+ an IDs variant).
+
+VERIFIED vs trino.io/docs/467 datetime.html + comparison/subquery semantics + WebSearch 2026-06-10:
+- **NOT EXISTS correlated anti-join is VALID in 467.** This is the canonical, decorrelatable form: a simple equality correlation (`o.customer_id = c.customer_id`) plus a constant range predicate, with NO LIMIT and NO nested subquery. The Trino correlated-subquery limitations that surfaced in search (no LIMIT inside the correlated subquery, no nested subqueries) do NOT apply to this textbook anti-join — it decorrelates cleanly and runs. (iter882 verify-first: a search result vaguely warned "NOT EXISTS may need workarounds" but that refers to LIMIT/nested edge cases, not this simple equality-correlated form — NOT a defect.)
+- `current_date` is valid (no parens, date as of query start). `current_date - INTERVAL '90' DAY` is a valid DATE-minus-interval expression yielding a DATE.
+- **"Sargable / partition pruning works" claim is ACCURATE.** `current_date - INTERVAL '90' DAY` is a query-level CONSTANT (evaluated once at query start, identical for every row — not a per-row function of `order_date`), so `order_date >= <const>` is a bare-column comparison against a constant and Trino can use it to prune partitions on `order_date`. (The "not a constant" phrasing a small-model WebFetch returned conflated compile-time literal with query-constant; for pruning purposes it is effectively constant.)
+- **Semantics are CORRECT** for "customers with no order in the last 90 days": NOT EXISTS is TRUE when the customer has zero matching orders in the window — this correctly INCLUDES never-ordered customers (no orders row at all → no match → counted) AND customers whose most recent order is older than 90 days. `COUNT(DISTINCT c.customer_id)` is one row per qualifying customer.
+
+## Q4 — orders where shipping_country and billing_country don't match incl NULLs (count + which) — 4.375
+
+Answer: `WHERE shipping_country != billing_country OR (shipping_country IS NULL AND billing_country IS NOT NULL) OR (shipping_country IS NOT NULL AND billing_country IS NULL)`; explained that `!=` with a NULL operand yields NULL (not TRUE), so NULL cases need explicit handling.
+
+VERIFIED vs trino.io/docs/467 comparison.html:
+- The `!=`-with-NULL explanation is CORRECT: `!=`/`<>` returns NULL (not TRUE/FALSE) when either operand is NULL, so a row where exactly one of the two countries is NULL would NOT be flagged by `shipping_country != billing_country` alone — hence the explicit NULL branches are genuinely needed.
+- The 3-branch logic is EXACTLY equivalent to `shipping_country IS DISTINCT FROM billing_country`:
+  - Branch 1 (`!=`) flags both-non-null-and-different (NULL/false otherwise).
+  - Branch 2 flags ship-NULL + bill-non-null.
+  - Branch 3 flags ship-non-null + bill-NULL.
+  - Both-NULL: none of the branches fire (branch 1 → NULL, branches 2/3 → false) → correctly NOT flagged.
+  - Both-equal-non-null: branch 1 → false, 2/3 → false → correctly NOT flagged.
+  This correctly flags all NULL-aware mismatches and only those. The answer RUNS and is CORRECT.
+
+**Deduction (completeness nuance, NOT an accuracy defect):** Trino 467 has the cleaner null-safe `IS DISTINCT FROM` operator (confirmed in comparison.html: "treat NULL as a known value and guarantee either a true or false outcome even in the presence of NULL"), which collapses the entire 3-branch OR to a one-liner `WHERE shipping_country IS DISTINCT FROM billing_country`. The responder's verbose 3-branch form is fully correct but did not mention the idiomatic one-liner. Weighed proportionally: Acc 5.0 (correct + correct NULL explanation), Comp 3.5 (cleaner idiom unmentioned), Clar 4.5, Act 4.5 → 4.375. This is a nuance, not a defect — no FIX-A warranted.
 
 ---
 
-## Teacher action: ZERO edits (NO-OP confirmed for the resource layer)
+## iter908 directive: DEFAULT NO-OP
+
+All 4 answers dialect-clean. **Q1 window-over-grouped-column muddle = ONE-OFF CONFIRMED, DID NOT RECUR — iter906 slip CLOSED.** NO dialect defect, NO findable-but-missing gap, NO FIX-A, NO escalation. Teacher ZERO edits.
 
 - Do NOT add any "wrong" card for Q1–Q4.
-- Do NOT mark the Q1 ROW_NUMBER-subquery + outer-WHERE-rn=1 form wrong (correct), the Q3 rn=2 second-earliest form wrong (correct), or the Q4 MAX() OVER + NULLIF share form wrong (correct).
-- Do NOT mark the Q2 SECOND query (`SUM(order_value) >= 1000` GROUP BY) wrong — it is the correct, idiomatic answer.
-- The ONLY defect is the Q2 FIRST query (window-over-grouped-column) — a responder synthesis muddle, handled by an iter907 re-probe, NOT a resource edit.
-- Federation (4.49944/310) remains the only un-passed row — bulletproofed angles only; NO federation edits.
-- Do NOT touch any iter534–905 pin. PIN Trino 467. DO NOT bump training/state.json (already passed; overall 4.58 PASS holds).
+- Do NOT mark the Q1 plain-GROUP-BY + CASE-over-SUM / boolean-comparison form wrong (it is correct 467) and do NOT add a findability anchor for the window-over-grouped-column slip (it did not recur — adding a card risks defang-backfire and duplicates the existing GROUP-BY-output / window-eval-order pins).
+- Do NOT mark Q2 COUNT(DISTINCT order_id), Q3 NOT EXISTS anti-join + current_date−INTERVAL pruning, or Q4 3-branch NULL-aware mismatch wrong (all correct).
+- OPTIONAL micro-anchor ONLY if it touches NO existing pin: a 1-line "`IS DISTINCT FROM` is the null-safe one-liner equivalent of the 3-branch `!=` OR" note near a NULL-comparison card. SKIP if it churns/duplicates a comparison-operator pin — the 3-branch answer is correct as-is, so this is purely optional polish.
+- Re-probe fresh adjacents next sweep. Federation (4.49944 / 310) is the only un-passed row — bulletproofed angles only.
+- Do NOT touch any iter534–906 pin. PIN Trino 467. NO federation edits.
+- **DO NOT bump training/state.json** (already passed; overall 4.84 PASS holds).
+
+All facts VERIFIED vs trino.io/docs/467 (select / aggregate / comparison / datetime .html) + WebSearch 2026-06-10. iter882 verify-first applied DECISIVELY: two small-model WebFetch misreads (Q1 "CASE-over-aggregate prohibited", Q3 "NOT EXISTS unsupported / current_date not constant") were re-verified against authoritative sources and found to be the OPPOSITE of the responder being wrong — neither turned into a false defect.
