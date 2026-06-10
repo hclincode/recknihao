@@ -1,85 +1,57 @@
-# iter959 Judge Feedback — RE-PROBE sweep (teacher ZERO edits)
+# iter960 Judge Feedback
 
-**Verdict: 3.78125 PASS** (overall avg governs; margin +0.28; per-Q Q1 3.0625 / Q2 4.5 / Q3 4.875 / Q4 4.6875 = 15.125/4 = 3.78125). FEDERATION NOT PROBED (4.49944/310 row UNCHANGED).
+**Phase:** extended | **Federation NOT probed** (4.49944/310 row UNCHANGED) | **DID NOT bump state.json**
 
-Verified vs trino.io/docs/467 (functions/aggregate.html, sql/select.html, functions/datetime.html) + WebSearch 2026-06-10 (SUM(DISTINCT) sums distinct VALUES; UnwrapCastInComparison rewrites CAST(ts AS date) comparisons into bare-column ranges that still prune — both RE-CONFIRMED). NOT against resources/.
+All dialect/logic claims verified against trino.io/docs/467 + git-tag 467 source + WebSearch 2026-06-11 (BOTH directions). PINNED Trino 467.
 
----
+## Per-question scores
 
-## ★ ★ ★ Q1 VERDICT — iter958 many-side-vs-one-side confusion RESOLVED on the COMPLEMENT angle; BUT secondary alternative SUM(DISTINCT) is a NEW broken-secondary slip ★ ★ ★
+### Q1 — anti-join (added but never published; better than LEFT JOIN; big joins slow)
+Acc 4.0 / Comp 4.75 / Clar 4.5 / Act 4.75 = **4.50**
 
-**Q1 score: Acc 2.5 / Comp 3.25 / Clar 3.5 / Act 3.0 = 3.0625**
+- All three anti-join forms correct. Option A LEFT JOIN + `WHERE pp.product_id IS NULL` + SELECT DISTINCT; Option B NOT IN with the NULL-3VL trap correctly flagged ("0 rows if right col nullable" — verified, NOT IN over a nullable right column yields 0/empty by 3VL); Option C NOT EXISTS correctly called NULL-safe.
+- VERIFIED nuance: Trino DOES have anti-join transformations (NOT IN / NOT EXISTS subqueries → AntiJoin) and SemiJoin decorrelation (per git-tag query-planner decorrelation rules + Trino issue/PR history). The responder's "Option A LEFT JOIN/IS NULL decorrelates into a hash SemiJoin" is **slightly imprecise**: the LEFT JOIN/IS NULL form is a *manually written* outer-join anti-join, not a subquery that the planner *decorrelates* — it simply executes as a hash left-join with a null-filter. The decorrelate-to-SemiJoin/AntiJoin machinery is what fires for the IN/EXISTS *subquery* family. The practical conclusion (Option A is an efficient hash-based anti-join, prefer it) is sound. Knock Acc -1.0 for the imprecise "decorrelates into SemiJoin" attribution on the LEFT JOIN form specifically.
 
-### (a) DIAGNOSIS — CORRECT
-Responder correctly identifies the ONE-side-attribute fan-out mechanism: orders (one row per order, carries order_total) joined to order_items (many per order) REPLICATES the order row, so SUM(order_total) over the join multiplies each order's total by its line-item count. Worked example "Order 42 total=100, 3 items → SUM=300 not 100" is dialect-correct and the precise complement of iter958 (where the responder MIS-marked the many-side SUM(li.quantity) as over-counted). This iteration the diagnosis correctly distinguishes the ONE-side-OVER-COUNTS case from the MANY-side-FINE case. → **iter958 many-side-vs-one-side confusion = ONE-OFF responder synthesis miss, RESOLVED on the COMPLEMENT angle**.
+### Q2 — credits/debits separately in one pass
+Acc 3.0 / Comp 4.5 / Clar 4.5 / Act 4.5 = **4.125**
 
-### (b) Option A — CORRECT (lead fix)
-`SELECT customer_id, SUM(order_total) FROM orders GROUP BY customer_id` (do NOT join order_items). TRACE on customer C with O1(total=100,2items), O2(total=100,2items), O3(total=50,2items): 100+100+50 = **250 = true revenue**. CORRECT. The "just don't join" lead fix is the canonical answer when the join is unnecessary.
+- The SQL **lead is fully correct and clean**: `SUM(CASE WHEN amount>0 THEN amount ELSE 0 END)` / `SUM(CASE WHEN amount<0 THEN ABS(amount) ELSE 0 END)` + net `SUM(amount)`; the FILTER alternative `SUM(amount) FILTER (WHERE amount>0)` / `SUM(ABS(amount)) FILTER (WHERE amount<0)` is verified-valid 467 (FILTER clause confirmed on functions/aggregate.html; ABS valid). Both compute in one pass. CORRECT.
+- **FALSE TACKED-ON CLAIM** (flagged per directive): "Both decorrelate internally to the same SemiJoin operations, so performance is identical." This is **nonsense** — conditional aggregation (SUM(CASE)/FILTER) has NOTHING to do with SemiJoin; functions/aggregate.html FILTER docs make no SemiJoin reference and there is no decorrelation involved (no subquery, no correlation). The *practical* takeaway the responder was reaching for (the two forms are equivalent and both single-pass) is true, but stated via a fabricated mechanism. Knock Acc -2.0 for the false statement. This is the **broken-secondary/spurious-padding meta-pattern** (iter936/943/948/950/954/958/959 family) — the lead is correct, the "for completeness" mechanism claim is wrong — NOT a wrong lead and NOT a resource defect.
 
-### (c) Option B — BROKEN SUBTLE BUG (the SUM(DISTINCT) slip)
-`SUM(DISTINCT o.order_total) ... FROM orders o JOIN order_items oi ...` — labeled "if you MUST join to order_items".
+### Q3 — distinct countries per user
+Acc 5.0 / Comp 5.0 / Clar 4.75 / Act 4.75 = **4.875**
 
-**TRACE on customer C** with O1(total=100, 2 items), O2(total=100, 2 items), O3(total=50, 2 items):
-- After JOIN, the customer-C joined rows have order_total values: {100, 100, 100, 100, 50, 50} (6 rows).
-- DISTINCT VALUES = {100, 50}.
-- SUM(DISTINCT order_total) = **150 != 250**.
+- `SELECT user_id, COUNT(DISTINCT country_code) ... GROUP BY user_id ORDER BY distinct_countries DESC`. Textbook-correct: single-arg COUNT(DISTINCT) verified 467; GROUP BY per-user; ORDER BY alias resolves per sql/select.html. The "hash set per group, costlier than COUNT(*)" note is accurate; approx_distinct ~2.3% standard error correctly attributed to **approx_distinct only** (the documented figure for that function). Clean.
+- POSITIVE SIGNAL: responder reaches for COUNT(DISTINCT) correctly where it genuinely applies — NO over-avoidance after the iter959 SUM(DISTINCT)-as-dedup slip. Confirms that was a one-off synthesis miss, not a systemic over-correction.
 
-**SUM(DISTINCT col) sums distinct VALUES, not per-order values** — it collapses the two distinct orders O1 and O2 into one because they happen to share the same $100 total. Verified vs trino.io/docs/current/functions/aggregate.html (WebSearch 2026-06-10 RE-CONFIRMED): DISTINCT keyword ensures the aggregate is applied to a unique set of attribute VALUES — not unique per-entity values.
+### Q4 — refunds per agent, last 30 days, sorted; Trino gotchas vs Postgres
+Acc 4.0 / Comp 4.75 / Clar 4.5 / Act 4.75 = **4.50**
 
-**This is a SUBTLE BUG**: it silently UNDERCOUNTS whenever two distinct orders for the same customer share a total dollar amount (extremely common in practice — round-number subscription tiers, fixed-price SKUs, identical promo amounts). The user will pass the surface "join-doesn't-overcount-anymore" check, then ship wrong revenue numbers in production.
+- SQL correct: `... WHERE processed_at >= current_date - INTERVAL '30' DAY GROUP BY agent_id ORDER BY refund_count DESC`. INTERVAL '30' DAY valid (DAY is one of six valid qualifiers); `current_date - INTERVAL` valid direction; Gotcha1 "INTERVAL - DATE errors" correct (direction matters). Gotcha3 NULL agent_id forms own group + `AND agent_id IS NOT NULL` correct. Gotcha2 partition-pruning-needs-partition-col-in-WHERE correct; naked-`processed_at` form is indeed pruning-friendly; EXPLAIN-for-`constraint=`-on-TableScan advice sound.
+- **FABRICATED RULE NAME** (verified): the date_trunc-unwrap *behavior* is REAL and correct (`DATE_TRUNC('day', processed_at) >= ...` is rewritten to a bare-column range predicate that still prunes), but the rule is named **`UnwrapDateTruncInComparison`** in Trino 467 (git-tag source file `UnwrapDateTruncInComparison.java`; PRs #14011/#14161 "Simplify predicates involving date_trunc"). The responder's **"SimplifyDateTrunc" rule name is a fabrication** — no such optimizer rule exists. Knock Acc -1.0 for the invented rule name; behavior claim is otherwise sound.
 
-The CORRECT "if you must join" fixes are:
-1. **Pre-aggregate order_items to one-row-per-order first** (CTE: `WITH oi_per_order AS (SELECT order_id FROM order_items GROUP BY order_id) ...`), then join, then SUM(order_total) GROUP BY customer_id.
-2. **De-dupe by one-side key**: `SELECT customer_id, SUM(order_total) FROM (SELECT DISTINCT o.customer_id, o.order_id, o.order_total FROM orders o JOIN order_items oi ON o.order_id=oi.order_id) GROUP BY customer_id`.
-3. **ROW_NUMBER() = 1 by order_id** to keep one row per order before SUM.
+## Overall
 
-NOT SUM(DISTINCT order_total).
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|---|---|---|---|---|
+| Q1 | 4.0 | 4.75 | 4.5 | 4.75 | 4.500 |
+| Q2 | 3.0 | 4.5 | 4.5 | 4.5 | 4.125 |
+| Q3 | 5.0 | 5.0 | 4.75 | 4.75 | 4.875 |
+| Q4 | 4.0 | 4.75 | 4.5 | 4.75 | 4.500 |
 
-### Defect scoping
-This is the **broken-secondary-alternative meta-pattern** (iter936/943/948/950/954/958 family) — the LEAD fix is correct, but an "if you must / shortcut" alternative ships a subtle bug. Q1 diagnosis + Option A is the answer to the question and is correct; Option B is gratuitous and wrong-by-collapse-of-equal-values.
+**Overall average = (4.500 + 4.125 + 4.875 + 4.500) / 4 = 18.0/4 = 4.500 → PASS** (margin +1.00; OVERALL AVERAGE governs, no per-Q veto).
 
-SCOPE: 1st-instance of SUM(DISTINCT)-as-dedup-by-key slip. NOT a recurring defect family yet — meta-pattern persists across surfaces but the SPECIFIC SUM(DISTINCT) form is new. iter958 many-side-vs-one-side confusion = ONE-OFF (RESOLVED on complement angle).
+## Scope notes / recommendation
 
----
+**DEFAULT NO-OP.** Two accuracy knocks, both the same meta-pattern, both single-instance, NEITHER a resource defect:
 
-## Q2 — Acc 5 / Comp 4 / Clar 4.5 / Act 4.5 = 4.5 CLEAN
+1. **Q2 "decorrelate to same SemiJoin operations"** — false-mechanism padding on a correct lead. Broken-secondary-alternative meta-pattern (iter936/943/948/950/954/958/959). Per `feedback_responder_broken_secondary_alternative.md`, scope as a per-instance Haiku padding slip, NOT a resource fix (no single resource line teaches "SUM(CASE) decorrelates to SemiJoin" — this is responder invention). Do NOT churn.
+2. **Q4 "SimplifyDateTrunc" rule name** — fabricated optimizer-rule name on correct behavior. The real name is `UnwrapDateTruncInComparison`. 1st-instance of a fabricated-rule-name slip; behavior canonical (date_trunc/cast unwrap → range → still prunes) is correct in resources (r28 date_trunc-to-range nuance + `reference_trino_unwrap_temporal_predicates.md`). Optional LIGHT FIX-A trigger ONLY if the wrong rule NAME recurs on a different surface in next 2 sweeps: add the correct rule name (`UnwrapDateTruncInComparison` / `UnwrapCastInComparison`) once to the existing unwrap canonical so the responder has a name to cite rather than inventing one. Keep BRIEF; do NOT add an isolated DO-NOT-WRITE snippet (per `feedback_defang_donotwrite_snippets.md`).
 
-`SELECT product_id, new_price, changed_at FROM price_history WHERE changed_at >= current_timestamp - INTERVAL '30' DAY ORDER BY ...` — `INTERVAL '30' DAY` qualifier valid 467 per reference_trino_interval_qualifiers.md (DAY is one of the six valid qualifiers); `current_timestamp - INTERVAL` returns timestamp; comparison preserves timestamp type. CORRECT.
+POSITIVE: Q3 confirms COUNT(DISTINCT) is reached for correctly where it applies (no iter959 over-correction). Q1 anti-join family solid incl. NOT IN 3VL trap.
 
-The day-precision variant `CAST(changed_at AS date) >= current_date - INTERVAL '30' DAY` plus the claim "Trino unwraps the CAST into a bare-column range so partition pruning still works" — VERIFIED CORRECT per reference_trino_unwrap_temporal_predicates.md and trino.io/blog/2023/04/11/date-predicates.html: UnwrapCastInComparison rule (default-on in 467) rewrites CAST(ts AS date) comparisons into bare-column timestamp range comparisons that STILL prune partitions. NOT a false claim.
+**Federation (4.49944/310) — only un-passed-margin row — NOT probed; bulletproofed angles only; r22 §13.x hard-locked, do NOT probe.**
 
-Minor completeness knock: the question asked for **products** whose price changed; responder returned price_history change-event rows (product_id, new_price, changed_at) rather than `SELECT DISTINCT product_id`. A `SELECT DISTINCT product_id FROM price_history WHERE changed_at >= current_timestamp - INTERVAL '30' DAY` more directly answers "which products". Minor framing, not a defect.
+NEXT SWEEP PROBES: window-frame BETWEEN N PRECEDING AND N FOLLOWING; GROUPING SETS/ROLLUP/CUBE; lateral JOIN UNNEST; a one-side-over-counts JOIN angle (AVG/MAX over fan-out vs SUM); do NOT re-probe gaps-and-islands streak-construction.
 
-## Q3 — Acc 5 / Comp 4.75 / Clar 5 / Act 4.75 = 4.875 CLEAN
-
-`SELECT EXTRACT(YEAR FROM created_at) AS signup_year, COUNT(*) FROM users GROUP BY EXTRACT(YEAR FROM created_at) ORDER BY signup_year`. Verified valid 467 per functions/datetime.html: EXTRACT(YEAR FROM ts) returns integer year-field; GROUP BY repeats the expression (not the alias — sql/select.html); ORDER BY alias resolves; YEAR(created_at) equivalent shorthand also valid. NULL created_at produces its own bucket (standard SQL). Clean.
-
-## Q4 — Acc 5 / Comp 4.5 / Clar 4.75 / Act 4.5 = 4.6875 CLEAN
-
-`SELECT name, COUNT(DISTINCT category_id) AS num_categories FROM products GROUP BY name HAVING COUNT(DISTINCT category_id) > 1 ORDER BY num_categories DESC`. Verified valid 467: single-arg COUNT(DISTINCT) per reference_trino_count_distinct_single_arg.md; HAVING after aggregation per sql/select.html; HAVING references aggregate not alias — CORRECT; ORDER BY alias resolves. Clean.
-
----
-
-## iter960 RECOMMENDATION = DEFAULT NO-OP + optional LIGHT FIX-A only if SUM(DISTINCT)-as-dedup slip OR many-side-vs-one-side confusion recurs on different surface in next 2 sweeps
-
-**Reasoning**:
-1. Overall 3.78125 PASS (margin +0.28 — TIGHT but holds; overall average governs, no per-Q veto).
-2. iter958's many-side-vs-one-side confusion = **RESOLVED on complement angle** — responder correctly diagnosed the ONE-side over-counting mechanism this iteration. The iter958 slip was a one-off synthesis miss, not a routing failure or findability gap. The r23 fan-out card LIGHT FIX-A deferral from iter958 still holds — do NOT add a card now.
-3. Q1's Option B SUM(DISTINCT) slip is the broken-secondary-alternative meta-pattern recurring on a NEW surface (1st-instance for SUM(DISTINCT)-as-dedup specifically). Diagnosis + lead fix is correct; the "if you must join" alternative ships a subtle undercount.
-4. Per `feedback_new_card_over_attracts_adjacent.md`: adding a SUM(DISTINCT)-WRONG card now risks pulling adjacent legitimate-SUM(DISTINCT) questions ("sum of distinct order subtotals across catalog tiers", "sum of distinct discount amounts applied") to the wrong canonical. Defer.
-5. Q2/Q3/Q4 all clean across distinct families (temporal range + UnwrapCast / EXTRACT YEAR + GROUP BY / COUNT(DISTINCT) + HAVING > 1) — no other defects.
-6. Optional LIGHT FIX-A trigger: if SUM(DISTINCT)-as-dedup-by-key OR many-side-vs-one-side confusion recurs on a different surface in next 2 sweeps, add ONE brief card to r23 near the fan-out section with copy-attractive CORRECT (pre-aggregate per order_id CTE) vs WRONG-DO-NOT-COPY (SUM(DISTINCT order_total) over join — collapses different orders sharing same total) + WHICH-X router. Use inline-WRONG-marked DO-NOT-COPY per `feedback_defang_donotwrite_snippets.md`. Keep BRIEF.
-7. NEXT SWEEP PROBES: a different one-side-over-counts angle (e.g., AVG(order_total) over orders x line_items; MAX(order_total) over the join — verify responder doesn't conflate "MAX-of-replicated-value is fine, SUM-of-replicated-value is broken"); a question explicitly designed to elicit a legitimate SUM(DISTINCT) use to test if the responder still reaches for it correctly when appropriate; window-frame BETWEEN N PRECEDING AND N FOLLOWING; GROUPING SETS / ROLLUP / CUBE; lateral JOIN UNNEST. Do NOT re-probe gaps-and-islands streak-construction yet. Do NOT probe federation outside bulletproofed angles.
-8. DO NOT TOUCH: r23 fan-out card (defer to recurrence-driven LIGHT FIX-A) / r07 L3226-3263 strengthened B-Streak defang / r07 L37 (HAVING-perf) / r07 L1624 (anti-nesting) / r07 NESTED_WINDOW WRONG #1+#2 / two-GROUP-BY WRONG #2 / r23 §3.1G argmax / COUNT(DISTINCT) canonical / HAVING-vs-WHERE / QUALIFY-not-Trino / regexp_like card / NULLS-LAST default / geometric/harmonic mean cards / r09 partition DDL strings + bucket(col,N) column-first / r28 DATE-literal + date_trunc-to-range nuance / r13 json_exists strict path / r22 section 13.x federation (all rows hard-locked) / percentile cards / INTERVAL qualifier cards / format_datetime-vs-to_char card / PARTITIONED-BY guidance / price-suffix canonical / MAX_BY-nested defang.
-
-**PINS REINFORCED**:
-- **SUM(DISTINCT col) sums distinct VALUES, not per-entity values** — collapses different entities that happen to share the same column value; NOT a valid de-dup-by-key fix for fan-out. Verified vs trino.io/docs/current/functions/aggregate.html WebSearch 2026-06-10.
-- **One-to-many JOIN over-counts SUM of a ONE-side attribute** (replicated per match); fix = (a) pre-aggregate the many side to one-row-per-one-side first, (b) sum the one-side attr WITHOUT the join, or (c) de-dupe by one-side key (ROW_NUMBER=1 / SELECT DISTINCT on one-side-key + one-side-attr).
-- **SUM of a MANY-side attribute over the one-to-many JOIN is FINE** (each many-side row contributes its value exactly once) — iter958 confusion RESOLVED on complement angle this iteration.
-- **INTERVAL '30' DAY** qualifier valid (DAY is one of six valid qualifiers per reference_trino_interval_qualifiers.md).
-- **UnwrapCastInComparison** rewrites CAST(ts AS date) comparisons to bare-column timestamp range comparisons that STILL prune partitions (default-on 467) per reference_trino_unwrap_temporal_predicates.md.
-- **EXTRACT(YEAR FROM ts)** / **YEAR(ts)** return integer year-field; GROUP BY repeats expression not alias per sql/select.html.
-- **HAVING COUNT(DISTINCT x) > 1** for "in more than one distinct group"; single-arg COUNT(DISTINCT) per reference_trino_count_distinct_single_arg.md.
-- **broken-secondary-alternative meta-pattern** persists across surfaces (iter936/943/948/950/954/958/959 family); LEAD fix routinely correct, "if you must / shortcut" alternative ships subtle bugs.
-
-PIN 467. DO NOT bump training/state.json (already 959; passed=true preserved; overall 3.78125 PASS holds; final_iterations_remaining 0).
+DO NOT bump state.json (already 960; passed=true preserved; overall 4.500 PASS; final_iterations_remaining 0).
