@@ -1,101 +1,97 @@
-# Iter 935 Feedback — DEFAULT NO-OP durability sweep (teacher ZERO edits)
+# Iter 936 Feedback — DEFAULT NO-OP durability sweep (teacher ZERO edits)
 
-**Overall**: 4.985 STRONG PASS (Q1 5.00 / Q2 5.00 / Q3 5.00 / Q4 4.94 = 19.94/4 = 4.985; margin +1.485 over 3.5 threshold; OVERALL AVERAGE governs, no per-Q veto).
+**Overall**: 4.625 PASS (Q1 5.00 / Q2 3.875 / Q3 5.00 / Q4 4.625 = 18.50/4 = 4.625; margin +1.125 over 3.5 threshold; OVERALL AVERAGE governs, no per-Q veto).
 
 **Federation NOT probed** (4.49944/310 row UNCHANGED).
 
-All dialect claims verified vs trino.io/docs/467 (functions/aggregate.html, functions/window.html, functions/datetime.html, functions/math.html) + Trino git-tag 467 source (MathFunctions.java) via WebFetch/WebSearch 2026-06-10 — NOT against resources/; iter882 verify-first applied BOTH directions.
+All dialect claims verified vs trino.io/docs/467 (functions/aggregate.html, functions/window.html, functions/datetime.html, sql/select.html, language/types.html) + Trino git-tag 467 source signals + WebSearch/WebFetch 2026-06-10 — NOT against resources/; iter882 verify-first applied BOTH directions.
 
 ---
 
 ## Per-question scores
 
-### Q1 — count distinct payment methods per customer (3 credit_card + 1 paypal → 2)
+### Q1 — accounts with >=1 overdue 'unpaid' invoice
 **Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = 5.00 CLEAN**
 
-`SELECT customer_id, COUNT(DISTINCT method) FROM payments GROUP BY customer_id` — canonical Trino 467.
-- COUNT(DISTINCT x) single-arg with GROUP BY VALID (verified aggregate.html count + standing single-arg pin; multi-arg `COUNT(DISTINCT a,b)` is a parse error, but the question is single-column so not relevant).
-- "DISTINCT dedups automatically, no extra work" — TRUE for the user (planner handles uniqueness); efficient framing accurate.
-- Worked example (3 credit_card + 1 paypal → 2) correct.
+`SELECT COUNT(DISTINCT account_id) FROM invoices WHERE due_date < CURRENT_DATE AND status='unpaid'` — fully correct.
 
-### Q2 — each customer's SECOND-largest order value
+- VERIFIED `CURRENT_DATE` is a built-in returning the current date (datetime.html: "Returns the current date as of the start of the query").
+- VERIFIED `CAST(CURRENT_TIMESTAMP AS DATE)` is valid for timestamp due_date (datetime.html: `date(x)` is alias for `CAST(x AS date)`).
+- VERIFIED `date < current_date` comparison valid (same-type orderable).
+- VERIFIED COUNT(DISTINCT x) single-arg form valid (standing pin).
+- DISTINCT correctly dedups accounts with multiple overdue invoices; `status='unpaid'` correctly excludes NULL status (3VL). Bonus `SELECT DISTINCT account_id` alternative apt.
+
+### Q2 — first AND most-recent order date per customer
+**Acc 3.5 / Comp 4.5 / Clar 3.5 / Act 4.0 = 3.875 (proportional ding for misleading first-draft framing; correct lead delivered)**
+
+The DELIVERED/RECOMMENDED answer is the clean canonical: `SELECT customer_id, MIN(created_at) AS first_order_date, MAX(created_at) AS most_recent_order_date FROM orders GROUP BY customer_id` — fully correct, idiomatic min/max-per-group.
+
+★ **DEFECT: the throwaway FIRST form is presented as merely "more verbose than necessary" when it is actually a PARSE/SEMANTIC ERROR.** The responder wrote a SELECT with `first_value(...) OVER (...) AS first_order_date` and `last_value(...) OVER (...) AS most_recent_order_date` and then placed those same `first_value(...) OVER (...)` / `last_value(...) OVER (...)` window-function expressions INSIDE the GROUP BY clause. VERIFIED Trino 467 rejects this: window functions are evaluated AFTER GROUP BY/HAVING, so a window function CANNOT appear in GROUP BY — Trino raises a semantic error of the form "GROUP BY clause cannot contain aggregations, window functions or grouping operations" (cf. trinodb/trino #25984 and pinned dialect fact). So the framing "Actually that's more verbose than necessary" UNDER-STATES the problem: a reader who copies the first block hits an error, not a verbose-but-valid query.
+
+VERIFY-BOTH-DIRECTIONS: (a) the FIRST form IS broken — confirmed; (b) the SECOND/lead-recommended form IS valid + correct — confirmed; min/max(created_at) GROUP BY customer_id is the canonical pattern (also a strong simplification — no need for window functions at all for this question).
+
+SCOPE = **RESPONDER SLIP on taught content (synthesis/presentation slip on an optional throwaway draft), NOT a findable resource gap**: resources already teach (i) MIN/MAX per group as the canonical first/last-per-customer pattern; (ii) the window-function-evaluation-order rule and the GROUP-BY-cannot-contain-window-function constraint; (iii) the default-frame trap for `last_value` (which is itself a separate gotcha the responder side-stepped by not relying on the OVER form). The correct answer WAS delivered as the LEAD recommendation; only the "more verbose than necessary" characterization of the discarded draft is wrong. → RE-PROBE-DON'T-CHURN, NO FIX-A this iter. If a future probe asks "first AND last in one row" and the responder again presents a window-in-GROUP-BY draft as merely "verbose", escalate (2nd instance) to a small router card under the first/last-per-group neighborhood that explicitly states "window functions cannot appear in GROUP BY (semantic error), prefer MIN/MAX-per-group for first/last-by-time questions."
+
+### Q3 — most popular product category per region (argmax-per-group)
 **Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = 5.00 CLEAN**
 
-Two-variant answer with subquery + outer WHERE — both dialect-correct.
-- **DENSE_RANK semantics verified** (window.html): for [100,100,90,80] returns 1,1,2,3 — so DENSE_RANK rank=2 picks the second-highest DISTINCT value. Framing "second-highest DISTINCT value (ties at top share rank 1)" CORRECT.
-- **ROW_NUMBER semantics verified**: 1,2,3,4 unique sequential — picks a single literal "2nd row"; deterministic tiebreaker via secondary ORDER BY (order_id) CORRECT.
-- **RANK gap caveat verified ACCURATE**: window.html — "tie values in the ordering will produce gaps in the sequence" → for [100,100,90,80] RANK returns 1,1,3,4 → WHERE rank=2 returns ZERO rows. Responder's warning is exactly right and load-bearing.
-- **Subquery wrapping**: REQUIRED in 467 because (a) window-fn alias not usable in same-level WHERE, (b) QUALIFY absent in 467. Responder DID wrap; CORRECT.
-- Both framings (DENSE_RANK for distinct-value, ROW_NUMBER for literal row) make the trade-off explicit — strong pedagogy.
+`SELECT region, max_by(category, order_count) FROM (SELECT region, category, COUNT(*) AS order_count FROM orders GROUP BY region, category) GROUP BY region` — fully correct argmax-per-group shape.
 
-### Q3 — % of users with login in last 7 days (2M users, huge login table)
-**Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0 = 5.00 CLEAN**
+- VERIFIED `max_by(x, y)` returns x at max y (aggregate.html: "Returns the value of `x` associated with the maximum value of `y` over all input values").
+- VERIFIED nested subquery shape: inner COUNT(*) GROUP BY (region, category) computes per-(region, category) order counts, outer max_by(category, order_count) GROUP BY region selects the category at the max count per region — canonical argmax-per-group pattern.
+- VERIFIED `max_by(category, ROW(order_count, category))` tie-break form: ROW types in Trino 467 are comparable/orderable when their fields are (PR #4647 simplifies comparable/orderable type operators); bigint+varchar are both orderable; ROW comparison is lexicographic by field order, so `ROW(order_count, category)` first sorts by count, then breaks ties by category for deterministic ordering. Responder's tie-break framing is correct.
+- Arbitrary tie behavior of plain max_by also correctly flagged.
 
-Two forms offered:
-1. `WITH active_users AS (SELECT DISTINCT u.user_id FROM users u LEFT JOIN login_events e ON e.user_id=u.user_id AND e.event_time >= CURRENT_TIMESTAMP - INTERVAL '7' DAY WHERE e.user_id IS NOT NULL) SELECT ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM users), 2) FROM active_users`
-2. Leaner: `ROUND(100.0 * COUNT(DISTINCT e.user_id) / (SELECT COUNT(*) FROM users), 2) FROM login_events e WHERE e.event_time >= CURRENT_TIMESTAMP - INTERVAL '7' DAY`
+### Q4 — avg line items per order for orders with total > $100
+**Acc 4.75 / Comp 4.5 / Clar 4.5 / Act 4.75 = 4.625 (small ding for the awkward first draft, lead-recommended form correct)**
 
-All facts VERIFIED:
-- **INTERVAL '7' DAY**: DAY is a valid INTERVAL qualifier in 467 (types.html / SqlBase.g4 intervalField = YEAR|MONTH|DAY|HOUR|MINUTE|SECOND); subtraction `timestamp − interval` supported (datetime.html operator examples).
-- **CURRENT_TIMESTAMP returns TIMESTAMP WITH TIME ZONE** (verified datetime.html: "Returns the current timestamp with time zone…").
-- **TIMESTAMP → TIMESTAMP WITH TIME ZONE implicit coercion EXISTS in 467** (iter916 pinned fact, git-tag TypeCoercion.java) — so `e.event_time (plain TIMESTAMP) >= CURRENT_TIMESTAMP - INTERVAL '7' DAY (TIMESTAMP WITH TIME ZONE)` does NOT raise a type error; the comparison runs.
-- **LEFT JOIN ... WHERE right.user_id IS NOT NULL = semi-join idiom**: valid; the move-filter-into-ON is what keeps the JOIN matching only recent events while the IS NOT NULL filters non-matchers. (Slight inefficiency vs `WHERE EXISTS` / `INNER JOIN` since LEFT JOIN preserves all users then filters — the leaner login_events-only form sidesteps this.)
-- **DISTINCT dedup** correct (a user with multiple events counted once).
-- **100.0 decimal-promo** correct (BIGINT/BIGINT would truncate; LEADING 100.0 forces decimal arithmetic before division — standing pin).
-- **Partition pruning on event_time** callout accurate (bare-column on partition col is sargable).
-- Both forms valid; the leaner form is correctly framed as the perf-conscious choice for "huge login table".
+The DELIVERED/RECOMMENDED answer is the clean canonical:
+```
+SELECT AVG(line_item_count) FROM (
+  SELECT o.order_id, COUNT(ol.order_id) AS line_item_count
+  FROM orders o INNER JOIN order_lines ol ON o.order_id = ol.order_id
+  WHERE o.total_amount > 100
+  GROUP BY o.order_id
+)
+```
 
-### Q4 — average rating rounded to nearest HALF-point (4.2→4.0, 4.4→4.5)
-**Acc 5.0 / Comp 4.75 / Clar 5.0 / Act 5.0 = 4.94 CLEAN**
+- VERIFIED nested aggregate: inner per-order COUNT(*)-style aggregate, outer AVG over the subquery with NO GROUP BY — a bare aggregate query without GROUP BY collapses to ONE scalar row (standard SQL + Trino behavior); the discarded `GROUP BY CAST(1 AS BIGINT)` "dummy grouping" the responder rejected was unnecessary AND the responder correctly removed it.
+- VERIFIED INNER JOIN excludes orders with no line items (zero-count orders excluded); LEFT JOIN alternative correctly flagged for the inclusive interpretation.
+- VERIFIED `WHERE o.total_amount > 100` is pre-aggregation row-filter (correct placement; HAVING would be wrong). "Pushed down/sargable" framing approximately correct (Trino can push the total_amount predicate into the orders scan).
+- `COUNT(ol.order_id)` counts non-NULL matched line-item rows per order; since `ol.order_id` is the join key (always present in matched rows), it behaves identically to `COUNT(*)` here.
 
-`SELECT product_id, ROUND(AVG(rating) * 2.0) / 2.0 AS rating_rounded_to_half FROM reviews GROUP BY product_id`
+★ **MINOR DEFECT: the throwaway first draft included `GROUP BY CAST(1 AS BIGINT)` ("dummy grouping") which the responder labeled merely "awkward" before discarding.** The dummy GROUP BY is not an ERROR per se (grouping by a constant produces one group, same result as no GROUP BY) but the framing as "awkward" rather than "unnecessary / a bare aggregate with no GROUP BY already collapses to one scalar row" is a slight clarity miss. Proportional small ding only because the lead-recommended form IS the clean correct shape.
 
-- **Round-to-nearest-half idiom arithmetically correct**: 4.2*2=8.4→ROUND=8→8/2.0=4.0 ✓; 4.4*2=8.8→ROUND=9→9/2.0=4.5 ✓; 3.75*2=7.5→ROUND=8→8/2.0=4.0 ✓ — all three worked examples land.
-- **ROUND uses HALF_UP** verified vs git-tag 467 source `core/trino-main/src/main/java/io/trino/operator/scalar/MathFunctions.java`: single-arg `round(double)` delegates to `Math.round` (HALF_UP); decimal variants explicitly use `RoundingMode.HALF_UP`. Responder's "rounds half-up" claim is documentation/source verified, and the 3.75→4.0 example demonstrates it (7.5 rounds UP to 8 under HALF_UP).
-- **ROUND signatures**: both `round(x)` (nearest integer) and `round(x, d)` (d decimal places) exist (math.html).
-- **Pedagogical quibble (Comp 4.75)**: the "use 2.0 not 2 to avoid int truncation" warning is technically loose — AVG(rating) returns double regardless, and `double * integer` widens to double in Trino (no truncation at this step); the actual risk would only appear if BOTH operands of `/` were integers. So `2.0` is best practice for clarity but not load-bearing here. Harmless, slight over-caution; not a defect. Minor -0.25 on Comp for the technically-imprecise reason given, not for the practice itself.
+SCOPE = RESPONDER SLIP on taught content (presentation/draft polish), NOT a findable resource gap. The bare-aggregate-no-GROUP-BY-collapses-to-one-row fact is already implicit across many resources via dozens of `SELECT COUNT(*) FROM t` / `SELECT AVG(x) FROM t` examples. RE-PROBE-DON'T-CHURN.
 
 ---
 
-## Critical-checks crosswalk (verified BOTH directions per iter882 verify-first)
+## Defect scope summary
 
-| Claim | Direction | Verdict | Source |
-|---|---|---|---|
-| COUNT(DISTINCT col) single-arg + GROUP BY valid | suspicious-claim | CONFIRMED valid | aggregate.html, count single-arg pin |
-| DENSE_RANK (1,1,2,3) / RANK gap (1,1,3,4) / ROW_NUMBER (1,2,3,4) | suspicious-claim | CONFIRMED verbatim | window.html quoted descriptions |
-| Window-alias NOT usable in same-level WHERE (needs subquery); QUALIFY absent in 467 | "that's wrong" instinct | CONFIRMED responder's subquery is required | standing pin (QUALIFY absent in 467) |
-| INTERVAL '7' DAY valid; CURRENT_TIMESTAMP − INTERVAL works | suspicious-claim | CONFIRMED valid | datetime.html operator examples, types.html intervalField |
-| TIMESTAMP → TIMESTAMP WITH TIME ZONE implicit coercion EXISTS in 467 | "that's wrong" instinct check | CONFIRMED (iter916 pin, git-tag TypeCoercion.java) — comparison does NOT error | standing pin |
-| LEFT JOIN/IS NULL semi-join + DISTINCT dedup + 100.0 decimal-promo | suspicious-claim | CONFIRMED all valid | standing pins |
-| ROUND(x*2.0)/2.0 round-to-nearest-half arithmetically correct | suspicious-claim | CONFIRMED for all 3 worked examples | math.html + worked verification |
-| ROUND single-arg rounds HALF_UP | suspicious-claim | CONFIRMED via git-tag MathFunctions.java (Math.round + RoundingMode.HALF_UP) | source + standing CAST-to-int HALF_UP pin |
-| ROUND(x) and ROUND(x,d) both exist | suspicious-claim | CONFIRMED | math.html |
-| "*2 not *2.0 would truncate" warning | "that's wrong" instinct check | TECHNICALLY LOOSE (double*int widens to double) — harmless over-caution NOT defect | math.html implicit widening |
+- **Q1**: NO defect — clean.
+- **Q2**: RESPONDER SLIP on taught content (window-fn-in-GROUP-BY presented as "verbose" not "broken" on a discarded first draft; lead-recommended form correct). NO findable gap; resources teach the rule + the canonical MIN/MAX-per-group answer. RE-PROBE-DON'T-CHURN. 1st instance of this specific framing-slip → escalate ONLY if recurs (2nd instance) — small router card under first/last-per-group neighborhood.
+- **Q3**: NO defect — clean argmax-per-group with correct ROW tie-break.
+- **Q4**: RESPONDER SLIP on taught content (dummy-GROUP-BY-CAST(1 AS BIGINT) framed as "awkward" not "unnecessary"; lead-recommended form correct). NO findable gap.
+
+NO RESOURCE DEFECTS. NO FINDABLE GAPS. NO FIX-A.
 
 ---
 
-## Scope tags
+## iter937 directive — DEFAULT NO-OP
 
-- **NO RESOURCE DEFECT** — no resource taught anything wrong.
-- **NO RESPONDER SLIP on taught content** — every dialect claim verified accurate; subquery-wrap correctly applied (no QUALIFY in 467); RANK-gap warning load-bearing and right; HALF_UP rounding source-confirmed.
-- **NO FINDABLE GAP** — Q4 "*2.0 avoids int truncation" is a minor pedagogical looseness, NOT a missing card / NOT a dialect defect / NOT load-bearing for correctness (worked examples all land regardless). Resources teach 100.0 decimal-promo + ROUND idioms extensively; adding a "double widens through int" card would risk New-Card-Over-Attracts-Adjacent regression for zero correctness gain.
+- Teacher ZERO edits this iter (already zero).
+- DO re-probe a "first-and-last-per-group" / "earliest-and-latest-in-one-row" question next sweep to confirm responder leads with MIN/MAX-per-group and does NOT present window-functions-inside-GROUP-BY as merely "verbose". Escalate to a small router card under r07 first/last-per-group neighborhood ONLY if the framing-slip recurs (2nd instance).
+- DO re-probe a "bare aggregate over a subquery" question next sweep to confirm responder skips the dummy-GROUP-BY draft entirely. Same escalation rule.
+- Optional adjacents (NO pin touch, SKIP if duplicative): argmax-per-group with explicit tie-break (max_by(x, ROW(y, x))); per-customer first-and-last ORDER BY with NULLs in created_at; AVG-over-per-group-COUNT with LEFT JOIN to include zero-count groups.
+- CONSIDER federation (thinnest passing row 4.49944/310, long un-retested — bulletproofed angles only). PRESERVE full iter534-935 pin inventory; NO federation edits.
+- PIN 467. DO NOT bump training/state.json (already 936; passed=true preserved; overall 4.625 PASS holds).
 
----
-
-## Iter 936 directive
-
-**iter936 = DEFAULT NO-OP / durability-breadth**. Teacher ZERO edits warranted.
-
-- All 4 dialect-clean; QUARTER/WEEK INTERVAL family (iter933 ADD-A-QUARTER card) NOT touched this iter, continues cool-down per New-Card-Over-Attracts-Adjacent lesson (skipped 2 sweeps now).
-- Optional low-priority re-probes (SKIP if duplicative):
-  - **Top-K-per-group (K>2)** variants: "third-highest order" / "top 5 per category" to keep DENSE_RANK vs ROW_NUMBER distinction durable.
-  - **Last-N-days percent active** variants with explicit CAST(event_time AS TIMESTAMP WITH TIME ZONE) — confirm responder doesn't add an UNNECESSARY CAST (iter916 coercion-exists pin).
-  - **Round-to-arbitrary-step**: round-to-nearest-0.25 (ROUND(x*4)/4) or round-to-nearest-5 (ROUND(x/5)*5) — confirm responder generalizes the *N/divide-by-N idiom.
-  - **COUNT(DISTINCT ROW(a,b))** distinct-combinations re-probe (iter925 slip arc).
-- Federation (4.49944/310) only un-passed row — bulletproofed angles only.
-- PRESERVE full iter534-934 pin inventory.
-- PIN 467.
-- NO federation edits.
-- **DO NOT bump training/state.json** (already 935; passed=true preserved; overall 4.985 STRONG PASS holds).
-
-PRESERVED PINS (TOUCHED THIS ITER, all confirmed): COUNT(DISTINCT x) single-arg; DENSE_RANK/RANK/ROW_NUMBER semantics + RANK-gap-zero-rows; QUALIFY absent in 467 (subquery required); INTERVAL qualifiers = YMD-HMS only (DAY valid); CURRENT_TIMESTAMP = TIMESTAMP WITH TIME ZONE; TIMESTAMP→TIMESTAMP WITH TIME ZONE coercion EXISTS in 467; LEFT JOIN/IS NULL semi-join idiom; 100.0 decimal-promo avoids integer-division truncation; ROUND single-arg + ROUND(x,d) HALF_UP rounding (git-tag MathFunctions.java).
+Pinned dialect facts touched this iter (all verified against trino.io/docs/467 + Trino source/GitHub):
+- Window functions CANNOT appear in GROUP BY (semantic error "GROUP BY clause cannot contain aggregations, window functions or grouping operations").
+- MIN/MAX per group via GROUP BY is the canonical first/last-by-time-per-entity pattern (no window function needed).
+- max_by(x, y) returns x at max y; ROW types are comparable/orderable when fields are; max_by(x, ROW(y, x)) is the canonical deterministic tie-break shape.
+- COUNT(DISTINCT col) single-arg valid.
+- CURRENT_DATE built-in; CAST(CURRENT_TIMESTAMP AS DATE) valid for DATE-column compare against timestamp.
+- Bare aggregate (SELECT AVG(x) FROM t) with no GROUP BY produces one scalar row; no dummy GROUP BY needed.
+- AVG over a subquery of per-group COUNT computes per-entity averages correctly.
+- INNER vs LEFT JOIN semantics for zero-count entities preserved.
