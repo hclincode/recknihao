@@ -1,6 +1,7 @@
 {
-  "iteration": 897,
+  "iteration": 898,
   "phase": "extended",
+  "notes_898": "iter898 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
   "notes_897": "iter897 re-probe sweep — zero edits; regexp_like `~`-slip one-off confirm + 3 fresh adjacents.",
   "notes_896": "iter896 re-probe sweep — zero edits; email-format-validation alias-in-WHERE one-off confirm + 3 fresh adjacents.",
   "notes_895": "iter895 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
