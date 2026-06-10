@@ -1,52 +1,62 @@
-# Judge Feedback — iter895 (EXTENDED PHASE, durability sweep with ONE Q3 defect)
+# Judge Feedback — iter896 (re-probe sweep)
 
-**Overall: 4.33 PASS** (per-Q 4.9375 / 4.9375 / 2.50 / 4.9375 = 17.3125/4 = 4.328; margin +0.83 over 3.5 threshold; **overall average governs — no per-Q veto**). Federation NOT probed (4.49944/310 row UNCHANGED).
+**Overall: 4.59 PASS** (per-Q 3.375 / 5.00 / 5.00 / 5.00 = 18.375/4 = 4.594; margin +1.09; OVERALL AVERAGE governs — no per-Q veto). PIN Trino 467. FEDERATION NOT PROBED (4.49944/310 row UNCHANGED). DO NOT bump training/state.json (already passed; overall PASS holds).
 
-Three dialect-clean answers + **ONE genuine Q3 dialect-accuracy DEFECT (alias-in-WHERE, unsupported in Trino) PLUS a logic bug (query-1 filter value never matches its own CASE outputs)**. The defect is a **RESPONDER SYNTHESIS SLIP**, not a resource gap — resources/ already teach the alias-in-WHERE rule correctly and prominently. → **iter896 = re-probe-don't-churn** (optional narrow findability anchor in an email/format-validation context only; do NOT churn any pin).
-
-All facts VERIFIED vs trino.io/docs/467 (select.html / datetime.html / aggregate.html / window.html) via WebFetch 2026-06-10. PIN Trino 467.
+All dialect facts VERIFIED vs trino.io/docs/467 (regexp / string / datetime / conversion / window .html) via WebFetch 2026-06-10 — NOT against resources/. iter882 verify-first lesson applied (did not flag any doc-CORRECT claim as a defect).
 
 ---
 
-## Q1 — truncate created_at to Monday 00:00, group by week — 4.9375 (Acc5 / Comp5 / Clar4.75 / Act5)
-`date_trunc('week', created_at) AS week_start`, `GROUP BY date_trunc('week', created_at)`. "Returns Monday at midnight; no day-of-week math."
+## TWO CRITICAL CHECKS ON Q1
 
-**CORRECT.** VERIFIED datetime.html: date_trunc supports `week`; doc example truncates 2001-08-22 (a Wednesday) → **2001-08-20 00:00:00.000 (a Monday)** = start of ISO week at midnight. Trino weeks are Monday-start (ISO-8601), so no day-of-week arithmetic is needed — the responder's framing is exactly right. GROUP BY repeats the **expression** (not a SELECT alias) → valid (correctly sidesteps the alias-in-GROUP-BY trap). Tiny clarity nit only: could note timestamp-with-tz week boundaries follow session zone — not a defect.
+### (A) ALIAS-IN-WHERE SLIP RE-PROBE → ONE-OFF CONFIRMED, iter895 slip is CLOSED
+The iter896 Q1 re-probe explicitly BAITED the iter895 alias-in-WHERE mistake ("can I just say `WHERE looks_valid = false`, referencing the flag I computed up in the SELECT?"). **The responder ANSWERED CORRECTLY:** "No, you cannot directly reference a column alias from SELECT in the WHERE clause" and supplied the CTE + subquery fixes (compute the flag in an inner query / CTE, then filter the real column in the outer query). **The alias-in-WHERE slip did NOT recur.** → **ONE-OFF CONFIRMED, the iter895 slip is closed; NO findability-anchor FIX-A needed.** This structural aspect scores **5.0** (the alias-in-WHERE rule cards at r27 §4.2, r23 §8, r07 are holding in practice — do NOT churn them).
 
-## Q2 — earliest "first seen" timestamp per user — 4.9375 (Acc5 / Comp5 / Clar4.75 / Act5)
-`MIN(created_at) AS first_seen ... GROUP BY user_id`; or `MIN(created_at) OVER (PARTITION BY user_id)` for per-row.
+### (B) NEW DIALECT DEFECT in the SAME Q1 answer — the `~` regex operator (CONFIRMED)
+The responder's example computed the flag as `(phone_number ~ '^\+?1?\d{10}$') AS looks_valid` — the **`~` regex-match operator**.
 
-**CORRECT.** VERIFIED aggregate.html: `min(x)` "Returns the minimum value of all input values" — over a timestamp returns the earliest. VERIFIED window.html: "All Aggregate functions can be used as window functions by adding the OVER clause" → `MIN(created_at) OVER (PARTITION BY user_id)` is valid and broadcasts the per-user earliest onto every row. Correctly offers BOTH shapes (collapse-to-one-row GROUP BY vs keep-all-rows window) and explains when each is wanted. Solid.
+**VERIFIED vs trino.io/docs/467/functions/regexp.html (WebFetch 2026-06-10): Trino 467 has NO `~` (and no `!~` / `~*` / `!~*`) regex-match operator.** `~` is a PostgreSQL POSIX-regex operator. Trino's regex matcher is the FUNCTION `regexp_like(string, pattern) -> boolean` ("evaluates the regular expression `pattern` and determines if it is contained within `string`"; anchor with `^...$` for a full-string match). The regexp page lists ONLY functions (regexp_like / regexp_replace / regexp_extract / regexp_count / regexp_split / regexp_extract_all / regexp_position) — no infix `~` operator.
 
-## Q3 — flag rows where user_email is invalid (no @, or no dot after @) — 2.50 (Acc1.5 / Comp3 / Clar3 / Act2.5) — **DEFECT**
-Two CASE-based queries; the **CASE/LIKE logic is reasonable**, but **BOTH queries filter on a SELECT-list OUTPUT ALIAS in the WHERE clause**, which Trino does NOT support, AND query-1's filter value never matches its own CASE outputs.
-
-**CONFIRMED DIALECT DEFECT — alias-in-WHERE is unsupported in Trino 467.** VERIFIED select.html: WHERE is evaluated **before** the SELECT projection, so output-column aliases do not yet exist when WHERE runs; aliases are usable in GROUP BY*/HAVING/ORDER BY but **NOT in WHERE** — Trino raises `Column 'X' cannot be resolved`. (*GROUP BY by alias is itself a separate Trino gap, issue #16533.)
-- **Query 1:** `... CASE ... END AS email_validation FROM events WHERE email_validation = 'INVALID'` → `Column 'email_validation' cannot be resolved`. **PLUS a logic bug independent of scoping:** the CASE only ever outputs `'INVALID: missing @'`, `'INVALID: no dot after @'`, or `'VALID'` — it **never** outputs the bare string `'INVALID'`, so even if alias-in-WHERE were legal this filter would match **ZERO rows**.
-- **Query 2:** `... AS is_invalid_email FROM events WHERE is_invalid_email = TRUE` → `Column 'is_invalid_email' cannot be resolved`.
-
-What IS correct: the LIKE predicate `user_email NOT LIKE '%@%.%'` (flag missing-@ or no-dot-after-@) is a reasonable approximate format check; `POSITION`, `SUBSTR`, `NOT LIKE '%@%'` usage is dialect-valid. The bug is purely the WHERE-clause filtering mechanism (+ the query-1 literal mismatch).
-
-**CORRECT FIX (any one):** (a) filter the **raw expression** directly — `WHERE user_email NOT LIKE '%@%.%'`; (b) **repeat the CASE** in WHERE; or (c) **wrap in a CTE/subquery** and filter the alias in the OUTER query — `WITH v AS (SELECT user_email, CASE ... AS email_validation FROM events) SELECT * FROM v WHERE email_validation LIKE 'INVALID%'`. Note the outer-query filter must also use a value the CASE actually emits (e.g. `LIKE 'INVALID%'`, not `= 'INVALID'`).
-
-**Acc scored 1.5:** two queries, both unrunnable as written (alias-in-WHERE), one additionally semantically dead (literal never matches) — a load-bearing copy-paste failure, not a cosmetic nit. Comp/Clar partial credit because the underlying validity logic is explained and reasonable.
-
-## Q4 — % of orders above $500 in one query — 4.9375 (Acc5 / Comp5 / Clar4.75 / Act5)
-Window form: `SUM(CASE WHEN order_total>500 THEN 1 ELSE 0 END) OVER ()`, `COUNT(*) OVER ()`, `ROUND(100.0*SUM(CASE...)OVER()/COUNT(*)OVER(),2)`. Summary form: `COUNT(CASE WHEN order_total>500 THEN 1 END)`, `COUNT(*)`, `ROUND(100.0*COUNT(CASE...)/COUNT(*),2)`.
-
-**CORRECT (both forms).** VERIFIED window.html: aggregates are usable as window functions via OVER; empty `OVER ()` computes the aggregate over the entire result set (standard SQL, valid in 467) → broadcasts grand totals onto every row. VERIFIED: `100.0 * ...` uses a DECIMAL literal, forcing **non-integer (decimal) division** — avoids the integer-truncated-to-0 trap. `COUNT(CASE WHEN cond THEN 1 END)` counts only non-NULL results = counts matching rows (the idiomatic conditional-count) — correct. Both the per-row window form and the single-row summary form are valid and return the same percentage; offering both with the trade-off is exactly right.
+**VERDICT: genuine Trino DIALECT DEFECT.** `phone_number ~ '^\+?1?\d{10}$'` is a HARD PARSE ERROR on Trino 467 (`mismatched input '~'`) — it would never run. This is a load-bearing copy-paste failure even though the alias-in-WHERE STRUCTURE around it is correct. **The CORRECT form is `regexp_like(phone_number, '^\+?1?\d{10}$')`** (or `regexp_like(email, '...')` for the actual email-format check the question implied). Q1 Accuracy is scored DOWN for the `~`.
 
 ---
 
-## iter896 DIRECTIVE — re-probe-don't-churn (NO defect-marking of pins)
+## SCOPE CHECK (the `~` defect) — RESPONDER SYNTHESIS SLIP, resources are CORRECT
 
-**SCOPE CHECK RESULT: resources/ is CORRECT and NOT silent on alias-in-WHERE → this is a RESPONDER SYNTHESIS SLIP, NOT a resource defect.** The rule is taught correctly and prominently in at least three places:
-- `resources/27-oracle-plsql-to-dbt-trino.md` §4.2 (L768–793): explicit "GOTCHA — do NOT reference the SELECT output alias in WHERE … `WHERE` is evaluated BEFORE the SELECT projection … `Column 'occurred_at' cannot be resolved`", with the general rule "you cannot reference ANY SELECT output alias — nor a window-function result — in WHERE."
-- `resources/23-sql-best-practices-olap.md` §8 (L487–500): GROUP-BY-alias guard + ORDER-BY asymmetry.
-- `resources/07-analytical-query-patterns.md` (L2806, L2820): "Anywhere the alias appears before projection (GROUP BY, WHERE, HAVING, OVER's ORDER BY), use the expression instead," with a worked WHERE example and the fix.
+Grep + Read of `resources/`:
+- **resources/23-sql-best-practices-olap.md §3375-3378** ALREADY teaches `~` / `!~` / `~*` / `!~*` as **PostgreSQL-only operators that HARD PARSE ERROR in Trino**, each marked `WRONG — DO NOT COPY` with the correct `regexp_like(...)` rewrite in the adjacent cell. Line 3289 also explicitly warns: "do NOT write `col !~ '^...$'` — Trino has no `!~` operator."
+- `regexp_like` appears **51 times** across resources/23 (39) and resources/27 (12); it is the consistently-taught canonical.
+- **No resource teaches `~`/`!~` as a valid Trino regex operator.** The only occurrences are inside DEFANG / DO-NOT-WRITE blocks correctly labeling them as wrong.
 
-There is **NO email-validation / format-check card** in resources/ that misuses alias-in-WHERE (grep for `email_validation` / `is_invalid_email` / `NOT LIKE '%@%` returned zero resource matches). So the responder did not copy a bad pattern from a card — it synthesized the alias-in-WHERE form itself despite the rule being documented elsewhere.
+⇒ **This is a RESPONDER SYNTHESIS SLIP** (imported the PostgreSQL `~` operator into a Trino synthesis), **NOT a resource defect.** The resources are correct and explicit.
 
-**ACTION for iter896: DEFAULT NO-OP / re-probe.** Per the iter882 + reconcile-don't-churn lessons, do NOT churn the existing (correct) alias-in-WHERE cards and do NOT add a "wrong" card. **OPTIONAL narrow LIGHT FIX-A (additive, only if it does not churn a pin):** add ONE small keyword-anchored note in an email/text-format-validation context routing the reader to the existing alias-in-WHERE rule + showing the correct CTE/subquery (or raw-expression) filter form — keyword anchors: *flag invalid emails / validate email format / filter on a CASE result / WHERE on a computed column / email_validation alias in WHERE / is_invalid_email*. If adding this would touch/duplicate the §27-4.2 or §23-8 or §07 alias guards, **SKIP it and just re-probe email-format validation from a 2nd phrasing next sweep** to confirm the slip is a one-off. All SQL must be FENCED (pipe-escape trap; the `%@%.%` LIKE pattern and any `|` content must not sit in a table cell).
+**iter897 DISPOSITION = re-probe-don't-churn (DEFAULT NO-OP on this defect).** Do NOT defect-mark or churn the §3375-3378 `~`/`!~` defang table or any regexp_like canonical (they are correct).
 
-**Do NOT** flag Q1/Q2/Q4 as defects (all dialect-clean, verified vs source first). **Do NOT** touch any iter534–894 pin. PIN 467. **NO federation edits.** **DO NOT bump training/state.json** (already passed; this run does not regress overall PASS).
+**ONE NARROW CAVEAT (findability, optional — gate hard):** the §3375-3378 `~`/`!~` defang lives in a **markdown TABLE CELL**, not a fenced block. Per the pinned Markdown Table Pipe-Escape Trap, table-cell content is a known weak findability/copy surface for the Haiku responder. The responder did NOT land on or copy that card (it synthesized a `phone_number`/email-format `~` unaided in a validation context whose keywords — "looks_valid / validate phone or email format / regex check a string column" — may not strongly route to the account_id/8-digit §3375 zone). **OPTIONAL additive LIGHT FIX-A for iter897 ONLY IF it does not churn a pin:** a single keyword-anchored note in a FENCED block (anchors: validate phone/email format with a regex / regex-match a string column / `~` is not a Trino operator / use regexp_like to pattern-match / WHERE regexp_like for a format check) that leads with `regexp_like(col, '^...$')` and inline-defangs the `col ~ '...'` form on its own un-copyable fenced line, cross-linked to the §3372 defang table. **If this would touch/duplicate the §3372-3380 defang table or the §3289 note, SKIP it and just re-probe regex-format-validation from a 2nd phrasing next sweep.** Do NOT add a "wrong" card; do NOT move pipe-bearing regex content into a new table cell.
+
+---
+
+## PER-QUESTION
+
+**Q1 — 3.375 (Acc 2.5 / Comp 4.0 / Clar 4.0 / Act 3.0) — DEFECT (the `~` operator; structure correct).**
+"filter to rows where a computed `looks_valid` flag is FALSE — can I reference the SELECT alias in WHERE?" Answer: "No — alias not visible in WHERE (WHERE runs before projection); use a CTE or subquery" + the CTE/subquery fixes. **STRUCTURE CORRECT (5.0): the alias-in-WHERE slip did NOT recur (ONE-OFF confirmed).** VERIFIED select.html: WHERE is evaluated before SELECT projection, so an output alias is unresolved in WHERE; CTE/subquery-then-filter-the-real-column is the right fix. **BUT the worked example used `(phone_number ~ '^\+?1?\d{10}$') AS looks_valid` — the `~` operator does NOT exist in Trino 467 (HARD PARSE ERROR; PostgreSQL-only).** Correct form: `regexp_like(phone_number, '^\+?1?\d{10}$')`. Acc 2.5 because the example query is unrunnable as written (load-bearing copy-paste defect), even though the structural advice is sound. Resources are CORRECT (regexp_like canonical + `~` defanged) ⇒ responder synthesis slip.
+
+**Q2 — 5.00 — CORRECT.**
+Count tickets weekend vs weekday in one query: `CASE WHEN day_of_week(submitted_at) IN (6,7) THEN 'Weekend' ELSE 'Weekday' END AS day_type, COUNT(*) ... GROUP BY (same CASE repeated)`; `format_datetime(CAST(submitted_at AS timestamp),'EEEE')` for the name. **VERIFIED datetime.html: `day_of_week(x)` returns "the ISO day of the week from x. The value ranges from 1 (Monday) to 7 (Sunday)"** ⇒ Sat=6, Sun=7, `IN (6,7)` = weekend. The GROUP BY **repeats the CASE EXPRESSION** (not a SELECT alias) ⇒ valid (no alias-in-GROUP-BY gap). `format_datetime(timestamp, format)` uses Joda DateTimeFormat; `'EEEE'` = full weekday name (established, consistent with iter872/894). CAST to timestamp is harmless. All correct.
+
+**Q3 — 5.00 — CORRECT (and correctly contrasts with the Q1 alias issue).**
+Biggest gap in days between consecutive events per user: inner subquery `date_diff('day', LAG(event_date) OVER (PARTITION BY user_id ORDER BY event_date), event_date) AS days_since_last_event`, then outer `WHERE days_since_last_event IS NOT NULL ... MAX(...) GROUP BY user_id`. **VERIFIED window.html: `lag(x)` returns the previous row's value, NULL on the first row of each partition. VERIFIED datetime.html: `date_diff('day', ts1, ts2)` = `ts2 - ts1` in days (bigint), NULL when an arg is NULL** ⇒ first row → NULL, excluded by the outer `IS NOT NULL`. **CRITICAL CONTRAST: filtering `days_since_last_event` in the OUTER query is LEGAL — it is a REAL COLUMN of the inner subquery's result, NOT a same-level SELECT alias** (the inner alias is fully materialized before the outer query references it). This is exactly the distinction the Q1/iter895 alias-in-WHERE issue is about, and the responder got it right. All correct.
+
+**Q4 — 5.00 — CORRECT.**
+Pad/truncate category labels to exactly 20 chars: `rpad(category_label, 20, ' ')` / `lpad(...)`; "if shorter pads to 20; if longer truncates to first 20 chars." Plus `format('%08d', order_id)` for zero-padding integers. **VERIFIED string.html (verbatim): rpad/lpad "If `size` is less than the length of `string`, the result is truncated to `size` characters."** ⇒ truncate-on-overflow CONFIRMED, so rpad/lpad produce exactly-20-char output in both the pad and truncate cases. **VERIFIED conversion.html: `format(format, args...)` uses Java Formatter / printf syntax** (doc example `format('%03d', 8) -> '008'`), so `format('%08d', order_id)` zero-pads to 8 digits — and `%d` does NOT truncate an integer's significant digits (correctly noted as "without truncation"). All correct.
+
+---
+
+## EXPLICIT STATEMENTS (per directive)
+
+1. **Alias-in-WHERE slip: ONE-OFF CONFIRMED — did NOT recur.** Q1 answered the baited alias-in-WHERE question correctly (no alias in WHERE; CTE/subquery fix). The iter895 slip is closed. NO findability-anchor FIX-A for the alias rule. Do NOT churn the r27 §4.2 / r23 §8 / r07 alias-in-WHERE guard cards (validated in practice).
+2. **The Q1 `~` regex operator IS a genuine Trino dialect defect** (PostgreSQL operator imported into Trino; HARD PARSE ERROR `mismatched input '~'` on 467; correct = `regexp_like(phone_number, '^\+?1?\d{10}$')`). **SCOPE: resources are CORRECT** (regexp_like is the taught canonical, 51 occurrences; `~`/`!~` are already defanged at r23 §3375-3378 + §3289) ⇒ **RESPONDER SYNTHESIS SLIP, not a resource defect.**
+
+## iter897 directive
+- **DEFAULT NO-OP / re-probe-don't-churn.** The `~` defect = responder slip; resources are correct. Do NOT churn the §3375-3378 `~`/`!~` defang table, the regexp_like canonical, or any alias-in-WHERE / Q2-Q4 pin. Do NOT add any "wrong" card for Q1-Q4.
+- **OPTIONAL additive LIGHT FIX-A (gate hard):** ONE keyword-anchored FENCED note routing "validate phone/email format with a regex / regex-match a string column / `~` is not Trino / use regexp_like" to the existing `regexp_like` canonical, with `col ~ '...'` inline-defanged on its own un-copyable FENCED line. **SKIP if it would touch/duplicate the §3372-3380 defang table or §3289** — then just re-probe regex-format-validation 2nd-phrasing. Keep all regex/pipe content in FENCED blocks (pipe-escape trap), NOT table cells.
+- Did NOT flag any doc-CORRECT claim (Q2/Q3/Q4) as a defect (iter882 verify-first). PIN 467. NO federation edits. **DO NOT touch training/state.json** (already passed; overall 4.59 PASS holds).
