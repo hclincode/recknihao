@@ -1,74 +1,140 @@
-# Iter940 Feedback — DEFAULT NO-OP durability sweep (teacher made ZERO resource edits)
+# Iter941 Feedback — DEFAULT NO-OP durability sweep (teacher made ZERO resource edits)
 
 **Date**: 2026-06-10
 **Phase**: EXTENDED (passed=true preserved)
-**Overall verdict**: **4.9375 PASS** (per-Q 5.00 / 5.00 / 5.00 / 4.75 = 19.75/4 = 4.9375; margin +1.4375; OVERALL AVERAGE governs)
-**Dialect verification**: All claims verified vs trino.io/docs/467 (sql/select.html, functions/window.html, functions/datetime.html) + WebSearch 2026-06-10 — NOT against resources/; iter882 verify-BOTH-directions discipline applied.
-**Federation row (4.49944/310)**: NOT PROBED this iter — bulletproofed-only constraint honored, no federation probe attempted.
+**Overall verdict**: **4.4375 PASS** (per-Q Q1 4.75 / Q2 4.875 / Q3 3.125 / Q4 5.00 = 17.75/4 = 4.4375; margin +0.9375; OVERALL AVERAGE governs, no per-Q veto)
+**Federation NOT probed** (4.49944/310 row UNCHANGED)
 
 ---
 
-## Per-question scores
+## Per-question scoring
 
-### Q1 — "Customers with >= 10 total orders; where does the count filter go?" — **5.00**
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- Query `GROUP BY customer_id HAVING COUNT(*) >= 10` is canonical and dialect-clean. Verified against sql/select.html: *"HAVING filters groups after groups and aggregates are computed"* — exact match to responder's exposition.
-- WHERE-cannot-reference-aggregates claim CONFIRMED — `WHERE COUNT(*) >= 10` would be a parse error (aggregates resolve at GROUP BY level, not at WHERE).
-- HAVING repeats the aggregate `COUNT(*) >= 10` (not the SELECT alias `total_orders`) — Trino HAVING cannot reference SELECT aliases (standard SQL behavior). Correctly handled.
-- ORDER BY can reference the alias `total_orders` (ORDER BY runs after SELECT projection) — also correct.
+### Q1 — Slow GROUP BY payment_method (Trino vs Postgres)
+**Score: 4.75** (Acc 4.5 / Comp 5.0 / Clar 5.0 / Act 4.5)
 
-### Q2 — "Percentage of sessions from mobile vs desktop" — **5.00**
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- Query `SELECT device_type, COUNT(DISTINCT session_id), ROUND(100.0 * COUNT(DISTINCT session_id) / SUM(COUNT(DISTINCT session_id)) OVER (), 2) FROM events GROUP BY device_type` — CONFIRMED VALID 467 BOTH DIRECTIONS:
-  - **The key check**: `SUM(COUNT(DISTINCT session_id)) OVER ()` — window function (SUM OVER) wrapping a GROUPED aggregate (COUNT DISTINCT). VALID in Trino because window functions are evaluated AFTER GROUP BY/HAVING (standard SQL semantics; verified via WebSearch — "rolling sum" and "percentage of total" idioms are canonical Trino patterns). The inner COUNT(DISTINCT session_id) produces one row per device_type group; the outer SUM(...) OVER () then sums those per-group counts into a grand total broadcast on every row. NOT a "nested aggregate" error (those are illegal only when both nests resolve at the same aggregation level — here the outer SUM is at window-frame level, not at GROUP BY level).
-  - **Empty OVER ()** — confirmed = whole result set as one window frame (no PARTITION BY = single partition; no ORDER BY = full-partition frame).
-  - **`100.0 *` decimal-promo** — correct; without it the `COUNT(DISTINCT)/SUM(COUNT(DISTINCT))` integer division would truncate to 0 (per Division pin).
-  - **COUNT(DISTINCT session_id) vs COUNT(\*)** — correct preference call (sessions are the unit of analysis, not events).
-  - ROUND(..., 2) and ORDER BY session_count DESC — both clean.
+VERIFIED dialect facts (trino.io/docs/467):
+- "Trino has no secondary indexes" — CORRECT (Iceberg connector relies on partition pruning + file skipping only).
+- "Cost = bytes scanned" — accurate framing for object-store-backed Iceberg.
+- Half-open date range `WHERE created_at >= DATE '...' AND created_at < DATE '...'` — CORRECT (DATE-literal, unwrappable for pruning, no overlap at boundary).
+- EXPLAIN to verify constraint pushdown — CORRECT canonical workflow.
 
-### Q3 — "Products with ZERO sales in LAST 30 DAYS — anti-join-with-date-filter" — **5.00**
-- **Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5**
-- **Q3 ANTI-JOIN-DATE-FILTER VERDICT — ON-PLACEMENT CORRECT.**
-- Query: `LEFT JOIN sales s ON s.product_id = p.product_id AND s.sale_date >= current_date - INTERVAL '30' DAY WHERE s.product_id IS NULL`
-- Date predicate placed in **ON clause** (not WHERE) — this IS the canonical correct form. Verified BOTH directions:
-  - **ON-placement (correct)**: Filter is applied DURING the join, so non-matching products survive with NULL sales columns; the outer `WHERE s.product_id IS NULL` then keeps zero-recent-sales products (anti-join preserved).
-  - **WHERE-placement (would break)**: If `s.sale_date >= current_date - INTERVAL '30' DAY` were in WHERE, the NULL sale_date from unmatched LEFT JOIN rows would fail the `>=` comparison (NULL >= anything yields NULL/false), silently dropping exactly the products we want and turning the anti-join into an inner-join filter — the classic trap.
-  - WebSearch 2026-06-10 confirmed Trino follows standard outer-join semantics: WHERE predicates on the null-supplying table convert LEFT JOIN to inner-join semantics; ON-clause predicates preserve the outer-join.
-- `INTERVAL '30' DAY` — DAY qualifier valid per types.html (only YEAR/MONTH/DAY/HOUR/MINUTE/SECOND legal; iter933 INTERVAL-qualifier pin honored — no QUARTER/WEEK misuse).
-- NOT IN alternative mentioned but de-prioritized — defensible: NOT IN has the nullable 3VL trap (if any sale_id were NULL, NOT IN returns NULL → entire predicate fails). Responder explicitly preferred LEFT JOIN/IS NULL form — solid call.
-- The "clearer/more efficient" framing is a tiny soft-heuristic, but for the actual zero-recent-sales semantic + null safety the LEFT JOIN form IS legitimately safer; defensible without ding.
+**MINOR Acc ding** (-0.5) for the secondary aside: "HAVING COUNT(*) > N to trim high-cardinality group-by memory." HAVING runs AFTER aggregation (pinned: HAVING filters groups after groups and aggregates are computed; standard SQL semantics) — it can only trim OUTPUT rows, not the aggregation's working set. The actual memory footprint of the GROUP BY is determined by the number of distinct group keys, which is already fixed by the time HAVING evaluates. To shrink the aggregation memory you need to push selectivity into WHERE (pre-aggregation filter), not HAVING (post-aggregation filter). Loose perf claim, not a dialect defect, not the main answer. Small Act ding mirrors.
 
-### Q4 — "Customers with >= 1 order in EVERY calendar month so far this year" — **4.75**
-- **Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5**
-- Primary query: `WHERE order_date >= DATE '2026-01-01' AND order_date < DATE '2027-01-01' GROUP BY customer_id HAVING COUNT(DISTINCT date_trunc('month', order_date)) = 12` — fully valid 467.
-  - `date_trunc('month', order_date)` returns date; COUNT(DISTINCT date_trunc(...)) is dialect-clean per pin.
-  - Half-open year-bounded WHERE correct (`>= 2026-01-01 AND < 2027-01-01`).
-  - "= 12" only correct at YEAR-END — the question said "so far this year" (today 2026-06-10 = only 5 complete calendar months Jan-May; June is partial). Strict "= 12" form would return zero rows until December 31, 2026.
-- Secondary variant: `WHERE order_date >= date_add('month', -5, date_trunc('month', current_date)) AND order_date < date_trunc('month', current_date) ... HAVING COUNT(DISTINCT date_trunc('month', order_date)) = 5` — CORRECTLY frames "so far this year" as "5 complete months excluding partial current month" (current_date 2026-06-10 → date_trunc gives 2026-06-01, minus 5 months gives 2026-01-01, so window is Jan-1 through May-31 = 5 complete months).
-  - `date_add('month', -5, ...)` valid per datetime.html; date_trunc('month', current_date) returns date.
-- **Completeness ding (4/5)**: The "so far this year" interpretation should have LED, with the "= 12 (full-year)" form as the secondary variant. The responder gave BOTH forms (saves the answer from a Comp 3 dock), but the lead query implicitly assumes a question the user didn't ask. A reader skimming might copy the "= 12" form and not realize it returns empty until December. Small Completeness ding only — not a defect, not findable gap, just ordering nuance.
-- COUNT(*) = 12 mistake correctly flagged ("counts orders, not months").
+### Q2 — Latest event per user
+**Score: 4.875** (Acc 5.0 / Comp 5.0 / Clar 4.5 / Act 5.0)
+
+VERIFIED dialect facts:
+- `max_by(event_time, event_time)` — VALID 467 (aggregate.html: "Returns the value of x associated with the maximum value of y"). Technically REDUNDANT but correct: `max_by(a, b)` returns `a` at max(`b`); when `a` = `b`, this equals `max(a)`. Plain `max(event_time) GROUP BY user_id` is the simpler canonical form for "latest timestamp only." `max_by` shines when you want some OTHER column at the max timestamp (e.g., `max_by(event_type, event_time)`).
+- ROW_NUMBER() + subquery WHERE rn=1 — VALID 467; "no QUALIFY / no DISTINCT ON in 467" — CONFIRMED (select.html does not document either; window-fn illegal in WHERE).
+- "Default is NULLS LAST for descending" — accurate but UNDER-stated. Per pinned fact (verified select.html "The default null ordering is NULLS LAST, regardless of the ordering direction"), Trino 467's default is NULLS LAST regardless of ASC/DESC. The responder phrasing "default is NULLS LAST for descending order" implies the rule is direction-dependent — it's not. Result is the same for the DESC case being asked, but the rule statement is slightly imprecise.
+
+**Small Clar ding** (-0.5) for that under-stated null-ordering rule. Otherwise clean — both forms answer the question (max_by for the timestamp, ROW_NUMBER for "all columns of the latest row").
+
+### Q3 — Bucket products into price ranges, COUNT per bucket — **WRONG-SHAPE LEAD**
+**Score: 3.125** (Acc 2.5 / Comp 3.5 / Clar 3.0 / Act 3.5)
+
+**★ KEY CHECK — WRONG-SHAPE VERDICT: CONFIRMED MUDDLED LEAD ★**
+
+The user asked to **count how many products fall in each bucket** — expected output: roughly 4 rows (one per price band), each with a per-bucket product count.
+
+The responder's LEAD CASE WHEN form:
+```sql
+SELECT product_id, price,
+       CASE WHEN price < 25 THEN '$0-$25' ... END AS price_bucket,
+       COUNT(*) AS product_count
+FROM products
+GROUP BY product_id, price, CASE WHEN ... END
+ORDER BY price_bucket
+```
+
+This **PARSES and RUNS** as valid Trino 467 SQL (GROUP BY can repeat the CASE expression — no alias-in-GROUP-BY trap because the expression is literal). But the SHAPE is **WRONG**: `product_id` is unique per product, so every group is **exactly one product** → `COUNT(*)` is **always 1** → the result is ONE ROW PER PRODUCT (each labelled with its bucket), NOT a per-bucket tally. The `product_count` column will be `1` for every row. That does not answer "how many products fall in each bucket."
+
+**CORRECT shape** (GROUP BY the bucket expression ONLY, no product_id/price in GROUP BY):
+```sql
+SELECT CASE WHEN price < 25 THEN '$0-$25'
+            WHEN price < 50 THEN '$25-$50'
+            WHEN price < 100 THEN '$50-$100'
+            ELSE '$100+' END AS price_bucket,
+       COUNT(*) AS product_count
+FROM products
+GROUP BY 1
+ORDER BY 1;
+```
+
+**Does the SECOND (dynamic-buckets) form rescue it?** YES — partially. The dynamic-buckets INNER JOIN form:
+```sql
+SELECT b.bucket_name, COUNT(*) AS product_count
+FROM products p
+INNER JOIN price_buckets b ON p.price >= b.min_price AND p.price < b.max_price
+GROUP BY b.bucket_name
+ORDER BY b.min_price
+```
+**DOES** produce the per-bucket count correctly (GROUP BY bucket_name only; each product contributes 1 to its bucket; one row per bucket). So the responder DID deliver a correct shape — just not as the lead. The reader is most likely to copy the FIRST canonical, so the muddled lead is the load-bearing defect.
+
+**MISSED OPPORTUNITY (completeness, not required)**: Trino 467 has native `width_bucket(x, bound1, bound2, n)` for equal-width bins AND `width_bucket(x, ARRAY[25, 50, 100])` for custom bins (math.html verified). For this exact "$0-25 / $25-50 / $50-100 / $100+" use case, `width_bucket(price, ARRAY[25, 50, 100])` would return 0/1/2/3 (cleaner than CASE WHEN for changing bucket sizes — directly answers the user's "better than CASE WHEN if bucket sizes change?" sub-question). Not mentioned. Comp ding.
+
+**Scope verdict: RESPONDER WRONG-SHAPE SLIP, NOT FINDABLE GAP**:
+- The GROUP BY output-shape rule (including a unique key collapses COUNT(*) to 1 per row; GROUP BY the bucket expression only for per-bucket count) is taught at the L488 / L1238 / iter909 / iter915 / iter936 GROUP-BY-muddle family locks. Resources already cover this correctly with copy-attractive canonicals.
+- This is the iter909/915/936 GROUP-BY-muddle family recurring — responder synthesis slip on already-taught content.
+- The dynamic-buckets form being correct shows the responder understands per-bucket aggregation; it just regressed on the simpler CASE WHEN lead form.
+- **RE-PROBE-DON'T-CHURN, NO iter942 FIX-A**: Churning the dense GROUP-BY-shape pins risks New-Card/defang regression for zero correctness benefit at 4th-instance recurrence; the canonical is already correct in resources.
+- ESCALATE to dedicated "per-bucket count CANONICAL = GROUP BY bucket only, NOT product_id+bucket" router card ONLY if this slip recurs in 2+ further sweeps with no intervening clean answer.
+
+OPTIONAL secondary: width_bucket(x, array) is not taught as the lead for "custom bin counts." Adding a small width_bucket card pointing at this exact use case (bin-count of custom ranges) would be a completeness improvement, NOT a defect fix. Defer unless a future probe specifically tests width_bucket.
+
+### Q4 — Cross-border ship vs billing, NULL inequality
+**Score: 5.00** (Acc 5.0 / Comp 5.0 / Clar 5.0 / Act 5.0)
+
+VERIFIED dialect facts (trino.io/docs/467 functions/comparison.html):
+- `IS DISTINCT FROM` is the **NULL-safe inequality** — CONFIRMED. Truth table from docs:
+  | a | b | a = b | a <> b | a DISTINCT b |
+  |---|---|-------|--------|--------------|
+  | 1 | 1 | TRUE | FALSE | FALSE |
+  | 1 | 2 | FALSE | TRUE | **TRUE** |
+  | 1 | NULL | NULL | NULL | **TRUE** |
+  | NULL | NULL | NULL | NULL | **FALSE** |
+  Docs verbatim: "treat NULL as a known value and both operators guarantee either a true or false outcome even in the presence of NULL input."
+- `!=` (or `<>`) → NULL → filtered out in WHERE — CORRECT (WHERE filters non-TRUE → both UNKNOWN and FALSE drop). Silent-drop behavior accurately explained.
+- OR-form with explicit IS NULL checks (`a != b OR (a IS NULL AND b IS NOT NULL) OR (a IS NOT NULL AND b IS NULL)`) — CORRECT NULL-safe equivalent. More verbose than `IS DISTINCT FROM`, but useful for engineers unfamiliar with the operator.
+- Truth-table presentation in the answer — CORRECT and matches the docs.
+
+Clean 5.00. This is the textbook correct answer to the cross-border-NULL trap. No defects.
 
 ---
 
-## Defect scope
+## Overall verdict and scope
 
-**NO RESOURCE DEFECT.** All four answers were dialect-clean; no canonical card needs editing.
+**OVERALL = 4.4375 PASS** (margin +0.9375). The single Q3 wrong-shape slip drags the average from a strong-5 sweep to a tight pass — but pass it does.
 
-**NO RESPONDER SLIP on taught content.** Q1/Q2/Q3 are exemplary; Q4 covered both interpretations and explicitly flagged the COUNT(*) vs COUNT(DISTINCT) trap.
+**SCOPE**:
+- NO RESOURCE DEFECT (Q3 GROUP-BY-output-shape rule is taught at L488/L1238/iter909/iter915/iter936 locks; canonicals correct).
+- RESPONDER SLIP on Q3 lead form (iter909/915/936 GROUP-BY-muddle family recurrence at 4th sweep with intervening clean answers — re-probe-don't-churn discipline applies; resources are right, responder synthesis regressed on the CASE WHEN lead while delivering the correct dynamic-buckets alternative).
+- Q1 HAVING-trims-memory aside is a loose perf colloquialism, not a dialect defect.
+- Q2 NULLS-LAST direction-dependence phrasing is mildly imprecise, not wrong-result.
+- NO FINDABLE GAP.
 
-**NO FINDABLE GAP.** Q4's "so far this year" lead-ordering nuance is presentation polish, not a missing card.
+**iter942 = DEFAULT NO-OP**:
+- Teacher ZERO resource edits.
+- RE-PROBE the Q3 slip next sweep via a fresh per-bucket-count question (e.g., "histogram of orders by total amount band" or "count customers by tenure band") — verify responder leads with GROUP BY bucket-expr ONLY, no product_id/customer_id in GROUP BY.
+- Escalate to dedicated FIX-A router card ONLY if Q3 GROUP-BY muddle recurs across 2+ further sweeps (currently 4th-cumulative-recurrence with intervening clean iter934/938/939/940 — still re-probe territory).
+- DO NOT touch dense L488 / L1238 / iter909/915/936 GROUP-BY-output-shape pins (defang-backfire risk per markdown-pipe-trap lesson).
+- OPTIONAL low-priority completeness improvement: a small width_bucket(x, array) card for custom-bin counting (NOT required; defer unless probed).
+- Federation (4.49944/310) only un-passed row — bulletproofed angles only.
+- PRESERVE full iter534-940 pin inventory. NO federation edits. PIN 467.
+- DO NOT bump training/state.json (already 941; passed=true preserved; overall 4.4375 PASS holds).
 
-**iter940 = DEFAULT NO-OP confirmed** — all 4 dialect-clean, zero new defects, all locks intact per state.json note.
-
----
-
-## Optional re-probes next sweep (SKIP IF DUPLICATIVE — no pin touch warranted)
-
-- Anti-join-with-date-filter where the responder is shown ONLY the WHERE-placement form first and must catch the trap (verify defang holds when prompt biases the wrong way).
-- "so far this year" / partial-period question with a deliberately ambiguous "every month" phrasing to confirm the variant LEADS, not trails.
-- Window-fn-over-grouped-aggregate ("share of total within category") to keep the SUM(COUNT(...)) OVER () idiom durable across PARTITION-BY framings.
-
-**Federation (4.49944/310)** — only un-passed row. Bulletproofed angles only; no federation edits this sweep.
-
-**PRESERVE full iter534-937 pin inventory.** PIN 467. **DO NOT bump training/state.json** (orchestrator bumps; passed=true preserved; overall 4.9375 PASS holds).
+## Pinned dialect facts carried forward (Q1-Q4 touched)
+- Trino has NO secondary indexes (Iceberg: partition pruning + file skipping only).
+- EXPLAIN reveals constraint pushdown.
+- Half-open DATE-literal range `>= DATE '...' AND < DATE '...'` correct for pruning.
+- HAVING runs AFTER aggregation; trims output only, does NOT reduce aggregation memory footprint.
+- `max_by(x, y)` returns x at max(y); `max_by(a, a)` = `max(a)` (valid but redundant).
+- Plain `max(event_time) GROUP BY user_id` is the simplest "latest timestamp" canonical.
+- ROW_NUMBER() OVER (PARTITION/ORDER) + subquery WHERE rn=1 = "all columns of latest row per group."
+- NO QUALIFY clause in 467. NO DISTINCT ON in 467.
+- Default ORDER BY null ordering = NULLS LAST regardless of direction (verified select.html).
+- GROUP BY output shape: including a unique key collapses COUNT(*) to 1 per row; GROUP BY the bucket expression ONLY for per-bucket count.
+- `width_bucket(x, bound1, bound2, n)` for equi-width bins; `width_bucket(x, ARRAY[...])` for custom bins (math.html verified).
+- CASE WHEN bucketing valid; GROUP BY repeats the CASE expression (no alias-in-GROUP-BY).
+- IS DISTINCT FROM is the NULL-safe inequality (TRUE when differ incl NULL-vs-nonNULL, FALSE when equal or both NULL).
+- `!=` / `<>` with NULL → UNKNOWN → silently filtered in WHERE.
