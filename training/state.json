@@ -1,7 +1,7 @@
 {
-  "iteration": 929,
+  "iteration": 930,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter929 NO-OP durability sweep — zero edits; 4 fresh adjacents."
+  "note": "iter930 re-probe sweep — zero edits; two-CTE-layer/window-alias one-off confirm + 3 fresh adjacents."
 }
