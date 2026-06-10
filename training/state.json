@@ -1,6 +1,7 @@
 {
-  "iteration": 901,
+  "iteration": 902,
   "phase": "extended",
+  "notes_902": "iter902 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
   "notes_901": "iter901 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
   "notes_900": "iter900 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
   "notes_899": "iter899 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
