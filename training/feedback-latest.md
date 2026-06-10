@@ -1,47 +1,62 @@
-# Judge Feedback — iter910 (re-probe sweep)
+# Judge Feedback — iter911 (NO-OP durability sweep)
 
-**Overall: 4.875 STRONG PASS** (Q1 5.00 / Q2 4.75 / Q3 5.00 / Q4 4.75)
-Phase: extended. Teacher edits this iter: ZERO (re-probe + 3 fresh adjacents). DO NOT bump state.json (already 910).
+**Verdict: STRONG PASS — overall average 4.875 / 5. NO-OP. No FIX-A for iter912.**
 
-All dialect claims verified vs trino.io/docs/467 (datetime / window / array / aggregate / conversion .html) via WebFetch 2026-06-10. Trino 467 PINNED. Production stack (on-prem Trino 467 + Iceberg + MinIO + JWT/OPA) unaffected — all four answers are pure portable SQL.
+Phase: extended. state.json NOT touched (already iter911, passed:true). Teacher made ZERO edits this iter — this is a 4-probe durability/adjacency sweep on window-function + date_trunc patterns.
 
----
+All dialect claims verified against **trino.io/docs/467** (datetime.html, window.html, types.html) + WebSearch on DATE↔TIMESTAMP coercion, Trino 467 PINNED, 2026-06-10, multi-source. On-prem Trino 467 + Iceberg + MinIO + HMS + JWT/OPA stack: all four answers are pure ANSI-ish SQL with no stack conflict.
 
-## Q1 — top-5 products' revenue as % of total — 5.00 CLEAN
+## EXPLICIT window-function correctness note (the headline check)
 
-**iter909 bare-column-in-GROUP-BY / GROUP-BY-1-on-aggregate muddle: ONE-OFF CONFIRMED — did NOT recur. The iter909 slip is CLOSED. NO findability-anchor FIX-A needed.**
+All FOUR window functions are used **CORRECTLY** — each is computed inside a subquery/CTE and then filtered or aggregated in an OUTER query. This is the canonical no-QUALIFY-in-467 pattern. There is **no muddle** (no window fn mixed into a GROUP-BY select list, no window fn in a bare WHERE, no attempt at QUALIFY):
+- Q1: `MAX() OVER (PARTITION BY)` in subquery → outer `SUM(CASE...) GROUP BY`.
+- Q3: `LAG() OVER (PARTITION BY ORDER BY)` in subquery → outer `WHERE price > prior_price`, `COUNT(DISTINCT)`.
+- Q4: `MIN() OVER (PARTITION BY)` in subquery → outer `WHERE first_order_date = order_date AND date_trunc(...)`, `DISTINCT`.
+- Q2 uses a plain `MIN()...GROUP BY` CTE (no window) joined to signups — also clean.
 
-Primary query verified clean:
-- Inner CTE `ranked_products`: `GROUP BY product_id`; `SUM(revenue) AS total_revenue` is an aggregate; `ROW_NUMBER() OVER (ORDER BY SUM(revenue) DESC)` is a window over an aggregate — VALID. Window functions run after GROUP BY/HAVING (verified window.html "run after the HAVING clause"), so ordering the window by `SUM(revenue)` is legal. **NO bare non-aggregated column this time.**
-- Outer query: a SINGLE SCALAR aggregate `ROUND(100.0 * SUM(CASE WHEN product_rank <= 5 THEN total_revenue ELSE 0 END) / SUM(total_revenue), 2)` over `ranked_products` with NO GROUP BY — correct. NOT the iter909 GROUP-BY-1-on-an-aggregate error. `100.0` decimal promotion correctly avoids integer-division truncation.
+## Per-question scores
 
-Second alt (FILTER + JOIN) also VALID: `ranked_products` with `product_id` + rank, JOIN `sales`, `SUM(revenue) FILTER (WHERE product_rank <= 5) / SUM(revenue)`. FILTER-on-aggregate confirmed aggregate.html.
+### Q1 — per-customer count of orders tying that customer's all-time max — 5.00
+`SUM(CASE WHEN order_value = max_value THEN 1 ELSE 0 END) GROUP BY customer_id` over a subquery with `MAX(order_value) OVER (PARTITION BY customer_id) AS max_value`.
+- VERIFIED window.html: all aggregate fns (incl. MAX) usable as window fns with `OVER (PARTITION BY)` and no ORDER BY → partition-wide max broadcast to every row. Valid.
+- Logic correct: outer GROUP BY customer_id counts every order whose value equals the per-customer max. **Ties → all tied orders counted** (intended for a "count of orders tying the max"). CLEAN.
 
-## Q2 — calendar days with zero sales in March 2026 — 4.75 CLEAN
+### Q2 — customers whose first order is in the same calendar week as signup — 4.75
+`first_orders` CTE `MIN(order_date)`; JOIN signups; `WHERE date_trunc('week', s.created_at) = date_trunc('week', f.first_order_date)`; `COUNT(DISTINCT)`.
+- VERIFIED datetime.html: `date_trunc('week', ...)` → **Monday-start** (ISO week, doc example `2001-08-22` → `2001-08-20` Monday). Same-week check correct.
+- **TIMESTAMP-vs-DATE nuance verified, NOT a defect.** `s.created_at` is TIMESTAMP → `date_trunc('week', timestamp)` returns TIMESTAMP (`Monday 00:00:00`); `f.first_order_date` is DATE (from `MIN(order_date)`) → `date_trunc('week', date)` returns DATE (`Monday`). The equality is TIMESTAMP = DATE. Trino 467 **implicitly coerces DATE → TIMESTAMP at midnight (00:00:00)** for the comparison (verified vs Trino DATE/TIMESTAMP comparison semantics: `DATE '...' < TIMESTAMP '...'` is valid, date→timestamp@midnight). So both sides resolve to `Monday 00:00:00` and equality yields the intended same-week result. **Valid, no type error, correct.** Weighed proportionally — coercion works → fully correct, no penalty.
+- Tiny clarity ding only: answer could have noted the DATE/TIMESTAMP coercion explicitly so a beginner isn't surprised by the mixed-type equality. Not a correctness issue.
 
-- `sequence(DATE '2026-03-01', LAST_DAY_OF_MONTH(DATE '2026-03-01'), INTERVAL '1' DAY)` → date array (verified array.html: sequence(start,stop,step) with INTERVAL DAY TO SECOND step over dates) + UNNEST valid.
-- `last_day_of_month(date)` EXISTS in 467 (verified datetime.html `last_day_of_month(x) → date`).
-- `DATE(order_date)` cast valid; date-range filter `>= DATE '2026-03-01' AND < DATE '2026-04-01'` correct half-open month window.
-- `COUNT(*) - COUNT(active_days.order_day)` over the LEFT JOIN correctly yields dead days (calendar days with no matching active day → order_day NULL → not counted by COUNT(col)). Verified COUNT(col) ignores NULLs, COUNT(*) counts rows.
-- Minor (not a defect, no penalty): `COALESCE(COUNT(...), 0)` is redundant — COUNT never returns NULL.
+### Q3 — how many products had a price increase at least once — 5.00
+Subquery `LAG(price) OVER (PARTITION BY product_id ORDER BY changed_at) AS prior_price`; outer `WHERE price > prior_price`; `COUNT(DISTINCT product_id)`.
+- VERIFIED window.html: LAG valid; first row of partition → NULL (no preceding row).
+- `price > prior_price` detects any increase; first row `price > NULL` → NULL → excluded by WHERE (correct, the first observation has no prior to compare). `COUNT(DISTINCT product_id)` = products with ≥1 increase. CLEAN.
 
-## Q3 — products ordered in every one of the last 3 full months — 5.00 CLEAN
+### Q4 — customers whose first-ever order is in the current month — 4.75
+Subquery `MIN(order_date) OVER (PARTITION BY customer_id) AS first_order_date`; outer `WHERE first_order_date = order_date AND date_trunc('month', order_date) = date_trunc('month', CURRENT_DATE)`; `DISTINCT customer_id`.
+- VERIFIED window.html MIN OVER valid (partition-wide min, no ORDER BY); datetime.html `date_trunc('month', ...)` → first of month. `CURRENT_DATE` is DATE → `date_trunc('month', date)` DATE; `order_date` DATE → DATE = DATE, no mixed-type issue here.
+- `first_order_date = order_date` isolates the first order row; month-equality keeps only current-month first orders. CLEAN.
+- Tiny ding: if a customer placed two orders on the exact same earliest date, `DISTINCT customer_id` still dedupes correctly, so harmless. No penalty of substance.
 
-- `order_date >= date_add('month', -3, date_trunc('month', current_date)) AND order_date < date_trunc('month', current_date)` = exactly the three most-recent FULL months (excludes the current partial month). Verified date_add(unit,value,ts) (negative value subtracts) + date_trunc.
-- `GROUP BY product_id HAVING COUNT(DISTINCT date_trunc('month', order_date)) = 3` correctly requires presence in all 3 distinct months. Valid in 467.
+## Overall
 
-## Q4 — days between each order and that customer's first-ever order — 4.75 CLEAN
+| Q | Score |
+|---|---|
+| Q1 | 5.00 |
+| Q2 | 4.75 |
+| Q3 | 5.00 |
+| Q4 | 4.75 |
+| **Avg** | **4.875** |
 
-- `customer_first_order` CTE: `MIN(order_date)` per `customer_id` (GROUP BY) — valid, MIN(date) confirmed.
-- `date_diff('day', f.first_order_date, o.order_date)` = `order_date − first_order_date` as bigint complete days (verified datetime.html `date_diff(unit, ts1, ts2) → bigint`, returns ts2−ts1). Earlier-first → positive day count. "Jan 1 → Jan 15 = 14" correct (day-aware count, NOT 15).
-- Minor (no penalty): for the customer's own first order the value is 0, as expected.
+**PASS (overall average governs, 4.875 ≥ 3.5).**
 
----
+## Defect / FIX-A assessment
 
-## Verdict
+- **NO fabrication** — every function (MAX/MIN/LAG OVER, date_trunc, the DATE→TIMESTAMP coercion) verified present + correct-signature + correct-semantics in Trino 467.
+- **NO wrong-signature, NO crossed-family, NO findability slip, NO muddle** — all four window fns used in the correct subquery+outer-filter/aggregate form.
+- **Q2 TIMESTAMP-vs-DATE date_trunc equality investigated specifically (per directive) and CLEARED** — implicit date→timestamp@midnight coercion makes both Mondays compare at `00:00:00`; intended same-week result holds. Not a hard defect, not even a soft one — only a clarity nicety to mention the coercion.
+- **NO prod-env conflict** — pure SQL; on-prem Trino 467 + Iceberg + MinIO + HMS + JWT/OPA unaffected.
 
-- **Q1 muddle ONE-OFF CONFIRMED** (did NOT recur). iter909 slip CLOSED.
-- **NO dialect defect, NO fabrication, NO wrong-signature, NO crossed-family, NO findability slip, NO prod-env conflict** across all 4. Every function verified present with correct signature in Trino 467.
-- **iter911 = DEFAULT NO-OP / durability sweep.** No LIGHT FIX-A warranted. Optional fresh adjacents next sweep: gap-filling with sequence over month/year intervals, FILTER-vs-CASE share variants, multi-level HAVING-COUNT-DISTINCT presence checks. PRESERVE full iter534–909 pin inventory; NO federation edits (federation 4.49944/310).
+**iter912 = DEFAULT NO-OP / durability-breadth sweep.** No resource edit warranted. Optional fresh adjacents for next sweep (do NOT mandate): `LEAD` (mirror of Q3 LAG), `NTH_VALUE`/`FIRST_VALUE` first-order variants, mixed DATE/TIMESTAMP date_trunc with an explicit CAST to show the coercion, count-of-ties using `RANK()=1` instead of `MAX() OVER`.
 
-DO NOT bump training/state.json (already 910).
+**PRESERVE** the full iter534–910 pin inventory; NO federation edits (federation 4.49944/310, do not churn). DO NOT bump training/state.json (already 911).
