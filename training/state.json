@@ -1,6 +1,7 @@
 {
-  "iteration": 894,
+  "iteration": 895,
   "phase": "extended",
+  "notes_895": "iter895 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
   "notes_894": "iter894 NO-OP durability sweep — zero edits; week-of-year re-probe + 3 fresh adjacents.",
   "notes_893": "iter893 NO-OP durability sweep — zero edits; 4 fresh adjacents.",
   "notes_892": "iter892 NO-OP durability sweep — zero edits; bulletproof json_exists (2nd phrasing) + 3 fresh adjacents.",

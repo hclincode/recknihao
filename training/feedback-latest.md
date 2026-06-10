@@ -1,64 +1,52 @@
-# Judge Feedback — iter894 (EXTENDED PHASE, NO-OP durability sweep)
+# Judge Feedback — iter895 (EXTENDED PHASE, durability sweep with ONE Q3 defect)
 
-**Overall: 4.94 / 5.00 — STRONG PASS** (per-Q 5.00 / 4.875 / 5.00 / 4.875 = 19.75 / 4 = 4.9375; margin +1.44 over the 3.5 threshold; the OVERALL AVERAGE governs — no per-question override).
+**Overall: 4.33 PASS** (per-Q 4.9375 / 4.9375 / 2.50 / 4.9375 = 17.3125/4 = 4.328; margin +0.83 over 3.5 threshold; **overall average governs — no per-Q veto**). Federation NOT probed (4.49944/310 row UNCHANGED).
 
-**Federation NOT probed this iter** — the Trino-federation row (4.49944 / 310, FAIL) is UNCHANGED.
+Three dialect-clean answers + **ONE genuine Q3 dialect-accuracy DEFECT (alias-in-WHERE, unsupported in Trino) PLUS a logic bug (query-1 filter value never matches its own CASE outputs)**. The defect is a **RESPONDER SYNTHESIS SLIP**, not a resource gap — resources/ already teach the alias-in-WHERE rule correctly and prominently. → **iter896 = re-probe-don't-churn** (optional narrow findability anchor in an email/format-validation context only; do NOT churn any pin).
 
-**iter894 was a NO-OP durability sweep** — week-of-year re-probe (iter893 slip recurrence test) + 3 fresh adjacents. All 4 answers dialect-clean. **The iter893 Q4 ISO-week-1 slip did NOT recur** (see Q1 below) → week-of-year topic CONFIRMED CLEAN.
-
----
-
-## Per-question scores
-
-| Q | Topic | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | week-number-of-year (1-53) to compare week 12 across years | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q2 | split full_name into first/last (split_part) | 5.0 | 4.5 | 5.0 | 5.0 | **4.875** |
-| Q3 | collapse runs of spaces to a single space (regexp_replace) | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q4 | day-of-month with highest average purchase value | 5.0 | 4.5 | 5.0 | 5.0 | **4.875** |
+All facts VERIFIED vs trino.io/docs/467 (select.html / datetime.html / aggregate.html / window.html) via WebFetch 2026-06-10. PIN Trino 467.
 
 ---
 
-## Q1 — WEEK-OF-YEAR SLIP RECURRENCE VERDICT: **ONE-OFF — CLEAN — slip did NOT recur**
+## Q1 — truncate created_at to Monday 00:00, group by week — 4.9375 (Acc5 / Comp5 / Clar4.75 / Act5)
+`date_trunc('week', created_at) AS week_start`, `GROUP BY date_trunc('week', created_at)`. "Returns Monday at midnight; no day-of-week math."
 
-The iter893 Q4 answer carried an INACCURATE ISO-8601 rationale ("week 1 = first week containing a Monday"). The iter894 Q1 re-probe of the SAME concept gave the **CORRECT** rationale:
+**CORRECT.** VERIFIED datetime.html: date_trunc supports `week`; doc example truncates 2001-08-22 (a Wednesday) → **2001-08-20 00:00:00.000 (a Monday)** = start of ISO week at midnight. Trino weeks are Monday-start (ISO-8601), so no day-of-week arithmetic is needed — the responder's framing is exactly right. GROUP BY repeats the **expression** (not a SELECT alias) → valid (correctly sidesteps the alias-in-GROUP-BY trap). Tiny clarity nit only: could note timestamp-with-tz week boundaries follow session zone — not a defect.
 
-> "Week 1 is the week containing the **FIRST THURSDAY** of the year, weeks 1-53, week always starts Monday."
+## Q2 — earliest "first seen" timestamp per user — 4.9375 (Acc5 / Comp5 / Clar4.75 / Act5)
+`MIN(created_at) AS first_seen ... GROUP BY user_id`; or `MIN(created_at) OVER (PARTITION BY user_id)` for per-row.
 
-This is the **textbook-correct ISO-8601 week-date definition**. VERIFIED (WebSearch Wikipedia *ISO week date* + *ISO 8601*, 2026-06-10): ISO week 1 = the week containing the year's first Thursday (equivalently the week containing January 4, equivalently the earliest week with ≥4 January days); weeks start Monday. The responder's "first Thursday" framing is exactly right.
+**CORRECT.** VERIFIED aggregate.html: `min(x)` "Returns the minimum value of all input values" — over a timestamp returns the earliest. VERIFIED window.html: "All Aggregate functions can be used as window functions by adding the OVER clause" → `MIN(created_at) OVER (PARTITION BY user_id)` is valid and broadcasts the per-user earliest onto every row. Correctly offers BOTH shapes (collapse-to-one-row GROUP BY vs keep-all-rows window) and explains when each is wanted. Solid.
 
-**Therefore the iter893 "first Monday" framing was a RESPONDER SYNTHESIS SLIP / ONE-OFF, NOT a content defect.** Week-of-year is CONFIRMED CLEAN. **NO FIX-A needed; iter894 = NO-OP** (scope check is moot — the responder produced the correct rationale unaided, so there is no "first Monday" card to hunt; do NOT add a "wrong" card, do NOT churn the week_of_year/EXTRACT(WEEK) SQL or the Monday-week-start fact).
+## Q3 — flag rows where user_email is invalid (no @, or no dot after @) — 2.50 (Acc1.5 / Comp3 / Clar3 / Act2.5) — **DEFECT**
+Two CASE-based queries; the **CASE/LIKE logic is reasonable**, but **BOTH queries filter on a SELECT-list OUTPUT ALIAS in the WHERE clause**, which Trino does NOT support, AND query-1's filter value never matches its own CASE outputs.
 
-Q1 Accuracy = **5.0** (per the run-prompt directive: first-Thursday framing correct → Acc 5.0).
+**CONFIRMED DIALECT DEFECT — alias-in-WHERE is unsupported in Trino 467.** VERIFIED select.html: WHERE is evaluated **before** the SELECT projection, so output-column aliases do not yet exist when WHERE runs; aliases are usable in GROUP BY*/HAVING/ORDER BY but **NOT in WHERE** — Trino raises `Column 'X' cannot be resolved`. (*GROUP BY by alias is itself a separate Trino gap, issue #16533.)
+- **Query 1:** `... CASE ... END AS email_validation FROM events WHERE email_validation = 'INVALID'` → `Column 'email_validation' cannot be resolved`. **PLUS a logic bug independent of scoping:** the CASE only ever outputs `'INVALID: missing @'`, `'INVALID: no dot after @'`, or `'VALID'` — it **never** outputs the bare string `'INVALID'`, so even if alias-in-WHERE were legal this filter would match **ZERO rows**.
+- **Query 2:** `... AS is_invalid_email FROM events WHERE is_invalid_email = TRUE` → `Column 'is_invalid_email' cannot be resolved`.
 
----
+What IS correct: the LIKE predicate `user_email NOT LIKE '%@%.%'` (flag missing-@ or no-dot-after-@) is a reasonable approximate format check; `POSITION`, `SUBSTR`, `NOT LIKE '%@%'` usage is dialect-valid. The bug is purely the WHERE-clause filtering mechanism (+ the query-1 literal mismatch).
 
-## Verification (all vs trino.io/docs/467, WebFetch/WebSearch 2026-06-10)
+**CORRECT FIX (any one):** (a) filter the **raw expression** directly — `WHERE user_email NOT LIKE '%@%.%'`; (b) **repeat the CASE** in WHERE; or (c) **wrap in a CTE/subquery** and filter the alias in the OUTER query — `WITH v AS (SELECT user_email, CASE ... AS email_validation FROM events) SELECT * FROM v WHERE email_validation LIKE 'INVALID%'`. Note the outer-query filter must also use a value the CASE actually emits (e.g. `LIKE 'INVALID%'`, not `= 'INVALID'`).
 
-**Q1 — 5.00 — CORRECT.** `week_of_year(order_date)` (alias `week()`) or `EXTRACT(WEEK FROM order_date)`; ISO-8601, week 1 = week containing the first Thursday, weeks 1-53, weeks start Monday.
-- VERIFIED functions/datetime.html: `week(x)` "Returns the **ISO week** of the year from x. The value ranges from 1 to 53." `week_of_year(x)` "This is an alias for week()." `EXTRACT(WEEK FROM x)` returns the ISO week (same 1-53 range). Function names, EXTRACT equivalence, and the 1-53 range all CONFIRMED.
-- VERIFIED ISO-8601 week-1 characterization (WebSearch): "first Thursday" = "containing Jan 4" = "earliest week with ≥4 January days"; Monday week-start. Responder's framing is the standard definition — fully accurate, no slip.
+**Acc scored 1.5:** two queries, both unrunnable as written (alias-in-WHERE), one additionally semantically dead (literal never matches) — a load-bearing copy-paste failure, not a cosmetic nit. Comp/Clar partial credit because the underlying validity logic is explained and reasonable.
 
-**Q2 — 4.875 — CORRECT.** `split_part(full_name,' ',1) AS first_name, split_part(full_name,' ',2) AS last_name`, with the honest caveat that multi-word last names ("Robert De Niro" → "De") need app/dbt logic.
-- VERIFIED functions/string.html: `split_part(string, delimiter, index)` "Splits string on delimiter and returns the field index. Field indexes start with **1**. If the index is larger than the number of fields, then **null** is returned." So `split_part(...,1)` / `split_part(...,2)` are valid and 1-based.
-- The honest "Robert De Niro → De is wrong; SQL alone can't parse arbitrary names" caveat is **APPROPRIATE, not a defect** — it is exactly the right scoping for the engineer (parsing arbitrary human names is genuinely out of reach for a single delimiter split). Good judgment.
-- Minor completeness nit only (−0.5 Comp): docs say out-of-range index returns **NULL** (not empty string). A single-word `full_name` (no space) makes `split_part(...,2)` return NULL — worth a one-line "single-word names → last_name is NULL" note. The responder did NOT incorrectly claim it returns '' (the run-prompt's "returns ''" premise is wrong, but the responder's actual answer doesn't assert it), so there is NO accuracy defect. Optional micro-anchor only.
+## Q4 — % of orders above $500 in one query — 4.9375 (Acc5 / Comp5 / Clar4.75 / Act5)
+Window form: `SUM(CASE WHEN order_total>500 THEN 1 ELSE 0 END) OVER ()`, `COUNT(*) OVER ()`, `ROUND(100.0*SUM(CASE...)OVER()/COUNT(*)OVER(),2)`. Summary form: `COUNT(CASE WHEN order_total>500 THEN 1 END)`, `COUNT(*)`, `ROUND(100.0*COUNT(CASE...)/COUNT(*),2)`.
 
-**Q3 — 5.00 — CORRECT.** `regexp_replace(user_input,'\s+',' ')` to collapse whitespace runs; `trim(regexp_replace(...))` to also strip the ends.
-- VERIFIED functions/regexp.html: `regexp_replace(string, pattern, replacement) → varchar` 3-arg form exists, "Replaces every instance of the substring matched by the regular expression pattern in string with replacement." "All of the regular expression functions use the **Java pattern** syntax" — so `\s` is the Java whitespace class and `\s+` matches one-or-more whitespace.
-- The single-quoted literal `'\s+'` correctly passes the literal backslash-s to the regex engine: Trino standard string literals do NOT interpret backslash escapes (backslash is an ordinary character), so `'\s+'` reaches the Java regex engine intact as the whitespace-class pattern. CONFIRMED correct. Wrapping in `trim(...)` to also strip leading/trailing whitespace is the right finishing touch.
-
-**Q4 — 4.875 — CORRECT.** `SELECT EXTRACT(DAY FROM order_date) AS day_of_month, AVG(order_value) AS avg_value FROM ... GROUP BY EXTRACT(DAY FROM order_date) ORDER BY avg_value DESC LIMIT 1`.
-- VERIFIED functions/datetime.html: `day(x)` "Returns the **day of the month** from x"; `day_of_month(x)` is an alias for `day()`; `EXTRACT(DAY FROM x)` maps to `day()` and returns day-of-month (1-31). The grouping/aggregate/order/limit pattern is idiomatic Trino 467. `AVG(order_value)` over the per-day groups + `ORDER BY avg_value DESC LIMIT 1` correctly returns the single highest-average day.
-- Minor completeness nit only (−0.5 Comp): on an exact tie (two calendar days with identical average), `LIMIT 1` returns an **arbitrary** one with no deterministic tiebreaker. A one-line "ties → arbitrary pick; add a tiebreaker or use RANK() to surface all tied days" note would bulletproof it. Minor only — not an accuracy defect.
+**CORRECT (both forms).** VERIFIED window.html: aggregates are usable as window functions via OVER; empty `OVER ()` computes the aggregate over the entire result set (standard SQL, valid in 467) → broadcasts grand totals onto every row. VERIFIED: `100.0 * ...` uses a DECIMAL literal, forcing **non-integer (decimal) division** — avoids the integer-truncated-to-0 trap. `COUNT(CASE WHEN cond THEN 1 END)` counts only non-NULL results = counts matching rows (the idiomatic conditional-count) — correct. Both the per-row window form and the single-row summary form are valid and return the same percentage; offering both with the trade-off is exactly right.
 
 ---
 
-## Verdict & directive for iter895
+## iter896 DIRECTIVE — re-probe-don't-churn (NO defect-marking of pins)
 
-- **PASS — overall 4.94, margin +1.44.** All 4 dialect-clean against trino.io/docs/467.
-- **Q1 week-of-year slip = ONE-OFF; week-of-year CONFIRMED CLEAN.** The iter893 "first Monday" rationale did NOT recur; the responder gave the correct first-Thursday/ISO-8601 framing unaided.
-- **NO genuine findable-but-missing gap and NO dialect defect surfaced.** **iter895 = DEFAULT NO-OP.** Teacher: ZERO edits.
-- Optional findability micro-anchors only (skip if they churn any pin): (Q2) "single-word name → split_part(...,2) returns NULL" near a split_part card; (Q4) "ties → LIMIT 1 arbitrary; use RANK() to surface all" near a top-N card. Neither is required.
-- Per the iter882 lesson: did NOT flag any correct claim as a defect — every fact was verified vs trino.io/docs/467 (datetime / string / regexp .html) + WebSearch ISO-8601 first. Do NOT add any "wrong" card for Q1-Q4. Do NOT touch any iter534-893 pin. PIN Trino 467. NO federation edits.
-- **DO NOT bump training/state.json** (already passed).
+**SCOPE CHECK RESULT: resources/ is CORRECT and NOT silent on alias-in-WHERE → this is a RESPONDER SYNTHESIS SLIP, NOT a resource defect.** The rule is taught correctly and prominently in at least three places:
+- `resources/27-oracle-plsql-to-dbt-trino.md` §4.2 (L768–793): explicit "GOTCHA — do NOT reference the SELECT output alias in WHERE … `WHERE` is evaluated BEFORE the SELECT projection … `Column 'occurred_at' cannot be resolved`", with the general rule "you cannot reference ANY SELECT output alias — nor a window-function result — in WHERE."
+- `resources/23-sql-best-practices-olap.md` §8 (L487–500): GROUP-BY-alias guard + ORDER-BY asymmetry.
+- `resources/07-analytical-query-patterns.md` (L2806, L2820): "Anywhere the alias appears before projection (GROUP BY, WHERE, HAVING, OVER's ORDER BY), use the expression instead," with a worked WHERE example and the fix.
+
+There is **NO email-validation / format-check card** in resources/ that misuses alias-in-WHERE (grep for `email_validation` / `is_invalid_email` / `NOT LIKE '%@%` returned zero resource matches). So the responder did not copy a bad pattern from a card — it synthesized the alias-in-WHERE form itself despite the rule being documented elsewhere.
+
+**ACTION for iter896: DEFAULT NO-OP / re-probe.** Per the iter882 + reconcile-don't-churn lessons, do NOT churn the existing (correct) alias-in-WHERE cards and do NOT add a "wrong" card. **OPTIONAL narrow LIGHT FIX-A (additive, only if it does not churn a pin):** add ONE small keyword-anchored note in an email/text-format-validation context routing the reader to the existing alias-in-WHERE rule + showing the correct CTE/subquery (or raw-expression) filter form — keyword anchors: *flag invalid emails / validate email format / filter on a CASE result / WHERE on a computed column / email_validation alias in WHERE / is_invalid_email*. If adding this would touch/duplicate the §27-4.2 or §23-8 or §07 alias guards, **SKIP it and just re-probe email-format validation from a 2nd phrasing next sweep** to confirm the slip is a one-off. All SQL must be FENCED (pipe-escape trap; the `%@%.%` LIKE pattern and any `|` content must not sit in a table cell).
+
+**Do NOT** flag Q1/Q2/Q4 as defects (all dialect-clean, verified vs source first). **Do NOT** touch any iter534–894 pin. PIN 467. **NO federation edits.** **DO NOT bump training/state.json** (already passed; this run does not regress overall PASS).
