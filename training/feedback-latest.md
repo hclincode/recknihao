@@ -1,73 +1,76 @@
-# Judge Feedback — iter961 (EXTENDED PHASE)
+# iter962 Judge Feedback — 2026-06-11 (EXTENDED PHASE)
 
-**Overall: 4.0625 — PASS** (margin +0.5625; OVERALL AVERAGE governs, no per-Q veto)
+**Overall: 4.328125 PASS** (margin +0.828). Per-Q: Q1 4.6875 / Q2 4.0 / Q3 3.625 / Q4 4.6875 = 17.3125/4 = 4.328125. OVERALL AVERAGE governs (no per-Q veto). FEDERATION NOT PROBED (r22 §13.x hard-locked, 4.49944/310 UNCHANGED).
 
-Per-Q: Q1 2.6875 / Q2 4.875 / Q3 4.0 / Q4 4.6875 = 16.25/4 = 4.0625
-
-Federation NOT probed (r22 §13.x hard-locked per directive; 4.49944/310 row UNCHANGED). DID NOT bump state.json.
-
-All dialect/logic verified vs trino.io/docs/467 (sql/select.html, functions/aggregate.html) + git-tag 467 + docs.getdbt.com (resource-configs/contract) + WebSearch 2026-06-11 — BOTH directions, NOT against resources/. PIN 467.
+All dialect/logic verified BOTH directions (present AND absent) vs trino.io/docs/467 (functions/datetime.html, functions/window.html, functions/aggregate.html, sql/select.html grammar) + git-tag 467 + WebSearch 2026-06-11 — NOT against resources/.
 
 ---
 
-## Q1 — accounts now on a LOWER plan than 6 months ago — **2.6875** (Acc 2.0 / Comp 3.0 / Clar 3.25 / Act 2.5)
+## ★★★ iter961 Q1 QUALIFY/LAG-AS-OF SLIP = CONFIRMED ONE-OFF (RE-PROBE CLEAN) ★★★
 
-**TWO real defects, both serious — this is NOT mere padding.**
+iter961 Q1 shipped TWO real defects on a temporal as-of question: (1) `QUALIFY ROW_NUMBER()... = 1` (parse error — Trino 467 has NO QUALIFY) and (2) `LAG(...)` used as a stand-in for as-of state. iter962 Q1 is the targeted re-probe (price AS OF Jan 1 from price_history).
 
-**(1) QUALIFY is a PARSE ERROR on Trino 467.** VERIFIED: trino.io/docs/467/sql/select.html SELECT grammar lists WITH/SELECT/FROM/WHERE/GROUP BY/HAVING/WINDOW/set-ops/ORDER BY/OFFSET/LIMIT — NO QUALIFY. It is a Snowflake/BigQuery/Databricks/Teradata extension; open Trino feature request trinodb/trino #20687, unimplemented as of 467. The responder's lead query `... QUALIFY ROW_NUMBER() OVER (...) = 1` would emit `mismatched input 'QUALIFY'` and never plan. The Trino-correct form is the subquery: `SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY change_timestamp DESC) AS rn FROM ...) WHERE rn = 1`.
+**iter962 Q1 used the CORRECT Trino-valid as-of pattern:**
+```
+SELECT product_id, price FROM (
+  SELECT product_id, price, effective_date,
+         ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY effective_date DESC) AS rn
+  FROM price_history
+  WHERE effective_date <= DATE '2026-01-01'
+) WHERE rn = 1
+```
+- NO QUALIFY (subquery + outer `WHERE rn = 1` instead — the Trino-correct form).
+- NO LAG (filter-to-cutoff-BEFORE-ranking is the genuine as-of pattern; LAG was correctly NOT reached for).
+- Filter `effective_date <= DATE '2026-01-01'` applied BEFORE the window, then keep most-recent-per-product via `ROW_NUMBER() DESC = 1`. TRACE: product P with rows Dec-1-2025 ($10), Jan-1-2026 ($12), Feb-1-2026 ($15) → cutoff filter keeps Dec-1 & Jan-1; DESC rank → Jan-1 ($12) = rn 1 = correct price in effect as-of Jan 1. CORRECT.
 
-**(2) LAG gives the prior CHANGE, not the as-of-6-months-ago state.** TRACE: account changes Free→Pro Jan 1, Pro→Enterprise Mar 1, Enterprise→Pro Jun 1; "now" = Jun 11, "6 months ago" = Dec 11 (plan in effect = Free). `LAG(new_plan) OVER (PARTITION BY account_id ORDER BY change_timestamp)` on the latest (Jun 1) row returns **Enterprise** (the Mar 1 plan), NOT Free. LAG answers the immediately-preceding-change question, which equals "6 months ago" only by coincidence. The correct point-in-time pattern is TWO as-of lookups: current plan = latest event with `change_timestamp <= now`; plan-6mo-ago = latest event with `change_timestamp <= now - INTERVAL '6' MONTH`. Additionally `current_plan < plan_6mo_ago` assumes plan names sort by tier (usually false) — the responder DID flag "or use your plan tier ordering," partial credit.
-
-**Resource-vs-slip determination: PURE RESPONDER SYNTHESIS SLIP, NOT a resource defect.** Grep confirms resources EXTENSIVELY and repeatedly teach the opposite of what the responder did:
-- r23 L1757 "The one-fact summary. Trino 467 has NO QUALIFY clause... immediate parse error: mismatched input 'QUALIFY'"; L1386, L3235 anti-pattern table; L1779/L1797 copy-attractive CORRECT subquery form + defanged WRONG QUALIFY block; L1305 "value as of latest event" idiom via max_by (the actual as-of pattern).
-- r27 L1675/L1928/L1989/L4090 QUALIFY landmine + #20687 reference.
-- r13 L5260 "Trino-compatible, NO QUALIFY".
-No resource teaches QUALIFY as valid, and none teaches LAG as the as-of-N-months pattern (r23 L1305 = max_by; r07 L1793 explicitly teaches as-of reasoning and distinguishes forward-fill / accumulation / interval-overlap). The responder reached PAST correct, copy-attractive canonicals for a non-Trino construct AND the wrong window pattern. This is a Haiku synthesis miss, not a findability or content gap. Re-probe-don't-churn: do NOT add a resource fix; re-probe a temporal-as-of question next sweep to confirm one-off.
-
-## Q2 — count distinct users last 30 days; COUNT(DISTINCT) vs better — **4.875** (Acc 5 / Comp 4.75 / Clar 5 / Act 4.75)
-
-CLEAN. `COUNT(DISTINCT user_id)` correct; `approx_distinct(user_id)` HyperLogLog ~2.3% standard error (~68% within ±2.3%), 100x faster, non-billing-only — VERIFIED: functions/aggregate.html documents 2.3% standard error for approx_distinct. Critically, the responder correctly attributed 2.3% to approx_distinct and NOT to approx_percentile. `WHERE event_date >= current_date - INTERVAL '30' DAY GROUP BY customer_id` valid (DAY qualifier valid, bare-column pruning-friendly). POSITIVE SIGNAL: COUNT(DISTINCT) reached for correctly where it genuinely applies — NO over-avoidance (confirms iter959 SUM(DISTINCT) slip remains one-off).
-
-## Q3 — median resolution time by priority on tens of millions of rows — **4.0** (Acc 3.5 / Comp 4.25 / Clar 4.5 / Act 3.75)
-
-Lead CORRECT: `approx_percentile(resolution_time_minutes, 0.5) AS median GROUP BY priority`, T-Digest single pass, array form `approx_percentile(x, ARRAY[0.5,0.90,0.99])` — VERIFIED valid 467 (4 overloads: single, array, weighted-single, weighted-array). "Trino 467 does NOT have PERCENTILE_CONT or MEDIAN" CONFIRMED (not in functions/aggregate.html). "docs do not publish a standard-error % for approx_percentile (unlike approx_distinct 2.3%)" CONFIRMED CORRECT — excellent precision.
-
-**BROKEN-SECONDARY PADDING (Accuracy knock):** "If you need exact median (regulatory), fall back to approx_percentile() with fewer rows or a smaller time window" is FALSE. approx_percentile is ALWAYS an approximation regardless of row count or window size — running it on fewer rows does not make it exact. This is the recurring broken-secondary-alternative meta-pattern (iter936/943/948/950/954/958/959/960 family per feedback_responder_broken_secondary_alternative.md): correct lead, false tacked-on "for completeness" remedy. Per-instance Haiku padding slip — NOT a resource defect; no single resource fix. The correct "exact median" path would be a full sort / NTILE-based exact computation accepting the cost, NOT approx_percentile-on-fewer-rows. Acc -1.5, lead recognized correct.
-
-## Q4 — dbt model contract: declare schema, fail build loudly on rename/retype — **4.6875** (Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.25)
-
-ACCURATE against real dbt-core behavior (docs.getdbt.com/reference/resource-configs/contract VERIFIED):
-- `config: contract: {enforced: true}` correct; columns list with `name` + `data_type` correct; all output columns must be declared — CONFIRMED.
-- Trino types (varchar/bigint/date/timestamp(6)) NOT string/int — CORRECT insistence (dbt applies type aliasing per adapter; Trino-native types are right for dbt-trino).
-- Build/compile-time enforcement raising a Compilation Error BEFORE materialize — CONFIRMED ("This model has an enforced contract that failed... data type mismatch").
-- "dbt enforces NOT Trino at query time" — CORRECT (structural enforcement at compile, dbt-side).
-- Pair with data tests unique/not_null/accepted_values — CONFIRMED (contracts = structural at build; data tests = data-quality post-build; complementary).
-- Model SQL `{{ config(materialized='table', properties={'partitioning': "ARRAY['month(signup_date)']"}) }}` — PLAUSIBLE/CORRECT: dbt-trino Iceberg connector key is `partitioning` (r13 L5609-5611 confirms 'partitioning' is the Iceberg key, NOT Hive's 'partitioned_by'); `month(signup_date)` is a valid Iceberg partition transform. Contracts require table/view/incremental materialization — responder used `table`, fine.
-Minor Act -0.75: did not note `on_schema_change` interplay for incremental, trivial for this question. Citing r27 §6.7C + r28 appropriate.
+**DISPOSITION FOR ORCHESTRATOR: the iter961 Q1 QUALIFY-parse + LAG-not-as-of slip is a CONFIRMED ONE-OFF responder synthesis miss. The re-probe is CLEAN. Resources teach the opposite extensively (r23 QUALIFY-not-Trino canonical, r27 §7A.2 QUALIFY landmine, max_by/as-of idioms). No resource defect, no findability gap. Do NOT churn QUALIFY/as-of content (adjacent over-attraction risk per feedback_new_card_over_attracts_adjacent.md).**
 
 ---
 
-## Scope summary
+## Per-Q scores
 
-- **Q1**: REAL Accuracy + LOGIC defect (QUALIFY parse error + LAG-not-as-of). PURE RESPONDER SYNTHESIS SLIP — resources teach the opposite extensively (r23/r27/r13). NOT a resource/findability gap. Re-probe a temporal-as-of question next sweep; DO NOT churn.
-- **Q2**: CLEAN. Confirms no COUNT(DISTINCT) over-avoidance.
-- **Q3**: Lead correct (approx_percentile, no percentile_cont/MEDIAN, array form, correct error-attribution). FALSE broken-secondary "exact median via fewer rows" remedy — recurring padding meta-pattern, per-instance NOT a resource fix.
-- **Q4**: SOLID/ACCURATE dbt model contracts; verified against dbt-core docs + dbt-trino partitioning form.
+### Q1 (price AS OF Jan 1) — 4.6875 (Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.25)
+Textbook-correct as-of. Filter-before-rank + ROW_NUMBER()=1 subquery; correctly labeled the "first row per group" canonical. No QUALIFY, no LAG. Clean clear explanation of why filter-before-rank gives the as-of price. Minor: did not note tie-on-effective_date edge (two prices same date → ROW_NUMBER picks one arbitrarily) but that's a trivial edge for this question.
 
-**Pattern:** Two single-instance defects again sit on broken-secondary / wrong-construct surfaces (Q1 QUALIFY+LAG, Q3 false exact-median remedy) while leads (Q2, Q4, Q3-lead) are correct. Q1's QUALIFY+LAG is the more serious because the LEAD itself is broken (won't parse + wrong logic), not just a tacked-on aside — but it remains a Haiku synthesis miss against correct, copy-attractive resources.
+### Q2 (% of category revenue from single biggest product) — 4.0 (Acc 4.25 / Comp 4.25 / Clar 3.0 / Act 4.5)
+Final forms CORRECT: 3-CTE form (product_revenue / RANK() ranked_products / category_totals → JOIN → WHERE rank=1 → ROUND(100.0*revenue/total,2)) and single-pass `ROUND(100.0 * SUM(revenue) FILTER (WHERE rank=1) / SUM(revenue), 2) ... GROUP BY category`. VERIFIED: FILTER(WHERE) supported on all aggregates (functions/aggregate.html); 100.0 decimal promotion standard; RANK() valid.
 
-## Recommendation — iter962
+Two knocks:
+- **CLARITY ding: visible thinking-out-loud churn.** Showed a `SUM(CASE WHEN rank=1...)` form, wrote "Wait — that's overcomplicating it," then pivoted. Messy stream-of-consciousness in a delivered answer; reader has to discard a false start. NOT an accuracy issue (the discarded form wasn't wrong per se), purely presentation.
+- **ACCURACY minor: RANK() vs ROW_NUMBER() TIE risk.** VERIFIED vs functions/window.html: RANK() assigns the SAME rank to tied rows. If two products TIE for top revenue in a category, both get rank=1, and `SUM(revenue) FILTER (WHERE rank=1)` sums BOTH — slightly OVER-stating "single biggest product's share." For "single biggest" strictly, ROW_NUMBER() (unique, picks one) is the safer choice; RANK() answers "co-top products' share." Minor because exact-revenue ties are rare and arguably "co-top" is defensible — NOTED not heavily penalized.
 
-DEFAULT NO-OP. Optional LIGHT FIX-A ONLY if (i) QUALIFY-in-lead OR LAG-as-as-of recurs on a temporal-as-of surface in next 2 sweeps, OR (ii) the false-exact-median / approx-becomes-exact padding recurs. Reasoning: (1) overall 4.0625 PASS, margin +0.5625; (2) Q1 defects are pure synthesis slips against extensively-correct resources — adding more QUALIFY/as-of content risks adjacent over-attraction per feedback_new_card_over_attracts_adjacent.md and would not address a content gap; (3) Q3 false remedy is the persistent broken-secondary meta-pattern (no single resource fix); (4) NEXT SWEEP PROBES: a temporal point-in-time / as-of-N-months question (confirm Q1 LAG-vs-as-of is one-off — verify responder reaches for max_by / as-of subquery not LAG); a "latest row per group" dedup question (confirm responder uses subquery+WHERE rn=1 not QUALIFY); window-frame BETWEEN N PRECEDING AND N FOLLOWING; GROUPING SETS/ROLLUP/CUBE; lateral JOIN UNNEST. DO NOT re-probe gaps-and-islands streak-construction.
+### Q3 (users active on BOTH web AND mobile in last 30 days) — 3.625 (Acc 4.5 / Comp 2.0 / Clar 4.0 / Act 4.0)
+Logic CORRECT for both-platforms: `GROUP BY user_id HAVING COUNT(DISTINCT platform) = 2` (single-arg COUNT(DISTINCT) valid 467; HAVING after aggregation valid). Correctly framed as the avoid-two-subqueries-and-join answer; IN-subquery-to-recover-sessions form + "IN = semi-join" note both correct.
 
-DO NOT TOUCH (all locks per iter960 inventory): r23 QUALIFY-not-Trino canonical L1305/L1386/L1757/L1779/L3235 (CONFIRMED this iter the responder's slip is NOT a content gap) / r23 approx_percentile + percentile footgun cards / r23 fan-out card / r07 L3226-3263 B-Streak defang / r07 L37 HAVING-perf / r07 L1624 anti-nesting / r23 §3.1G argmax / COUNT(DISTINCT) canonical / HAVING-vs-WHERE / regexp_like card / NULLS-LAST default / geometric/harmonic mean cards / r09 partition DDL strings + bucket(col,N) column-first / r28 DATE-literal + date_trunc-to-range / r13 json_exists strict path + 'partitioning' Iceberg key (CONFIRMED Q4) / r22 §13.x federation (hard-locked) / INTERVAL qualifier cards / format_datetime-vs-to_char card / PARTITIONED-BY guidance / price-suffix canonical / MAX_BY-nested defang / r27 QUALIFY landmine §7A.2.
+- **COMPLETENESS MISS (-): DROPPED the explicit "last 30 days" filter.** The question says "active on both web AND mobile **in the last 30 days**." The answer counts ALL-TIME both-platform users, not last-30-days. Missing `WHERE session_start >= current_date - INTERVAL '30' DAY` (or equivalent on the sessions timestamp column). A user who used web 2 years ago and mobile today would be wrongly included. This is a real semantic miss — the answer solves a slightly different question than asked. The COUNT(DISTINCT platform)=2 logic is correct, but the answer is INCOMPLETE without the date predicate.
+
+### Q4 (avg tenure days, active employees, Trino vs Postgres gotchas) — 4.6875 (Acc 5 / Comp 4.75 / Clar 4.75 / Act 4.25)
+`SELECT AVG(date_diff('day', hire_date, current_date)) AS avg_tenure_days FROM employees WHERE end_date IS NULL`. ALL gotcha claims VERIFIED vs functions/datetime.html:
+- date_diff is unit-first: `date_diff('day', a, b)` with quoted unit then two args — CONFIRMED.
+- current_date / current_timestamp are keywords with NO parens; `current_date()` WITH parens is INVALID — CONFIRMED ("SQL-standard functions do not use parenthesis").
+- AVG skips NULL hire_date — correct (aggregates ignore NULLs).
+- date_diff preferred over raw timestamp subtraction / to_unixtime for readability + DST — sound.
+- CAST-to-DOUBLE variant — fine.
+Clean and accurate; the Postgres-contrast framing (no `current_date()`, unit-first not `age()`) is exactly the kind of dialect gotcha the question wanted.
+
+---
+
+## Scope notes
+- Q1: iter961 QUALIFY/LAG-as-of slip CONFIRMED ONE-OFF — re-probe clean. No action.
+- Q2: correct final forms; CLARITY ding for visible "Wait — overcomplicating it" churn (messy-thinking presentation, NOT a resource defect); RANK()-vs-ROW_NUMBER() tie over-count is a minor NOTED accuracy nuance (ties rare/co-top defensible). Per-instance, NOT a resource fix.
+- Q3: COUNT(DISTINCT platform)=2 logic correct BUT dropped the question's "last 30 days" date filter — real COMPLETENESS miss. Single-instance responder omission (dropped a stated constraint), consistent with the broken-secondary/incomplete-synthesis meta-pattern family (iter936/943/948/950/954/958/959/960/961). NOT a resource/findability gap — the date-filter pattern is taught extensively (every recent INTERVAL '30' DAY probe passed). Re-probe-don't-churn: re-probe a both-conditions Q with an explicit recency window next sweep to confirm one-off.
+- Q4: clean and accurate; all dialect gotchas verified.
+- NO resource defect / NO findability gap this sweep.
+
+## RECOMMENDATION = DEFAULT NO-OP
+Overall 4.328 PASS, margin +0.828. iter961 Q1 slip confirmed one-off (the headline outcome). Q2 churn and Q3 dropped-constraint are per-instance Haiku synthesis/presentation slips against correct, findable resources — no single resource fix; adding content risks adjacent over-attraction. NEXT SWEEP PROBES: re-probe a both-conditions-WITH-recency-window Q (confirm Q3 dropped-30-day-filter is one-off — verify responder carries ALL stated constraints into the query); RANK-vs-ROW_NUMBER "single top" with a deliberate tie (confirm responder picks ROW_NUMBER for strict single); window-frame BETWEEN N PRECEDING AND N FOLLOWING; GROUPING SETS/ROLLUP/CUBE; lateral JOIN UNNEST. Do NOT re-probe gaps-and-islands streak-construction. Federation (4.49944/310) bulletproofed angles only.
 
 PINS REINFORCED:
-- **Trino 467 has NO QUALIFY — parse error `mismatched input 'QUALIFY'` (Snowflake/BigQuery/Databricks/Teradata/DuckDB only; #20687 unimplemented). Use subquery: `SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (...) AS rn FROM ...) WHERE rn = 1` or max_by for few columns.**
-- **"Plan/value AS-OF (now − N months)" is TWO as-of lookups (latest event ts ≤ now, latest event ts ≤ now−N), NOT LAG — LAG returns the immediately-preceding CHANGE, not the state in effect at a point in time. Plan-name comparison needs an explicit tier ordering, not lexical `<`.**
-- **approx_percentile is ALWAYS approximate (T-Digest) — running it on fewer rows / smaller window does NOT make it exact; exact median needs a full sort / exact percentile path, NOT approx_percentile-on-fewer-rows. No published standard-error figure for approx_percentile (2.3% is approx_distinct ONLY).**
-- **COUNT(DISTINCT col) single-arg native; approx_distinct HyperLogLog ~2.3% standard error (approx_distinct ONLY), 100x faster, non-billing; INTERVAL '30' DAY + bare-column pruning-friendly.**
-- **dbt model contracts: `config: contract: {enforced: true}` + columns with `name`+`data_type` (Trino types varchar/bigint/timestamp(6)/date/double/decimal NOT string/int); compile/build-time Compilation Error before materialize; dbt enforces (NOT Trino at query time); requires table/view/incremental materialization; pair with data tests unique/not_null/accepted_values. dbt-trino Iceberg partition key = `properties={'partitioning': "ARRAY['month(col)']"}` (NOT Hive 'partitioned_by').**
-- **broken-secondary / wrong-construct meta-pattern (iter936/943/948/950/954/958/959/960/961 family) persists — leads correct, tacked-on remedy/construct ships false claims; Q1 escalated form = wrong construct IN the lead (QUALIFY+LAG); per-instance Haiku synthesis, NOT a resource defect.**
+- **as-of / point-in-time = filter ts <= cutoff BEFORE ranking, then ROW_NUMBER() OVER (PARTITION BY key ORDER BY ts DESC) = 1 in a SUBQUERY (NO QUALIFY — parse error in 467; NO LAG — LAG returns the preceding CHANGE not the state-in-effect). iter961 QUALIFY/LAG-as-of slip CONFIRMED ONE-OFF.**
+- **RANK() assigns SAME rank to tied rows (functions/window.html) — for STRICT "single biggest" use ROW_NUMBER() (unique); RANK()=1 FILTER-share OVER-states on a top-revenue tie (co-top); ROW_NUMBER() picks exactly one.**
+- **FILTER (WHERE cond) supported on ALL aggregates (functions/aggregate.html); 100.0 * x / y forces decimal/double promotion.**
+- **COUNT(DISTINCT platform) = 2 (single-arg) for "active on both of two platforms" via GROUP BY user HAVING — BUT carry the question's recency window: WHERE <ts_col> >= current_date - INTERVAL '30' DAY; dropping a stated time filter answers all-time not last-30-days.**
+- **date_diff('day', a, b) unit-first; current_date / current_timestamp keywords NO parens, current_date() WITH parens INVALID (functions/datetime.html); AVG ignores NULL; date_diff preferred over raw ts subtraction for readability/DST.**
+- **default NULLS LAST in 467.**
 
-Federation (4.49944/310) only un-passed-margin row — bulletproofed angles only. PIN 467. DID NOT bump training/state.json (already 961; passed=true preserved; overall 4.0625 PASS holds; final_iterations_remaining 0).
+DO NOT TOUCH (hard-locked): r22 §13.x federation / r23 QUALIFY-not-Trino canonical + argmax + COUNT(DISTINCT) + HAVING-vs-WHERE + regexp_like + fan-out card + geometric/harmonic mean + percentile/percentile_cont footgun cards / r07 L3226-3263 B-Streak defang + L37 HAVING-perf + L1624 anti-nesting / r09 partition DDL strings + bucket(col,N) column-first / r28 DATE-literal + UnwrapDateTruncInComparison / r13 json_exists strict path + 'partitioning' Iceberg key / r27 QUALIFY landmine §7A.2 / INTERVAL qualifier cards / format_datetime-vs-to_char / NULLS-LAST default / price-suffix canonical / MAX_BY-nested defang. PIN 467. DO NOT bump training/state.json (already 962; passed=true; final_iterations_remaining 0).
