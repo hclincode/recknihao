@@ -34,7 +34,7 @@ ORDER BY signups DESC;
 - Postgres reads every row of `user_events`, including columns it doesn't need (row-oriented storage).
 - Trino reads only `plan_type`, `event_name`, and `event_date` columns from the Parquet files. Iceberg skips files that don't fall in the current month.
 
-**What to watch for:** if `GROUP BY` has high cardinality (e.g., `GROUP BY user_id` across 50M users), the engine has to keep all distinct groups in memory. Add a `HAVING COUNT(*) > N` to trim, or pre-aggregate.
+**What to watch for:** if `GROUP BY` has high cardinality (e.g., `GROUP BY user_id` across 50M users), the engine has to keep all distinct groups in memory. To actually cut that memory you must reduce the INPUT rows that reach the aggregation — add a `WHERE` filter on a partition/filter column so fewer rows are read, or pre-aggregate in stages (e.g. a daily rollup table). A `HAVING COUNT(*) > N` does **not** help here: HAVING runs *after* all groups are built, so it only trims the OUTPUT rows, not the in-memory group set the engine had to construct.
 
 ### Filter a date/timestamp column to a period (this year / this month / last N days) — keep the COLUMN BARE so partition pruning works
 
