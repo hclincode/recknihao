@@ -1,7 +1,7 @@
 {
-  "iteration": 933,
+  "iteration": 934,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter933 LIGHT FIX-A — added ADD-A-QUARTER/ADD-A-WEEK INTERVAL-qualifier card in r07 after the WHICH-QUARTER card (~L3481); verified 467 SqlBase.g4 intervalField = YEAR|MONTH|DAY|HOUR|MINUTE|SECOND (no QUARTER/WEEK); INTERVAL '1' QUARTER/WEEK are parse errors; two-surfaces trap (valid as date_trunc/date_add UNIT, not as interval qualifier). All locks + r22 federation intact."
+  "note": "iter934 ZERO-edit NO-OP durability sweep — read-only spot-check, no resource edits. CONFIRMED INTACT: iter933 ADD-A-QUARTER/ADD-A-WEEK card r07 L3481-3500 (INTERVAL '3' MONTH / date_add('quarter',1,x) lead, wrong INTERVAL '1' QUARTER/WEEK defanged in comments, two-surfaces trap present); adjacent WHICH-QUARTER/WEEK-OF-YEAR card r07 L3469-3479 uncorrupted (quarter()/week_of_year(), quarter_of_year defanged); first-match/window-alias r07 L4448/L4506; B-Streak L3155; DATE-literal r28 L1047; r23 regexp_like 3262-3306 + alternation L3313/L3319 + ~ defang 3375-3378; GROUP-BY-output L488/L1238; top-N-share r07 1836; Pattern B3 L3665; NTILE C3 L1860-1909; at_timezone Fact 3b L2443; r13 json_exists L3387; r09 json_exists L654 + row.* L883 + json_object L801; r23 url_extract_parameter L574 + mean-family L984 + 3.1F L1640 + 3.1E L1392; r22 §13.x federation UNTOUCHED."
 }
