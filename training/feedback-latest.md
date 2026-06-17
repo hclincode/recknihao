@@ -1,125 +1,52 @@
-# iter998 Judge Feedback — EXTENDED PHASE breadth sweep
+# Judge Feedback — iter999 (EXTENDED PHASE breadth sweep / re-probe of iter998)
 
-**OVERALL 4.6172 STRONG PASS** (Q1 4.0 / Q2 4.8125 / Q3 4.84375 / Q4 4.8125 = 18.46875/4 = 4.6172; margin +1.117; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.6172 — STRONG PASS** (margin +1.117). OVERALL AVERAGE governs; no per-Q veto.
 
-All 4 Qs verified BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
+| Q | Topic | Acc | Clar | App | Comp | Q-avg |
+|---|---|---|---|---|---|---|
+| 1 | Collapse internal multiple spaces → single (regexp_replace) | 3.5 | 3.75 | 4.25 | 4.5 | **4.0** |
+| 2 | Pull "seats" from metadata JSON as NUMBER + SUM | 5.0 | 4.75 | 4.75 | 4.75 | **4.8125** |
+| 3 | `WHERE refund_amount != NULL` returns zero rows | 5.0 | 4.875 | 4.75 | 4.75 | **4.84375** |
+| 4 | "this month so far" auto-updating filter | 5.0 | 4.75 | 4.875 | 4.625 | **4.8125** |
 
----
+Sum 18.46875 / 4 = **4.6172**.
 
-## Q1 — clean product names: trim + collapse internal spaces (Postgres trim+regexp_replace → Trino?) — 4.0
+Verified BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source (NOT against resources/):
+- RAW git-tag `regexp.md` (raw.githubusercontent.com/trinodb/trino/467/...) shows SINGLE-backslash examples `'\d+[ab] '`, `'(\d+)([ab]) '`, `'(\w)(\w*)'` — confirms single-backslash is the engine-level canonical; rendered-HTML doubling is the Sphinx artifact.
+- functions/json.html: `json_extract_scalar(json, json_path) → varchar` ("returns the result value as a string").
+- functions/comparison.html: "any comparison involving a `NULL` will produce `NULL`"; IS NULL / IS NOT NULL "treat NULL as a known value … guarantee either a true or false outcome."
+- functions/datetime.html: `date_trunc(unit, x) → [same as input]`; `current_date` = current date as of query start.
 
-**SQL CORRECT, PROSE BACKSLASH CLAIM WRONG (the ding).**
-
-- `regexp_replace(trim(product_name), '\s+', ' ')` — the deliverable SQL is CORRECT working Trino 467:
-  - trim() removes general leading/trailing whitespace — VERIFIED.
-  - regexp_replace 3-arg (string, pattern, replacement) — VERIFIED valid.
-  - ★ SINGLE-backslash `'\s+'` is CORRECT. Verified via RAW git-tag source
-    (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/regexp.md):
-    examples use single backslash `'\d+'`, `'(\w)'`. Trino does NOT process backslash
-    escapes in standard '...' VARCHAR literals, so `'\s'` reaches the Java regex engine as
-    the whitespace class = WORKS. DOUBLE backslash `'\\s+'` would reach the engine as
-    escaped-backslash+s (matches a literal backslash then 's') = BROKEN. (The RENDERED
-    trino.io HTML shows `\\s` — a Sphinx doubling artifact; the RAW source shows single `\s`.
-    iter991 lesson re-confirmed.)
-- ★★ **PROSE DEFECT (responder slip):** the prose asserts "Trino regex uses DOUBLE BACKSLASH
-  for character classes, so it's '\s+' not '\s+' in some dialects" — this is (a) the WRONG
-  backslash convention (Trino canonical is SINGLE backslash, raw-source verified), and
-  (b) internally garbled/self-contradictory (it contradicts the responder's own correct
-  single-backslash SQL). If a user FOLLOWED the prose and wrote `'\\s+'`, the query would
-  BREAK. The deliverable SQL is correct, so a user who copies the code block is fine — but
-  the explanation is actively wrong on a load-bearing dialect point.
-- CLASSIFY: **RESPONDER prose/false-claim slip, NOT a resource defect.** Resources use
-  single-backslash / backslash-free char-classes per iter991 (r23 canonical uses `[0-9]{8}`).
-  regex-backslash tic family (prose direction). Re-probe-don't-churn.
-- Acc 3.5 / Clar 3.75 / App 4.25 / Comp 4.5.
-
-**ORCHESTRATOR ACTION (PHASE 6):** grep resources/ to CONFIRM no resource asserts a
-double-backslash convention (expected: none — iter991 already verified single-backslash /
-backslash-free char-classes are canonical). If grep is clean, this is purely a responder
-slip with no resource fix needed.
-
-## Q2 — pull "seats" out of metadata JSON as a NUMBER for math — 4.8125 CLEAN
-
-- `CAST(json_extract_scalar(metadata, '$.seats') AS INTEGER)` then SUM — VERIFIED.
-  json_extract_scalar(json, json_path) → varchar (functions/json.html) = correct; CAST to
-  INTEGER for arithmetic is the right typed-extraction; SUM aggregates. CORRECT.
-- Alternative `JSON_VALUE(metadata, '$.seats' RETURNING INTEGER NULL ON EMPTY NULL ON ERROR)`
-  — VERIFIED real Trino 467 SQL/JSON syntax (RETURNING type + ON EMPTY/ON ERROR clauses
-  documented). Both valid.
-- No fabricated functions. Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q3 — `WHERE refund_amount != NULL` returns zero rows — 4.84375 CLEAN
-
-- Diagnosis CORRECT: `!= NULL` / `= NULL` always evaluate to NULL/UNKNOWN under 3VL
-  (any comparison involving NULL produces NULL — functions/comparison.html); WHERE keeps
-  only TRUE rows, drops UNKNOWN → zero rows. Matches symptom exactly.
-- Fix CORRECT: `WHERE refund_amount IS NOT NULL` (IS NULL/IS NOT NULL always return boolean);
-  SELECT DISTINCT order_id variant for "every order with ≥1 refunded line item" is apt.
-- "Never use = NULL / != NULL" guidance sound. Acc 5.0 / Clar 4.875 / App 4.75 / Comp 4.75.
-
-## Q4 — "this month" filter; `WHERE recorded_at >= '2026-06-01'` on a TIMESTAMP — 4.8125 CLEAN
-
-- Correctly flags hardcoded '2026-06-01' breaks on month rollover.
-- Recommended dynamic half-open filter VERIFIED CORRECT:
-  `WHERE recorded_at >= date_trunc('month', current_date)
-     AND recorded_at < date_trunc('month', current_date) + INTERVAL '1' MONTH`
-  - date_trunc('month', current_date) → first of month (returns DATE, matches input type);
-    comparing TIMESTAMP recorded_at to a DATE → DATE coerces to TIMESTAMP (valid).
-  - `+ INTERVAL '1' MONTH` on the truncated value is valid (`+` interval operator); next-month
-    first. Half-open `>= AND <` is the correct fencepost (no double-count, no boundary gap).
-  - Auto-updates each month; date_trunc-on-column partition-prunes (Trino unwraps
-    date_trunc in comparison — UnwrapDateTruncInComparison).
-- ★ **#7334 SIDESTEPPED — NOT a 2-in-2 recurrence:** the responder did NOT explicitly flag
-  that the user's ORIGINAL bare-varchar '2026-06-01' vs a TIMESTAMP column would throw
-  TYPE_MISMATCH (no implicit varchar→timestamp coercion). This is a MINOR completeness point,
-  NOT a defect — the recommended query uses date_trunc and contains NO bare varchar literal,
-  so it avoids the trap entirely. CONTRAST iter997 Q2 which MISSED flagging the DATE-literal
-  requirement on queries that DID use bare varchar literals (those would error). Here the
-  recommended form is correct and self-protecting, so the omission is immaterial. The
-  varchar-vs-DATE/TS-literal omission did NOT recur in a load-bearing way → NOT 2-in-2.
-- Acc 5.0 / Clar 4.75 / App 4.875 / Comp 4.625.
+Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in; no auth/permission angle.
 
 ---
 
-## SCOPE NOTES
+## Per-question scope notes
 
-- **Q1**: SQL single-backslash `'\s+'` CORRECT (raw-source verified single is canonical;
-  double-backslash would break) + trim + 3-arg regexp_replace valid; PROSE double-backslash
-  claim WRONG + internally garbled = RESPONDER prose slip (deliverable SQL correct).
-  Orchestrator: grep resources/ to confirm no resource asserts double-backslash.
-- **Q2**: json_extract_scalar(json,path)→varchar + CAST AS INTEGER then SUM; JSON_VALUE
-  RETURNING INTEGER ON EMPTY/ON ERROR real — CLEAN.
-- **Q3**: `!=NULL`/`=NULL`→UNKNOWN (3VL), WHERE drops UNKNOWN; IS NOT NULL is the fix — CLEAN.
-- **Q4**: date_trunc('month', current_date) … `< … + INTERVAL '1' MONTH` half-open this-month
-  filter CORRECT; #7334 bare-varchar omission SIDESTEPPED via date_trunc, NOT 2-in-2.
+### ★ Q1 (KEY) — SQL CORRECT, PROSE DOUBLE-BACKSLASH CLAIM WRONG — **2nd CONSECUTIVE** (2-in-2)
+- Deliverable SQL `regexp_replace(product_name, '\s+', ' ')` is CORRECT: 3-arg regexp_replace valid; SINGLE-backslash `'\s+'` is the canonical Trino 467 form (raw git-tag verified). Trino does NOT escape backslash in `'...'` literals, so `'\s'` reaches the engine as the Java whitespace class and WORKS; `'\\s+'` would reach the engine as literal-backslash+s and be BROKEN. `'\s+'`→single space collapses "Starter  Plan"→"Starter Plan" correctly. (Minor completeness: did not pair with trim() for edge spaces, but the question is specifically about INTERNAL spaces, and `\s+` would also collapse edge runs — immaterial.)
+- ★★ PROSE DEFECT: the explanatory note "Trino regex strings use DOUBLE backslashes (`'\s+'` not `'\s'`) per the official Trino regexp documentation" is WRONG and internally garbled (it even contradicts its own correct single-backslash SQL). A user who FOLLOWED the prose and wrote `'\\s+'` would BREAK the query. This is the **SAME wrong prose claim as iter998 Q1 → 2nd CONSECUTIVE (2-in-2), same direction** (SQL single = correct both times; explanatory prose double = wrong both times).
+- CLASSIFY: regex-backslash tic, PROSE direction. The wrong claim does not appear in resources (resources canonicalize single-backslash / backslash-free char-classes per iter991; r23 uses `[0-9]{8}`), so this is a RESPONDER recall slip pulled from external rendered-doc memory, NOT a wrong-content resource defect.
+- ★ ORCHESTRATOR (PHASE 6) DISPOSITION: I (judge) have verified the FACT (single-backslash correct, double wrong). The orchestrator must GREP resources/ to decide the 2-in-2 disposition:
+  - If correct single-backslash guidance is NOT findable from the regexp_replace context → **findability gap**; candidate **LIGHT additive co-located note** near the regexp keywords: "single-quoted string literals do not escape backslash; `'\s'`/`'\d'` reach the regex engine as-is — do NOT double them to `'\\s'`/`'\\d'`, which would break the pattern."
+  - If correct guidance IS findable but the responder misreads it / pulls double-backslash from external rendered-doc memory → **responder recall ceiling**, no resource fix (accept the per-Q prose cost).
+- Acc dinged to 3.5 for the wrong load-bearing prose (SQL correct so App/Comp held up).
 
-## TICS — all CLEAN except Q1 regex-backslash PROSE slip
-no QUALIFY / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion /
-fabricated-fn (trim / regexp_replace / json_extract_scalar / JSON_VALUE / date_trunc ALL real
-& verified) / GREATEST-LEAST-NULL / date-minus-integer (Q4 INTERVAL '1' MONTH correct) /
-temporal-vs-varchar-literal (Q4 sidestepped via date_trunc, NOT a recurrence) / broken-secondary /
-mid-churn / column-scope / ILIKE-conflation / INTERVAL-quarter-week.
-**Sole blemish: Q1 prose double-backslash claim (responder slip; SQL correct).**
+### Q2 — json + CAST + SUM — CLEAN
+`SUM(CAST(json_extract_scalar(metadata, '$.seats') AS INTEGER))` VERIFIED: json_extract_scalar→varchar, CAST to INTEGER for arithmetic, SUM ignores NULL; missing-key/malformed → NULL (correctly ignored). No fabricated function. Could have mentioned `JSON_VALUE(... RETURNING INTEGER)` as an alternative (not required). CLEAN.
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.117; all 4 deliverable SQL/diagnoses correct & verified both directions; sole ding
-is Q1's WRONG prose backslash claim — a RESPONDER explanation slip (SQL it ships is correct,
-raw-source-verified), NOT a findable resource gap and NOT 2-in-2 (iter991 the responder got
-the backslash RIGHT in both SQL and reasoning; this is a fresh prose-direction slip). Resources
-already canonicalize single-backslash / backslash-free char-classes per iter991.
+### Q3 — IS NOT NULL (3VL) — CLEAN
+Diagnosis CORRECT: `!= NULL` / `= NULL` always evaluate to NULL/UNKNOWN under 3-valued logic; WHERE keeps only TRUE, so UNKNOWN rows are dropped → zero rows (matches symptom). Fix `WHERE refund_amount IS NOT NULL` CORRECT (IS NOT NULL always returns boolean). CLEAN.
 
-Re-probe next sweep:
-(a) ★ another regex Q with backslash char-classes (`\d`/`\s`/`\w`) — confirm SQL stays single-
-    backslash AND watch whether the PROSE again asserts double-backslash; if a SECOND prose
-    double-backslash claim appears (2-in-2 prose direction) → trace to resource root cause
-    (grep resources for any double-backslash assertion; if none, accept as recurring responder
-    padding — but a LIGHT additive defang clarifying "Trino single-quoted literals do NOT
-    escape backslash; '\s' reaches the regex engine as-is; '\\s' would be broken" near
-    regexp keywords would help the responder's explanation track its own correct SQL).
-(b) another JSON-extraction Q — confirm json_extract_scalar/JSON_VALUE leads stay.
-(c) another NULL-comparison/3VL Q — confirm `!=NULL`→IS NOT NULL lead.
-(d) another this-month/date-range filter Q — confirm date_trunc half-open lead + watch whether
-    responder flags the bare-varchar-vs-TIMESTAMP TYPE_MISMATCH when the user's query uses one.
+### Q4 — date_trunc month-to-date auto-update — CLEAN; #7334 NOT recurring
+Recommended `WHERE recorded_at >= date_trunc('month', current_date)` VERIFIED CORRECT: date_trunc('month', current_date) = first-of-month, `>=` captures month-to-date, auto-updates on rollover. date_trunc-on-column variant `date_trunc('month', recorded_at) = date_trunc('month', current_date)` also correct (sargable via UnwrapDateTruncInComparison). `date_add('month', 0, ...)` is a redundant-but-valid alternative (harmless no-op wrapper, not broken). Prose `DATE '2026-06-01'` uses the DATE keyword literal (typed), so **#7334 bare-varchar-vs-TIMESTAMP TYPE_MISMATCH is SIDESTEPPED — NOT recurring**: the recommended form uses date_trunc/typed literals, no bare varchar against a TIMESTAMP column. CLEAN.
 
-Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits.
-DO NOT bump training/state.json (already 998; passed=true preserved; final_iterations_remaining 0).
+---
+
+## Tic scan
+CLEAN except Q1 regex-backslash PROSE slip (now 2-in-2). No QUALIFY / no false-mechanism semi-join mislabel / no MAX(varchar) / no percent_rank inversion / no fabricated functions (regexp_replace / json_extract_scalar / date_trunc / date_add all real & verified) / no GREATEST-LEAST-NULL / no temporal-vs-varchar-literal trap (Q4 sidestepped via date_trunc + DATE keyword) / no broken-secondary (Q4 date_add('month',0,...) redundant but valid, not broken) / no mid-churn / no column-scope / no ILIKE-conflation / no INTERVAL-quarter-week.
+
+## Recommendation
+**DEFAULT NO-OP on resources by the judge** (margin +1.117; all 4 deliverable SQL/diagnoses correct & verified both directions). The SINGLE actionable item is the **Q1 regex-backslash prose claim, now 2nd CONSECUTIVE (2-in-2, same direction)** — this crosses the 2-in-2 threshold and REQUIRES the orchestrator to GREP resources/ in PHASE 6 to disambiguate findability-gap (→ LIGHT additive defang note) vs responder recall-ceiling (→ no fix). Do NOT churn the deliverable SQL — it is correct.
+
+Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). MUST NOT bump training/state.json (already 999; passed=true; final_iterations_remaining 0).
