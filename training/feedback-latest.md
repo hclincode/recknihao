@@ -1,72 +1,58 @@
-# Judge Feedback — iter1000
+# iter1001 Judge Feedback
 
-**Phase**: extended | **Mode**: end-of-iteration (no per-Q mid-cycle, state.json passed=true, final_iterations_remaining=0)
-**Verification**: all claims checked BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source + official GitHub issue. PINNED Trino 467. NOT verified against resources/.
-**Prod fit**: Trino 467 / Iceberg + Hive Metastore / on-prem MinIO / Spark ingest / dbt. All 4 Qs are pure SQL-semantics, environment-neutral. NO federation drag-in; no auth angle. prod_info.md serving-env section still unfilled (noted, immaterial here).
-
----
-
-## OVERALL: 4.797 — STRONG PASS
-
-(Q1 4.8125 / Q2 4.8125 / Q3 4.8125 / Q4 4.75 = 19.1875 / 4 = **4.7969**; margin +1.297 over 3.5 threshold. OVERALL AVERAGE governs, no per-Q veto.)
-
----
+**Iteration**: 1001 (EXTENDED PHASE breadth sweep; 0 resource edits expected)
+**Verification**: All claims verified against trino.io/docs/467 + RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md), NOT resources/. PINNED Trino 467.
+**Prod stack** (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 Qs fit; no federation drag-in; no auth angle.
 
 ## Per-question scores
 
-### Q1 — split_part for email-domain extraction (Postgres → Trino?) — 4.8125 CLEAN
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75
-- **VERIFIED (functions/string.html):** `split_part(string, delimiter, index) → varchar` EXISTS in Trino 467; "Field indexes start with 1" → 1-based. `split_part('alice@example.com','@',2)` = `'example.com'`, `split_part(...,'@',1)` = local-part. All correct.
-- split_part is NOT a fabricated function (real & verified). "Cleaner than substr(strpos(...))" framing apt.
-- Direct lift from Postgres works identically — exactly what the engineer needs.
+### Q1 — Group login events by hour-of-day; EXTRACT(hour FROM created_at) usable in GROUP BY/WHERE like Postgres? — **4.8125 CLEAN**
+- VERIFIED at functions/datetime.html: `extract(field FROM x) → bigint`. EXTRACT(HOUR FROM timestamp) returns a **bigint** (integer 0–23), directly usable in GROUP BY and WHERE — matches Postgres on this point. CORRECT.
+- Supported fields VERIFIED: HOUR/MINUTE/SECOND/DAY/DAY_OF_WEEK(DOW)/DAY_OF_MONTH/DAY_OF_YEAR/MONTH/QUARTER/YEAR/WEEK/etc. Responder's field list correct.
+- `GROUP BY EXTRACT(hour FROM created_at)` valid (basic GROUP BY accepts expressions). CORRECT.
+- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-### Q2 — TEXT order totals to DECIMAL, NULL on bad rows — 4.8125 CLEAN
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75
-- **VERIFIED:** `TRY_CAST(expr AS type)` returns NULL on cast failure (vs CAST throws + aborts) — valid Trino 467, query completes. Correct lead.
-- ★ **WHITESPACE-TRIM VERDICT (verified BOTH ways, settled at raw source + official issue #23359):** Trino 467 does **NOT** trim leading/trailing whitespace when casting VARCHAR to **DECIMAL** (an EXACT numeric type) — `CAST('  49.99 ' AS DECIMAL)` **FAILS**, so `TRY_CAST('  49.99 ' AS DECIMAL(10,2))` → **NULL**. The responder's "whitespace not trimmed → NULL" claim is **FULLY CORRECT, not an over-statement**. (Trap: real/double DO tolerate surrounding whitespace per #23359, but DECIMAL does not — exact-vs-float inconsistency. The WebFetch "BigDecimal accepts whitespace" reading was WRONG; Java BigDecimal(String) throws on surrounding spaces.)
-- ★ **TRIM recommendation CORRECT:** `TRY_CAST(TRIM(total) AS DECIMAL(10,2))` → 49.99 for `'  49.99 '`, still NULL for `'N/A'`. This is the right, safe, complete deliverable. Nails the dirty-data SaaS use case.
-- TRY_CAST not fabricated (real & verified).
+### Q2 — amount integer cents (10099); amount/100 = 100 not 100.99; what's going on + how to get decimal? — **4.6875 CLEAN (minor terminology ding)**
+- Integer/integer division truncates toward zero VERIFIED: 10099/100 = 100. Correct diagnosis of the classic integer-division trap.
+- Fix `amount / 100.0` VERIFIED: `100.0` (non-scientific decimal notation) is a **DECIMAL literal** in Trino 467 (language/types.html: scientific notation like `1.03e1` casts to DOUBLE; plain `100.0` is DECIMAL), so the division promotes to DECIMAL → 100.99. CORRECT.
+- `CAST(amount AS DECIMAL) / 100` also works. CORRECT.
+- ★ MINOR TERMINOLOGY IMPRECISION (not a defect): responder wrote "100.0 promotes the calculation to decimal/floating-point arithmetic." `100.0` is specifically a DECIMAL literal → DECIMAL division, NOT floating-point (a DOUBLE result would need `100e0` / CAST AS DOUBLE). Substance (promotes to decimal, yields 100.99) is correct; light deduct on accuracy/clarity only.
+- Acc 4.5 / Clar 4.625 / App 4.75 / Comp 4.875.
 
-### Q3 — workspaces where ALL active users logged in within 30 days — 4.8125 CLEAN
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75
-- **VERIFIED (functions/aggregate.html):** `bool_and(boolean)` returns TRUE iff every input value is TRUE, FALSE if any is FALSE; ignores NULL and returns NULL on empty/all-NULL group (general aggregate rule) → `COALESCE(...,false)` guard correct. `bool_or` for "at least one" correct.
-- ★ **The KEY distinction is correct and load-bearing:** `WHERE` removes non-matching rows (so a count is misleading — the user's exact symptom), whereas `HAVING bool_and(predicate)` tests that ALL remaining rows satisfy the condition. `WHERE status='active'` correctly SCOPES to active users (the population), then bool_and asks "is every one of them current." Textbook "every row in a group satisfies a condition" pattern.
-- ★ **INTERVAL form correct (NOT date-minus-integer):** `current_date - INTERVAL '30' DAY` is valid Trino (date − interval, singular DAY qualifier) — NOT the Postgres `current_date - 30` bare-integer-ism, NOT a quarter/week qualifier trap. Clean.
-- bool_and not fabricated (real & verified).
+### Q3 — DISTINCT plan,region vs GROUP BY plan,region; meaningful difference? which to use? — **4.8125 CLEAN — iter989 FOLKLORE DID NOT RECUR**
+- `SELECT DISTINCT plan, region` and `SELECT plan, region ... GROUP BY plan, region` are SEMANTICALLY EQUIVALENT (same result rows) and Trino plans them essentially identically — no perf winner. CONFIRMED.
+- ★ Responder said "both perform well on Trino; pick whichever reads better" and did NOT assert "GROUP BY faster than DISTINCT" — CORRECT. The iter989 DISTINCT-vs-GROUP-BY perf-folklore **DID NOT RECUR (one-off confirmed; folklore clean).**
+- DISTINCT = pure dedup (more readable); GROUP BY = needed when you add aggregates (COUNT(*) etc.). Correct, useful framing.
+- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-### Q4 — round invoice UP; CEIL vs CEILING same? — 4.75 CLEAN
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.5
-- **VERIFIED (functions/math.html):** `ceil(x)` is documented as an ALIAS for `ceiling(x)` — identical functions, both "round x up to the nearest integer" (toward +infinity, true ceiling). Responder's "identical synonyms, pick either, documented as equivalent at math.html" is CORRECT (minor direction nuance: docs phrase it as ceil-alias-of-ceiling, not ceiling-alias-of-ceil — immaterial, they are the same function).
-- CEIL(14.10)=15, CEIL(14.00)=14, CEIL(14.99)=15 — all CORRECT, no rounding surprise for positive amounts (the invoice case). Resolves the teammate disagreement cleanly.
-- ROUND(amount,0) for round-half noted as the contrast (correct — round-half-up vs always-up).
-- Slight completeness ding only: did not explicitly note ceil of a DECIMAL(10,2) returns a decimal-typed value (15.00 not int 15) — purely cosmetic, the engineer's display-as-whole-dollars goal is met either way.
+### Q4 — Daily summary: total + per-region subtotals + grand total in ONE query (currently 3 UNIONs); single-query GROUP BY variant? — **4.8125 CLEAN — KEY CHECK: ROLLUP-NO-EXPRESSIONS CAVEAT IS *CORRECT*, NOT A FABRICATION**
+- `GROUP BY ROLLUP(region)` emits per-region rows + a grand-total row in one query. VERIFIED CORRECT.
+- `GROUPING(region)` = 0 for detail rows / 1 for the grand-total (aggregated) row; single-column bitmask; label via CASE. VERIFIED CORRECT (functions/aggregate.html GROUPING bitmask).
+- ★★ **THE SUSPECT CLAIM — VERIFIED, RESPONDER IS RIGHT.** The run-prompt's "strong prior" (that ROLLUP/CUBE/GROUPING SETS accept arbitrary expressions, so the responder fabricated an over-restrictive limitation) is **WRONG**. Verified at trino.io/docs/467 sql/select.html AND raw git-tag 467 source (sql/select.md), verbatim: *"Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed."* Grammar shows `GROUPING SETS ( ( column [, ...] ) [, ...] ) | CUBE ( column [, ...] ) | ROLLUP ( column [, ...] )` — **column**, not expression. Basic GROUP BY accepts expressions; ROLLUP/CUBE/GROUPING SETS do NOT.
+- Therefore the responder's caveat "ROLLUP works with COLUMN NAMES ONLY, not expressions — if you need a date part, pre-compute it in a CTE first" is **FULLY CORRECT and the documented best practice**, NOT a fabricated over-restrictive limitation. The `WITH ... GROUP BY ROLLUP(yr, region)` CTE-precompute workaround is exactly the right pattern.
+- ★ IMPORTED-PRIOR TRAP AVOIDED (judge side): same family as GREATEST/LEAST-NULL, date_diff-boundary, to_char-exists (MEMORY) — verify dialect facts against the 467 source BEFORE asserting the responder is wrong. Git-tag source refuted the run-prompt's prior. Verified verdict reported per instructions.
+- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
 
----
+## Overall
+(4.8125 + 4.6875 + 4.8125 + 4.8125) / 4 = 19.125 / 4 = **4.7813 — STRONG PASS** (margin +1.281; overall average governs, no per-Q veto).
 
-## Tics scan — ALL CLEAN
-No QUALIFY / no false-mechanism semi-join mislabel / no MAX(varchar) / no percent_rank inversion / NO fabricated functions (split_part, try_cast, bool_and, bool_or, ceil, ceiling, trim, round ALL real & verified) / no regex-backslash prose slip / no GREATEST-LEAST-NULL / no date-minus-integer (Q3 used INTERVAL correctly) / no temporal-vs-varchar-literal / no broken-secondary or false-justification / no mid-churn / no column-scope error / no ILIKE-conflation / no INTERVAL quarter/week trap.
+## Tics — ALL CLEAN
+No QUALIFY / false-mechanism-semi-join-mislabel / MAX(varchar) / percent_rank-inversion / **fabricated functions or limitations (Q4 ROLLUP-no-expressions is REAL, source-verified — NOT a fabrication)** / regex-backslash / GREATEST-LEAST-NULL / **DISTINCT-vs-GROUP-BY-perf-folklore (Q3 ABSENT — did NOT recur, one-off confirmed)** / date-minus-integer / broken-secondary-false-justification (Q4 caveat is a TRUE justification, not broken/false) / GROUPING-bitmask-error / mid-churn / column-scope / ILIKE-conflation / INTERVAL-quarter-week. EXTRACT→bigint, integer-div-truncation, DECIMAL-literal-promotion, ROLLUP, GROUPING — all real & verified.
 
-Notably: the iter998/999 regex-backslash PROSE slip (2-in-2) did NOT appear here — no regex question this sweep, so no read on whether it recurs; remains an open re-probe item.
+## Scope notes
+- **Q1**: EXTRACT(HOUR FROM ts) → bigint, GROUP BY/WHERE usable like Postgres, fields correct. CLEAN.
+- **Q2**: integer/integer truncates toward zero (10099/100=100) + `amount/100.0` (100.0 is a DECIMAL literal) → 100.99 + CAST AS DECIMAL alt. CLEAN; only ding = minor "decimal/floating-point" terminology imprecision (it's DECIMAL division specifically, not float) — terminology nit, not a defect.
+- **Q3**: `SELECT DISTINCT a,b` == `SELECT a,b GROUP BY a,b` — semantically equivalent, Trino plans identically, no perf winner; responder correctly said "both perform well, pick whichever reads better." **iter989 folklore DID NOT recur (one-off confirmed).** CLEAN.
+- **Q4 (KEY)**: ROLLUP lead + GROUPING(region) 0-detail/1-grand-total bitmask CORRECT; **the "ROLLUP works with column names only, not expressions" caveat is VERIFIED CORRECT against trino.io/docs/467 + raw git-tag 467 source ("Only column names are allowed") — NOT a fabricated over-restrictive limitation; the run-prompt's expressions-accepted prior was wrong.** CTE-precompute workaround correct. CLEAN — genuinely strong, complete answer; NO responder slip.
 
----
+## Recommendation
+**DEFAULT NO-OP** (margin +1.281; all 4 deliverables correct & verified both directions; zero tics; zero fabricated functions/limitations; Q3 folklore did NOT recur; Q4 KEY caveat verified TRUE). No findable resource gap, no findability gap, no 2-in-2 recurrence.
 
-## Scope notes (explicit)
-- **Q1**: split_part EXISTS, 1-based index, `split_part(email,'@',2)`='example.com'. CLEAN.
-- **Q2**: TRY_CAST returns NULL-on-failure (CAST throws). ★ VERIFIED whitespace verdict: Trino 467 does NOT trim whitespace casting VARCHAR→DECIMAL (exact type) — `'  49.99 '`→NULL is CORRECT (not an over-statement); real/double would tolerate it but DECIMAL does not (#23359). TRIM recommendation `TRY_CAST(TRIM(total) AS DECIMAL(10,2))` CORRECT & complete.
-- **Q3**: bool_and = all-rows-satisfy (TRUE iff every TRUE, COALESCE-guard all-NULL); WHERE status='active' correctly SCOPES the population; HAVING tests all; INTERVAL '30' DAY (NOT bare integer). CLEAN.
-- **Q4**: CEIL = CEILING aliases (same function), true ceiling toward +inf, no rounding surprise for positive invoice amounts; ROUND(,0) is the round-half contrast. CLEAN.
-
----
-
-## RECOMMENDATION = DEFAULT NO-OP on resources
-Margin +1.297; all 4 deliverables correct & verified both directions against trino.io/docs/467 + raw 467 source + official issue #23359. Zero tics, zero fabricated functions, no findable resource gap, no findability gap, no 2-in-2 recurrence. This is a strong, clean breadth iteration.
-
-Re-probe next sweep (no resource action now):
-- (a) another string-split/extraction Q — confirm split_part 1-based lead holds.
-- (b) another dirty-TEXT→numeric cast Q — confirm TRY_CAST + TRIM lead; watch whether responder keeps the (correct) "DECIMAL doesn't trim" framing vs over-generalizing to real/double.
-- (c) another "all/every row in group satisfies" Q — confirm bool_and + WHERE-scopes-vs-HAVING-tests distinction holds; bool_or for "at least one".
-- (d) another rounding Q (FLOOR/ROUND/ceil/truncate) — confirm alias + toward-±inf + round-half distinctions.
-- (e) STILL OPEN from iter998/999: regex-backslash PROSE direction (2-in-2 prior) — no regex Q this iter; if a regex Q appears and prose double-backslash recurs (would be 3-in-3), orchestrator grep resources for findability-vs-recall-ceiling disposition.
+Re-probe next sweep:
+- (a) another ROLLUP/CUBE/GROUPING SETS Q — confirm column-names-only + CTE-precompute lead holds; watch the INVERSE slip (responder wrongly claiming expressions ARE allowed).
+- (b) another date-part bucketing Q (EXTRACT/date_trunc in GROUP BY) — confirm basic-GROUP-BY-accepts-expressions vs ROLLUP-does-not distinction stays sharp.
+- (c) another integer-vs-decimal arithmetic Q — confirm integer-div-truncation diagnosis + 100.0-DECIMAL-literal fix; watch the decimal-vs-float terminology drift.
+- (d) another DISTINCT-vs-GROUP-BY equivalence Q — confirm folklore stays absent (clean since iter989).
 
 Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
-NO resource edits. MUST NOT bump training/state.json (already 1000; passed=true preserved; final_iterations_remaining 0).
+NO resource edits. MUST NOT bump training/state.json (already 1001; passed=true preserved; final_iterations_remaining 0).
