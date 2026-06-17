@@ -1,51 +1,51 @@
-# iter1003 Judge Feedback
+# Judge Feedback — iter1004
 
-**OVERALL 4.4063 — PASS** (threshold 3.5; margin +0.906). Sum 70.5/16. OVERALL AVERAGE governs, no per-Q veto.
-
-All facts verified against trino.io/docs/467 + RAW git-tag 467 source + official GitHub issues — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 Qs fit; no federation drag-in; no auth angle.
+**Phase:** extended (durability-breadth sweep). Verified BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source (functions/map.md, functions/window.md, functions/math.md, functions/datetime.md, functions/aggregate.md) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 Qs fit; no federation drag-in; no auth angle.
 
 ## Per-question scores
 
-### Q1 — cumulative/running total of daily signups — 3.0 (DEFECT: `::` cast invalid in 467)
-- Accuracy **2.0** / Clarity **4.0** / Applicability **2.0** / Completeness **4.0** = 12.0/4 = 3.0
-- **WINDOW LOGIC CORRECT:** `SUM(COUNT(*)) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is the canonical running-total-of-daily-aggregate pattern — aggregate-over-window after GROUP BY is legal Trino 467; the frame explanation (UNBOUNDED PRECEDING..CURRENT ROW = cumulative) is accurate and clear.
-- ★★ **DEFECT — `::` CAST OPERATOR IS A PARSE ERROR IN TRINO 467.** The answer uses `created_at::date` THREE times (SELECT, GROUP BY, ORDER BY). Trino 467 does **NOT** support the PostgreSQL/Snowflake/DuckDB `::` cast shorthand.
-  - **Citation:** GitHub issue [#23795 "Cast operator `::`"](https://github.com/trinodb/trino/issues/23795) is **OPEN** (labels: "enhancement", "syntax-needs-review"); linked PR [#25259](https://github.com/trinodb/trino/pull/25259) is **OPEN / unmerged** as of June 2026. Trino 467 was released **6 Dec 2024** (release-467), well before any merge. The `language/types.md` and conversion docs for 467 document only `CAST(x AS type)` / `TRY_CAST`; there is no `::` token in the grammar.
-  - **CORRECTION (canonical):** use `CAST(created_at AS date)` in all three positions:
-    ```sql
-    SELECT CAST(created_at AS date) AS signup_day,
-           COUNT(*) AS signups_today,
-           SUM(COUNT(*)) OVER (ORDER BY CAST(created_at AS date)
-                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_signups
-    FROM user_events
-    GROUP BY CAST(created_at AS date)
-    ORDER BY CAST(created_at AS date)
-    ```
-  - **Imported-prior family** slip (PostgreSQL `::` habit). The query fails to parse on the first `::`, so the engineer cannot run it as written — hence low Accuracy/Applicability despite correct window semantics.
-  - Stylistic alternative (not scored): `date_trunc('day', created_at)` (returns timestamp) is another day-bucketing form, but `CAST(... AS date)` is the right fix for the responder's intent.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 month-over-month new-signup growth + pct change | 5.0 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q2 bucket price_cents into labeled UI ranges | 5.0 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q3 pull utm_source key out of MAP | 5.0 | 4.75 | 4.875 | 4.875 | 4.875 |
+| Q4 does AVG skip NULLs or must COALESCE | 5.0 | 4.625 | 4.75 | 4.875 | 4.8125 |
 
-### Q2 — pivot: one row per customer, count per plan, no joins — 5.0
-- Accuracy **5.0** / Clarity **5.0** / Applicability **5.0** / Completeness **5.0** = 20/4 = 5.0
-- Conditional aggregation `SUM(CASE WHEN plan_name='starter' THEN 1 ELSE 0 END)` per plan + `GROUP BY customer_id` is the correct join-free pivot. The `COUNT(*) FILTER (WHERE plan_name='starter')` variant is also correct and equivalent.
-- **VERIFIED:** `FILTER (WHERE <condition>)` is supported for **all** aggregate functions in 467 (functions/aggregate). Both forms equivalent — responder's "both equivalent" claim correct. Clean, complete, no tics.
+**Overall = (5.0+4.75+4.75+4.75 + 5.0+4.75+4.75+4.75 + 5.0+4.75+4.875+4.875 + 5.0+4.625+4.75+4.875) / 16 = 76.5/16 = 4.7813**
 
-### Q3 — true median / 50th percentile (AVG skewed by outliers) — 4.8125
-- Accuracy **5.0** / Clarity **4.75** / Applicability **4.75** / Completeness **4.75** = 19.25/4 = 4.8125
-- **VERIFIED both directions:** `approx_percentile(col, 0.5)` (scalar) and `approx_percentile(col, ARRAY[0.5,0.95,0.99])` (array) both exist in 467 (functions/aggregate). There is **NO** native `MEDIAN()` and **NO** SQL-standard `PERCENTILE_CONT()` — both-absent claim correct (aligns with r05 §2234 PERCENTILE footgun lock). T-Digest/approximate framing correct; "exact requires full sort" accurate. Clean.
+## PASS — overall average 4.7813 (>= 3.5; margin +1.281). OVERALL AVERAGE governs, no per-Q veto.
 
-### Q4 — top 5 most-viewed pages per country (not global) — 4.8125
-- Accuracy **5.0** / Clarity **4.75** / Applicability **4.75** / Completeness **4.75** = 19.25/4 = 4.8125
-- `ROW_NUMBER() OVER (PARTITION BY country ORDER BY view_count DESC)` in a subquery, filtered `WHERE rank_in_country <= 5` — canonical top-N-per-group; PARTITION BY country gives per-country (not global) ranking. Correct; no QUALIFY (correctly avoided — not in 467). Clean.
+## Q3 element_at-vs-subscript verdict (REQUIRED)
 
-## Tics check
-All CLEAN except Q1 `::` cast. No QUALIFY, no fabricated function, no false-mechanism, no broken-secondary, no regex-backslash, no INTERVAL-quarter/week, no GREATEST/LEAST-NULL. Q2/Q3/Q4 bulletproof.
+**Responder is FULLY CORRECT on BOTH halves.** Verified against RAW git-tag 467 source `docs/src/main/sphinx/functions/map.md`:
+- (a) `element_at(map, key)` — "Returns value for given `key`, or `NULL` if the key is not contained in the map." → returns NULL on missing key. CONFIRMED.
+- (b) Subscript `map[key]` — "This operator throws an error if the key is not contained in the map." → THROWS on absent key. CONFIRMED.
 
-## Recommendation — DEFAULT NO-OP (with re-probe watch)
+So the responder's guidance ("use element_at, it returns NULL if key absent; DO NOT use metadata['utm_source'] subscript because it ERRORS if the key is missing; element_at is NULL-safe") is exactly right, including the WHERE element_at(...) IS NOT NULL filter and the "MAP is a true key-value type not a JSON string" framing. CLEAN, no defect.
 
-Despite the Q1 defect, recommend **DEFAULT NO-OP — no resource edit this iter**:
-- **FIRST** observation of a `::`-cast slip in this sweep window. Per reconcile/2-in-2 discipline, a single imported-prior responder slip on an otherwise-correct query is a **per-instance one-off**, not yet a source-verified findable resource gap. Substance (window/cumulative) correct; only cast shorthand wrong.
-- Before any FIX-A, the teacher/orchestrator should **grep resources/ for any `::` usage** — if a resource models `x::type`, that is the root cause and must be reconciled in place (replace with `CAST(x AS type)`). If resources are clean, this is responder prose import, not a defect.
+## `::` cast check (REQUIRED)
 
-**Re-probe next sweep:** issue another day/period-bucketing or cast-bearing Q (e.g. `CAST`-to-date, `date_trunc('day', ...)`). If `::` recurs (**2-in-2**), escalate to a LIGHT additive defang: a copy-attractive `CAST(x AS date)` canonical with an inline-marked `-- WRONG: x::date is a PARSE ERROR in Trino 467 (PR #25259 unmerged)` un-copyable note (defang-don't-bare-negative-example discipline).
+**`::` did NOT appear in any of the 4 answers.** All casts/arithmetic use proper Trino forms (ROUND(100.0*..., 2), integer literals, element_at, AVG/COUNT). The iter1003 Q1 PostgreSQL `::` slip did NOT recur. No 2-in-2; the `::`-ban double-lock (r23 §3.1C + r27 §4.4A) holds and was not exercised this iter.
 
-Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN); federation row stays 4.49944/310. MUST NOT bump training/state.json (already 1003; passed=true preserved; final_iterations_remaining 0).
+## Other dialect verifications (all CLEAN)
+
+- Q1: `DATE_TRUNC('month', created_date)` on a DATE column is valid — date_trunc returns same type as input (DATE in, DATE out); `month` is a supported unit (millisecond..year). `LAG(x) OVER (ORDER BY ...)` valid, default offset 1, returns NULL outside partition; repeated LAG inside CASE is valid (analyzer recognizes the identical window expression). `COUNT(DISTINCT user_id)` is single-arg — VALID (the COUNT(DISTINCT a,b) multi-arg parse-error trap is NOT triggered). `ROUND(x, 2)` and `100.0` DECIMAL literal correct; CASE guard avoids divide-by-NULL.
+- Q2: CASE/WHEN ascending-threshold bucketing valid; first-match-wins ordering correct; ELSE catch-all correct. `width_bucket(x, bound1, bound2, n)` and `width_bucket(x, bins)` both exist in 467 — responder correctly scoped it to regular-interval bins and chose CASE for the irregular labeled ranges. price_cents/100 framing (100 cents = $1) correct.
+- Q4: AVG ignores NULL — verified (aggregate.md: aggregates "ignore null values" except count/count_if/max_by/min_by/approx_distinct; avg NOT in that list). `COUNT(col)` = non-null count, `COUNT(*)` = all rows — correct; the COUNT(*)>COUNT(col) diagnostic to reveal NULL rows is apt. The (10,20,30)+2 NULLs → AVG=20 not 12 example is correct.
+
+## TICS — ALL CLEAN
+
+No QUALIFY / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn (date_trunc/lag/count/avg/element_at/width_bucket ALL real & verified) / regex-backslash (no regex Q) / GREATEST-LEAST-NULL / date-minus-integer / `::`-cast (ABSENT — did NOT recur) / broken-secondary-false-justification (Q2 width_bucket aside accurate+correctly-scoped, Q4 diagnostic accurate — neither is a broken alt) / mid-churn / column-scope / ILIKE-conflation / INTERVAL-quarter-week / MAP-subscript-vs-element_at (Q3 CORRECT both halves).
+
+## Recommendation — DEFAULT NO-OP
+
+Margin +1.281; all 4 deliverables correct & verified both directions; zero tics; zero fabricated functions; the targeted Q3 element_at-vs-subscript check resolved CORRECT both halves; `::` did NOT recur (iter1003 slip confirmed a per-instance one-off, no 2-in-2). No findable resource gap, no resource defect, no 2-in-2 recurrence. **No resource edit; no FIX-A.**
+
+Re-probe watch next sweep:
+- (a) `::`-cast shorthand — iter1003 was the FIRST occurrence; iter1004 CLEAN. Stays a per-instance one-off (ban double-locked); only a 2-in-2 recurrence would warrant a LIGHT findability nudge.
+- (b) another MAP-extraction Q — confirm element_at-NULL-safe-vs-subscript-throws lead holds; watch for the INVERSE slip (wrongly claiming subscript is NULL-safe).
+- (c) another date-bucket + window Q (date_trunc/LAG/LEAD over monthly aggregate) — confirm date_trunc-returns-DATE + LAG-default-NULL + CASE-divide-by-NULL guard stays sharp.
+- (d) another labeled-binning Q — confirm CASE-for-irregular vs width_bucket-for-regular-interval distinction.
+- (e) another AVG/aggregate-NULL Q — confirm "aggregates skip NULL, COUNT/count_if are the exceptions" framing.
+
+Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310). MUST NOT bump training/state.json (already 1004; passed=true; final_iterations_remaining 0; orchestrator commits).
