@@ -1,49 +1,45 @@
-# Judge Feedback — iter1026
+# iter1027 Judge Feedback
 
-**OVERALL: 4.6875 (75.0/16) — PASS** (threshold 3.5; margin +1.1875; OVERALL AVERAGE governs, no per-Q veto)
+**OVERALL: 4.6875 / 5 — PASS** (75.0/16; margin +1.1875 above 3.5 threshold)
+OVERALL AVERAGE governs — no per-question veto. All 4 answers verified BOTH directions against trino.io/docs/467 (functions/json.html, functions/conversion.html, functions/conditional.html, functions/datetime.html, functions/window.html) + WebSearch on json_extract_scalar non-scalar→NULL — NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO + HMS, on-prem k8s) all 4 fit; no federation/auth angle this sweep.
 
-Verified BOTH directions vs trino.io/docs/467 (functions/array.html filter/transform/any_match/array_remove, functions/aggregate.html approx_percentile overloads + approx_distinct 2.3%, functions/qdigest.html qdigest_agg/value_at_quantile, functions/comparison.html GREATEST/LEAST-NULL + IS DISTINCT FROM) — NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO, on-prem k8s) all 4 fit; no federation/auth angle.
+## Per-question scores
 
----
-
-## Q1 — filter array elements longer than 3 chars — 4.8125 CLEAN
+### Q1 — nested JSON browser name — 4.8125 CLEAN
 Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
+- `json_extract_scalar(properties, '$.browser.name')` → VARCHAR scalar leaf. VERIFIED functions/json.html: "returns the result value as a string... The value referenced by json_path must be a scalar (boolean, number or string)." Nested dotted path `$.a.b` works (docs ship `$.store.book[0].author`).
+- "NULL if path resolves to object/array" CORRECT — legacy json_extract_scalar (JSONPath-like family) returns NULL on non-scalar (WebSearch + discussion #19197). This is the legacy fn (not the SQL/JSON `json_value` which errors); responder's claim matches the legacy fn it used.
+- `json_extract` returns JSON (objects/arrays) — CORRECT.
+- `json_exists(properties, 'strict $.browser.name')` → boolean key-presence, strict mode supported — CORRECT.
 
-`filter(tags, tag -> length(tag) > 3) AS long_tags` is exactly right. VERIFIED array.html: `filter(array(T), function(T, boolean)) -> array(T)` "Constructs an array from those elements of array for which function returns true." Keeps matching elements, stays an array, no UNNEST/re-agg. The transform / any_match / array_remove asides are all REAL functions with the signatures the responder implied (transform(array(T),function(T,U))->array(U); any_match(array(T),function(T,boolean))->boolean; array_remove(x,element)->array). No fabrication.
-
-## Q2 (KEY) — p95 / approximate percentile + accuracy — 4.8125 CLEAN
+### Q2 — skip/null bad unit_price rows — 4.8125 CLEAN
 Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
+- `TRY_CAST(unit_price AS DECIMAL(18,2))` → NULL on bad input vs CAST throws. VERIFIED functions/conversion.html: "Like cast(), but returns null if the cast fails."
+- `try(expr)` catches divide-by-zero / invalid-cast-or-function-arg / numeric-out-of-range → NULL. VERIFIED functions/conditional.html (three documented categories; JSON-error mention is a benign over-listing, the core three are exact).
+- `COALESCE(TRY_CAST(...), 0)` default — CORRECT and idiomatic (docs explicitly pair try with COALESCE).
 
-- `approx_percentile(response_time_ms, 0.95)` for p95 → CORRECT (aggregate.html `approx_percentile(x, percentage)`).
-- ARRAY form `approx_percentile(x, ARRAY[0.50,0.95,0.99])` → CORRECT (`approx_percentile(x, percentages)` returns array).
-- **Main accuracy distinction CORRECT (priority item):** docs publish NO fixed standard-error figure for approx_percentile; the documented "standard error of 2.3%" applies to **approx_distinct ONLY**. The responder explicitly told the engineer NOT to conflate them — exactly right. approx_percentile is T-Digest based with no single published error %.
-- No built-in MEDIAN / PERCENTILE_CONT → CORRECT (absent from aggregate.html; PERCENTILE_CONT WITHIN GROUP is a parse error per r05 §2234 lock).
-- **Sub-claim assessment — "approx_percentile(x, 0.95, accuracy) — no such overload; build qdigest for tunable accuracy" is FULLY CORRECT, not even an understatement.** VERIFIED aggregate.html: the ONLY overloads are `(x, percentage)`, `(x, percentages)`, `(x, w, percentage)`, `(x, w, percentages)`. The 3-arg form is the WEIGHTED form `(x, w, percentage)` — the third arg is a percentage, NOT accuracy. **NO approx_percentile overload exposes an accuracy parameter** (the run-prompt's hypothesis that a weighted form carries accuracy is NOT borne out by the 467 docs). Accuracy lives in `qdigest_agg(x, w, accuracy)` (VERIFIED qdigest.html: 3 overloads, 3rd takes "a value greater than zero and less than one... constant for all input rows") + `value_at_quantile(qdigest, quantile)`. The responder's recommendation to build a qdigest for tunable accuracy is the correct, idiomatic path. No defect.
+### Q3 — events per week, weeks with >= 50 events — 4.71875 CLEAN
+Acc 5 / Comp 4.625 / Clar 4.75 / App 4.75
+- `date_trunc('week', event_date)` → Monday-start week bucket. VERIFIED functions/datetime.html (example truncates 2001-08-22 → 2001-08-20, a Monday).
+- GROUP BY repeats the `date_trunc(...)` expr (alias not resolvable in GROUP BY) — CORRECT.
+- `HAVING COUNT(*) >= 50` filters AFTER aggregation; `>=` correct for "at least 50" (boundary not slipped to `>`). WHERE-vs-HAVING distinction stated correctly (WHERE pre-aggregation, HAVING post-aggregation). CTE variant valid.
 
-## Q3 — highest of three warehouse columns per row — 4.78125 CLEAN
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.625
+### Q4 — each row alongside total session count — 4.8125 CLEAN
+Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
+- `COUNT(*) OVER ()` (empty OVER) → whole-table count attached to every row, no row collapse. VERIFIED functions/window.html: "All Aggregate functions can be used as window functions by adding the OVER clause"; empty frame = whole result set.
+- `CONCAT('Session ', ROW_NUMBER() OVER (ORDER BY session_id), ' of ', COUNT(*) OVER ())` label — ROW_NUMBER() OVER (ORDER BY ...) VERIFIED (unique sequential from 1).
+- "window functions don't collapse vs GROUP BY" distinction CORRECT.
 
-`greatest(warehouse_a_stock, warehouse_b_stock, warehouse_c_stock)` → CORRECT (across columns, one row in/out). VERIFIED comparison.html: GREATEST/LEAST "return null if any argument is null" — so `GREATEST(100, NULL, 50) = NULL` in Trino exactly as stated. The Postgres contrast (Postgres ignores NULLs; Trino/Oracle/MySQL/BigQuery return NULL) is accurate. COALESCE-wrap (e.g. `greatest(coalesce(a,0), coalesce(b,0), coalesce(c,0))`) to ignore NULLs is the right fix. Matches reference_trino_greatest_least_null.md card.
+## TICS check — CLEAN
+No `::` cast anywhere (all 4). No QUALIFY, no false semi-join, no fabricated functions (json_extract_scalar/json_extract/json_exists/TRY_CAST/try/date_trunc/COUNT-OVER/ROW_NUMBER all real & verified). No regex-backslash, INTERVAL-quarter-week, OFFSET-before-LIMIT, generate_subscripts, or broken-secondary slip this iter. NO DEFECTS — all 4 fully correct and verified both directions.
 
-## Q4 (KEY) — null-safe plan_tier-changed check — 4.5625 (minor sloppiness)
-Acc 4.5 / Comp 4.75 / Clar 4.5 / App 4.5
+## RECOMMENDATION = DEFAULT NO-OP
+Margin +1.1875; all 4 clean; all four targeted checks resolved in the responder's favor. No source-verified findable gap, no resource defect, no 2-in-2 consecutive recurrence. NO resource edit; NO FIX-A; NO git commit (orchestrator commits once after judge). MUST NOT bump state.json (already 1027).
 
-Concept CORRECT and VERIFIED (comparison.html): `IS DISTINCT FROM` is null-safe; `a IS DISTINCT FROM b` is TRUE when values differ OR exactly one operand is NULL; FALSE only when both identical (including both NULL). Plain `!=`/`<>` returns UNKNOWN when an operand is NULL → 3-valued logic drops changed-with-NULL rows (e.g. free→NULL or NULL→paid transitions silently excluded). The worked example correctly JOINs `old_subscriptions o` + `new_subscriptions n ON id WHERE o.plan_tier IS DISTINCT FROM n.plan_tier` — fully correct.
+## Re-probe (monitor only, next sweep)
+- (a) nested JSON: json_extract_scalar→VARCHAR scalar / NULL-on-non-scalar, json_extract→JSON, json_exists→boolean strict-mode — watch json_value-vs-json_extract_scalar error-vs-NULL confusion.
+- (b) error-tolerant casts: TRY_CAST→NULL-on-fail vs CAST-throws, try() three categories, COALESCE default — watch try() over-listing of caught error types.
+- (c) date_trunc('week') Monday-start + HAVING-post-aggregation `>=`-for-"at least" boundary (watch > vs >= slip) + WHERE-vs-HAVING.
+- (d) COUNT(*) OVER () whole-table-no-collapse + ROW_NUMBER() OVER (ORDER BY) label — watch window-vs-GROUP-BY collapse confusion.
 
-**DEFECT (minor, dangling-alias sloppiness):** the FIRST snippet writes `FROM old_subscriptions o ... WHERE o.plan_tier IS DISTINCT FROM new.plan_tier` — there is NO `new` table/alias in that FROM clause, so the `new.` reference is undefined and would not run as written. The second (worked) example fixes this with a proper join + `n` alias. The concept and full worked example are both correct; only the throwaway first snippet has the dangling alias. Light Acc/Clar deduct, not a floor breaker. Per-instance responder slip (sloppy illustrative snippet family), NOT a findable resource gap.
-
----
-
-## TICS scan
-`::` shorthand ABSENT all 4 (good). No QUALIFY / no false semi-join glossary / no fabricated function (filter/transform/any_match/array_remove/approx_percentile/qdigest_agg/value_at_quantile/greatest all real & verified; MEDIAN/PERCENTILE_CONT correctly flagged absent) / no regex-backslash issue / no INTERVAL quarter-week / no OFFSET-before-LIMIT / no generate_subscripts. Only blemish: Q4's first-snippet dangling `new.` alias.
-
-## RECOMMENDATION — DEFAULT NO-OP
-Margin +1.1875; all 4 substantively correct incl BOTH KEY items resolved in the responder's favor: Q2 (no-2.3%-for-approx_percentile + T-Digest + no-accuracy-overload→qdigest) and Q4 (IS DISTINCT FROM null-safe vs != UNKNOWN-drops). Q4 dangling-alias is a FIRST-occurrence per-instance sloppiness in a throwaway snippet (worked example correct) — NOT a findable resource gap, NOT 2-in-2. No resource edit, no FIX-A, no git commit.
-
-Re-probe (monitor only):
-- (a) filter(array, lambda)→array keep-true, no UNNEST + transform/any_match/array_remove family.
-- (b) approx_percentile no-2.3% (vs approx_distinct 2.3%), ARRAY-form for multiple, NO accuracy overload → qdigest_agg(x,w,accuracy)+value_at_quantile for tunable accuracy; watch MEDIAN/PERCENTILE_CONT relapse.
-- (c) GREATEST/LEAST return NULL if ANY arg NULL (Postgres-contrast) + COALESCE-wrap.
-- (d) IS DISTINCT FROM null-safe vs != UNKNOWN-drops; watch dangling-alias relapse in the illustrative snippet — if 2-in-2, LIGHT findability nudge (alias both sides of the join in the lead snippet).
-
-Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310). MUST NOT bump state.json (already 1026; orchestrator commits).
+Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310).
