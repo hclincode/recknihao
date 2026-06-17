@@ -1,58 +1,53 @@
-# iter1001 Judge Feedback
+# Judge Feedback — iter1002
 
-**Iteration**: 1001 (EXTENDED PHASE breadth sweep; 0 resource edits expected)
-**Verification**: All claims verified against trino.io/docs/467 + RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md), NOT resources/. PINNED Trino 467.
-**Prod stack** (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 Qs fit; no federation drag-in; no auth angle.
+**Phase:** extended (passed=true preserved). OVERALL AVERAGE governs — no per-Q veto.
+**Prod stack:** Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt — all 4 Qs fit; no federation drag-in; no auth angle.
+**Verification:** Both directions vs trino.io/docs/467 + RAW git-tag 467 source — NOT against resources/.
 
-## Per-question scores
+## Source verifications (this iter)
 
-### Q1 — Group login events by hour-of-day; EXTRACT(hour FROM created_at) usable in GROUP BY/WHERE like Postgres? — **4.8125 CLEAN**
-- VERIFIED at functions/datetime.html: `extract(field FROM x) → bigint`. EXTRACT(HOUR FROM timestamp) returns a **bigint** (integer 0–23), directly usable in GROUP BY and WHERE — matches Postgres on this point. CORRECT.
-- Supported fields VERIFIED: HOUR/MINUTE/SECOND/DAY/DAY_OF_WEEK(DOW)/DAY_OF_MONTH/DAY_OF_YEAR/MONTH/QUARTER/YEAR/WEEK/etc. Responder's field list correct.
-- `GROUP BY EXTRACT(hour FROM created_at)` valid (basic GROUP BY accepts expressions). CORRECT.
-- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+- **json_extract_scalar (RAW git-tag 467 functions/json.md):** signature `json_extract_scalar(json, json_path) -> varchar`; returns the scalar value AS A STRING; JSON path `$.key` object-member access AND `$[index]` array access both documented (example `$.store.book[0].author`). Q1 `json_extract_scalar(properties,'$.plan')`→varchar + `CAST(... AS BIGINT)` for the numeric `seats` = CORRECT.
+- **UNNEST join syntax (RAW git-tag 467 sql/select.md):** documented example `CROSS JOIN UNNEST(scores) AS t(score)` — exactly the `AS t(tag)` alias form the responder used. LEFT JOIN form: "in case of using LEFT JOIN the only condition supported by the current implementation is ON TRUE" — responder's `LEFT JOIN UNNEST(tags) AS t(tag) ON TRUE` is the documented and only-supported LEFT form. Q3 = CORRECT both forms.
+- **ROW_NUMBER dedup:** PARTITION BY account_id ORDER BY updated_at DESC, filter rn=1 in outer query = canonical Trino dedup; NO QUALIFY in 467, correctly nested in a CTE. RANK()/tiebreak notes accurate. Q2 = CORRECT.
+- **SUM() OVER () empty window:** empty OVER () = single partition over all result rows → grand total broadcast onto each row = CORRECT (classic ratio-to-total without self-join). `100.0` non-scientific = DECIMAL literal → avoids integer-division truncation = CORRECT. `NULLIF(SUM(...) OVER (),0)` divide-by-zero guard = CORRECT. PARTITION BY month variant correct. Q4 = CORRECT.
 
-### Q2 — amount integer cents (10099); amount/100 = 100 not 100.99; what's going on + how to get decimal? — **4.6875 CLEAN (minor terminology ding)**
-- Integer/integer division truncates toward zero VERIFIED: 10099/100 = 100. Correct diagnosis of the classic integer-division trap.
-- Fix `amount / 100.0` VERIFIED: `100.0` (non-scientific decimal notation) is a **DECIMAL literal** in Trino 467 (language/types.html: scientific notation like `1.03e1` casts to DOUBLE; plain `100.0` is DECIMAL), so the division promotes to DECIMAL → 100.99. CORRECT.
-- `CAST(amount AS DECIMAL) / 100` also works. CORRECT.
-- ★ MINOR TERMINOLOGY IMPRECISION (not a defect): responder wrote "100.0 promotes the calculation to decimal/floating-point arithmetic." `100.0` is specifically a DECIMAL literal → DECIMAL division, NOT floating-point (a DOUBLE result would need `100e0` / CAST AS DOUBLE). Substance (promotes to decimal, yields 100.99) is correct; light deduct on accuracy/clarity only.
-- Acc 4.5 / Clar 4.625 / App 4.75 / Comp 4.875.
+## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
 
-### Q3 — DISTINCT plan,region vs GROUP BY plan,region; meaningful difference? which to use? — **4.8125 CLEAN — iter989 FOLKLORE DID NOT RECUR**
-- `SELECT DISTINCT plan, region` and `SELECT plan, region ... GROUP BY plan, region` are SEMANTICALLY EQUIVALENT (same result rows) and Trino plans them essentially identically — no perf winner. CONFIRMED.
-- ★ Responder said "both perform well on Trino; pick whichever reads better" and did NOT assert "GROUP BY faster than DISTINCT" — CORRECT. The iter989 DISTINCT-vs-GROUP-BY perf-folklore **DID NOT RECUR (one-off confirmed; folklore clean).**
-- DISTINCT = pure dedup (more readable); GROUP BY = needed when you add aggregates (COUNT(*) etc.). Correct, useful framing.
-- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+### Q1 — extract plan + seats from JSON string, GROUP BY them
+- Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 4.75 → **4.8125**
+- json_extract_scalar→varchar + CAST seats to BIGINT correct; repeating the extraction expressions character-identically in GROUP BY is the right Trino approach (aliases not resolvable in GROUP BY). Two-tier "promote hot JSON keys to top-level Iceberg columns" note is genuinely useful prod guidance, not padding.
 
-### Q4 — Daily summary: total + per-region subtotals + grand total in ONE query (currently 3 UNIONs); single-query GROUP BY variant? — **4.8125 CLEAN — KEY CHECK: ROLLUP-NO-EXPRESSIONS CAVEAT IS *CORRECT*, NOT A FABRICATION**
-- `GROUP BY ROLLUP(region)` emits per-region rows + a grand-total row in one query. VERIFIED CORRECT.
-- `GROUPING(region)` = 0 for detail rows / 1 for the grand-total (aggregated) row; single-column bitmask; label via CASE. VERIFIED CORRECT (functions/aggregate.html GROUPING bitmask).
-- ★★ **THE SUSPECT CLAIM — VERIFIED, RESPONDER IS RIGHT.** The run-prompt's "strong prior" (that ROLLUP/CUBE/GROUPING SETS accept arbitrary expressions, so the responder fabricated an over-restrictive limitation) is **WRONG**. Verified at trino.io/docs/467 sql/select.html AND raw git-tag 467 source (sql/select.md), verbatim: *"Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed."* Grammar shows `GROUPING SETS ( ( column [, ...] ) [, ...] ) | CUBE ( column [, ...] ) | ROLLUP ( column [, ...] )` — **column**, not expression. Basic GROUP BY accepts expressions; ROLLUP/CUBE/GROUPING SETS do NOT.
-- Therefore the responder's caveat "ROLLUP works with COLUMN NAMES ONLY, not expressions — if you need a date part, pre-compute it in a CTE first" is **FULLY CORRECT and the documented best practice**, NOT a fabricated over-restrictive limitation. The `WITH ... GROUP BY ROLLUP(yr, region)` CTE-precompute workaround is exactly the right pattern.
-- ★ IMPORTED-PRIOR TRAP AVOIDED (judge side): same family as GREATEST/LEAST-NULL, date_diff-boundary, to_char-exists (MEMORY) — verify dialect facts against the 467 source BEFORE asserting the responder is wrong. Git-tag source refuted the run-prompt's prior. Verified verdict reported per instructions.
-- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+### Q2 — keep most recent row per account_id (dedup a status-change log)
+- Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 4.75 → **4.8125**
+- Canonical ROW_NUMBER() PARTITION/ORDER DESC + rn=1; correctly nested in CTE (no QUALIFY in 467). Tiebreak-on-identical-timestamp note + RANK() ties-share-rank contrast both accurate and on-point.
+
+### Q3 — explode array tags, count per individual tag
+- Accuracy 5.0 / Completeness 4.875 / Clarity 4.75 / Actionability 4.75 → **4.84375**
+- CROSS JOIN UNNEST(tags) AS t(tag) matches doc form exactly; LEFT JOIN ... ON TRUE to preserve NULL/empty-array rows is the documented-correct (and only-supported) LEFT form. Note that UNNEST is in FROM and precedes WHERE is accurate and helps the beginner reason about filtering.
+
+### Q4 — each customer's % of monthly total in one query, no self-join
+- Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 4.875 → **4.84375**
+- SUM() OVER () grand total + 100.0 decimal literal (avoids int truncation) + ROUND 2dp; NULLIF divide-by-zero guard and PARTITION BY month variant are exactly the right defensive additions. Half-open month range `>= DATE '2026-06-01' AND < DATE '2026-07-01'` uses typed DATE literals (no bare-varchar TYPE_MISMATCH trap).
 
 ## Overall
-(4.8125 + 4.6875 + 4.8125 + 4.8125) / 4 = 19.125 / 4 = **4.7813 — STRONG PASS** (margin +1.281; overall average governs, no per-Q veto).
+
+(4.8125 + 4.8125 + 4.84375 + 4.84375) / 4 = **4.8281** → **STRONG PASS** (margin +1.328)
+
+16 sub-scores: 5.0/4.75/4.75/4.75 + 5.0/4.75/4.75/4.75 + 5.0/4.875/4.75/4.75 + 5.0/4.75/4.75/4.875.
 
 ## Tics — ALL CLEAN
-No QUALIFY / false-mechanism-semi-join-mislabel / MAX(varchar) / percent_rank-inversion / **fabricated functions or limitations (Q4 ROLLUP-no-expressions is REAL, source-verified — NOT a fabrication)** / regex-backslash / GREATEST-LEAST-NULL / **DISTINCT-vs-GROUP-BY-perf-folklore (Q3 ABSENT — did NOT recur, one-off confirmed)** / date-minus-integer / broken-secondary-false-justification (Q4 caveat is a TRUE justification, not broken/false) / GROUPING-bitmask-error / mid-churn / column-scope / ILIKE-conflation / INTERVAL-quarter-week. EXTRACT→bigint, integer-div-truncation, DECIMAL-literal-promotion, ROLLUP, GROUPING — all real & verified.
+No QUALIFY (Q2 correctly nests in CTE) / no fabricated-fn-or-syntax (json_extract_scalar, UNNEST alias `t(tag)`, LEFT JOIN UNNEST ON TRUE, ROW_NUMBER, SUM OVER (), NULLIF ALL real & verified) / no broken-secondary (all secondary notes — RANK tiebreak, LEFT JOIN ON TRUE, PARTITION BY month, NULLIF guard — are CORRECT, not the usual Haiku broken-padding) / no int-division-truncation slip (Q4 100.0 DECIMAL literal correct) / no regex-backslash (no regex Q) / no GREATEST-LEAST-NULL / no date-minus-integer / no ILIKE-conflation / no INTERVAL-quarter-week / no MAX-varchar / no semi-join-mislabel / no column-scope.
 
-## Scope notes
-- **Q1**: EXTRACT(HOUR FROM ts) → bigint, GROUP BY/WHERE usable like Postgres, fields correct. CLEAN.
-- **Q2**: integer/integer truncates toward zero (10099/100=100) + `amount/100.0` (100.0 is a DECIMAL literal) → 100.99 + CAST AS DECIMAL alt. CLEAN; only ding = minor "decimal/floating-point" terminology imprecision (it's DECIMAL division specifically, not float) — terminology nit, not a defect.
-- **Q3**: `SELECT DISTINCT a,b` == `SELECT a,b GROUP BY a,b` — semantically equivalent, Trino plans identically, no perf winner; responder correctly said "both perform well, pick whichever reads better." **iter989 folklore DID NOT recur (one-off confirmed).** CLEAN.
-- **Q4 (KEY)**: ROLLUP lead + GROUPING(region) 0-detail/1-grand-total bitmask CORRECT; **the "ROLLUP works with column names only, not expressions" caveat is VERIFIED CORRECT against trino.io/docs/467 + raw git-tag 467 source ("Only column names are allowed") — NOT a fabricated over-restrictive limitation; the run-prompt's expressions-accepted prior was wrong.** CTE-precompute workaround correct. CLEAN — genuinely strong, complete answer; NO responder slip.
+★ Notable: the "broken for-completeness secondary alternative" pattern (recurring Haiku failure mode) did NOT appear this iter — every secondary note was correct.
 
-## Recommendation
-**DEFAULT NO-OP** (margin +1.281; all 4 deliverables correct & verified both directions; zero tics; zero fabricated functions/limitations; Q3 folklore did NOT recur; Q4 KEY caveat verified TRUE). No findable resource gap, no findability gap, no 2-in-2 recurrence.
+## Recommendation — DEFAULT NO-OP
+
+Margin +1.328; all 4 deliverables correct and verified both directions against RAW git-tag 467 source; zero tics; zero fabricated functions/syntax; no findable resource gap; no 2-in-2 recurrence. NO resource edit warranted.
 
 Re-probe next sweep:
-- (a) another ROLLUP/CUBE/GROUPING SETS Q — confirm column-names-only + CTE-precompute lead holds; watch the INVERSE slip (responder wrongly claiming expressions ARE allowed).
-- (b) another date-part bucketing Q (EXTRACT/date_trunc in GROUP BY) — confirm basic-GROUP-BY-accepts-expressions vs ROLLUP-does-not distinction stays sharp.
-- (c) another integer-vs-decimal arithmetic Q — confirm integer-div-truncation diagnosis + 100.0-DECIMAL-literal fix; watch the decimal-vs-float terminology drift.
-- (d) another DISTINCT-vs-GROUP-BY equivalence Q — confirm folklore stays absent (clean since iter989).
+- (a) another JSON-extraction + GROUP BY Q — confirm json_extract_scalar→varchar + CAST-for-numeric + repeat-expr-in-GROUP-BY lead holds.
+- (b) another dedup/latest-row-per-key Q — confirm ROW_NUMBER+rn=1-in-CTE (no QUALIFY) + tiebreak; watch for QUALIFY slip.
+- (c) another array-explode Q — confirm CROSS JOIN UNNEST AS t(col) + LEFT JOIN ON TRUE for empty-array preservation.
+- (d) another ratio-to-total/window-aggregate Q — confirm SUM() OVER () grand total + decimal-literal-avoids-truncation + NULLIF guard.
 
-Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
-NO resource edits. MUST NOT bump training/state.json (already 1001; passed=true preserved; final_iterations_remaining 0).
+Federation r22 §13.x hard-locked, NOT probed (OVERRIDDEN). NO resource edits. MUST NOT bump training/state.json (already 1002; passed=true preserved; final_iterations_remaining 0).
