@@ -1,43 +1,64 @@
-# iter979 Judge Feedback — EXTENDED PHASE breadth sweep
+# iter980 Judge Feedback — EXTENDED PHASE breadth sweep
 
-**OVERALL 4.5625 STRONG PASS** (Q1 4.75 / Q2 4.75 / Q3 4.0625 / Q4 4.75 = 18.25/4 = 4.5625; margin +1.0625; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.64 STRONG PASS** (Q1 4.75 / Q2 4.75 / Q3 4.3125 / Q4 4.75 = 18.5625/4 = 4.6406; margin +1.14; OVERALL AVERAGE governs, no per-Q veto).
 
-Verification: all claims checked BOTH directions vs trino.io/docs/467 (functions/aggregate.html count(x) vs count(*); sql/select.html HAVING + correlated-subquery support) + WebSearch Trino decorrelation 2026-06-17 — NOT against resources/. Q2 LEFT-JOIN-COUNT and Q3 relational-division TRACED on concrete examples. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — answers fit.
+All 4 dialect/logic claims verified BOTH directions vs trino.io/docs/467 (functions/window.html row_number()="unique sequential number ... starting with one, according to the ordering"; functions/aggregate.html count(x)="number of non-null input values" + "all aggregate functions ignore null values" w/ five named exceptions count/count_if/max_by/min_by/approx_distinct → avg & min ignore NULL; min_by/max_by exist) + WebSearch QUALIFY-absence 2026-06-17 — NOT against resources/. Q1/Q2/Q3/Q4 logic TRACED on concrete examples. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — answers fit.
 
 ---
 
-## Q1 — Products where current_qty < reorder_point (just a WHERE clause?) — 4.75 CLEAN
+## Q1 — Second-most-recent login per user (clean way or self-join?) — 4.75 CLEAN
+`SELECT user_id, login_timestamp FROM (SELECT user_id, logged_at AS login_timestamp, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY logged_at DESC) AS rn FROM user_events WHERE event_name='login') WHERE rn = 2`.
 
-`SELECT product_id, product_name, current_qty, reorder_point FROM stock_levels WHERE current_qty < reorder_point ORDER BY current_qty` — correct, no Trino-specific gotcha for a plain comparison; "works same as Postgres" accurate for this construct; "WHERE runs before GROUP BY" correct (there is no GROUP BY here but the ordering note is harmless context). **NULL 3VL caveat VERIFIED CORRECT and a genuine value-add:** `NULL < 5` -> UNKNOWN -> row excluded by WHERE; if a missing `current_qty` should count as below-reorder, add `OR current_qty IS NULL` — correctly framed as a data-design decision, not a Trino quirk. No tics. Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
+- VERIFIED row_number() starts at 1 in the ORDER BY ordering (window.html). DESC → rn1 = most recent, rn2 = second-most-recent.
+- **TRACE** [Jan1, Jan5, Jan20]: ORDER BY logged_at DESC → Jan20=rn1, Jan5=rn2, Jan1=rn3 → `rn=2` returns Jan5, the **second-most-recent** — CORRECT.
+- Correctly explains <2 logins → user absent from result (no rn=2 row). Correct.
+- **QUALIFY-absent claim VERIFIED** (Trino 467 has no QUALIFY; subquery-wrap is the canonical Nth-per-group form). Legitimate guard, NOT the false-mechanism tic.
+- Correctly generalizes: =1 for latest, <=5 for top-5; implies **max_by gives only the single latest** (not the 2nd) — accurate, max_by(x,y) returns value at the single MAX y.
 
-## Q2 — Direct reports per manager INCLUDING zero-report managers — 4.75 CLEAN (KEY CHECK: semi-join mislabel did NOT recur)
+Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-`SELECT m.manager_id, m.manager_name, COUNT(e.employee_id) AS direct_report_count FROM managers m LEFT JOIN employees e ON m.manager_id=e.manager_id GROUP BY m.manager_id, m.manager_name ORDER BY direct_report_count DESC`. **VERIFIED the textbook LEFT-JOIN-COUNT pattern (aggregate.html count(x)="number of non-null input values" vs count(*)="number of input rows"):** for a manager with no reports, the LEFT JOIN emits one NULL-padded row -> `COUNT(*)` would count it as 1 (the trap) but `COUNT(e.employee_id)` ignores the NULL child key -> 0 (correct). The responder EXPLICITLY explained this distinction and prescribed `COUNT(child_key)` — exactly right. TRACE (manager M, no reports): NULL-padded row -> COUNT(*)=1, COUNT(employee_id)=0 -> kept with 0. CORRECT.
+## Q2 — Distinct IPs per account over past 90 days — 4.75 CLEAN
+`SELECT account_id, COUNT(DISTINCT ip_address) AS unique_ips FROM login_events WHERE logged_at >= current_date - INTERVAL '90' DAY GROUP BY account_id`.
 
-**SEMI-JOIN MISLABEL DID NOT RECUR (decisive):** the iter978 Q3 false-mechanism slip (calling a LEFT JOIN / IS NULL anti-join a "SemiJoin node") did NOT repeat here. The responder described the LEFT JOIN and COUNT semantics plainly and accurately, with no spurious plan-node naming. This confirms the iter978 SemiJoin mislabel as INTERMITTENT, not a structural defect — NO FIX-A warranted on recurrence grounds. Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
+- **VERIFIED COUNT(DISTINCT x) ignores NULL** (aggregate.html count(x)="non-null input values") → NULL IPs skipped. Responder's "DISTINCT+COUNT skip NULL IPs" CORRECT.
+- `INTERVAL '90' DAY` valid 467 (DAY is a supported interval qualifier; not the QUARTER/WEEK parse-error trap).
+- **90-day window CARRIED THROUGH** to aggregation (WHERE filters input rows before GROUP BY) — not dropped; partition-pruning framing accurate for a bare/coerced timestamp predicate.
 
-## Q3 — Products in EVERY one of a customer's orders (relational division) — 4.0625 (single-customer correct+complete; all-customers self-flagged-incomplete)
+Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-**SINGLE-CUSTOMER LEAD CORRECT + COMPLETE:** `SELECT product_id FROM order_items WHERE customer_id=42 GROUP BY product_id HAVING COUNT(DISTINCT order_id) = (SELECT COUNT(DISTINCT order_id) FROM order_items WHERE customer_id=42) ORDER BY product_id`. **TRACE (customer 42 has 3 distinct orders O1/O2/O3):** product in all 3 -> COUNT(DISTINCT order_id)=3 = total 3 -> kept (in ALL); product in only O1,O2 -> COUNT=2 != 3 -> dropped (in SOME not all). Relational-division logic CORRECT. The subquery is NON-CORRELATED (literal `customer_id=42`) -> unambiguously valid Trino 467 (HAVING + scalar subquery comparison is standard; COUNT(DISTINCT) confirmed valid).
+## Q3 — Split revenue NEW (first order) vs RETURNING — 4.3125 (single minor comp ding: exact-tie edge)
+`CASE WHEN created_at = MIN(created_at) OVER (PARTITION BY customer_id) THEN 'new' ELSE 'returning' END`; then `WITH tagged_orders AS (...) SELECT customer_type, SUM(order_total), COUNT(*) GROUP BY customer_type`.
 
-**ALL-CUSTOMERS GENERALIZATION — HONESTLY SELF-FLAGGED INCOMPLETE (good behavior, NOT a fabrication slip):** `GROUP BY customer_id, product_id HAVING COUNT(DISTINCT order_id) = (SELECT COUNT(DISTINCT order_id) FROM order_items t2 WHERE t2.customer_id=t1.customer_id)` references `t1.customer_id` but the outer `FROM order_items` lacks the `t1` alias. The responder explicitly noted "(This syntax needs a correlation alias — see the resources for the full pattern)" — i.e. it self-identified the missing alias rather than shipping a confidently-broken query. **VERIFIED the generalization WOULD work once the `t1` alias is added:** Trino DOES support correlated subqueries and decorrelates them (WebSearch: decorrelation of correlated subqueries is a core optimizer capability; the correlated COUNT-in-HAVING relational-division pattern decorrelates into an aggregation + join). This is the missing-column-in-CTE family by surface, but SELF-FLAGGED -> minor completeness ding ONLY, NOT a false-confidence / fabrication slip. The self-flag-plus-defer is the desired behavior. Acc 4.25 / Clar 4.0 / App 4.0 / Comp 4.0.
+- **TRACE** customer with orders t1<t2<t3: MIN() OVER = t1 for all rows; CASE created_at=t1 → 'new' (the t1 row), else 'returning' (t2,t3). SUM(order_total) GROUP BY customer_type splits first-order revenue ('new') from later-order revenue ('returning') — CORRECT.
+- No self-join, no fan-out; MIN() OVER (PARTITION BY customer_id) = per-row customer-earliest-order ts — correct as-of mechanism.
+- CTE column scope CLEAN (tagged_orders projects all referenced cols).
+- **MINOR COMP ding (per directive, do NOT heavily ding):** exact-timestamp ties — if a customer has 2 orders at the identical MIN(created_at), BOTH match the CASE and tag 'new' (slight over-count of 'new' revenue). Strictly-precise form: ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at, order_id)=1 → 'new', or a created_at+order_id tiebreaker. Acceptable common simplification; responder did not surface the tie. Comp ding only.
 
-## Q4 — Count sessions with zero clicks (zeros-vs-NULLs trap?) — 4.75 CLEAN
+Acc 4.5 / Clar 4.5 / App 4.25 / Comp 4.0.
 
-`SELECT COUNT(*) AS sessions_with_zero_clicks FROM sessions WHERE click_count = 0` — correct. **VERIFIED the 3VL explanation:** `click_count = 0` matches only explicit 0; `NULL = 0` evaluates to UNKNOWN -> NULL rows excluded; if "loaded and left" is stored as NULL, this query misses them. Diagnostic query (`COUNT(*)`, `COUNT(click_count)`, `SUM(CASE WHEN click_count=0...)`, `SUM(CASE WHEN click_count IS NULL...)`) is correct and genuinely useful for understanding the data shape — `COUNT(click_count)` ignoring NULLs is confirmed (aggregate.html). Remediation `WHERE click_count = 0 OR click_count IS NULL` correct if NULL means zero. No tics. Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
+## Q4 — Average order value, subtotal only, some tax NULL (just AVG(subtotal)?) — 4.75 CLEAN
+`SELECT AVG(subtotal) AS avg_order_value FROM checkout` (+ GROUP BY store_id variant).
+
+- **VERIFIED avg ignores NULL** (aggregate.html, avg not among the five exceptions) — but moot since subtotal always populated.
+- KEY: tax_amount NULLs are **irrelevant** because tax is NOT in the AVG expression. Responder correctly explains "AVG(subtotal) ignores the tax column entirely."
+- **Correctly AVOIDS the AVG(subtotal+tax) NULL-poisoning trap** (a NULL tax would null the per-row sum and drop that row from the average) — exactly the right caution.
+
+Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
 ---
 
 ## SCOPE NOTES
+- Q1 ROW_NUMBER()=2-in-subquery = canonical Nth-per-group; QUALIFY correctly flagged absent; max_by correctly noted as single-latest-only. CLEAN.
+- Q2 COUNT(DISTINCT) NULL-skip + INTERVAL '90' DAY + 90-day window carried. CLEAN.
+- Q3 MIN() OVER first-order classification CORRECT; lone item = unaddressed exact-timestamp tie (BOTH rows tag 'new') — acceptable simplification, minor comp ding NOT a logic defect.
+- Q4 AVG(subtotal) correct; NULL tax irrelevant (not in expr); avoids AVG(subtotal+tax) poisoning. CLEAN.
 
-- **Q2 LEFT-JOIN-COUNT CORRECT + semi-join-mislabel did NOT recur** — `COUNT(e.employee_id)` (child key, ignores NULL -> 0) vs `COUNT(*)` (counts the null-padded row -> 1) is the right pattern, explained explicitly; no spurious "SemiJoin node" naming. iter978 Q3 mislabel = CONFIRMED INTERMITTENT/one-off, NO FIX-A.
-- **Q3 single-customer CORRECT + all-customers generalization SELF-FLAGGED INCOMPLETE** — single-customer lead complete + valid (non-correlated subquery); all-customers form is missing the `t1` alias but the responder self-flagged it and deferred to resources rather than shipping it broken -> minor comp ding, NOT a fabrication/false-confidence slip (self-flag is good behavior; the form would work with the alias since Trino decorrelates correlated subqueries).
-- **Q1 / Q4 CLEAN** — both nail the 3VL NULL semantics (NULL comparison -> UNKNOWN -> excluded; OR IS NULL to include) and frame the NULL handling as a data-design decision.
+## TICS — ALL CLEAN
+No QUALIFY-misuse (Q1 correctly says absent) / no false-mechanism-semi-join mislabel / no MAX(varchar)-as-latest (Q1 used ROW_NUMBER, noted max_by=single-latest) / no percent_rank inversion / no fabricated fn-or-rule-or-issue# / no PARTITIONED-BY foreign DDL / no broken-secondary-alternative / no false-justification perf aside / no mid-churn / no missing-column-in-CTE (Q3 CTE projects all) / no JOIN-fan-out / no ts-minus-ts.
 
-## TICS — CLEAN
+## RECOMMENDATION — DEFAULT NO-OP
+Margin +1.14; the lone non-clean item (Q3 exact-timestamp tie) is an acceptable common simplification, NOT a resource/findability gap. Three of four answers fully clean. Re-probe next sweep:
+- (a) another Nth-per-group / "2nd-most-recent" Q (ROW_NUMBER()=N subquery stays clean; QUALIFY stays correctly-absent),
+- (b) another first-event-vs-rest classification Q — does responder surface the exact-tie tiebreaker (ROW_NUMBER ORDER BY ts, id) when ties matter? (deferring/omitting acceptable for a non-strict ask).
 
-No QUALIFY; no false-mechanism semi-join mislabel (Q2 did NOT mislabel — confirmed); no MAX(varchar)-as-latest; no percent_rank inversion; no fabricated functions/rule-names/issue-numbers; no PARTITIONED-BY foreign DDL; no broken-secondary / false-justification; no mid-churn; the Q3 missing-`t1`-alias was SELF-FLAGGED (not a silent slip); no JOIN fan-out; no ts-minus-ts.
-
-## RECOMMENDATION = DEFAULT NO-OP
-
-Margin +1.0625; lone non-clean item (Q3 all-customers generalization) is an honestly-self-flagged incomplete generalization, NOT a resource defect or findability gap. Re-probe next sweep: (a) another relational-division "appears in ALL / every" Q — does the responder reach the full correlated form WITH the alias, or keep deferring (deferring is acceptable); (b) another LEFT-JOIN-COUNT "include zero-X entities" Q — confirm COUNT(child_key) stays correct and the SemiJoin mislabel stays absent (3-clean would fully retire the iter978 concern). Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 979; passed=true preserved; final_iterations_remaining 0).
+Federation r22 §13.x hard-locked, NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 980; passed=true preserved; final_iterations_remaining 0).
