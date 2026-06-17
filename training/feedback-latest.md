@@ -1,65 +1,60 @@
-# Judge Feedback — iter1005
+# Judge Feedback — iter1006
 
-**OVERALL: 4.6875 — PASS** (75.0/16; margin +1.1875; OVERALL AVERAGE governs, no per-Q veto)
+**OVERALL: 4.0156 (64.25/16) — PASS** (threshold 3.5; margin +0.5156). OVERALL AVERAGE governs — no per-Q veto. One real load-bearing parse-error defect (Q4 clause order) drags the average but does not sink the pass.
 
-Verified BOTH directions against trino.io/docs/467 + RAW git-tag 467 source (language/types.md, sql/select.md, functions/array.md, functions/string.md) + GitHub issues — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt) — all 4 questions fit; no federation/auth angle.
+Verified BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source + official GitHub issues — NOT resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt): all 4 fit; no federation/auth angle.
 
 ---
 
 ## Per-question scores
 
-### Q1 — date spine + LEFT JOIN so missing days show 0 — **4.8125 CLEAN**
-- `sequence(DATE '2026-01-01', current_date, INTERVAL '1' DAY)` VERIFIED valid (array.md: "Generate a sequence of dates from start to stop, incrementing by step. The type of step can be either INTERVAL DAY TO SECOND or INTERVAL YEAR TO MONTH"); bounds inclusive — CORRECT.
-- `UNNEST(...) AS d(day)` spine + `LEFT JOIN ... ON s.event_date = d.day` + `COALESCE(s.signup_count, 0)` = canonical zero-fill — CORRECT.
-- "Trino has no generate_series (Postgres) — use sequence()" CORRECT (no Postgres folklore drag-in).
-- Variant `UNNEST(sequence(0,29)) AS t(n)` + `date_add('day', n, current_date - INTERVAL '30' DAY)` valid; integer sequence inclusive; `current_date - INTERVAL '30' DAY` valid (date − singular DAY qualifier, NOT bare-integer, NOT quarter/week trap).
-- Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75.
+### Q1 — anti-join (accounts with no matching user) — **4.8125 CLEAN**
+- Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75
+- `WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.account_id = a.account_id)` — CORRECT canonical anti-join.
+- NOT IN + NULL three-valued-logic gotcha **VERIFIED CORRECT**: if `users.account_id` contains any NULL, `NOT IN` evaluates to UNKNOWN for every outer row → WHERE drops all rows → empty result. NOT EXISTS is NULL-safe. Accurate and load-bearing.
+- `LEFT JOIN users u ON u.account_id=a.account_id WHERE u.account_id IS NULL` equivalent — CORRECT, and "both compile to the same anti-join plan" matches Trino's optimizer behavior.
 
-### Q2 — inline plan-tier label + monthly price without a separate table — **4.40625 (minor ding — secondary-example dialect wart)**
-- PRIMARY deliverable (the actual question): `CASE WHEN plan_tier='starter' THEN 'Starter Plan' ...` for label + a second CASE for `monthly_price` — fully CORRECT and directly answers "inline lookup without a separate table." First-match-wins, ELSE catch-all sound.
-- SECONDARY "better architectural approach" = a dimension table with `CREATE TABLE iceberg.analytics.plan_dimensions (...) WITH (partitioning = ARRAY[])`. ★ **DIALECT WART:** an EMPTY `ARRAY[]` literal has no determinable element type in Trino (general rule: "cannot determine type of empty array" → needs a cast such as `CAST(ARRAY[] AS ARRAY(varchar))`), and `WITH (partitioning = ARRAY[])` is NOT a documented or idiomatic way to declare an unpartitioned Iceberg table. The documented idiom is to **OMIT the `partitioning` property entirely** (omission → unpartitioned). At best non-idiomatic; plausibly an error depending on connector property parsing. Minor deduction because it is the optional secondary example, not the deliverable; the INSERT...VALUES + LEFT JOIN star-schema framing is otherwise correct and well-explained.
-- Acc 4.25 / Comp 4.5 / Clar 4.5 / App 4.375.
-- **TEACHER NOTE (no edit required this iter — single occurrence, secondary example):** if an "unpartitioned Iceberg table DDL" Q recurs, the canonical answer is to OMIT `partitioning`. Watch for `partitioning = ARRAY[]` recurrence → only on 2-in-2 consider a LIGHT additive note in r09 ("declare unpartitioned by OMITTING the partitioning property; a bare ARRAY[] literal needs a cast and is not idiomatic"). DO NOT churn on a one-off in a secondary aside.
+### Q2 — DISTINCT active users per calendar week — **4.46875 (minor ding)**
+- Acc 4.5 / Comp 4.5 / Clar 4.5 / App 4.375
+- `date_trunc('week', event_date)` + `COUNT(DISTINCT user_id)` + GROUP BY repeated-expression — CORRECT.
+- **Monday verdict VERIFIED CORRECT**: RAW git-tag 467 datetime.md example truncates 2001-08-22 (Wed) → 2001-08-20, which is a **Monday** (ISO-8601 week start). Responder's "Monday 00:00:00, ISO-8601 week start" is right.
+- ★ **MINOR IMPRECISION (the ding): "in UTC".** For a tz-less DATE / TIMESTAMP-without-time-zone column, `date_trunc` does NO time-zone conversion — it operates on the stored wall-clock value. There is no UTC involved for tz-less types. The "in UTC" phrasing is misleading (it would only matter for TIMESTAMP WITH TIME ZONE). Result is still correct; deduct on Acc/Clar only.
+- Alias-not-usable-in-GROUP-BY caveat CORRECT (GROUP BY takes expressions/ordinals, not output aliases by name).
 
-### Q3 — read ROW fields; `WHERE properties.device='mobile'` "syntax error" — **4.84375 CLEAN (KEY)**
-- Dot notation `properties.device` (SELECT and WHERE) VERIFIED CORRECT (types.md: "Named row fields are accessed with field reference operator (.)"; `CAST(ROW(1, 2.0) AS ROW(x BIGINT, y DOUBLE)).x`).
-- `(properties).*` parenthesized "expand all fields" VERIFIED CORRECT (select.md: "row_expression.* [AS (column_alias ...)] ... All fields of the row define output columns"; example `(CAST(ROW(1, true) AS ROW(...))).*` — parentheses required). NOT a fabrication.
-- "Common mistakes" correctly identified: `properties['device']` (MAP subscript — wrong for ROW), `element_at(properties,'device')` (MAP/ARRAY — wrong for ROW), `json_extract_scalar` (JSON strings — wrong for native ROW). Correctly distinguishes native ROW from MAP and from JSON-in-VARCHAR.
-- Bonus `CAST(json_parse(properties) AS ROW(...)).device` for the VARCHAR-holding-JSON case — valid and useful disambiguation.
-- Acc 5.0 / Comp 4.75 / Clar 4.875 / App 4.75.
+### Q3 — safe cast garbage strings to int → NULL — **4.84375 CLEAN**
+- Acc 5.0 / Comp 4.75 / Clar 4.875 / App 4.75
+- `TRY_CAST(response_time_ms AS INTEGER)` → NULL on 'timeout', query continues — **VERIFIED CORRECT** (conversion.html: "Like cast(), but returns null if the cast fails"). CAST throws — correct contrast.
+- `COALESCE(TRY_CAST(response_time_ms AS INTEGER), -1)` default — CORRECT.
 
-### Q4 — build greeting "Hi Jane Smith, you are on the Growth plan" — CONCAT vs || — **4.8125 CLEAN**
-- `concat_ws(' ', first_name, last_name)` skips NULLs VERIFIED (string.md: "Any null values provided in the arguments after the separator are skipped").
-- `format('Hi %s %s, you are on the %s plan', ...)` printf-style VERIFIED (Trino format() = Java String.format / printf %s %d).
-- `||` chain valid; ★ critical caveat VERIFIED CORRECT: `||` requires VARCHAR operands and does NOT auto-cast numerics — "'Plan ID: '||plan_id is a parse/type error; CAST or format('%d')" is RIGHT (Trino does not implicitly convert numeric↔character; explicit `CAST(x AS varchar)` required). Not a broken-secondary — the caveat is true and load-bearing.
-- Decision guide (concat_ws simple / format mixed-types / CAST+|| dynamic) is accurate and actionable.
-- Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75.
-
----
-
-## The 5 directed checks — resolved verdicts
-
-1. **Q2 empty `ARRAY[]` partitioning** — ★ DIALECT WART. `WITH (partitioning = ARRAY[])` is NOT the documented way to declare an unpartitioned Iceberg table; OMIT the property instead. Bare `ARRAY[]` has no inferable element type (needs a cast). Minor deduction; secondary example only.
-2. **Q3 ROW access** — CORRECT both directions. `properties.device` dot (incl. WHERE) valid; `(properties).*` parenthesized expansion valid; `['...']`/`element_at`/`json_extract_scalar` correctly flagged WRONG for native ROW.
-3. **Q1 date spine** — CORRECT. `sequence(DATE,DATE,INTERVAL '1' DAY)` valid + inclusive; UNNEST + LEFT JOIN + COALESCE canonical; `UNNEST(sequence(0,29))` valid; no generate_series (Postgres-only, correctly noted).
-4. **Q4 concat** — ALL THREE CORRECT. concat_ws skips NULLs; format() printf-style; `||` needs VARCHAR / no numeric auto-cast / CAST needed.
-5. **PostgreSQL `::` cast** — ABSENT in all four answers. Clean (iter1003 one-off did NOT recur; ban stays double-locked r23 §3.1C + r27 §4.4A, not exercised).
+### Q4 — paginated API via ORDER BY DESC + LIMIT + OFFSET — **2.0 ★DEFECT (parse error in primary SQL)**
+- Acc 2.0 / Comp 2.0 / Clar 2.5 / App 1.5
+- ★★ **LOAD-BEARING DEFECT — CLAUSE ORDER IS A TRINO PARSE ERROR.** The responder wrote `ORDER BY created_at DESC LIMIT 50 OFFSET 100` (LIMIT-before-OFFSET, PostgreSQL/MySQL order). **In Trino 467 this is a PARSE ERROR** (`mismatched input 'offset'`).
+  - **Citation:** trino.io/docs/467/sql/select.html synopsis documents the clause order as `[ ORDER BY ... ] [ OFFSET count [ROW|ROWS] ] [ LIMIT { count | ALL } ]` — **OFFSET MUST come before LIMIT**. Confirmed by trinodb/trino #7553 ("Support offset after limit in queries" — not supported) and sqlglot #1754 ("Trino throws an error if offset comes after limit and not before"; `limit 1 offset 1` → `mismatched input 'offset'`, `offset 1 limit 1` works).
+  - **CORRECT FORM:** `SELECT order_id, created_at, total FROM orders WHERE tenant_id=123 ORDER BY created_at DESC OFFSET 100 LIMIT 50;`
+- ★ **Compounding miss:** the question explicitly asks "fine in Trino or different from Postgres?" The clause-order difference (Trino requires OFFSET-before-LIMIT; Postgres accepts LIMIT-before-OFFSET) **IS one of the genuine Postgres→Trino differences** — and the responder asserted the reverse-order query "works in Trino," which is exactly backwards. It identified the cost-model difference but inverted the syntax difference.
+- The OFFSET cost-model commentary (Trino+Iceberg OFFSET does not reduce scan cost; reads all WHERE-matching rows then trims; deep OFFSET rescans) and the **keyset/seek pagination recommendation** (`ORDER BY order_id DESC, WHERE order_id < last_id, LIMIT 50`) are **CORRECT and genuinely useful** — this saves Q4 from a full sink. But a SaaS engineer who copies the literal example query gets a syntax error, so Acc/App are heavily docked.
 
 ---
 
-## TICS scan
-All clean except the Q2 secondary-example empty-`ARRAY[]` wart: no QUALIFY / false-mechanism-semi-join / MAX-varchar / percent_rank-inversion / fabricated-fn (sequence/unnest/date_add/coalesce/concat_ws/format/json_parse ALL real & verified; `(row).*` real) / regex-backslash / GREATEST-LEAST-NULL / date-minus-integer (Q1 INTERVAL correct) / `::`-cast (ABSENT) / broken-secondary (Q4 `||` caveat TRUE) / mid-churn / column-scope / ILIKE-conflation / INTERVAL-quarter-week / MAP-subscript-vs-element_at (Q3 ROW correctly NOT confused with MAP).
+## TICs
+- `::` PostgreSQL cast: **ABSENT all 4** (ban stays double-locked r23 §3.1C + r27 §4.4A; not exercised; iter1003 one-off has not recurred).
+- All functions real & verified: NOT EXISTS / LEFT JOIN-IS NULL / date_trunc('week') / COUNT(DISTINCT) / TRY_CAST / COALESCE.
+- No QUALIFY, no false semi-join mislabel, no MAX-varchar, no GREATEST/LEAST-NULL, no date-minus-integer, no INTERVAL quarter/week, no regex-backslash, no broken-secondary (Q4 keyset rec is correct).
+- ★ NEW TIC THIS ITER: **OFFSET/LIMIT clause-order inversion** (Postgres-prior import → Trino parse error). Q4 only. First occurrence — per-instance one-off until/unless it recurs.
 
 ---
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.1875; 3 of 4 fully clean & verified both directions; Q3 KEY ROW-access resolved CORRECT both directions; `::` did NOT recur. The sole ding is a non-idiomatic `partitioning = ARRAY[]` in Q2's OPTIONAL secondary architectural aside (the primary CASE deliverable is correct) — a single occurrence in a secondary example, NOT a findable resource gap and NOT 2-in-2. NO resource edit; NO FIX-A.
+## Defects / notes for teacher
+1. **Q4 LIMIT-before-OFFSET = Trino parse error** (the one real defect). Correct form is `OFFSET 100 LIMIT 50`. Same **imported-prior family** as the historical date-minus-integer / GREATEST-NULL / `::`-cast slips: a PostgreSQL syntactic habit carried into Trino where the grammar rejects it. The deliverable example as written does NOT parse.
+2. **Q2 "in UTC"** is an imprecise aside for tz-less columns — no tz conversion happens. Minor.
 
-**Re-probe next sweep:**
-- (a) another "unpartitioned Iceberg table DDL" / dimension-table-creation Q — confirm the canonical answer is to OMIT `partitioning`; watch `partitioning = ARRAY[]` recurrence → only on 2-in-2 a LIGHT r09 additive note.
-- (b) another ROW/struct field-access Q — confirm dot + `(row).*` lead and ROW-vs-MAP-vs-JSON disambiguation stay sharp; watch INVERSE slip (recommending `element_at`/subscript for a native ROW).
-- (c) another date-spine / calendar Q — confirm sequence()+UNNEST+LEFT JOIN+COALESCE and no-generate_series.
-- (d) another string-build Q — confirm concat_ws-skips-NULL / format-printf / `||`-needs-VARCHAR-CAST trio.
-- (e) `::`-cast stays per-instance one-off — only 2-in-2 → LIGHT nudge.
-
-Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310). MUST NOT bump state.json (already 1005; passed=true; final_iterations_remaining 0; orchestrator commits).
+## RECOMMENDATION = DEFAULT NO-OP (with a flagged re-probe)
+- Margin +0.5156, PASS. 3/4 answers clean; Q4 deliverable SQL has a genuine parse-error defect but the conceptual content (cost model + keyset pagination) is correct.
+- This is the **FIRST** occurrence of the OFFSET/LIMIT clause-order inversion — treat as a per-instance one-off (imported-prior family), NOT yet a source-verified findable resource gap.
+- **Re-probe next sweep (priority):** another LIMIT/OFFSET pagination Q. If the responder AGAIN emits `LIMIT n OFFSET m` (LIMIT-before-OFFSET) → that is **2-in-2 same-direction** → orchestrator GREP resources/ for OFFSET/LIMIT guidance:
+  - if the correct OFFSET-before-LIMIT order is NOT findable from "pagination/OFFSET/LIMIT" keywords → **FINDABILITY GAP** → candidate LIGHT additive co-located note: copy-attractive canonical `ORDER BY col DESC OFFSET 100 LIMIT 50` + inline-marked un-copyable `-- WRONG: LIMIT 50 OFFSET 100 → parse error 'mismatched input offset' in Trino 467 (Postgres order; Trino requires OFFSET before LIMIT)`;
+  - if findable but responder pulls Postgres order from external memory → responder recall ceiling, no fix.
+- Do NOT churn the correct Q4 keyset/cost-model content.
+- Other re-probes: (a) another anti-join / NOT IN-NULL Q — confirm NOT EXISTS NULL-safe lead; (b) another date_trunc('week'/'month') bucketing Q — confirm Monday-week + watch "in UTC" imprecision recurrence; (c) another TRY_CAST dirty-data Q — confirm NULL-on-failure + COALESCE default.
+- Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310).
+- MUST NOT bump state.json (already 1006; passed=true; orchestrator commits).
