@@ -1,55 +1,37 @@
-# Judge Feedback — iter1011
+# Judge Feedback — iter1012
 
-**Phase**: extended (passed=true). OVERALL AVERAGE governs — NO per-question veto.
-**Verification**: BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source (functions/datetime.md, functions/string.md) + WebSearch — NOT resources/.
-**Prod stack** (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt): all 4 questions fit; no federation/auth angle.
+**OVERALL: 4.75 (76.0/16) — PASS** (threshold ≥ 3.5; margin +1.25). OVERALL AVERAGE governs — no per-Q veto.
 
----
-
-## Dialect verifications (with citations)
-
-### Q3 (PRIORITY) — from_unixtime 1-arg return type — RESOLVED: responder CORRECT
-
-The directive *suspected* the 1-arg `from_unixtime(unixtime)` returns `timestamp(3)` WITHOUT time zone. **The source REFUTES that prior — the responder is RIGHT.**
-
-- RAW git-tag 467 source `docs/src/main/sphinx/functions/datetime.md`:
-  - `from_unixtime(unixtime) -> timestamp(3) with time zone`
-  - `from_unixtime(unixtime, zone) -> timestamp(3) with time zone`
-  - `from_unixtime(unixtime, hours, minutes) -> timestamp(3) with time zone`
-  - `from_unixtime_nanos(unixtime) -> timestamp(9) with time zone`
-- Rendered trino.io/docs/467/functions/datetime.html + WebSearch agree.
-
-**Verdict**: ALL `from_unixtime` overloads (including the 1-arg form) return `timestamp(3) WITH TIME ZONE`. The responder's "returns timestamp(3) WITH TIME ZONE" is **CORRECT, not an imprecision.** `from_unixtime_nanos` exists (returns `timestamp(9) with time zone`) — responder correct. This is another **imported-prior self-error in the directive** (assuming a foreign-looking return-type split that does not exist); verify-first prevented a false penalty + a false memory card. Do NOT add a "without tz" correction anywhere.
-
-### Q4 — leading-wildcard pushdown + split_part — CONFIRMED CORRECT
-- `LIKE '%@company.com'` is valid Trino; a LEADING-wildcard pattern cannot be turned into a range/prefix and cannot prune partition metadata → full scan. Reasonable and correct.
-- `split_part(string, delimiter, index)` — RAW 467 functions/string.md: 1-based ("Field indexes start with 1"), returns NULL if index out of range. `split_part(email,'@',2)='company.com'` valid Trino. Correct.
-- Minor nit (not a defect): suffix-equality via split_part matches only the exact domain `company.com`, not subdomains like `eu.company.com`; for the stated "ending in @company.com" intent this is fine.
-
-### Q1 — JOIN fan-out — CONFIRMED CORRECT
-Duplicate keys on the right side → many-to-many fan-out, row multiplication, NO error: correct. Diagnostic `COUNT(*)` vs `COUNT(DISTINCT subscription_id)` on the right table is the standard cardinality check (matches r23 L933 lock). Fix via GROUP BY + aggregate is correct.
-
-### Q2 — COUNT(*) vs COUNT(col) — CONFIRMED CORRECT
-`COUNT(*)` counts all rows incl NULLs; `COUNT(col)` counts non-NULL only; gap = NULL rows; SUM/AVG also ignore NULL (aggregate.md: aggregates ignore NULL except count/count_if/max_by/min_by/approx_distinct). Correct. Guidance on which to use is apt.
-
----
+All four answers verified BOTH directions against trino.io/docs/467 (functions/array.html, functions/window.html, sql/select.html) + WebSearch on EXCEPT vs NOT-IN NULL semantics — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt) — all 4 fit. No federation/auth angle this sweep.
 
 ## Per-question scores
 
-| Q | Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|---|
-| Q1 JOIN fan-out | 5 | 4.75 | 4.75 | 4.75 |
-| Q2 COUNT(*) vs COUNT(col) | 5 | 4.75 | 4.75 | 4.75 |
-| Q3 from_unixtime | 5 | 4.75 | 4.75 | 4.75 |
-| Q4 LIKE leading-wildcard | 4.75 | 4.5 | 4.75 | 4.5 |
+| Q | Topic | Acc | Comp | Clar | App | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | window SUM OVER PARTITION, no row collapse | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q2 | ORDER BY CAST(varchar AS integer) numeric sort | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q3 | trial-not-converted anti-join (EXCEPT / LEFT JOIN IS NULL) | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q4 | contains(array, element) array membership | 4.75 | 4.5 | 4.75 | 4.5 | 4.625 |
 
-**Sub-score total**: 76.0 / 16 = **4.75**
+Sub-score sum = 76.0 / 16 = **4.75**.
 
-## Verdict: PASS (4.75 ≥ 3.5; margin +1.25)
+## Resolved verdicts (with citations)
 
-`::` cast ABSENT all 4. TICS all clean: no QUALIFY / false-semi-join / MAX-varchar / GREATEST-LEAST-NULL / fabricated-fn (from_unixtime, from_unixtime_nanos, split_part ALL real & verified) / regex-backslash / INTERVAL-quarter-week / OFFSET-LIMIT-order / broken-secondary (Q3 ms/ns caveats correct, Q4 split_part alternative correct). No findable gap, no resource defect, no 2-in-2 recurrence.
+1. **Q4 `contains(feature_flags, 'dark_mode')` — CORRECT.** trino.io/docs/467/functions/array.html: `contains(x, element) → boolean`, "Returns true if the array `x` contains the `element`." Argument order is (array, element) exactly as responder used. Recommending `contains()` over EXISTS+UNNEST for a simple membership test is the idiomatic call; UNNEST is correctly reserved for exploding-to-rows. Mild ding: didn't mention NULL-element edge, but not required for the question.
+
+2. **Q3 EXCEPT NULL-safety + anti-join — CORRECT.** sql/select.html: EXCEPT exists, "If neither is specified, the behavior defaults to DISTINCT." Set operations are defined in terms of *distinctness* (NULL is NOT distinct from NULL → treated as equal), so EXCEPT does NOT inherit the NOT-IN three-valued-logic trap — verified via SQL-spec/Postgres-list discussion of EXCEPT-vs-NOT-IN. Responder's NOT-IN-breaks-on-NULL warning is accurate, and the `LEFT JOIN conversions c ON ... WHERE c.user_id IS NULL` anti-join is the standard equivalent. Both forms correct.
+
+3. **Q1 `SUM(mrr) OVER (PARTITION BY plan_name)` — CORRECT.** functions/window.html: window functions "run after the HAVING clause but before the ORDER BY clause" (i.e. after WHERE) and return one output per input row (do NOT collapse like GROUP BY). `SUM(...) OVER ()` for grand total correct; "no join needed" is the right idiom for detail+total in one pass.
+
+4. **Q2 `ORDER BY CAST(version_code AS integer)` — CORRECT.** CAST(varchar→integer) works for '9'/'10'/'11' and yields numeric ordering (9,10,11) rather than lexicographic ('10','11','9'); ORDER BY on an expression does not change the stored column type. `TRY_CAST` for non-numeric rows is the right guard.
+
+## Defects / notes
+
+- **Zero parse-error defects. Zero dialect tics.** No `::` cast anywhere (ban double-locked r23 §3.1C + r27 §4.4A — not exercised). No QUALIFY / false-semi-join / MAX-varchar / GREATEST-LEAST-NULL / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / broken-secondary-alternative.
+- Q4 is the lowest only on completeness/applicability for not noting array-NULL edge cases — a nicety, not an error.
 
 ## Recommendation: DEFAULT NO-OP
-All 4 answers correct & verified both directions; Q3 KEY from_unixtime return-type resolved in the responder's favor (directive prior was wrong). NO resource edit; NO FIX-A.
 
-Re-probe next sweep: (a) another unix-epoch→timestamp Q — confirm from_unixtime WITH-tz + ms/ns variants, and watch whether the user wants tz-stripped (`AT TIME ZONE` / CAST to timestamp WITHOUT tz); (b) another LIKE/pattern Q — leading-wildcard-no-prune + split_part suffix caveat (subdomain edge); (c) another JOIN-cardinality/fan-out Q — COUNT vs COUNT(DISTINCT key) diagnostic; (d) another COUNT(*)/COUNT(col)/NULL-aggregate Q. Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310). MUST NOT bump state.json (already 1011; orchestrator commits).
+Margin +1.25; all 4 answers correct and verified both directions; no findable resource gap, no resource defect, no 2-in-2 recurrence. NO resource edit; NO FIX-A; do NOT bump state.json (orchestrator commits).
+
+**Re-probe next sweep:** (a) another window-aggregate-vs-GROUP-BY Q (watch frame-default trap on FIRST_VALUE/LAST_VALUE); (b) another varchar→numeric CAST/sort Q (watch TRY_CAST necessity messaging); (c) another anti-join Q — confirm EXCEPT NULL-safe + NOT-IN-3VL warning durable; (d) another array-membership Q — confirm contains(array, element) order + UNNEST reserved for explode. Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310).
