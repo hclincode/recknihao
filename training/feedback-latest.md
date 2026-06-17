@@ -1,53 +1,51 @@
-# Judge Feedback — iter1002
+# iter1003 Judge Feedback
 
-**Phase:** extended (passed=true preserved). OVERALL AVERAGE governs — no per-Q veto.
-**Prod stack:** Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt — all 4 Qs fit; no federation drag-in; no auth angle.
-**Verification:** Both directions vs trino.io/docs/467 + RAW git-tag 467 source — NOT against resources/.
+**OVERALL 4.4063 — PASS** (threshold 3.5; margin +0.906). Sum 70.5/16. OVERALL AVERAGE governs, no per-Q veto.
 
-## Source verifications (this iter)
+All facts verified against trino.io/docs/467 + RAW git-tag 467 source + official GitHub issues — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 Qs fit; no federation drag-in; no auth angle.
 
-- **json_extract_scalar (RAW git-tag 467 functions/json.md):** signature `json_extract_scalar(json, json_path) -> varchar`; returns the scalar value AS A STRING; JSON path `$.key` object-member access AND `$[index]` array access both documented (example `$.store.book[0].author`). Q1 `json_extract_scalar(properties,'$.plan')`→varchar + `CAST(... AS BIGINT)` for the numeric `seats` = CORRECT.
-- **UNNEST join syntax (RAW git-tag 467 sql/select.md):** documented example `CROSS JOIN UNNEST(scores) AS t(score)` — exactly the `AS t(tag)` alias form the responder used. LEFT JOIN form: "in case of using LEFT JOIN the only condition supported by the current implementation is ON TRUE" — responder's `LEFT JOIN UNNEST(tags) AS t(tag) ON TRUE` is the documented and only-supported LEFT form. Q3 = CORRECT both forms.
-- **ROW_NUMBER dedup:** PARTITION BY account_id ORDER BY updated_at DESC, filter rn=1 in outer query = canonical Trino dedup; NO QUALIFY in 467, correctly nested in a CTE. RANK()/tiebreak notes accurate. Q2 = CORRECT.
-- **SUM() OVER () empty window:** empty OVER () = single partition over all result rows → grand total broadcast onto each row = CORRECT (classic ratio-to-total without self-join). `100.0` non-scientific = DECIMAL literal → avoids integer-division truncation = CORRECT. `NULLIF(SUM(...) OVER (),0)` divide-by-zero guard = CORRECT. PARTITION BY month variant correct. Q4 = CORRECT.
+## Per-question scores
 
-## Per-question scores (Accuracy / Completeness / Clarity / Actionability)
+### Q1 — cumulative/running total of daily signups — 3.0 (DEFECT: `::` cast invalid in 467)
+- Accuracy **2.0** / Clarity **4.0** / Applicability **2.0** / Completeness **4.0** = 12.0/4 = 3.0
+- **WINDOW LOGIC CORRECT:** `SUM(COUNT(*)) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is the canonical running-total-of-daily-aggregate pattern — aggregate-over-window after GROUP BY is legal Trino 467; the frame explanation (UNBOUNDED PRECEDING..CURRENT ROW = cumulative) is accurate and clear.
+- ★★ **DEFECT — `::` CAST OPERATOR IS A PARSE ERROR IN TRINO 467.** The answer uses `created_at::date` THREE times (SELECT, GROUP BY, ORDER BY). Trino 467 does **NOT** support the PostgreSQL/Snowflake/DuckDB `::` cast shorthand.
+  - **Citation:** GitHub issue [#23795 "Cast operator `::`"](https://github.com/trinodb/trino/issues/23795) is **OPEN** (labels: "enhancement", "syntax-needs-review"); linked PR [#25259](https://github.com/trinodb/trino/pull/25259) is **OPEN / unmerged** as of June 2026. Trino 467 was released **6 Dec 2024** (release-467), well before any merge. The `language/types.md` and conversion docs for 467 document only `CAST(x AS type)` / `TRY_CAST`; there is no `::` token in the grammar.
+  - **CORRECTION (canonical):** use `CAST(created_at AS date)` in all three positions:
+    ```sql
+    SELECT CAST(created_at AS date) AS signup_day,
+           COUNT(*) AS signups_today,
+           SUM(COUNT(*)) OVER (ORDER BY CAST(created_at AS date)
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_signups
+    FROM user_events
+    GROUP BY CAST(created_at AS date)
+    ORDER BY CAST(created_at AS date)
+    ```
+  - **Imported-prior family** slip (PostgreSQL `::` habit). The query fails to parse on the first `::`, so the engineer cannot run it as written — hence low Accuracy/Applicability despite correct window semantics.
+  - Stylistic alternative (not scored): `date_trunc('day', created_at)` (returns timestamp) is another day-bucketing form, but `CAST(... AS date)` is the right fix for the responder's intent.
 
-### Q1 — extract plan + seats from JSON string, GROUP BY them
-- Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 4.75 → **4.8125**
-- json_extract_scalar→varchar + CAST seats to BIGINT correct; repeating the extraction expressions character-identically in GROUP BY is the right Trino approach (aliases not resolvable in GROUP BY). Two-tier "promote hot JSON keys to top-level Iceberg columns" note is genuinely useful prod guidance, not padding.
+### Q2 — pivot: one row per customer, count per plan, no joins — 5.0
+- Accuracy **5.0** / Clarity **5.0** / Applicability **5.0** / Completeness **5.0** = 20/4 = 5.0
+- Conditional aggregation `SUM(CASE WHEN plan_name='starter' THEN 1 ELSE 0 END)` per plan + `GROUP BY customer_id` is the correct join-free pivot. The `COUNT(*) FILTER (WHERE plan_name='starter')` variant is also correct and equivalent.
+- **VERIFIED:** `FILTER (WHERE <condition>)` is supported for **all** aggregate functions in 467 (functions/aggregate). Both forms equivalent — responder's "both equivalent" claim correct. Clean, complete, no tics.
 
-### Q2 — keep most recent row per account_id (dedup a status-change log)
-- Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 4.75 → **4.8125**
-- Canonical ROW_NUMBER() PARTITION/ORDER DESC + rn=1; correctly nested in CTE (no QUALIFY in 467). Tiebreak-on-identical-timestamp note + RANK() ties-share-rank contrast both accurate and on-point.
+### Q3 — true median / 50th percentile (AVG skewed by outliers) — 4.8125
+- Accuracy **5.0** / Clarity **4.75** / Applicability **4.75** / Completeness **4.75** = 19.25/4 = 4.8125
+- **VERIFIED both directions:** `approx_percentile(col, 0.5)` (scalar) and `approx_percentile(col, ARRAY[0.5,0.95,0.99])` (array) both exist in 467 (functions/aggregate). There is **NO** native `MEDIAN()` and **NO** SQL-standard `PERCENTILE_CONT()` — both-absent claim correct (aligns with r05 §2234 PERCENTILE footgun lock). T-Digest/approximate framing correct; "exact requires full sort" accurate. Clean.
 
-### Q3 — explode array tags, count per individual tag
-- Accuracy 5.0 / Completeness 4.875 / Clarity 4.75 / Actionability 4.75 → **4.84375**
-- CROSS JOIN UNNEST(tags) AS t(tag) matches doc form exactly; LEFT JOIN ... ON TRUE to preserve NULL/empty-array rows is the documented-correct (and only-supported) LEFT form. Note that UNNEST is in FROM and precedes WHERE is accurate and helps the beginner reason about filtering.
+### Q4 — top 5 most-viewed pages per country (not global) — 4.8125
+- Accuracy **5.0** / Clarity **4.75** / Applicability **4.75** / Completeness **4.75** = 19.25/4 = 4.8125
+- `ROW_NUMBER() OVER (PARTITION BY country ORDER BY view_count DESC)` in a subquery, filtered `WHERE rank_in_country <= 5` — canonical top-N-per-group; PARTITION BY country gives per-country (not global) ranking. Correct; no QUALIFY (correctly avoided — not in 467). Clean.
 
-### Q4 — each customer's % of monthly total in one query, no self-join
-- Accuracy 5.0 / Completeness 4.75 / Clarity 4.75 / Actionability 4.875 → **4.84375**
-- SUM() OVER () grand total + 100.0 decimal literal (avoids int truncation) + ROUND 2dp; NULLIF divide-by-zero guard and PARTITION BY month variant are exactly the right defensive additions. Half-open month range `>= DATE '2026-06-01' AND < DATE '2026-07-01'` uses typed DATE literals (no bare-varchar TYPE_MISMATCH trap).
+## Tics check
+All CLEAN except Q1 `::` cast. No QUALIFY, no fabricated function, no false-mechanism, no broken-secondary, no regex-backslash, no INTERVAL-quarter/week, no GREATEST/LEAST-NULL. Q2/Q3/Q4 bulletproof.
 
-## Overall
+## Recommendation — DEFAULT NO-OP (with re-probe watch)
 
-(4.8125 + 4.8125 + 4.84375 + 4.84375) / 4 = **4.8281** → **STRONG PASS** (margin +1.328)
+Despite the Q1 defect, recommend **DEFAULT NO-OP — no resource edit this iter**:
+- **FIRST** observation of a `::`-cast slip in this sweep window. Per reconcile/2-in-2 discipline, a single imported-prior responder slip on an otherwise-correct query is a **per-instance one-off**, not yet a source-verified findable resource gap. Substance (window/cumulative) correct; only cast shorthand wrong.
+- Before any FIX-A, the teacher/orchestrator should **grep resources/ for any `::` usage** — if a resource models `x::type`, that is the root cause and must be reconciled in place (replace with `CAST(x AS type)`). If resources are clean, this is responder prose import, not a defect.
 
-16 sub-scores: 5.0/4.75/4.75/4.75 + 5.0/4.75/4.75/4.75 + 5.0/4.875/4.75/4.75 + 5.0/4.75/4.75/4.875.
+**Re-probe next sweep:** issue another day/period-bucketing or cast-bearing Q (e.g. `CAST`-to-date, `date_trunc('day', ...)`). If `::` recurs (**2-in-2**), escalate to a LIGHT additive defang: a copy-attractive `CAST(x AS date)` canonical with an inline-marked `-- WRONG: x::date is a PARSE ERROR in Trino 467 (PR #25259 unmerged)` un-copyable note (defang-don't-bare-negative-example discipline).
 
-## Tics — ALL CLEAN
-No QUALIFY (Q2 correctly nests in CTE) / no fabricated-fn-or-syntax (json_extract_scalar, UNNEST alias `t(tag)`, LEFT JOIN UNNEST ON TRUE, ROW_NUMBER, SUM OVER (), NULLIF ALL real & verified) / no broken-secondary (all secondary notes — RANK tiebreak, LEFT JOIN ON TRUE, PARTITION BY month, NULLIF guard — are CORRECT, not the usual Haiku broken-padding) / no int-division-truncation slip (Q4 100.0 DECIMAL literal correct) / no regex-backslash (no regex Q) / no GREATEST-LEAST-NULL / no date-minus-integer / no ILIKE-conflation / no INTERVAL-quarter-week / no MAX-varchar / no semi-join-mislabel / no column-scope.
-
-★ Notable: the "broken for-completeness secondary alternative" pattern (recurring Haiku failure mode) did NOT appear this iter — every secondary note was correct.
-
-## Recommendation — DEFAULT NO-OP
-
-Margin +1.328; all 4 deliverables correct and verified both directions against RAW git-tag 467 source; zero tics; zero fabricated functions/syntax; no findable resource gap; no 2-in-2 recurrence. NO resource edit warranted.
-
-Re-probe next sweep:
-- (a) another JSON-extraction + GROUP BY Q — confirm json_extract_scalar→varchar + CAST-for-numeric + repeat-expr-in-GROUP-BY lead holds.
-- (b) another dedup/latest-row-per-key Q — confirm ROW_NUMBER+rn=1-in-CTE (no QUALIFY) + tiebreak; watch for QUALIFY slip.
-- (c) another array-explode Q — confirm CROSS JOIN UNNEST AS t(col) + LEFT JOIN ON TRUE for empty-array preservation.
-- (d) another ratio-to-total/window-aggregate Q — confirm SUM() OVER () grand total + decimal-literal-avoids-truncation + NULLIF guard.
-
-Federation r22 §13.x hard-locked, NOT probed (OVERRIDDEN). NO resource edits. MUST NOT bump training/state.json (already 1002; passed=true preserved; final_iterations_remaining 0).
+Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN); federation row stays 4.49944/310. MUST NOT bump training/state.json (already 1003; passed=true preserved; final_iterations_remaining 0).
