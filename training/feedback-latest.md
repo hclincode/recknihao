@@ -1,43 +1,90 @@
-# Judge Feedback — iter1031
+# Judge Feedback — iter1032
 
-**Overall: 4.78125 / 5 → PASS** (76.5/16; margin +1.28125; OVERALL AVERAGE governs, no per-Q veto)
+**Phase**: extended (passed=true). Overall average governs; NO per-question veto. No federation/auth angle in any of the 4 questions; all 4 fit the prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore).
 
-Verified BOTH directions vs RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/:
-- `functions/conversion.md` — typeof EXISTS, "Returns the name of the type of the provided expression" as a varchar; examples `typeof(123)`→`integer`, `typeof('cat')`→`varchar(3)`, `typeof(cos(2)+1.5)`→`double`.
-- `functions/array.md` — all_match EXISTS: "Returns `true` if all the elements match the predicate (a special case is when the array is empty); `false` if one or more don't match; `NULL` if the predicate returns `NULL` for one or more elements and `true` for all others." array_except: "elements in x but not in y, without duplicates."
-- `functions/datetime.md` — from_unixtime(unixtime) → `timestamp(3) with time zone` (CONFIRMED with time zone; seconds since epoch). Overloads: (unixtime), (unixtime, zone), (unixtime, hours, minutes) all → timestamp(3) WITH TIME ZONE; from_unixtime_nanos → timestamp(9) with time zone.
-- `sql/select.md` — INTERSECT "returns only the rows that are in the result sets of both"; defaults to DISTINCT if neither ALL/DISTINCT specified.
-
-Prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore) — all 4 fit; no federation/auth angle.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/.
 
 ---
 
-## Q1 — typeof (check data type of an expression)
-**Acc 4.75 / Comp 4.5 / Clar 4.75 / App 4.75 → 4.6875**
+## Q1 — last-30-days cutoff: `created_at >= current_timestamp - 30`?
 
-LEAD CORRECT: `typeof(expr)` exists (conversion.md) and returns the type-name as a varchar; `SELECT typeof(raw_payload) FROM orders LIMIT 1` then CAST is exactly the right diagnostic workflow; "one row enough" is correct. Minor: the illustrative `'varchar(255)'` is shown quoted as if it were a string literal output — typeof returns the type-name AS the value (e.g. `varchar(255)` / `json` / `varbinary`), not a quoted literal; harmless presentation. Also note typeof reports the STATIC/declared type after transforms (e.g. `varchar(255)`, or `json` if raw_payload is a JSON column), not a runtime-inferred narrower type — a small completeness nuance, not a defect. Verified-source citation present in answer (conversion.html) and accurate.
+**Answer**: Use `date_add('day', -30, current_timestamp)`; says `current_timestamp - 30` does NOT parse (no timestamp-minus-integer operator), must name the unit.
 
-## Q2 — all_match (all array strings non-empty, no UNNEST/subquery)
-**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125**
+**Verified (functions/datetime.md, git-tag 467):**
+- `date_add(unit, value, timestamp)` — "Adds an interval `value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." Returns same type as input. Responder's `date_add('day', -30, current_timestamp)` is the correct signature and correct negative-value-for-subtraction idiom.
+- Temporal arithmetic uses INTERVAL only (e.g. `date '2012-08-08' + interval '2' day`). There is NO timestamp-minus-bare-integer operator. The responder's "does not parse" claim is ACCURATE — `timestamp - 30` is not valid Trino.
+- Minor completeness point only: `current_timestamp - INTERVAL '30' DAY` is an equally valid form the responder could have mentioned. Its absence is not a defect; the lead form is correct and idiomatic.
 
-LEAD CORRECT & VERIFIED: `all_match(tags, x -> length(x) > 0)` — single expression, no UNNEST/subquery, `all_match(array(T), function(T,boolean))->boolean` (array.md). length() on varchar returns char count, >0 == non-empty: correct. The `cardinality(array_except(tags, filter(...nonempty...)))=0` alternative is a sound equivalent for the non-empty check (any empty/short element survives the except → cardinality>0); array_except dedups but that doesn't affect the =0 emptiness test, so not misleading. COMPLETENESS NUANCE (not a defect): empty-array → `all_match` returns `true` (vacuous, array.md special case) and NULL-element → returns NULL; worth a one-liner but immaterial to the asked tags-non-empty check. No fabricated function.
-
-## Q3 — from_unixtime (epoch seconds → timestamp, group by day)
-**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125**
-
-FULLY CORRECT & VERIFIED: `from_unixtime(created_epoch)` then `date_trunc('day', ...)` to group by day. Result type stated as `timestamp(3) with time zone` — CONFIRMED against datetime.md (carried-correction reference_trino_from_unixtime_tz.md: ALL overloads incl 1-arg return WITH TIME ZONE). The seconds-not-millis warning (divide by 1e3 if millis) is exactly the right footgun to flag for an epoch column. date_trunc('day') for daily grouping correct.
-
-## Q4 — INTERSECT (users in both trial and paid cohorts)
-**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125**
-
-CORRECT & VERIFIED: INTERSECT of two `SELECT user_id ... WHERE plan='trial'/'paid'` returns users present in both (select.md). "INTERSECT dedups (each user_id once)" CORRECT — defaults to DISTINCT (select.md). "NULL-safe" is accurate for Trino set-operation semantics (NULLs compared as equal, consistent with the NULL-safe EXCEPT family) and in any case immaterial here since user_id is non-NULL; not misleading. "No JOIN needed / cleaner than JOIN" correct — INTERSECT avoids dup-fan-out and the explicit join predicate. Good contrast with the JOIN approach.
+**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.5 → **4.75**
+Reasoning: lead fully correct and verified; "does not parse" diagnosis right; only the unmentioned INTERVAL alternative trims completeness slightly.
 
 ---
 
-## TICS scan
-`::` ABSENT all 4. No QUALIFY / no false semi-join / no fabricated function (typeof / all_match / from_unixtime / array_except / INTERSECT all real & verified) / no regex-backslash / no INTERVAL quarter-week / no OFFSET-before-LIMIT / no generate_subscripts / no broken-secondary-alternative. The Q2 array_except alternative is sound, not a broken padding append.
+## Q2 — spend-tier labeling (low <$50 / medium $50–$200 / high >$200)
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.28125; all 4 clean and verified both directions; both type-introspection (typeof) and the from_unixtime WITH-TIME-ZONE carried correction resolved in the responder's favor. No source-verified resource defect; no 2+ consecutive same-shape slip. NO resource edit; NO FIX-A; NO git commit.
+**Answer**: `CASE WHEN ... < 50 'low' / BETWEEN 50 AND 200 'medium' / ELSE 'high' END`, grouped by user with `SUM(order_total)`; mentions `if()` for 2-outcome case; says CASE/if() same plan.
 
-Re-probe (monitor only, no churn): (a) typeof returns type-name varchar (unquoted value) — watch for presenting it as a quoted string literal or claiming runtime-narrowed type; (b) all_match(arr, x->pred) no-UNNEST + empty-array→true / NULL-element→NULL completeness note; (c) from_unixtime SECONDS-input + timestamp(3) WITH TIME ZONE + millis÷1e3; (d) INTERSECT distinct-default + NULL-equal set semantics + cleaner-than-JOIN. Federation r22 §13.x hard-locked, NOT probed. MUST NOT bump state.json (already 1031; orchestrator handles commits).
+**Verified (functions/conditional.md, git-tag 467):**
+- Docs state "The following `IF` and `CASE` expressions are equivalent" — the CASE/if() "same plan" characterization is sound, not worth dinging.
+- `if()` is 2-arg `if(condition, true_value)` or 3-arg `if(condition, true_value, false_value)` — responder's 2-outcome `if()` mention is accurate.
+- BETWEEN is inclusive. Boundary check: `< 50` → low; `BETWEEN 50 AND 200` → medium (exactly $50 and exactly $200 both land in medium); `ELSE` (> 200) → high. NO gap, NO overlap. Bucket logic is sound for the stated spec.
+
+**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.75 → **4.8125**
+Reasoning: correct, clean boundaries, useful SUM-per-user framing, accurate if()-vs-CASE nuance.
+
+---
+
+## Q3 — discover all DISTINCT keys across an `events.metadata` MAP column
+
+**Answer**: `SELECT DISTINCT key FROM events CROSS JOIN UNNEST(map_keys(metadata)) AS t(key) ORDER BY key`; explains `map_keys`→array(varchar), UNNEST explodes, DISTINCT dedups.
+
+**Verified:**
+- functions/map.md: `map_keys(x(K,V)) -> array(K)` — returns an array of the keys. Confirmed.
+- sql/select.md: CROSS JOIN UNNEST(array) AS t(col) is the canonical pattern ("UNNEST is normally used with a JOIN"; example `CROSS JOIN UNNEST(scores) AS t(score)`). Confirmed.
+- DISTINCT across the exploded rows correctly dedups keys; ORDER BY key is fine.
+- More efficient alt exists (`array_distinct(flatten(array_agg(map_keys(metadata))))`) but the UNNEST form is correct and most beginner-readable; its absence is not a defect.
+
+**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.75 → **4.8125**
+Reasoning: fully correct, each step explained for a beginner, directly runnable.
+
+---
+
+## Q4 — users who signed up in January but never ordered
+
+**Answer**: `SELECT user_id FROM users WHERE signup_month='January' EXCEPT SELECT user_id FROM orders`; says EXCEPT is set-difference, NULL-safe, requires same column count/types; LEFT JOIN + IS NULL also works but more error-prone.
+
+**Verified (sql/select.md, git-tag 467):**
+- "If neither is specified, the behavior defaults to `DISTINCT`." EXCEPT defaults to DISTINCT — responder's set-difference + dedup characterization is correct.
+- NULL handling: set operations treat NULLs as equal for dedup/difference purposes (standard SQL DISTINCT semantics). The "NULL-safe" characterization is accurate — EXCEPT does NOT carry the NOT IN (subquery-with-NULL) zero-rows footgun. Matches r23 §10 anti-join / EXCEPT NULL-safe canonical.
+- Same column count / compatible types requirement is correct.
+- Note: EXCEPT dedups the left side, so duplicate January signups collapse — fine for a user_id list, exactly the ask.
+
+**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.75 → **4.8125**
+Reasoning: correct, NULL-safe claim verified, good contrast with the error-prone LEFT JOIN + IS NULL path. EXCEPT is the cleaner lead for this question.
+
+---
+
+## Overall
+
+| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5 | 4.75 | 4.75 | 4.5 | 4.75 |
+| Q2 | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q3 | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q4 | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
+
+**Overall average = (4.75 + 4.8125 + 4.8125 + 4.8125) / 4 = 4.796875 → PASS** (margin +1.296875 over 3.5).
+
+`::` cast ABSENT all 4. TICS CLEAN: all functions real & verified (date_add, map_keys, UNNEST, if/CASE, EXCEPT); no QUALIFY / no false semi-join / no regex-backslash / no INTERVAL quarter-week / no OFFSET-before-LIMIT / no broken "for completeness" secondary alternative / no over-warning folklore.
+
+**Source-verified defects: NONE.** All four answers correct in both directions.
+
+**RECOMMENDATION = DEFAULT NO-OP.** No resource edit, no FIX-A, no git commit. No source-verified resource defect and no 2-in-2 same-shape slip. Margin is comfortable.
+
+Re-probe (monitor only, no action):
+- (a) date_add('day',-N,ts) negative-value + "timestamp - integer does not parse" + optionally INTERVAL '30' DAY form
+- (b) CASE bucket boundaries inclusive-BETWEEN no-gap/overlap + if() 2/3-arg + CASE/if() same-plan
+- (c) map_keys→array + CROSS JOIN UNNEST AS t(key) + DISTINCT; watch for array_distinct(flatten(array_agg)) alt
+- (d) EXCEPT defaults-DISTINCT + NULL-safe vs NOT IN footgun + LEFT JOIN+IS NULL contrast
+
+Federation r22 §13.x hard-locked, NOT probed (4.49944/310). MUST NOT bump state.json (already 1032; orchestrator commits once after judge).
