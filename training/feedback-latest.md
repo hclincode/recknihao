@@ -1,45 +1,44 @@
-# iter1027 Judge Feedback
+# Judge Feedback — iter1028
 
-**OVERALL: 4.6875 / 5 — PASS** (75.0/16; margin +1.1875 above 3.5 threshold)
-OVERALL AVERAGE governs — no per-question veto. All 4 answers verified BOTH directions against trino.io/docs/467 (functions/json.html, functions/conversion.html, functions/conditional.html, functions/datetime.html, functions/window.html) + WebSearch on json_extract_scalar non-scalar→NULL — NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO + HMS, on-prem k8s) all 4 fit; no federation/auth angle this sweep.
+**OVERALL: 4.640625 / 5** (74.25/16) — **PASS** (threshold 3.5; margin +1.140625)
+OVERALL AVERAGE governs — no per-question veto.
+
+Verified BOTH directions against trino.io/docs/467 (functions/json.html, functions/comparison.html, functions/array.html, functions/conditional.html, sql/select.html) + WebSearch (COALESCE mixed-numeric coercion) — NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore) fits all 4; no federation/auth angle.
 
 ## Per-question scores
 
-### Q1 — nested JSON browser name — 4.8125 CLEAN
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-- `json_extract_scalar(properties, '$.browser.name')` → VARCHAR scalar leaf. VERIFIED functions/json.html: "returns the result value as a string... The value referenced by json_path must be a scalar (boolean, number or string)." Nested dotted path `$.a.b` works (docs ship `$.store.book[0].author`).
-- "NULL if path resolves to object/array" CORRECT — legacy json_extract_scalar (JSONPath-like family) returns NULL on non-scalar (WebSearch + discussion #19197). This is the legacy fn (not the SQL/JSON `json_value` which errors); responder's claim matches the legacy fn it used.
-- `json_extract` returns JSON (objects/arrays) — CORRECT.
-- `json_exists(properties, 'strict $.browser.name')` → boolean key-presence, strict mode supported — CORRECT.
+| Q | Topic | Acc | Comp | Clar | App | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | json_array_length (tags count) | 5.0 | 4.75 | 4.75 | 4.75 | 4.8125 |
+| Q2 | all_match prefix-validation (KEY) | 3.0 | 4.0 | 4.25 | 4.25 | 3.875 |
+| Q3 | COALESCE mixed numeric types | 5.0 | 4.75 | 4.75 | 4.625 | 4.78125 |
+| Q4 | zip → array(ROW) | 4.25 | 4.5 | 4.5 | 4.75 | 4.5 |
 
-### Q2 — skip/null bad unit_price rows — 4.8125 CLEAN
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-- `TRY_CAST(unit_price AS DECIMAL(18,2))` → NULL on bad input vs CAST throws. VERIFIED functions/conversion.html: "Like cast(), but returns null if the cast fails."
-- `try(expr)` catches divide-by-zero / invalid-cast-or-function-arg / numeric-out-of-range → NULL. VERIFIED functions/conditional.html (three documented categories; JSON-error mention is a benign over-listing, the core three are exact).
-- `COALESCE(TRY_CAST(...), 0)` default — CORRECT and idiomatic (docs explicitly pair try with COALESCE).
+## Resolved verdicts (with citations)
 
-### Q3 — events per week, weeks with >= 50 events — 4.71875 CLEAN
-Acc 5 / Comp 4.625 / Clar 4.75 / App 4.75
-- `date_trunc('week', event_date)` → Monday-start week bucket. VERIFIED functions/datetime.html (example truncates 2001-08-22 → 2001-08-20, a Monday).
-- GROUP BY repeats the `date_trunc(...)` expr (alias not resolvable in GROUP BY) — CORRECT.
-- `HAVING COUNT(*) >= 50` filters AFTER aggregation; `>=` correct for "at least 50" (boundary not slipped to `>`). WHERE-vs-HAVING distinction stated correctly (WHERE pre-aggregation, HAVING post-aggregation). CTE variant valid.
+**Q1 — CLEAN.** `json_array_length(json_extract(properties,'$.tags'))` is correct. `json_array_length` exists, takes a JSON array, returns bigint (functions/json.html). `json_extract(json, path)` returns JSON, so extract-the-nested-array-first then count is right; bare top-level array → `json_array_length(col)` directly. Both branches accurate.
 
-### Q4 — each row alongside total session count — 4.8125 CLEAN
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-- `COUNT(*) OVER ()` (empty OVER) → whole-table count attached to every row, no row collapse. VERIFIED functions/window.html: "All Aggregate functions can be used as window functions by adding the OVER clause"; empty frame = whole result set.
-- `CONCAT('Session ', ROW_NUMBER() OVER (ORDER BY session_id), ' of ', COUNT(*) OVER ())` label — ROW_NUMBER() OVER (ORDER BY ...) VERIFIED (unique sequential from 1).
-- "window functions don't collapse vs GROUP BY" distinction CORRECT.
+**Q2 (KEY) — DEFECT: LIKE underscore is a wildcard.** The `all_match(enabled_flags, flag -> ...)` structure is fully correct: `all_match(array(T), function(T,boolean)) -> boolean` returns true iff the predicate holds for ALL elements, works on the array in-place (no UNNEST), and the `array_except` subset aside is real and valid (functions/array.html). BUT the inner predicate `flag LIKE 'ff_%'` is BUGGY. In SQL `LIKE`, `_` is the single-character WILDCARD (comparison.html: "`_` matches any single character"), so `'ff_%'` matches "ff" + ANY one char + any rest — e.g. "ffxtest", "ffabc", "ff9" all pass. It does NOT require a LITERAL underscore as the 3rd character, so it is WRONG for validating a literal `"ff_"` prefix.
+Correct forms:
+- `starts_with(flag, 'ff_')` — literal, no wildcard interpretation (functions/string.html), or
+- `flag LIKE 'ff\_%' ESCAPE '\'` — escaped underscore (ESCAPE clause confirmed in comparison.html).
+**Classification: responder slip** (imported habit that LIKE `_` is literal). Not a findable resource gap — no resource asserts `LIKE 'x_'` is literal. 1st occurrence → per-instance monitor, NOT 2-in-2, NO FIX-A.
 
-## TICS check — CLEAN
-No `::` cast anywhere (all 4). No QUALIFY, no false semi-join, no fabricated functions (json_extract_scalar/json_extract/json_exists/TRY_CAST/try/date_trunc/COUNT-OVER/ROW_NUMBER all real & verified). No regex-backslash, INTERVAL-quarter-week, OFFSET-before-LIMIT, generate_subscripts, or broken-secondary slip this iter. NO DEFECTS — all 4 fully correct and verified both directions.
+**Q3 — CLEAN.** `COALESCE(amount_usd, amount_eur, amount_gbp)` across DOUBLE/DECIMAL/BIGINT works. Trino finds a common numeric SUPER-TYPE within the numeric family and does NOT error on mixed numerics (conditional.html first-non-null + WebSearch confirms implicit numeric coercion; only possible precision loss). The contrast is accurate: Trino is strict elsewhere — `int = varchar` → TYPE_MISMATCH, and `||` concat has no numeric auto-cast (VARCHAR-only). `CAST(DOUBLE AS DECIMAL)` HALF_UP also correct.
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.1875; all 4 clean; all four targeted checks resolved in the responder's favor. No source-verified findable gap, no resource defect, no 2-in-2 consecutive recurrence. NO resource edit; NO FIX-A; NO git commit (orchestrator commits once after judge). MUST NOT bump state.json (already 1027).
+**Q4 — minor access-pattern off.** `zip(metric_names, metric_values)` → `array(row(T,U))` element-wise merge is VERIFIED (array.html: "Merges the given arrays, element-wise, into a single array of rows"). The `map(keys, values)` 2-arg constructor aside is correct (requires unique, non-null keys). DEFECT (minor): the extraction snippet `CROSS JOIN UNNEST(zip(...)) AS t(pair)` then `pair.col0 / pair.col1` is OFF. UNNEST of an `array(row(...))` EXPANDS the row fields into SEPARATE columns (sql/select.html: UNNEST with an ARRAY of ROW structures expands each field of the ROW into a corresponding column). The correct form is `AS t(name, value)` then `SELECT name, value` — not a single `pair` row accessed via `pair.col0`. zip itself and the map aside are fully correct; only the UNNEST-access detail slipped.
+**Classification: per-instance access-pattern slip** (UNNEST-of-array(row) expands fields, not a row-typed column). 1st occurrence monitor, NOT 2-in-2.
 
-## Re-probe (monitor only, next sweep)
-- (a) nested JSON: json_extract_scalar→VARCHAR scalar / NULL-on-non-scalar, json_extract→JSON, json_exists→boolean strict-mode — watch json_value-vs-json_extract_scalar error-vs-NULL confusion.
-- (b) error-tolerant casts: TRY_CAST→NULL-on-fail vs CAST-throws, try() three categories, COALESCE default — watch try() over-listing of caught error types.
-- (c) date_trunc('week') Monday-start + HAVING-post-aggregation `>=`-for-"at least" boundary (watch > vs >= slip) + WHERE-vs-HAVING.
-- (d) COUNT(*) OVER () whole-table-no-collapse + ROW_NUMBER() OVER (ORDER BY) label — watch window-vs-GROUP-BY collapse confusion.
+## TICS
+`::` absent all 4. Clean except Q2 LIKE-underscore + Q4 UNNEST-row-access. No QUALIFY / false-semi-join / fabricated-fn (json_array_length, json_extract, zip, all_match, array_except, COALESCE, map, starts_with all real & verified) / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / generate_subscripts / broken-secondary.
 
-Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310).
+## Recommendation: DEFAULT NO-OP
+Margin +1.140625. 2/4 clean (Q1, Q3 resolved in responder's favor). Q2 and Q4 are both per-instance responder slips on FIRST occurrence — neither is a findable resource gap and neither is a 2-in-2 recurrence. No resource edit, no FIX-A, no git commit (orchestrator commits once after judge).
+
+Re-probe (monitor only):
+- (a) prefix-validation — watch `LIKE 'x_%'` literal-underscore relapse; if 2-in-2 → LIGHT nudge (LIKE `_` = wildcard; use `starts_with(s,'x_')` or `LIKE 'x\_%' ESCAPE '\'`).
+- (b) `zip` → array(row) + UNNEST-of-array(row) EXPANDS fields `AS t(a,b)` NOT `pair.col0`; watch relapse.
+- (c) json_array_length nested extract-first vs bare-array.
+- (d) COALESCE common-numeric-super-type vs strict `int=varchar` / `||` no-coercion.
+
+Federation r22 §13.x hard-locked, NOT probed (4.49944/310). MUST NOT bump state.json (already 1028).
