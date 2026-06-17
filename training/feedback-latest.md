@@ -1,186 +1,59 @@
-# Judge Feedback — iter1039
+# Judge Feedback — iter1040
 
-**Verification basis:** All claims verified BOTH directions against RAW git-tag 467 source
-(raw.githubusercontent.com/trinodb/trino/467/docs/...) + WebSearch on official docs / trinodb
-issue tracker — NOT against `resources/`. Prod stack (Trino 467 + Iceberg + MinIO + Hive
-Metastore, on-prem) fits all 4 questions; no federation/auth angle (federation r22 §13.x
-hard-locked, NOT probed).
+**Overall: 4.484375 → PASS** (margin +0.984375; overall average governs, no per-Q veto)
 
-Scoring per dimension (Accuracy / Completeness / Clarity / Actionability), each 1–5.
+Verified BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source (functions/array.md, functions/datetime.md, functions/window.html) + WebSearch (Trino #16984 / AWS re:Post error-class), NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO, Hive Metastore) — all 4 fit; no federation/auth angle.
 
 ---
 
-## Q1 — cumulative revenue by day (running total) — **3.625**
+## Per-question scores
 
-**Answer:**
+### Q1 — running total of revenue BY DAY on raw `orders` (MANY rows/day): **3.5 — INVALID LEAD (2-IN-2 RECURRENCE)**
+Acc 2.5 / Comp 4.0 / Clar 4.5 / App 3.0
+
 ```sql
-SELECT day, revenue,
-       SUM(revenue) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-         AS cumulative_revenue
-FROM iceberg.analytics.daily_revenue
-WHERE day >= DATE '2026-01-01'
-ORDER BY day;
-```
-plus a `PARTITION BY tenant_id` multi-tenant variant.
-
-**Verification — TWO assessments as directed:**
-
-(a) **Is the query AS WRITTEN valid Trino? YES.** It selects from `daily_revenue`, which is ONE
-ROW PER DAY, with NO GROUP BY. So `SUM(revenue) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED
-PRECEDING AND CURRENT ROW)` is a straightforward running total over already-aggregated rows —
-fully valid. **The iter1038 dangerous invalid shape did NOT recur.** There is NO
-GROUP-BY + bare-`SUM(OVER)`-of-a-non-grouping-column error here (that error needs a `GROUP BY`
-in the same statement; this query has none). The ROWS frame is the correct running-total frame
-(and the default once ORDER BY is present), and the `PARTITION BY tenant_id` variant is sound.
-Running-total *mechanics* are correct.
-
-(b) **COMPLETENESS DODGE (the real penalty).** The QUESTION gave an `orders` table that is ONE
-ROW PER ORDER, hundreds of orders per day — i.e. MANY rows per day. The answer silently assumes
-a pre-existing one-row-per-day `daily_revenue` table and never shows the pre-aggregation. An
-engineer holding only `orders` CANNOT run this. The missing grain-collapse step is:
-```sql
-WITH daily AS (
-  SELECT date_trunc('day', order_ts) AS day, SUM(amount) AS revenue
-  FROM orders GROUP BY date_trunc('day', order_ts)
-)
-SELECT day, revenue,
-       SUM(revenue) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-         AS cumulative_revenue
-FROM daily ORDER BY day;
-```
-(Equivalent nested form directly over `orders` + `GROUP BY day`:
-`SUM(SUM(amount)) OVER (ORDER BY day ROWS ...)`.) Because the answer skips the aggregation the
-question explicitly called for, it does not actually solve the stated problem.
-
-**Scores:** Accuracy 4.5 / Completeness 2.75 / Clarity 4.5 / Actionability 2.75 → **3.625**
-Accuracy mostly preserved (what is shown runs and is correct); Completeness/Applicability dinged
-hard for dodging the many-rows-per-day grain. This is a SOFTER failure than a non-executable
-query — the prior dangerous shape is gone.
-
----
-
-## Q2 — null-safe date equality without CASE/IS NULL — **4.8125**
-
-**Answer:** `WHERE plan_start IS NOT DISTINCT FROM another_date`; NULL=NULL→equal, false only on
-real value mismatch; equivalent to `(a=b) OR (a IS NULL AND b IS NULL)`.
-
-**Verification:** RAW comparison.md (467) — "The IS DISTINCT FROM and IS NOT DISTINCT FROM
-operators treat NULL as a known value and both operators guarantee either a true or false outcome
-even in the presence of NULL input," and explicitly `SELECT NULL IS NOT DISTINCT FROM NULL;
--- true`. This is exactly the spec: NULL vs NULL counts equal, only false when values actually
-differ, and no CASE/IS NULL used. The stated equivalence is accurate. CONFIRMED clean.
-
-**Scores:** Accuracy 5 / Completeness 4.75 / Clarity 4.75 / Actionability 4.75 → **4.8125**
-
----
-
-## Q3 — pull nested JSON os as a plain string for GROUP BY — **3.25**
-
-**Answer:**
-```sql
-SELECT event_id, json_extract_scalar(properties, '$.context.os') AS device_os
-FROM events
-WHERE occurred_at >= CURRENT_DATE - INTERVAL '7' DAY
-GROUP BY device_os;
+SELECT DATE(created_at) AS day,
+       SUM(revenue) AS daily_total,
+       SUM(revenue) OVER (ORDER BY DATE(created_at) ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
+FROM orders GROUP BY DATE(created_at) ORDER BY day;
 ```
 
-**Verification — core CORRECT, illustrative query BROKEN on two counts:**
+**The query does NOT run.** `daily_total = SUM(revenue)` (plain aggregate over the GROUP BY) is correct, and `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the right running-total frame. The DEFECT is the cumulative expression: a **bare `SUM(revenue) OVER (...)`** where `revenue` is NEITHER a grouping column NOR wrapped in a GROUP-BY aggregate. Window functions run AFTER aggregation (trino.io/docs/467/functions/window.html: window functions "run after the HAVING clause but before ORDER BY"), so after `GROUP BY DATE(created_at)` the bare column `revenue` no longer exists per-row → Trino raises **"'revenue' must be an aggregate expression or appear in GROUP BY clause"** (error class confirmed via Trino #16984 + AWS re:Post).
 
-- **Core guidance CORRECT.** RAW json.md (467): json_extract_scalar "returns the result value as
-  a string (as opposed to being encoded as JSON)" and supports nested dot paths
-  (`$.store.book[0].author` example). So `json_extract_scalar(properties, '$.context.os')`
-  correctly returns the nested os as a plain varchar suitable for grouping. The
-  `INTERVAL '7' DAY` predicate is a valid qualifier.
-- **DEFECT 1 — GROUP-BY-ALIAS error.** The query writes `GROUP BY device_os`, where `device_os`
-  is the SELECT-list ALIAS. Trino does NOT permit GROUP BY to reference a select-list alias (only
-  ORDER BY may). Confirmed via trinodb/trino issue #16533 ("Using alias in group by is not
-  supported by Trino") — Trino diverges from MySQL/Postgres here and requires the actual
-  expression. As written this is an analysis error ("Column 'device_os' cannot be resolved").
-  Fix: repeat the expression `GROUP BY json_extract_scalar(properties,'$.context.os')` or use the
-  ordinal `GROUP BY 2`.
-- **DEFECT 2 — ungrouped non-aggregate.** `event_id` is in the SELECT list but is neither grouped
-  nor aggregated → a second analysis error. The grouping intent ("so it can be grouped") wants
-  `SELECT json_extract_scalar(...) AS device_os, COUNT(*) ... GROUP BY 1`.
-- **INTERNAL INCONSISTENCY:** Q4 below correctly REPEATS the expression in GROUP BY
-  (`GROUP BY format_datetime(...)`) while Q3 used the alias — the responder applied the rule
-  correctly in one answer and broke it in another within the SAME iteration, which signals a slip
-  rather than a missing concept.
+**Correct forms** (both taught verbatim in r07):
+- Nested aggregate: `SUM(SUM(revenue)) OVER (ORDER BY DATE(created_at) ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — Pattern A2 (r07 L2763+), the `SUM(SUM(amount)) OVER` window-over-aggregate.
+- Pre-aggregate CTE: `WITH daily AS (SELECT DATE(created_at) AS day, SUM(revenue) AS daily_total FROM orders GROUP BY DATE(created_at)) SELECT day, daily_total, SUM(daily_total) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM daily` — r07 L2682-2697 (iter667 BROADEN), the EXACT "per-day running total from row-grain orders" recipe, which ALSO contains the verbatim warning: *"Do NOT try to fix this by writing `SUM(amount) OVER (ORDER BY order_date ROWS ...)` directly on the row-grain `orders` table."*
 
-**Scores:** Accuracy 3.0 / Completeness 4.0 / Clarity 4.0 / Actionability 3.0 → **3.25**
-Accuracy penalized for shipping a non-executable example; partially offset because the
-asked-about json_extract_scalar mechanic (the actual question) is correct.
+**RECURRENCE — this is the SECOND occurrence of this exact invalid shape.** iter1038 Q2 was the first (bare single-`SUM(revenue) OVER` beside `GROUP BY order_date`, scored 3.5). iter1039 Q1 dodged it by assuming a pre-aggregated `daily_revenue` table (no GROUP BY → valid running total). iter1040 Q1 puts the broken shape back, now with the GROUP BY explicitly present → 2-in-2 on the real (orders, many-rows-per-day) surface. The resource is COMPLETE and CORRECT on this case (Pattern A / A2 / iter667 BROADEN), so this is a **FINDABILITY / synthesis gap**, not a resource gap — the responder anchors on the base Pattern A example (window over raw rows, no GROUP BY) and bolts a `GROUP BY` onto it without switching to the nested/CTE form.
+
+### Q2 — most recent event per user: **4.8125 CLEAN**
+Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75. `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY changed_at DESC)` then `WHERE rn = 1` in a CTE = canonical top-1-per-group. Window functions are not allowed in `WHERE`, so the CTE wrap is required and correct. Fully sound.
+
+### Q3 — sessions whose `page_views` array contains a pricing URL: **4.8125 CLEAN**
+Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75. `contains(page_views, 'https://...')` → boolean membership (array.md verbatim: "Returns true if the array x contains the element"; signature `contains(x, element) -> boolean`); case-sensitive. The case-insensitive variant `contains(transform(page_views, x -> lower(x)), lower('...'))` is sound — `transform(array(T), function(T,U)) -> array(U)` lowercases each element, then `contains` checks membership. Both functions real & verified.
+
+### Q4 — monthly revenue trend, HAVING above $10,000: **4.8125 CLEAN**
+Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75. `date_trunc('month', created_at)` valid, returns timestamp truncated to month (datetime.md: `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00') -- 2022-10-01 00:00:00.000`). `GROUP BY DATE_TRUNC('month', created_at)` REPEATS the expression (correct — NOT the SELECT alias, avoids #16533). `HAVING SUM(revenue) > 10000` filters post-aggregation; `> 10000` = strictly above (excludes exactly 10000), matches "above $10,000". WHERE-runs-before / HAVING-runs-after explanation correct. Note: this Q4 demonstrates the responder CORRECTLY uses an aggregate over the GROUP BY in HAVING — contrast with the Q1 window-stage error, confirming the gap is specifically the window-over-aggregate nesting, not GROUP BY aggregates generally.
 
 ---
 
-## Q4 — signups by day-of-week NAME — **4.75**
-
-**Answer:**
-```sql
-SELECT format_datetime(created_at, 'EEEE') AS day_name, COUNT(*) AS signups
-FROM users
-WHERE created_at >= CURRENT_DATE - INTERVAL '30' DAY
-GROUP BY format_datetime(created_at, 'EEEE')
-ORDER BY CASE format_datetime(created_at,'EEEE') WHEN 'Monday' THEN 1 ... WHEN 'Sunday' THEN 7 END;
-```
-
-**Verification:** RAW datetime.md (467) — `format_datetime(timestamp, format) -> varchar`, JodaTime
-DateTimeFormat patterns. JodaTime: `E` = day-of-week text; 4+ pattern letters (`EEEE`) render the
-FULL form → "Monday" (EEE → "Mon"). CONFIRMED. `created_at` is a timestamp, so format_datetime
-accepts it directly (no CAST needed). `dayname()` is genuinely ABSENT in 467 (day_of_week()
-returns the bigint the user did NOT want) — correctly avoided. Crucially `GROUP BY
-format_datetime(created_at,'EEEE')` REPEATS the expression (NOT an alias) → VALID, in direct
-contrast with the Q3 mistake. The `ORDER BY CASE … Monday→1 … Sunday→7` calendar-sort is sound
-(prevents alphabetical day scrambling). CONFIRMED clean.
-
-**Scores:** Accuracy 5 / Completeness 4.75 / Clarity 4.5 / Actionability 4.75 → **4.75**
-
----
-
-## Overall
-
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 4.5 | 2.75 | 4.5 | 2.75 | 3.625 |
-| Q2 | 5.0 | 4.75 | 4.75 | 4.75 | 4.8125 |
-| Q3 | 3.0 | 4.0 | 4.0 | 3.0 | 3.25 |
-| Q4 | 5.0 | 4.75 | 4.5 | 4.75 | 4.75 |
-
-**Overall average = (3.625 + 4.8125 + 3.25 + 4.75) / 4 = 4.109375 → PASS**
-(overall average governs; no per-Q veto. Margin +0.609375 over the 3.5 threshold.)
-
-`::` cast ABSENT all 4. No QUALIFY / false-semi-join / fabricated-function / regex-backslash /
-INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning. Defects: Q1 completeness dodge
-(pre-aggregation omitted), Q3 GROUP-BY-alias + ungrouped-column broken example.
+## TICS check
+`::` ABSENT all 4. Clean except Q1 (no QUALIFY / false-semi-join / fabricated-fn [ROW_NUMBER/contains/transform/date_trunc all real & verified] / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary).
 
 ---
 
 ## Recommendation
 
-**(1) Q1 — running-total re-probe: WATCH (q) DOWNGRADED TO PASSIVE MONITOR.** The iter1038 invalid
-running-total shape (bare single `SUM(OVER)` of a non-grouping column inside a `GROUP BY day`
-query) did **NOT recur**. The mechanics shown are valid because the source table is already
-one-row-per-day; what remains is a pure **completeness dodge** — the answer assumed a
-pre-aggregated `daily_revenue` table rather than showing the orders→daily grain-collapse the
-question specified. This is a softer failure than a non-executable query. Downgrade the
-running-total/cumulative-sum watch from active to passive monitor; re-probe with a RAW
-one-row-per-order source next sweep to confirm the responder volunteers the pre-aggregation CTE
-(r07 L1791 daily-CTE card + Pattern A2 L2763 nested SUM(SUM)-OVER worked example already teach
-it). NO FIX-A.
+**Q1 finding: the bare-`SUM(x) OVER`-beside-`GROUP BY` form is INVALID in 467 (will not run), and this is the 2nd occurrence (iter1038 Q2 first; iter1039 re-probe dodged it by assuming a pre-aggregated table).** This is now a confirmed 2-in-2 on the real row-grain shape.
 
-**(2) Q3 — GROUP-BY-ALIAS broken illustrative query: classify as RESPONDER SLIP / sloppy-
-illustrative-snippet watch (c), NOT a confirmed resource gap.** This is a **1st occurrence** of
-GROUP-BY-alias misuse, and the core guidance (json_extract_scalar nested-path → varchar for
-grouping) was CORRECT. The responder applied the same rule CORRECTLY in Q4 of the SAME iteration
-(repeated the expression in GROUP BY), proving it holds the right pattern — this reads as
-per-Q padding/slip, not a systematic misconception. **Grep-worthy but low expectation:** teacher
-MAY grep `resources/` for any blessed `GROUP BY <alias>` snippet (json / nested-extract cards
-especially); if one exists it is a resource defect to reconcile in place (repeat-the-expression
-or `GROUP BY <ordinal>`, and never leave an ungrouped non-aggregate like `event_id` in the
-SELECT alongside a GROUP BY). If resources already use repeat-expression/ordinal form everywhere,
-this is a pure RESPONDER SLIP → per-instance MONITOR; re-probe nested-JSON-grouping next sweep,
-escalate to a LIGHT findability nudge only if GROUP-BY-alias recurs (2-in-2).
+Classification: **FINDABILITY GAP, not a resource gap.** Grep confirms r07 ALREADY teaches the correct form thoroughly:
+- iter667 BROADEN (L2679-2699) — the EXACT "per-day running total from row-grain orders, many rows per day" CTE recipe + the verbatim "Do NOT write `SUM(amount) OVER (...)` directly on the row-grain `orders` table" warning.
+- Pattern A2 (L2763+) — `GROUP BY` + `SUM(SUM(x)) OVER` window-over-aggregate canonical + GROUP BY rules anchor + DO-NOT-WRITE matrix.
 
-**Net: DEFAULT NO-OP** (margin +0.609375; both KEY items are a softer completeness dodge (Q1) and
-a 1st-occurrence responder slip on an otherwise-correct core (Q3); no source-verified resource
-defect, no 2-in-2). NO resource edit; NO FIX-A; NO commit (orchestrator commits). MUST NOT bump
-state.json (already 1039).
+The responder is anchoring on the BASE Pattern A example (L2554-2568: window over raw `daily_revenue` rows, NO GROUP BY) and bolting a `GROUP BY` onto it without promoting to the nested/CTE form. The iter667 BROADEN guard and Pattern A2 live ~120-200 lines BELOW Pattern A, so the keyword-matching Haiku responder grabs Pattern A first and never reaches the guard.
+
+**Recommend a LIGHT FIX-A: a prominent INLINE guard at Pattern A (immediately after the L2554-2568 base example, before the ROWS-vs-RANGE digression)** with the exact router cue: *"MANY rows per grouping key (e.g. raw `orders`, many orders per day) and you want a running total BY that key? Do NOT write `SUM(x) OVER (...)` beside a `GROUP BY` — `x` is not a grouping column and the window stage runs after aggregation, so Trino errors 'must be an aggregate expression or appear in GROUP BY clause'. Pre-aggregate in a CTE first (see iter667 BROADEN below) OR nest as `SUM(SUM(x)) OVER (...)` (see Pattern A2 below)."* Pull the guard UP to Pattern A so the responder hits it on the first keyword match, with forward-links to the two existing correct recipes. This is additive (no reconcile needed — existing content is correct); it closes the findability gap that the deep-buried guards aren't reaching the responder.
+
+If the responder STILL relapses after the guard is hoisted, reclassify as a Haiku synthesis ceiling (can find the recipe but can't assemble it on a novel domain) and stop churning.
+
+No other action: Q2/Q3/Q4 all clean and resolved in the responder's favor. Do NOT bump state.json (already 1040; orchestrator commits).
