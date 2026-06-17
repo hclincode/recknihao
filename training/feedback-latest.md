@@ -1,58 +1,86 @@
-# Judge Feedback — iter1036
+# Judge Feedback — iter1037
 
-**Overall: 4.375 PASS** (17.5 / 4; margin +0.875; overall average governs, no per-Q veto)
+**Overall: Q1 4.0 / Q2 4.8125 / Q3 4.8125 / Q4 4.8125 → 4.5625 PASS** (73.0/16; margin +1.0625; overall average governs, no per-Q veto).
 
-Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/...) + WebSearch on official docs/blog — NOT against resources/. Prod stack (Trino 467 + Iceberg + Hive Metastore, on-prem MinIO) fits all 4; no federation/auth angle this sweep.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/...) and trino.io docs — NOT resources/. Production stack (Trino 467 + Iceberg + MinIO + Hive Metastore) fits all four; no federation/auth angle (federation r22 §13.x hard-locked, not probed).
+
+---
+
+## Q1 — keep array elements starting with literal "evt_" — **4.0**
+
+**LEAD CORRECT — FIX-A CONFIRMED REACHING RESPONDER.** The primary answer is
+`filter(event_codes, code -> starts_with(code, 'evt_')) AS evt_codes_only`.
+
+- `filter(array(T), function(T,boolean)) -> array(T)` EXISTS — array.md (467 RAW), "Constructs an array from those elements of `array` for which `function` returns true". Array shape preserved, no UNNEST/re-agg. Correct structure.
+- `starts_with(string, substring) -> boolean` EXISTS — string.md (467 RAW), "Tests whether `substring` is a prefix of `string`". Literal prefix match, NO wildcard interpretation, so `starts_with(code,'evt_')` matches a LITERAL underscore — exactly the user's intent.
+
+This is the canonical, safest form for a literal-underscore prefix inside an array lambda. **The iter1029/iter1036 FIX-A family (literal `_`/`%` prefix → use starts_with, not bare LIKE) is CONFIRMED reaching the responder: the lead now uses starts_with on the filter-lambda surface that relapsed at iter1036.**
+
+**SECONDARY ASIDE — subtly buggy (the persistent broken-secondary trait).** The "for multiple prefixes" aside shows
+`filter(event_codes, code -> code LIKE 'evt_%' OR code LIKE 'sys_%')`.
+In LIKE, `_` is a SINGLE-CHARACTER WILDCARD — comparison.md (467 RAW): "`_` matches any single character", "`%` matches zero or more characters", with ESCAPE available (`'South_America' LIKE 'South\_America' ESCAPE '\'`). So `LIKE 'evt_%'` ALSO matches "evtXanything" (any char in the 4th position), NOT specifically a literal "evt_". For a LITERAL-underscore prefix this is subtly wrong; the correct LIKE form is `LIKE 'evt\_%' ESCAPE '\'`.
+
+Mitigating: the responder DID hedge ("starts_with() is cleaner for literal text matching"), and the aside's purpose was a multi-prefix illustration where the underscore-literalness is incidental rather than the asked-for guarantee. Accuracy docked for the buggy throwaway form; the lead (the actual answer) is fully correct.
+
+**Classification:** the broken `LIKE 'evt_%'` is the persistent broken-secondary / over-illustrative-aside trait, NOT a fresh resource gap (the lead used the FIX-A correctly; both the iter1029 r23 §653 bare-column caveat and the iter1036 r07 §759 filter-lambda caveat are present and intact per state.json). The LEAD relapse the FIX-A targeted did NOT recur. **Per-instance one-off — MONITOR only, no FIX-A, no churn.** Acc 3.5 / Comp 4.25 / Clar 4.25 / App 4.0.
+
+## Q2 — price bands via width_bucket, cleaner than a giant CASE — **4.8125**
+
+`width_bucket(amount, ARRAY[25.0,50.0,100.0,250.0])` + CASE mapping 0→'$0-25' … 4→'$250+'.
+
+- **Array-form EXISTS — VERIFIED.** math.md (467 RAW): `width_bucket(x, bins) -> bigint`, "Returns the bin number of `x` according to the bins specified by the array `bins`"; bins "must be an array of doubles … sorted ascending". (The 4-arg equi-width `width_bucket(x, bound1, bound2, n)` also exists; the responder correctly used the array overload, which is the right tool for IRREGULAR bands.)
+- **Bucket numbering EXACTLY correct — DISPOSITIVE from 467 source.** trino-main MathFunctions.java widthBucket(array) does a binary search with `if (operand < bin) upper=index; else lower=index+1; return lower;` — i.e. **lower-bound-inclusive** (a value equal to a bound goes to the HIGHER bucket), returns **0 below the first bound** and **n at/above the last bound**. With `ARRAY[25,50,100,250]` (n=4 bounds → 5 buckets):
+  - `amt < 25` → 0
+  - `25 <= amt < 50` → 1
+  - `50 <= amt < 100` → 2
+  - `100 <= amt < 250` → 3
+  - `amt >= 250` → 4
+
+  This matches the responder's stated 0/1/2/3/4 mapping and ranges EXACTLY, including the boundary inclusivity (`25 <=` lower-inclusive). No off-by-one, no boundary slip.
+
+Genuinely cleaner than a 5-branch CASE on the boundaries; the CASE here only LABELS the integer bucket. (Question mentioned a `placed_at` column but clearly wants amount bands — using `amount` is the sensible reading, not a defect.) Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75.
+
+## Q3 — each customer's % of TOTAL revenue, no separate subquery — **4.8125**
+
+`ROUND(100.0 * revenue / SUM(revenue) OVER (), 2)`.
+
+- `SUM()` usable as a window function — window.md (467 RAW): "All aggregate functions can be used as window functions by adding the `OVER` clause." An empty `OVER ()` (no PARTITION, no ORDER BY) computes the grand total across the whole result set on every row — eliminates the self-join/scalar-subquery for the denominator. Correct.
+- `NULLIF(SUM(revenue) OVER (), 0)` div-by-zero guard sound (INTEGER/DECIMAL `/0` THROWS DIVISION_BY_ZERO; NULLIF→NULL propagates).
+- `100.0 *` forces decimal division (avoids integer truncation). Correct.
+- `PARTITION BY account_category` variant for per-segment share — correct generalization.
+
+Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75.
+
+## Q4 — single most-recent session per user, cleaner than max-then-join-back — **4.8125**
+
+`ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY started_at DESC NULLS LAST)` in a CTE/subquery, then `WHERE rn = 1`.
+
+- row_number() — window.md (467 RAW): "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition." Canonical top-1-per-group. `DESC NULLS LAST` is harmless/safe (Trino default null ordering is already NULLS LAST, but explicit is fine).
+- Window function NOT allowed in WHERE, so the subquery/CTE wrap before filtering `rn=1` is REQUIRED — responder did this correctly. (No QUALIFY in Trino 467, correctly avoided.)
+- ALT `max_by(session_id, started_at)` + `MAX(started_at)` GROUP BY user_id — aggregate.md (467 RAW): `max_by(x, y)` "Returns the value of `x` associated with the maximum value of `y` over all input values." Correct for grabbing a FEW columns at the max timestamp without a join-back. Sound, NOT a broken secondary this time.
+
+Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75.
 
 ---
 
-## Q1 — return per-account features starting with literal "beta_" without exploding to rows
-
-**filter(enabled_features, f -> f LIKE 'beta_%') AS beta_features**
-
-Scores: **Accuracy 3.0 / Completeness 4.0 / Clarity 4.25 / Applicability 3.5 → 3.6875**
-
-- STRUCTURE CORRECT: `filter(array(T), function(T,boolean)) -> array(T)` EXISTS in 467 (array.md: "Constructs an array from those elements of `array` for which `function` returns true"). Using filter() + a lambda to keep matching elements in-place, no UNNEST, is exactly the right approach for "without exploding to rows." Credit this.
-- **PREDICATE BUGGY — LIKE-underscore-literal-prefix defect.** In Trino LIKE, `_` is a SINGLE-CHARACTER WILDCARD. Verified comparison.md (467 RAW): "`_` matches any single character" and "`%` matches zero or more characters"; "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the `ESCAPE` character." So `f LIKE 'beta_%'` matches `"beta"` + ANY single char + anything — it would keep `"betaX9"`, `"betamax"`, `"betatron"`, NOT specifically the literal-underscore prefix `"beta_foo"`. The answer therefore returns WRONG elements for the stated requirement.
-- FIX: `filter(enabled_features, f -> starts_with(f, 'beta_'))` (string.md: starts_with tests a literal prefix, no wildcard) OR `filter(enabled_features, f -> f LIKE 'beta\_%' ESCAPE '\')` (escaped underscore per comparison.md example `'South_America' LIKE 'South\_America' ESCAPE '\'`).
-- **RECURRENCE FLAG:** this is the SAME LIKE-underscore-literal-prefix misconception as iter1028 Q2 / iter1029 Q1 (the iter1029 §651/§653 FIX-A topic). iter1030 confirmed the FIX-A working for a BARE-COLUMN prefix-validation question. Now it has relapsed inside a `filter()` ARRAY-LAMBDA context — a NEW surface where the §653 caveat's keywords (starts_with / LIKE prefix) may not be reaching the responder because the question framing is array/filter-centric, not "validate a code prefix." Orchestrator: grep resources to classify findability-gap (filter/array-lambda locus lacks the literal-underscore caveat cross-ref) vs recall-ceiling.
-
-## Q2 — 28-day (4-week) TIME-window moving average of daily order count
-
-**CTE daily_counts(CAST date, COUNT(*)) then AVG(daily_orders) OVER (ORDER BY order_date RANGE BETWEEN INTERVAL '27' DAY PRECEDING AND CURRENT ROW)**
-
-Scores: **Accuracy 3.75 / Completeness 4.5 / Clarity 4.5 / Applicability 4.0 → 4.1875**
-
-- WINDOW LOGIC CORRECT. Trino supports RANGE frames with an INTERVAL offset over a date/timestamp ORDER BY column (since v346; trino.io blog "Introducing new window features" example: `avg(totalprice) OVER (... ORDER BY orderdate RANGE BETWEEN interval '1' month PRECEDING AND CURRENT ROW)`). `INTERVAL '27' DAY PRECEDING` + `CURRENT ROW` = 28 calendar days inclusive = correct for "4-week / last 28 days" as a TIME window (not a fixed row count). Pre-aggregating to a daily CTE then applying the RANGE frame is the sound canonical pattern and correctly handles missing/sparse days (a ROWS frame would not).
-- **`::` CAST DEFECT (minor, isolated).** The CTE uses `created_at::date`. The PostgreSQL-style `::` cast operator is NOT valid Trino — it is a parse error (conversion.md documents only `CAST(value AS type)` and `TRY_CAST`; issue #23795). Must be `CAST(created_at AS date)`. This slip is confined to the CTE projection; the window-frame logic (the hard part of the question) is correct. Accuracy dinged for the parse-error slip, not the core approach.
-
-## Q3 — pull nested device.os from JSON in ONE shot
-
-**json_extract_scalar(properties, '$.device.os') AS device_os**
-
-Scores: **Accuracy 5 / Completeness 4.75 / Clarity 4.75 / Applicability 4.75 → 4.8125**
-
-- FULLY CORRECT. json.md (467 RAW): `json_extract_scalar` "Like json_extract, but returns the result value as a string... The value referenced by json_path must be a scalar"; documented example `json_extract_scalar(json, '$.store.book[0].author')` confirms nested dot-path traversal. `'$.device.os'` resolves the nested value in a single call and returns VARCHAR — exactly "one shot, not two extracts." Correctly contrasts json_extract (returns the whole object as JSON) for the non-scalar case.
-
-## Q4 — label day-of-week NAME (Monday..Sunday), not a number
-
-**format_datetime(CAST(plan_start_date AS timestamp), 'EEEE') → full name; 'EEE' short; cast optional via DATE→TIMESTAMP coercion; dayname() does NOT exist in 467**
-
-Scores: **Accuracy 5 / Completeness 4.75 / Clarity 4.75 / Applicability 4.75 → 4.8125**
-
-- FULLY CORRECT. datetime.md (467 RAW): `format_datetime(timestamp, format) -> varchar` "Formats timestamp as a string using format"; "compatible with JodaTime's DateTimeFormat pattern format." `EEEE` (full weekday name) / `EEE` (short) are standard JodaTime day-of-week patterns. `dayname()` is correctly identified as ABSENT in 467 (no such function in datetime.md); the numeric alternative `day_of_week(x)->bigint` "ranges from 1 (Monday) to 7 (Sunday)" is a number, which the user explicitly did NOT want — so steering to format_datetime is right. DATE→TIMESTAMP implicit coercion making the CAST optional is accurate (the cast is harmless/explicit, fine to keep).
-
----
+## Source-verified facts this iter
+- `filter(array(T),function(T,boolean))->array(T)` EXISTS — array.md 467 RAW.
+- `starts_with(string,substring)->boolean` EXISTS (literal prefix, no wildcard) — string.md 467 RAW; `ends_with` ABSENT.
+- LIKE `_` = single-char wildcard, `%` = zero-or-more, ESCAPE for literals — comparison.md 467 RAW.
+- `width_bucket(x, bins[])->bigint` EXISTS — math.md 467 RAW; **lower-bound-inclusive, 0 below first, n at/above last — DISPOSITIVE from MathFunctions.java 467 source** (`operand < bin ? upper=index : lower=index+1; return lower`).
+- `SUM()`/all aggregates usable with `OVER ()` for whole-result total — window.md 467 RAW.
+- `row_number()` sequential-from-1 within partition; window fns not allowed in WHERE — window.md 467 RAW.
+- `max_by(x,y)` returns x at max y — aggregate.md 467 RAW.
 
 ## TICS check
-- `::` present in Q2 ONLY (defect flagged). Absent Q1/Q3/Q4.
-- All functions real & verified: filter, json_extract_scalar, json_extract, format_datetime, day_of_week. dayname() correctly called absent.
-- No QUALIFY / false-semi-join / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / broken-secondary / over-warning.
-- Q1 LIKE-underscore is the one accuracy defect of substance; Q2 `::` is a minor isolated parse-error slip.
+Clean except Q1 secondary `LIKE 'evt_%'` (literal-underscore-wildcard). No QUALIFY, no false semi-join, no fabricated functions (filter/starts_with/width_bucket/sum-OVER/row_number/max_by all real & verified; ends_with correctly absent), no regex-backslash, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no `::` cast. Q1 LEAD broken-secondary is the only blemish and it's an aside, not the answer.
 
-## Recommendation
-PASS at 4.375 (margin +0.875). TWO source-verified defects this sweep:
-1. **Q1 LIKE-underscore-literal-prefix RELAPSE** — now inside a `filter()` array-lambda (new surface vs the bare-column prefix questions iter1028/1029/1030). Orchestrator: grep resources to decide findability-gap (add literal-`_`/`%`-prefix caveat + starts_with/ESCAPE cross-ref at the filter/array-lambda + LIKE-in-lambda locus, not just the bare-column prefix-validation card) vs recall-ceiling. This is the recurring §653 family on a new framing — worth a LIGHT findability nudge if a grep shows the array-lambda path lacks the cross-ref.
-2. **Q2 `::` cast slip** — isolated to the CTE; the §1154/§3247/§1394/§659 `::`-lock canon exists. Likely a per-instance responder slip rather than a resource gap; classify via grep but do not churn the `::` lock if it is intact and findable.
+## Recommendation — **DEFAULT NO-OP** (margin +1.0625)
 
-Do NOT bump state.json (teacher already handled; orchestrator commits).
+- **Q1 FIX-A is CONFIRMED reaching the responder.** The lead uses `starts_with(code,'evt_')` on the exact filter-lambda surface that relapsed at iter1036 — the targeted relapse did NOT recur. The buggy `LIKE 'evt_%'` is confined to a throwaway multi-prefix aside and is the persistent broken-secondary trait, NOT a fresh resource gap (both literal-prefix caveats r23 §653 and r07 §759 are present/intact). Classify as a **per-instance one-off — passive MONITOR only.** Do NOT churn the defang; the resource cards are already in place and the lead honored them.
+- Q2/Q3/Q4 fully correct and source-verified, both directions; both KEY width_bucket array-form + bucket-numbering and the max_by/row_number alternatives resolved in the responder's favor.
+- No 2-in-2 recurrence (the Q1 LEAD prefix misconception is resolved; only an aside slipped). No source-verified resource defect.
+
+NO resource edit; NO FIX-A; NO git commit; MUST NOT bump state.json (already 1037; orchestrator commits).
+
+**Re-probe (monitor only):** (a) literal-`_`/`%` prefix inside filter-lambda — confirm lead keeps using starts_with and watch whether the multi-prefix aside relapses to bare `LIKE 'x_%'`; if the LEAD (not just an aside) relapses → escalate; (b) width_bucket array-form bucket numbering (0 below first / n at/above last / lower-inclusive); (c) SUM() OVER () grand-total share + NULLIF guard; (d) ROW_NUMBER top-1-per-group wrap-then-rn=1 + max_by alternative. Federation r22 §13.x hard-locked, not probed (4.49944/310).
