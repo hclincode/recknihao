@@ -1,90 +1,58 @@
-# Judge Feedback — iter1032
+# Judge Feedback — iter1033
 
-**Phase**: extended (passed=true). Overall average governs; NO per-question veto. No federation/auth angle in any of the 4 questions; all 4 fit the prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore).
+**Overall: Q1 4.8125 / Q2 4.75 / Q3 4.8125 / Q4 4.75 → 4.78125 PASS** (76.5/16; margin +1.28125; overall average governs, no per-Q veto).
 
-Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/.
-
----
-
-## Q1 — last-30-days cutoff: `created_at >= current_timestamp - 30`?
-
-**Answer**: Use `date_add('day', -30, current_timestamp)`; says `current_timestamp - 30` does NOT parse (no timestamp-minus-integer operator), must name the unit.
-
-**Verified (functions/datetime.md, git-tag 467):**
-- `date_add(unit, value, timestamp)` — "Adds an interval `value` of type `unit` to `timestamp`. Subtraction can be performed by using a negative value." Returns same type as input. Responder's `date_add('day', -30, current_timestamp)` is the correct signature and correct negative-value-for-subtraction idiom.
-- Temporal arithmetic uses INTERVAL only (e.g. `date '2012-08-08' + interval '2' day`). There is NO timestamp-minus-bare-integer operator. The responder's "does not parse" claim is ACCURATE — `timestamp - 30` is not valid Trino.
-- Minor completeness point only: `current_timestamp - INTERVAL '30' DAY` is an equally valid form the responder could have mentioned. Its absence is not a defect; the lead form is correct and idiomatic.
-
-**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.5 → **4.75**
-Reasoning: lead fully correct and verified; "does not parse" diagnosis right; only the unmentioned INTERVAL alternative trims completeness slightly.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...), NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore) fits all 4; no federation/auth angle.
 
 ---
 
-## Q2 — spend-tier labeling (low <$50 / medium $50–$200 / high >$200)
+## Q1 — EVERY tag starts with 'e', no UNNEST — 4.8125 CLEAN
 
-**Answer**: `CASE WHEN ... < 50 'low' / BETWEEN 50 AND 200 'medium' / ELSE 'high' END`, grouped by user with `SUM(order_total)`; mentions `if()` for 2-outcome case; says CASE/if() same plan.
+**Answer:** `all_match(tags, tag -> starts_with(tag, 'e'))` in WHERE.
 
-**Verified (functions/conditional.md, git-tag 467):**
-- Docs state "The following `IF` and `CASE` expressions are equivalent" — the CASE/if() "same plan" characterization is sound, not worth dinging.
-- `if()` is 2-arg `if(condition, true_value)` or 3-arg `if(condition, true_value, false_value)` — responder's 2-outcome `if()` mention is accurate.
-- BETWEEN is inclusive. Boundary check: `< 50` → low; `BETWEEN 50 AND 200` → medium (exactly $50 and exactly $200 both land in medium); `ELSE` (> 200) → high. NO gap, NO overlap. Bucket logic is sound for the stated spec.
+- `all_match(array(T), function(T,boolean)) -> boolean` EXISTS — array.md: "Returns whether all elements of an array match the given predicate... `true` if all match (special case empty array → true); `false` if one+ don't; `NULL` if predicate is NULL for one+ and true for the rest."
+- `starts_with(string, substring) -> boolean` EXISTS — string.md: "Tests whether `substring` is a prefix of `string`."
+- For a single literal letter `'e'` (no `_`/`%`), starts_with and LIKE 'e%' are equivalent — NO escape issue (the literal-`_`/`%`-prefix trap from iter1029/1030 does NOT apply here; 'e' has no wildcard chars). No row explosion, single boolean expression in WHERE. Fully correct.
+- Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75.
 
-**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.75 → **4.8125**
-Reasoning: correct, clean boundaries, useful SUM-per-user framing, accurate if()-vs-CASE nuance.
+## Q2 — faster approximate unique count for a chart — 4.75 CLEAN
+
+**Answer:** `approx_distinct(session_id)` (HyperLogLog), "2.3% standard error", "~100x faster/less memory", GROUP BY event_date + date-range filter; exact = COUNT(DISTINCT) with `SET SESSION distinct_aggregations_strategy = 'pre_aggregate'` / `'split_to_subqueries'`.
+
+- `approx_distinct(x) -> bigint` and `approx_distinct(x, e) -> bigint` EXIST — aggregate.md: "approximation of count(DISTINCT x)... should produce a **standard error of 2.3%**, which is the standard deviation of the (approximately normal) error distribution." 2.3% verbatim CORRECT.
+- "100x faster / 100x less memory" is a rough perf heuristic, not a doc figure. Defensible characterization (HLL is sub-linear memory vs exact distinct's per-key state); not an over-claim worth penalizing.
+- **CRUCIAL secondary aside VERIFIED CORRECT:** `distinct_aggregations_strategy` IS a real 467 property (properties-optimizer.md), default AUTOMATIC, legal values `SINGLE_STEP / MARK_DISTINCT / PRE_AGGREGATE / SPLIT_TO_SUBQUERIES / AUTOMATIC`. The responder's cited `'pre_aggregate'` and `'split_to_subqueries'` are BOTH legal values. The property name is NOT fabricated and NOT confused with `mark_distinct_strategy` (no such separate property; MARK_DISTINCT is a value of this property). No defect.
+- Acc 5 / Comp 4.75 / Clar 4.5 / App 4.75.
+
+## Q3 — plan_tier×region detail + per-tier subtotal + grand total in ONE query — 4.8125 CLEAN
+
+**Answer:** `GROUP BY ROLLUP(plan_tier, region)` + `CASE GROUPING(plan_tier,region) WHEN 0 'Detail' WHEN 1 'Plan Tier Total' WHEN 3 'Grand Total'`; ORDER BY GROUPING(...), plan_tier NULLS LAST, region NULLS LAST. States ROLLUP(a,b) = GROUPING SETS ((a,b),(a),()).
+
+- **Bitmask VERIFIED (select.md GROUPING operation):** "bits are assigned to the argument columns with the rightmost column being the least significant bit... a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise." So leftmost (plan_tier) = MSB; bit=1 = column AGGREGATED/excluded.
+  - (plan_tier, region) grouping set → 0b00 = **0** = Detail (correct)
+  - (plan_tier) grouping set [region rolled up] → 0b01 = **1** = Plan Tier Total (correct)
+  - () grand total [both rolled up] → 0b11 = **3** = Grand Total (correct)
+  - Mask 2 (0b10) never occurs under ROLLUP. Responder's 0/1/3 mapping and labels are EXACTLY correct.
+- ROLLUP(a,b) = GROUPING SETS ((a,b),(a),()) CORRECT (select.md shipping example).
+- Column-names-only pin respected (plain column names, no expressions in ROLLUP). NULLS-LAST ordering correctly separates real values from rollup-NULLs.
+- Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75.
+
+## Q4 — combine aligned name/value arrays into a key-value map — 4.75 CLEAN
+
+**Answer:** `map(feature_names, feature_values)` 2-arg constructor; `cardinality()>0` guard; `feature_map['key']` lookup; `CROSS JOIN UNNEST(feature_map) AS t2(k,v)` to iterate; steers AWAY from `map_from_entries(zip_with(...))`.
+
+- 2-arg `map(array(K), array(V)) -> map(K,V)` EXISTS — map.md: "Returns a map created using the given key/value arrays." Requires equal lengths (errors on mismatch); the question states arrays are same-length/aligned, so safe. CORRECT.
+- `UNNEST(map) AS t(k,v)` expands map to key/value columns — confirmed.
+- The "don't use the longer `map_from_entries(zip_with(...))`" steer is FINE — `map(keys,values)` is the direct/correct form, so this is NOT a broken-secondary; it's a valid simplification steer.
+- **Minor completeness nuance (not a defect):** map subscript `feature_map['battery_capacity']` THROWS if the key is absent (map.md: subscript "throws an error if the key is not contained in the map"), whereas `element_at(feature_map, 'battery_capacity')` returns NULL. The example implicitly assumes the key exists; for defensive lookups element_at is safer. The responder did not flag this — costs a fraction on completeness only.
+- Acc 5 / Comp 4.5 / Clar 4.75 / App 4.75.
 
 ---
 
-## Q3 — discover all DISTINCT keys across an `events.metadata` MAP column
+## TICS check
+`::` ABSENT all 4. No QUALIFY / false-semi-join / fabricated function / regex-backslash / INTERVAL quarter-week / OFFSET-before-LIMIT / generate_subscripts / broken-secondary / over-warning. All functions cited (all_match, starts_with, approx_distinct, GROUPING, ROLLUP, map, UNNEST) are real and verified. Session property `distinct_aggregations_strategy` + its two cited values verified real. Q1 literal-prefix correctly avoids the underscore-wildcard trap (literal 'e' has no wildcard chars).
 
-**Answer**: `SELECT DISTINCT key FROM events CROSS JOIN UNNEST(map_keys(metadata)) AS t(key) ORDER BY key`; explains `map_keys`→array(varchar), UNNEST explodes, DISTINCT dedups.
+## RECOMMENDATION = DEFAULT NO-OP
+Margin +1.28125; all 4 clean; ZERO source-verified resource defects; no 2-in-2 same-shape slip. The two secondary points flagged for careful verification (Q2 session-property name/values, Q3 GROUPING bitmask) both resolved IN THE RESPONDER'S FAVOR against RAW 467 source. NO resource edit; NO FIX-A; NO git commit. MUST NOT bump state.json (already 1033; orchestrator commits).
 
-**Verified:**
-- functions/map.md: `map_keys(x(K,V)) -> array(K)` — returns an array of the keys. Confirmed.
-- sql/select.md: CROSS JOIN UNNEST(array) AS t(col) is the canonical pattern ("UNNEST is normally used with a JOIN"; example `CROSS JOIN UNNEST(scores) AS t(score)`). Confirmed.
-- DISTINCT across the exploded rows correctly dedups keys; ORDER BY key is fine.
-- More efficient alt exists (`array_distinct(flatten(array_agg(map_keys(metadata))))`) but the UNNEST form is correct and most beginner-readable; its absence is not a defect.
-
-**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.75 → **4.8125**
-Reasoning: fully correct, each step explained for a beginner, directly runnable.
-
----
-
-## Q4 — users who signed up in January but never ordered
-
-**Answer**: `SELECT user_id FROM users WHERE signup_month='January' EXCEPT SELECT user_id FROM orders`; says EXCEPT is set-difference, NULL-safe, requires same column count/types; LEFT JOIN + IS NULL also works but more error-prone.
-
-**Verified (sql/select.md, git-tag 467):**
-- "If neither is specified, the behavior defaults to `DISTINCT`." EXCEPT defaults to DISTINCT — responder's set-difference + dedup characterization is correct.
-- NULL handling: set operations treat NULLs as equal for dedup/difference purposes (standard SQL DISTINCT semantics). The "NULL-safe" characterization is accurate — EXCEPT does NOT carry the NOT IN (subquery-with-NULL) zero-rows footgun. Matches r23 §10 anti-join / EXCEPT NULL-safe canonical.
-- Same column count / compatible types requirement is correct.
-- Note: EXCEPT dedups the left side, so duplicate January signups collapse — fine for a user_id list, exactly the ask.
-
-**Scores** — Accuracy 5 / Clarity 4.75 / Applicability 4.75 / Completeness 4.75 → **4.8125**
-Reasoning: correct, NULL-safe claim verified, good contrast with the error-prone LEFT JOIN + IS NULL path. EXCEPT is the cleaner lead for this question.
-
----
-
-## Overall
-
-| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 4.75 | 4.75 | 4.5 | 4.75 |
-| Q2 | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
-| Q3 | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
-| Q4 | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
-
-**Overall average = (4.75 + 4.8125 + 4.8125 + 4.8125) / 4 = 4.796875 → PASS** (margin +1.296875 over 3.5).
-
-`::` cast ABSENT all 4. TICS CLEAN: all functions real & verified (date_add, map_keys, UNNEST, if/CASE, EXCEPT); no QUALIFY / no false semi-join / no regex-backslash / no INTERVAL quarter-week / no OFFSET-before-LIMIT / no broken "for completeness" secondary alternative / no over-warning folklore.
-
-**Source-verified defects: NONE.** All four answers correct in both directions.
-
-**RECOMMENDATION = DEFAULT NO-OP.** No resource edit, no FIX-A, no git commit. No source-verified resource defect and no 2-in-2 same-shape slip. Margin is comfortable.
-
-Re-probe (monitor only, no action):
-- (a) date_add('day',-N,ts) negative-value + "timestamp - integer does not parse" + optionally INTERVAL '30' DAY form
-- (b) CASE bucket boundaries inclusive-BETWEEN no-gap/overlap + if() 2/3-arg + CASE/if() same-plan
-- (c) map_keys→array + CROSS JOIN UNNEST AS t(key) + DISTINCT; watch for array_distinct(flatten(array_agg)) alt
-- (d) EXCEPT defaults-DISTINCT + NULL-safe vs NOT IN footgun + LEFT JOIN+IS NULL contrast
-
-Federation r22 §13.x hard-locked, NOT probed (4.49944/310). MUST NOT bump state.json (already 1032; orchestrator commits once after judge).
+Passive re-probe monitors (no action): (a) approx_distinct 2.3%-error + distinct_aggregations_strategy values; (b) ROLLUP/GROUPING bitmask 0/1/3 mapping from another column-count angle; (c) map(keys,values) vs element_at-NULL-vs-subscript-throws on absent key; (d) all_match + starts_with literal-prefix. Federation r22 hard-locked, NOT probed (4.49944/310).
