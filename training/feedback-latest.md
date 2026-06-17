@@ -1,51 +1,74 @@
-# Judge Feedback — iter996 (EXTENDED PHASE breadth sweep)
+# iter997 Judge Feedback (EXTENDED PHASE breadth sweep)
 
-**OVERALL 4.78125 STRONG PASS** (Q1 4.6875 / Q2 4.8125 / Q3 4.75 / Q4 4.875 = 19.125/4 = 4.78125; margin +1.28; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.40625 PASS** (Q1 4.8125 / Q2 3.625 / Q3 4.8125 / Q4 4.8125 = 17.625/4 = 4.40625; margin +0.906; OVERALL AVERAGE governs, no per-Q veto).
 
-All 4 questions verified BOTH directions against trino.io/docs/467 (sql/select.html GROUP-BY-ordinal + no-alias + no-QUALIFY; functions/string.html split_part 1-based no-negative; functions/datetime.html EXTRACT(MONTH/YEAR FROM ts); functions/window.html window-funcs-run-after-HAVING-before-ORDER-BY → not in WHERE + row_number valid; functions/aggregate.html max_by(x,y) real) + pinned 467 source (reference_trino_cast_to_integer_rounds: CAST(decimal/double AS integer) ROUNDS half-up, truncate() drops decimals) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
-
----
-
-## Q1 — GROUP BY ordinal (GROUP BY 1, 2) valid vs repeat EXTRACT expressions — **4.6875 CLEAN**
-- GROUP BY ordinal positions VERIFIED valid: select.html "a simple GROUP BY clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)." `GROUP BY 1, 2` is correct.
-- EXTRACT(MONTH FROM ts) / EXTRACT(YEAR FROM ts) VERIFIED valid (datetime.html `extract(field FROM x)→bigint`, YEAR/MONTH supported).
-- SELECT-list ALIAS NOT referenceable in GROUP BY (`GROUP BY month, year` fails) — CORRECT. Trino resolves GROUP BY against INPUT columns/ordinals, not output aliases (#16533).
-- MINOR terminology imprecision (not a defect): responder called the alias-in-GROUP-BY failure a "PARSE ERROR"; it is technically an analysis/resolution error ("column cannot be resolved"), not a strict parse error. Substance (aliases don't work in GROUP BY; use ordinal or repeat the full expression) is fully correct. Repeating the EXTRACT expressions also works (verbose) — correct.
-- Acc 4.75 / Clar 4.75 / App 4.5 / Comp 4.75.
-
-## Q2 — 'Direct'/'Organic'/'Other' Source column; COALESCE gave raw URL — **4.8125 CLEAN**
-- CASE WHEN is the right tool, COALESCE is NOT — CORRECT. COALESCE(referrer_url,'Direct') only substitutes when NULL, otherwise returns the raw URL (exactly the user's symptom); it has no branching for the "contains google" / else cases.
-- `CASE WHEN referrer_url IS NULL THEN 'Direct' WHEN referrer_url LIKE '%google%' THEN 'Organic' ELSE 'Other' END` — correct: top-to-bottom evaluation, first matching WHEN wins, ELSE fallback. IS NULL must come first (LIKE on NULL → UNKNOWN, won't match) — handled correctly by ordering.
-- ELSE optional → defaults NULL when omitted — CORRECT (conditional.html).
-- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q3 — split_part for SKU numeric part + CAST leading zeros — **4.75 CLEAN**
-- Trino HAS split_part — CORRECT (string.html `split_part(string, delimiter, index)→varchar`).
-- 1-based positive index VERIFIED: "Field indexes start with 1." `split_part('SKU-00142','-',2)` = '00142' (index 1 = 'SKU' before dash, index 2 = '00142' after) — CORRECT. (Note: split_part has NO negative index in Trino — not raised here, not needed.)
-- `CAST('00142' AS integer)` = 142 — CORRECT. String→integer parses the numeric value; leading zeros are display formatting only, stripped on conversion.
-- ASIDE (correct, pinned): "CAST ROUNDS not truncates" for decimals — `CAST(47.89 AS integer)` = 48 (rounds half-up), use `truncate(47.89)` = 47 to drop decimals. VERIFIED against pinned 467 source (reference_trino_cast_to_integer_rounds). Responder correctly noted it doesn't affect the '00142' case (an exact-integer string). Good defensive accuracy, NOT the broken-secondary tic.
-- Acc 5.0 / Clar 4.75 / App 4.5 / Comp 4.75.
-
-## Q4 (KEY CHECK — iter994 window-in-WHERE re-probe) — top-3 per workspace — **4.875 CLEAN**
-- Correctly diagnosed: `LIMIT 3` applies to the FINAL result set, giving top-3 OVERALL not per-group (matches user's symptom).
-- Correct pattern VERIFIED: ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY COUNT(*) DESC) computed in the INNER subquery SELECT over a GROUP BY workspace_id, page_path; OUTER query `WHERE rn <= 3` references rn as a PLAIN COLUMN (not a window function in WHERE).
-  - (a) VALID Trino 467 — window fn lives in the subquery SELECT; outer WHERE filters a materialized column. CONFIRMED.
-  - (b) ROW_NUMBER() OVER (... ORDER BY COUNT(*) DESC) window-OVER-aggregate inside a GROUP BY query is VALID (window funcs run after HAVING/aggregation — window.html "run after the HAVING clause but before ORDER BY"). CONFIRMED.
-  - (c) "Trino has NO QUALIFY, window funcs can't go directly in WHERE, nest in subquery/CTE and filter the rank outside" — CONFIRMED (select.html has no QUALIFY; window funcs run before ORDER BY but after HAVING, so cannot appear in WHERE).
-- ★ **iter994 window-fn/alias-in-WHERE slip did NOT recur.** Here the responder correctly nested the window in the subquery and filtered rn in the OUTER WHERE — the RIGHT pattern. iter994 NTILE-alias-in-WHERE confirmed a one-off responder padding slip, NOT a resource defect.
-- Single-column top-1 alternative `max_by(page_path, views)` GROUP BY workspace_id over a per-page-count subquery — max_by VERIFIED real (aggregate.html `max_by(x,y)` "value of x associated with the maximum value of y"); valid alternative for top-1 only (responder scoped it correctly as single-column-top-1).
-- Acc 5.0 / Clar 4.75 / App 4.875 / Comp 4.875.
+All 4 Qs verified BOTH directions vs trino.io/docs/467 + WebSearch of official issues/source — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
 
 ---
 
-## SCOPE NOTES
-- **Q1**: GROUP BY ordinal (GROUP BY 1, 2) VALID + EXTRACT(MONTH/YEAR FROM ts) valid + SELECT-alias-NOT-in-GROUP-BY CORRECT; minor "PARSE ERROR" terminology (technically analysis/resolution error, substance correct).
-- **Q2**: CASE-WHEN-not-COALESCE CORRECT (COALESCE only swaps NULL→single value, no branching; CASE first-match-wins + ELSE-fallback; IS NULL first).
-- **Q3**: split_part 1-based positive index CORRECT (index 2='00142') + CAST('00142' AS int)=142 leading-zeros-stripped CORRECT + CAST-rounds-decimals aside (47.89→48, truncate→47) CORRECT/pinned.
-- **Q4 (KEY)**: top-N-per-group = ROW_NUMBER() in INNER subquery SELECT over GROUP BY + OUTER WHERE rn<=3 (rn as plain column) CORRECT/valid Trino 467; window-over-aggregate-in-GROUP-BY valid; "no QUALIFY, nest+filter-outside" CORRECT; max_by single-column-top-1 alt CORRECT. **window-in-WHERE slip did NOT recur (iter994 one-off CONFIRMED).**
+## Q1 — extract JSON scalar (Postgres `metadata->>'plan'` → Trino) — **4.8125 CLEAN**
 
-## TICS — ALL CLEAN
-no QUALIFY (Q4 correctly says absent + uses subquery) / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn (split_part, ROW_NUMBER, max_by, EXTRACT, truncate ALL real & verified) / regex-backslash / GREATEST-LEAST-NULL / window-in-WHERE (Q4 ABSENT — correct subquery nesting) / GROUP-BY-alias (Q1 correctly rejects alias, uses ordinal) / date-minus-integer / broken-secondary-false-justification (Q3 CAST-rounds aside is accurate, not broken) / mid-churn / column-scope / DISTINCT-vs-GROUP-BY-folklore / ILIKE-conflation / INTERVAL-quarter-week.
+VERIFIED vs functions/json.html:
+- `json_extract_scalar(json, json_path) → varchar` REAL — doc: "Like json_extract(), but returns the result value as a string." Correct Trino equivalent of Postgres `->>` (Trino has NO `->>` operator; the function is the answer).
+- `JSON_VALUE(json_input, json_path [RETURNING type] [... ON EMPTY] [... ON ERROR])` REAL SQL/JSON syntax — full signature confirmed; `RETURNING varchar`, `NULL ON EMPTY`, `NULL ON ERROR` all valid for distinguishing absent-key vs malformed-JSON.
+- `CAST(json_extract_scalar(metadata,'$.price') AS DECIMAL)` correct for typed extraction (json_extract_scalar always returns varchar).
+- "Use json_extract_scalar for everyday, json_value for absent-vs-malformed distinction" — accurate steering.
+- NO fabricated-fn tic (both functions real). Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.28; all 4 leads correct & verified both directions; zero tics; no findable resource/findability gap; no 2-in-2 recurrence; Q4 KEY CHECK clean (window-in-WHERE one-off confirmed, NOT a resource defect). Re-probe next sweep: (a) another top-N-per-group / window-rank Q — confirm ROW_NUMBER-in-subquery + OUTER-WHERE-rank lead stays + watch window-in-WHERE recurrence (still per-instance responder padding if it reappears, not a resource fix); (b) another conditional/fallback Q — confirm CASE-vs-COALESCE distinction stays; (c) another string-parse/CAST Q — confirm split_part-1-based + CAST-rounds-vs-truncate stays. Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 996; passed=true preserved; final_iterations_remaining 0).
+## Q2 — BETWEEN inclusive on both endpoints? — **3.625 (BETWEEN-inclusive lead CORRECT + UNFLAGGED varchar-vs-DATE coercion trap)**
+
+★ THE KEY CHECK. Two-part verdict:
+
+**Part A — BETWEEN inclusivity: CORRECT.** VERIFIED vs functions/comparison.html: "value BETWEEN min AND max"; "3 BETWEEN 2 AND 6 is equivalent to 3 >= 2 AND 3 <= 6" — inclusive on BOTH endpoints. The responder's lead is right. The TIMESTAMP half-open gotcha (`>= '2025-01-01' AND < '2025-02-01'` to avoid sub-second fencepost loss) is also a genuinely good, correct nuance.
+
+**Part B — ★ VERIFIED COERCION VERDICT: Trino 467 THROWS on DATE/TIMESTAMP-column vs bare-VARCHAR-literal. The responder MISSED flagging the DATE-literal requirement.**
+- functions/comparison.html EXPLICITLY: "the value, min, and max parameters to BETWEEN and NOT BETWEEN must be the same type" + "Trino will error if you attempt to compare operands of different types."
+- Confirmed in the wild: AWS re:Post documents `TYPE_MISMATCH: Cannot apply operator: date < varchar(10)`; Trino does NOT implicitly convert VARCHAR→DATE/TIMESTAMP (consistent with iter989 #7334 timestamp-vs-varchar finding). Fix is `DATE '2025-01-01'` / `CAST('2025-01-01' AS DATE)` / `from_iso8601_date(...)`.
+- IMPACT: the responder's example queries use BARE varchar literals `due_date BETWEEN '2025-01-01' AND '2025-01-31'`. If `due_date` is a DATE or TIMESTAMP column (the overwhelmingly likely case for a column literally named `due_date`), those queries ERROR. They only run if `due_date` is a VARCHAR column storing ISO date strings (where lexicographic = chronological order makes the comparison coincidentally correct).
+- CONTRAST: iter989 Q3 correctly CAUGHT the timestamp-vs-varchar trap. Here the responder did NOT flag that a DATE/TIMESTAMP `due_date` needs `DATE` literals — a real accuracy/completeness gap on the exact column the user is asking about.
+
+Classification: **RESPONDER slip (incomplete answer), NOT a resource defect** — this is the iter989-confirmed VARCHAR-vs-DATE-coercion tic recurring as an OMISSION rather than a wrong claim. The BETWEEN-inclusive lead is fully correct, so the answer is not wrong, just incomplete on the load-bearing column-type caveat. Score down for the unflagged coercion trap. Acc 3.5 / Clar 4.0 / App 3.5 / Comp 3.5.
+
+NOTE: this is the SECOND surfacing (iter989 caught it, iter997 missed it) of date/timestamp-vs-bare-varchar. NOT 2-in-2 in the same direction (989 = caught, 997 = missed), so re-probe-don't-churn — but flag for next sweep: if a third date/timestamp-column-vs-string-literal Q also omits the DATE-literal flag, trace whether a resource needs an additive "compare DATE/TIMESTAMP columns with typed literals (DATE '...'), never bare varchar — Trino throws TYPE_MISMATCH, no implicit coercion" note co-located with BETWEEN / date-filter keywords.
+
+## Q3 — IN vs EXISTS, real difference in results/speed (last-30-days, non-correlated)? — **4.8125 CLEAN**
+
+VERIFIED:
+- For a NON-CORRELATED positive-membership subquery, IN and EXISTS are semantically EQUIVALENT and Trino lowers BOTH to a SemiJoin — confirmed via `TransformUncorrelatedInPredicateSubqueryToSemiJoin` (Trino's documented decorrelation rule; SemiJoin operator yields one TRUE/FALSE per outer row, dedups the build side). NO "EXISTS is faster" folklore. This is a CORRECT SemiJoin attribution, NOT a false-mechanism semi-join mislabel.
+- Correlated NOT EXISTS → LeftJoin + Aggregation slow path (#21859) is REAL and CORRECTLY scoped as NOT applicable to this non-correlated positive case.
+- `WHERE user_id IN (SELECT user_id FROM orders WHERE created_at >= current_date - INTERVAL '30' DAY)` — `current_date - INTERVAL '30' DAY` is VALID Trino (date − interval; `INTERVAL '30' DAY` matches the doc `INTERVAL '2' DAY` singular-unit-keyword form). NOT the date−bare-integer Postgres-ism (`current_date - 30`) — responder used INTERVAL correctly.
+- "Run EXPLAIN, look for SemiJoin" — correct, actionable verification advice.
+- Recommending IN is fine (plan-equivalent to EXISTS here). NO DISTINCT-vs-GROUP-BY perf folklore. Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+## Q4 — best-available label (display_name else username else email) — **4.8125 CLEAN**
+
+VERIFIED vs functions/conditional.html:
+- `COALESCE(display_name, username, email)` — "Returns the first non-null value in the argument list"; N-arg; short-circuits like CASE. Returns first non-NULL left-to-right exactly as described. Cleaner than nested IF/CASE — correct.
+- "NVL is Oracle 2-arg, COALESCE is N-arg idiomatic Trino" — CORRECT. NVL is NOT in Trino docs (Oracle-only); COALESCE is the idiomatic Trino form. Good Oracle-migration-aware framing.
+- Since email is always set, the COALESCE chain is guaranteed non-NULL — implicitly correct (no need for a trailing sentinel). Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.875.
+
+---
+
+## Tic audit (RESOURCE-defect vs RESPONDER-slip)
+
+- QUALIFY: ABSENT (none used). CLEAN.
+- false-mechanism semi-join mislabel: Q3 IN/EXISTS→SemiJoin is CORRECT (verified rule name), NOT a mislabel. CLEAN.
+- MAX(varchar): N/A. percent_rank inversion: N/A.
+- fabricated functions: json_extract_scalar / json_value / COALESCE ALL REAL & verified; NVL correctly identified as Oracle-only. CLEAN.
+- regex-backslash / GREATEST-LEAST-NULL: N/A.
+- **VARCHAR-vs-DATE-coercion [Q2 — KEY]: TRAP PRESENT, responder MISSED flagging it.** Verified Trino 467 THROWS TYPE_MISMATCH on DATE/TIMESTAMP-column vs bare-varchar-literal. RESPONDER omission (incomplete), not a resource defect. Down-scored Q2.
+- date-minus-integer: Q3 used `INTERVAL '30' DAY` correctly (NOT bare integer). CLEAN.
+- EXISTS-vs-IN folklore: Q3 correctly states plan-equivalent for non-correlated positive case. CLEAN.
+- broken-secondary / mid-churn / column-scope / ILIKE-conflation / INTERVAL-quarter-week: none. CLEAN.
+
+## Recommendation = DEFAULT NO-OP (margin +0.906)
+
+All 4 LEADS correct & verified both directions. The sole ding is Q2's unflagged varchar-vs-DATE coercion caveat — a RESPONDER completeness omission on a load-bearing column-type point, NOT a wrong claim and NOT a findable resource gap (the BETWEEN-inclusive answer itself is correct). NOT 2-in-2 in the same direction (iter989 CAUGHT the same coercion trap; iter997 MISSED it).
+
+Re-probe next sweep:
+- (a) ★ another date/timestamp-COLUMN vs string-LITERAL filter Q (BETWEEN, `>=`, `=`) — confirm whether responder flags the DATE-literal requirement / TYPE_MISMATCH. If a third such Q ALSO omits it (making it 2-in-2 as an omission), trace to resource root cause: an additive co-located note "compare DATE/TIMESTAMP columns with typed literals DATE '...' / TIMESTAMP '...', never bare varchar — Trino throws TYPE_MISMATCH, no implicit coercion" near BETWEEN/date-filter keywords.
+- (b) another IN-vs-EXISTS / subquery-membership Q — confirm SemiJoin-equivalence lead stays + #21859 correlated-NOT-EXISTS scoping + INTERVAL-not-integer.
+- (c) another JSON-extraction Q — confirm json_extract_scalar / json_value lead.
+- (d) another COALESCE/NVL fallback Q — confirm N-arg COALESCE + NVL-is-Oracle framing.
+
+Federation r22 §13.x hard-locked, NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 997; passed=true preserved; final_iterations_remaining 0).
