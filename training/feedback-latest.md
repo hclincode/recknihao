@@ -1,67 +1,65 @@
-# Judge Feedback — iter988 (EXTENDED PHASE breadth sweep)
+# Judge Feedback — iter989 (EXTENDED PHASE breadth sweep)
 
-**OVERALL 4.78125 — STRONG PASS** (Q1 4.75 / Q2 4.75 / Q3 4.8125 / Q4 4.8125 = 19.125/4 = 4.78125; margin +1.281; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.3672 — PASS** (Q1 3.125 / Q2 4.8125 / Q3 4.6875 / Q4 4.84375 = 17.46875/4 = 4.3672; margin +0.867; OVERALL AVERAGE governs, no per-Q veto — Q1 folklore does NOT sink the iter).
 
-All 4 questions verified BOTH directions against trino.io/docs/467 (functions/map.html, functions/array.html, sql/select.html GROUPING/ROLLUP, comparison.html + NOT-IN/NULL 3VL via WebSearch) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt): all four answers fit; NO federation drag-in, NO out-of-stack tooling.
-
----
-
-## Q1 — NOT IN returns 0 rows despite users lacking Feb orders — **4.75 CLEAN**
-
-VERIFIED CORRECT. The `NOT IN (subquery)` + NULL three-valued-logic trap is exactly right: if `orders.user_id` contains even one NULL, `user_id NOT IN (..., NULL, ...)` evaluates to UNKNOWN for every outer row (`x <> NULL` is UNKNOWN; NOT-UNKNOWN is UNKNOWN), the WHERE keeps only TRUE rows, so everything is filtered out → 0 rows. Confirmed standard SQL behavior (Postgres/MySQL/BigQuery/Snowflake identical) and confirmed Trino 467 behavior.
-- Fix A `NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id=s.user_id AND o.order_month='2024-02')` is NULL-safe and decorrelates to an anti-join — CORRECT.
-- Fix B `LEFT JOIN ... WHERE o.user_id IS NULL` is the equivalent **anti-join** — and the responder NAMED IT CORRECTLY as an anti-join. ★ NO false-mechanism semi-join mislabel (a known tic).
-- "Never use NOT IN with a nullable subquery; reach for NOT EXISTS" is sound, correctly-scoped advice.
-- ★ Stray "premium_users.user_id" example-table reference is a trivial COSMETIC wart (does not affect the deliverable logic), NOT a defect.
-Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q2 — region + tier subtotals + grand total in one query — **4.75 CLEAN ★ KEY CHECK PASSED**
-
-VERIFIED CORRECT both ways against sql/select.html GROUPING operation.
-- `GROUP BY ROLLUP(region, tier)` is valid Trino 467 and produces: detail rows {region,tier}, region subtotal {region} with tier rolled up, and grand total {} with both rolled up — CONFIRMED.
-- ★ **GROUPING(region, tier) bitmask CONFIRMED PRECISELY:** docs state grouping() returns a bit set where bit=1 when the column is NOT in the grouping (rolled up) and bit=0 when it IS a grouping column, and the **leftmost argument is the most-significant bit**. Therefore:
-  - detail {region,tier} → 0b00 = **0** ✓ (responder: 0 = Detail)
-  - region subtotal {region}, tier rolled up → region-bit 0, tier-bit 1 → 0b01 = **1** ✓ (responder: 1 = Region Total)
-  - grand total {}, both rolled up → 0b11 = **3** ✓ (responder: 3 = Grand Total)
-- ★ **"No value 2 for ROLLUP — don't write WHEN 2" CONFIRMED CORRECT:** value 2 = 0b10 = region rolled away + tier present = the {tier}-only grouping, which ROLLUP does NOT emit (that combination only comes from CUBE or explicit GROUPING SETS). Excellent, precise teaching.
-- CUBE for independent margins on both dims and GROUPING SETS ((region),(tier),()) for hand-picked subtotals — both CORRECT.
-The whole GROUPING-bitmask answer is subtle and the responder got every value right. ★ NO grouping-bitmask error (a watched tic). The only reason this isn't 5.0: clarity could note that NULL appears in the rolled-up columns of subtotal/total rows (the GROUPING() row_type label addresses this, but a beginner may still wonder where the NULLs come from).
-Acc 4.875 / Clar 4.5 / App 4.75 / Comp 4.875.
-
-## Q3 — count products with more than 3 tags (ARRAY length) — **4.8125 CLEAN**
-
-VERIFIED CORRECT against functions/array.html.
-- `count(*) ... WHERE cardinality(tags) > 3` — `cardinality(array)` returns the element count, CONFIRMED. `> 3` correctly maps to "more than 3" (keeps 4+). No sargability/function-wrap issue worth flagging here.
-- "Trino has no array_length()" — CONFIRMED (cardinality is the canonical function; no array_length exists). NOT a fabrication-of-absence error.
-- contains(tags,'featured'), array_distinct, array_join(tags, ', ') — all valid 467, CONFIRMED.
-- "cardinality works on ARRAY and MAP (MAP = key count)" — CONFIRMED (cardinality(map) returns number of entries).
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q4 — MAP filter properties['country']='US' type error — **4.8125 CLEAN ★ verified both ways**
-
-VERIFIED CORRECT against functions/map.html.
-- ★ **Subscript `map[key]` THROWS on a missing key — CONFIRMED.** Docs: the subscript operator "throws an error if the key is not contained in the map." `element_at(map, key)` "Returns value for given key, or NULL if the key is not contained in the map." So the element_at fix is exactly right: `element_at(properties,'country')='US'` returns NULL on missing keys, the WHERE drops them, no error. CORRECT both ways.
-- Existence check `element_at(properties,'country') IS NOT NULL` — CORRECT.
-- ★ NOTE: the user reported a "type error"; the actual production failure is most likely the missing-key RUNTIME error ("Key not present in map: ..."), not a static type error. The responder's element_at fix is correct regardless of which the user hit — NO ding. (Minor: the answer could have noted the user's "type error" wording might actually be the runtime missing-key error, but this is non-load-bearing.)
-- JSON-string fallback (json_extract_scalar) — appropriate hedge, valid 467.
-- ★ MAP type spelling: `MAP(VARCHAR,VARCHAR)` parens-syntax CORRECT; `MAP<VARCHAR,VARCHAR>` is Hive/Spark and parse-errors in Trino 467 — CONFIRMED. Good dialect-trap callout, no PARTITIONED-BY-style foreign-DDL drag-in.
-Acc 4.875 / Clar 4.75 / App 4.75 / Comp 4.875.
+All 4 questions verified BOTH directions against trino.io/docs/467 + Trino source / GitHub issues (sql/select.html DISTINCT semantics + optimizer hash-aggregation planning; functions/string.html split_part/split; functions/array.html element_at; functions/comparison.html BETWEEN + VARCHAR↔TIMESTAMP coercion; trinodb/trino #7334 timestamp<varchar type error; Querify Labs distinct-aggregation plan note) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt): all four answers fit; NO federation drag-in.
 
 ---
 
-## Scope notes / tics
+## ★ Q1 — DISTINCT vs GROUP BY for unique customer/month combos — **3.125 — ACCURACY DEFECT (FALSE PERFORMANCE FOLKLORE)**
 
-- **Q1**: NOT-IN+NULL 3VL trap CORRECT; ★ anti-join CORRECTLY NAMED (no semi-join mislabel); stray "premium_users" = cosmetic wart only.
-- **Q2 (KEY CHECK)**: ROLLUP valid; ★ GROUPING bitmask 0=detail / 1=region-subtotal / 3=grand-total CONFIRMED CORRECT (leftmost=MSB, bit=1 when rolled up); ★ "no value 2 for ROLLUP" CONFIRMED CORRECT (2=0b10={tier}-only, CUBE/GROUPING-SETS-only). NO grouping-bitmask error.
-- **Q3**: cardinality(array)=length CONFIRMED; no array_length() CONFIRMED; contains/array_distinct/array_join valid; cardinality(map)=key count CONFIRMED.
-- **Q4**: ★ subscript `map[key]` THROWS on missing key + element_at returns NULL — CONFIRMED both ways; element_at fix correct; MAP(...) parens correct, MAP<> Hive/Spark parse-error CONFIRMED.
+The engineer asked a precise question: "Real difference, or interchangeable for unique combinations?" **The correct answer is: YES, they are interchangeable.** For a pure unique-combination query with NO aggregate functions, `SELECT DISTINCT customer_id, month FROM invoices` and `SELECT customer_id, month FROM invoices GROUP BY customer_id, month` are SEMANTICALLY EQUIVALENT and Trino plans them essentially IDENTICALLY — both lower to an `AggregationNode` whose grouping keys are the selected columns, with no aggregate functions. Same operator, same hash-aggregation, no meaningful performance difference. Use whichever is clearer.
 
-TICS OTHERWISE CLEAN: no QUALIFY-misuse / false-mechanism-semi-join-mislabel (Q1 anti-join correctly named) / MAX(varchar) / percent_rank-inversion / fabricated-fn-or-rule (cardinality, element_at, GROUPING, ROLLUP, contains, array_join all real 467; array_length correctly stated ABSENT) / PARTITIONED-BY-foreign-DDL / aggregate-in-GROUP-BY / broken-secondary-false-justification / ILIKE-conflation / grouping-bitmask-error / mid-churn / missing-CTE-col / JOIN-fan-out / ts-minus-ts / column-scope.
+**The responder's answer is WRONG on the central claim.** It said:
+- "They are NOT interchangeable in Trino 467" — **FALSE** (they are interchangeable here).
+- "GROUP BY can leverage Trino's hash aggregation and cost-based optimizer better than DISTINCT" — **FALSE**; SELECT DISTINCT uses the same hash aggregation.
+- "DISTINCT is more of a dedup-rows-after-fetching-everything operation" — **FALSE MECHANISM**; DISTINCT does not "fetch everything then dedup" — it is an aggregation over the distinct columns, identical to GROUP BY.
+- "GROUP BY signals intent to the optimizer and will perform better" — **FALSE FOLKLORE**.
 
-## Recommendation = DEFAULT NO-OP
+The verification nuance the responder confused: COUNT(DISTINCT x) / MULTIPLE distinct aggregations (MarkDistinct operator) CAN have plan/perf differences vs GROUP BY-based rewrites — but that is a DIFFERENT case (distinct *aggregation*), NOT the bare `SELECT DISTINCT a, b` row-dedup the engineer asked about. The responder appears to have imported the "GROUP BY beats DISTINCT" folklore (a common SQL-Server/MySQL-era myth) and mis-applied it.
 
-Margin +1.281; all 4 leads correct; all dialect/logic claims verified both directions. The only blemishes are sub-cosmetic (Q1 stray table name; Q2 NULLs-in-subtotal-rows could be spelled out for beginners). NO findable resource defect, NO findability gap, NO 2-in-2 recurrence. Q2 GROUPING-bitmask and Q4 map-subscript-throws — both subtle, both nailed.
+★ **CLASSIFICATION:** This reads like a RESPONDER PERFORMANCE-FOLKLORE slip (broken-justification / unsupported-perf-claim family), NOT obviously a resource quote — the false mechanism ("DISTINCT fetches everything then dedups") and the vague "signals intent / CBO leverages it better" are classic invented justifications. **HOWEVER it must be root-caused: orchestrator PHASE 6 must GREP resources/ for any "GROUP BY faster than DISTINCT" / "DISTINCT dedups after fetching" / "DISTINCT is slower" content.** If a resource asserts this → RESOURCE DEFECT, reconcile-in-place (state DISTINCT vs GROUP BY are equivalent for pure dedup; only COUNT(DISTINCT)/multi-distinct aggregation differs). If no resource says it → confirmed responder folklore slip; re-probe-don't-churn, but if it recurs 2-in-2 a LIGHT additive note is warranted ("`SELECT DISTINCT a,b` == `GROUP BY a,b`, same plan; no perf winner; the DISTINCT-vs-GROUP-BY perf story only applies to COUNT(DISTINCT) aggregations").
 
-Re-probe next sweep: (a) another GROUPING/CUBE/GROUPING SETS Q to confirm the bitmask convention stays correct under CUBE (where value 2 DOES appear) — watch whether the responder correctly emits/explains the {tier}-only row; (b) another MAP/ARRAY collection-access Q to confirm element_at-vs-subscript and cardinality stay correct.
+Partial credit: the recommended query itself is valid Trino and returns the correct result, and the engineer would not be harmed operationally — but they were given a wrong mental model and a false "your teammate is right for perf reasons" verdict. Acc 2.0 / Clar 3.75 / App 3.25 / Comp 3.5.
 
-Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 988; passed=true preserved; final_iterations_remaining 0).
+---
+
+## Q2 — Cast dirty CSV `amount` ('N/A'/blank) without killing query — **4.8125 CLEAN**
+
+VERIFIED CORRECT. `TRY_CAST(amount AS DECIMAL(10,2))` returns NULL on any value that cannot be cast (blanks, 'N/A'), and the query completes — whereas plain `CAST` throws and aborts the whole query. Confirmed Trino 467 semantics (TRY_CAST = CAST that returns NULL instead of raising on failure). The TRY_CAST-vs-CAST contrast table is accurate and directly actionable. Exactly the right tool for dirty-CSV ingestion. Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+---
+
+## Q3 — BETWEEN inclusivity + TIMESTAMP-vs-date-string — **4.6875 — LARGELY CORRECT, minor wording imprecision**
+
+Both core claims VERIFIED:
+- ★ **BETWEEN is inclusive of both endpoints** (`value BETWEEN min AND max` == `value >= min AND value <= max`) — CONFIRMED comparison.html.
+- ★ **VARCHAR-vs-TIMESTAMP type error CONFIRMED.** Trino 467 does NOT implicitly coerce a bare quoted string ('2024-03-01' = VARCHAR) to TIMESTAMP/DATE in a comparison; `timestamp_col BETWEEN '2024-03-01' AND '2024-03-31'` raises a type-mismatch error ("Cannot apply operator: timestamp < varchar", trinodb/trino #7334). Trino coerces numeric↔numeric and char↔char but NOT char↔temporal. The responder's "the query will fail with a type error" is CORRECT.
+- ★ **Half-open fix CORRECT and is the right recommendation for a TIMESTAMP column:** `billing_period_end >= DATE '2024-03-01' AND billing_period_end < DATE '2024-04-01'` avoids the midnight-fencepost bug where `BETWEEN ... DATE '2024-03-31'` (inclusive right endpoint at 00:00:00) silently drops March-31 rows with a time-of-day after midnight. Strong, production-correct guidance.
+
+Minor (the only ding): the responder wrote "Trino does NOT implicitly coerce VARCHAR to TIMESTAMP **WITH TIME ZONE**." The column is plain `TIMESTAMP`, not `TIMESTAMP WITH TIME ZONE`; the "WITH TIME ZONE" qualifier is gratuitous/imprecise. The no-coercion conclusion holds regardless of which timestamp type the column is, so this is a cosmetic wording slip, not a logic error. Acc 4.5 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+---
+
+## Q4 — Extract last path segment (Postgres negative split_part index) — **4.84375 CLEAN**
+
+VERIFIED CORRECT both ways:
+- ★ **split_part requires a POSITIVE 1-based index in Trino 467** — "Field indexes start with 1"; no negative index support (out-of-range returns NULL, negative is invalid). Postgres' `split_part(url,'/',-1)` does NOT work in Trino — CONFIRMED. Correctly attributed to Postgres-only.
+- ★ **`element_at(split(referrer_url, '/'), -1)` is the correct idiom.** `split(string, delim)` returns an array (CONFIRMED string.html); `element_at(array, -1)` returns the LAST element — element_at supports negative indices ("If index < 0, element_at accesses elements from the last to the first", array.html). CONFIRMED.
+- The worked trace `split(url,'/') = ['https:','','partner.example.com','promo','SUMMER2024'] → element_at(...,-1) = 'SUMMER2024'` is accurate (note the empty string at index 2 from the `//` — correctly shown, does not affect the last-segment result).
+- Bonus `element_at(split(file_path,'.'),-1)` for file extension is a correct, useful generalization.
+
+Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.875.
+
+---
+
+## Scope notes / tic audit
+
+- ★ **Q1 DISTINCT-vs-GROUP-BY "not interchangeable / GROUP BY faster" = FALSE PERFORMANCE FOLKLORE accuracy defect.** They ARE equivalent for pure unique-combination dedup in Trino 467 (same AggregationNode plan, no perf winner). False mechanism ("DISTINCT fetches everything then dedups") + invented justification ("signals intent / CBO leverages it better"). Reads like a RESPONDER folklore slip (unsupported-perf-claim / broken-justification family) — **FLAGGED FOR ORCHESTRATOR PHASE-6 resource grep** ("GROUP BY faster than DISTINCT" / "DISTINCT dedups after fetching" / "DISTINCT is slower"). If found in a resource → RESOURCE DEFECT reconcile-in-place; if not → responder folklore, re-probe-don't-churn (2-in-2 → LIGHT additive note: DISTINCT==GROUP BY for row-dedup; perf story is COUNT(DISTINCT)-only).
+- **Q2** TRY_CAST-returns-NULL / CAST-throws CLEAN.
+- **Q3** BETWEEN-inclusive (>=AND<=) CONFIRMED + VARCHAR-vs-TIMESTAMP type-error CONFIRMED (#7334, no char↔temporal coercion) + half-open `>= DATE ... AND < DATE ...` fix CORRECT for the midnight fencepost; only "WITH TIME ZONE" wording imprecise (column is plain TIMESTAMP, point holds).
+- **Q4** split_part-no-negative-index (1-based, Postgres-only negative) CONFIRMED + `element_at(split(),-1)` last-segment idiom CONFIRMED (element_at negative-index from tail, split→array).
+
+TICS otherwise CLEAN: no QUALIFY / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn-or-rule (TRY_CAST, split, element_at, BETWEEN all real & correctly described; split_part-negative correctly ABSENT) / PARTITIONED-BY-foreign-DDL / aggregate-in-GROUP-BY / broken-secondary / ILIKE-conflation / mid-churn / missing-CTE-col / JOIN-fan-out / ts-minus-ts / column-scope. The ONE accuracy defect is Q1's DISTINCT-vs-GROUP-BY perf folklore (unsupported-perf-claim family).
+
+**iter990 RECOMMENDATION = DEFAULT NO-OP pending PHASE-6 grep on Q1 DISTINCT-vs-GROUP-BY folklore** (overall margin +0.867 PASS; Q2/Q3/Q4 all leads correct & verified both directions; Q1 is the sole defect and reads responder-side, but MUST be resource-grepped before disposition). Re-probe: (a) another DISTINCT vs GROUP BY / dedup-vs-aggregate Q — watch the "GROUP BY faster" folklore recur (2-in-2 → reconcile resource or LIGHT additive note: they're the same plan for pure dedup); (b) another temporal-predicate-on-TIMESTAMP Q — confirm half-open `>= DATE ... AND < DATE ...` lead + VARCHAR-no-coercion stay correct, watch "WITH TIME ZONE" over-qualification. Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 989; passed=true preserved; final_iterations_remaining 0).
