@@ -650,6 +650,8 @@ WHERE starts_with(code, 'US');
 
 **Net rule.** **Prefix → `starts_with(s, 'US')`** (real Trino function) **or** `s LIKE 'US%'` (both fine; `LIKE 'US%'` with a leading literal also pushes down — see the §6 pruning table row `SUBSTR(country,1,2)='US'` → `LIKE 'US%'`). **Suffix → there is no `ends_with`; use `s LIKE '%.csv'`** (or `substr(s, -4) = '.csv'`). Do NOT reach for `ends_with` — it is one of the most common fabricated-from-another-dialect function names.
 
+> **⚠️ Prefix CONTAINS a literal `_` or `%` (e.g. `ff_`, `evt_`, `50%`)? Then `LIKE 'prefix%'` is WRONG — and `starts_with` is the safe answer.** In `LIKE`, `_` matches ANY single character and `%` matches any sequence (per [comparison.html](https://trino.io/docs/467/functions/comparison.html)), so `s LIKE 'ff_%'` matches `'ffXanything'` too — NOT just the literal `ff_` prefix. *Keyword anchors: starts with ff_, prefix with an underscore, code begins with sku_, LIKE underscore literal prefix, match exact ff_ prefix.* **For a literal-underscore (or literal-`%`) prefix, PREFER `starts_with(s, 'ff_')`** (literal, no wildcard interpretation), or escape the wildcard: **`s LIKE 'ff\_%' ESCAPE '\'`** (see the [LITERAL `%`/`_` LIKE-ESCAPE canonical, §3.1-regex zone below](#leading-canonical--match-a-literal--or-_-escape-a-wildcard-in-like--like-pattern-escape-c-and-the-substring-test-is-strposs-sub--0-not-contains-which-is-array-only-iter751-pin--fix-a)). The clean-literal `LIKE 'US%'` form above is fine ONLY because `US` has no `_`/`%`.
+
 ---
 
 ### LEADING CANONICAL — Trino `format(format_string, args...)` — printf / Java-Formatter-style string building
