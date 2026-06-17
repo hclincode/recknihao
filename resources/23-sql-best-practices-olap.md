@@ -1203,7 +1203,7 @@ Trino has TWO date-format function families with DIFFERENT pattern syntaxes — 
 
 Mixing a MySQL function with a Joda pattern -- e.g. date_parse(.., 'MM/dd/yyyy') -- FAILS or misparses.
 Mnemonic: percent-sign -> MySQL -> date_parse / date_format ;  no percent sign -> Joda -> parse_datetime / format_datetime.
-NOTE the MySQL MINUTE specifier is %i, NOT %M  (%M is the full MONTH NAME 'January'..'December').
+NOTE the MySQL MINUTE specifier is %i, NOT %M  (%M is the full MONTH NAME 'January'..'December').  (And there is no %B: the full-month code is %M; %b is the abbreviated month — %B is a C/strftime code, not a Trino specifier.)
 NOTE Joda lowercase mm is MINUTE; uppercase MM is the MONTH (the classic month/minute swap).
 ```
 

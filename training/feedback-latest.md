@@ -1,58 +1,61 @@
-# iter984 Judge Feedback
+# iter985 Judge Feedback — EXTENDED PHASE breadth sweep
 
-**OVERALL 4.40625 STRONG PASS** (Q1 4.6875 / Q2 4.0625 / Q3 4.75 / Q4 4.125 = 17.625/4 = 4.40625; margin +0.906; OVERALL AVERAGE governs, no per-Q veto)
+**OVERALL 4.46875 PASS** (Q1 4.6875 / Q2 4.4375 / Q3 4.75 / Q4 4.0 = 17.875/4 = 4.46875; margin +0.969; OVERALL AVERAGE governs, no per-Q veto).
 
-EXTENDED PHASE breadth sweep. All 4 Qs verified BOTH directions vs trino.io/docs/467 (NOT resources/):
-- sql/select.html GROUP BY: "all output expressions must be either aggregate functions or columns present in the GROUP BY clause"; GROUP BY accepts input columns / ordinal, NOT output aliases; DISTINCT ON (Postgres) absent.
-- functions/string.html: one-arg `trim(string)` "Removes leading and trailing whitespace" (general whitespace incl. tabs, not space-only); `lower()` standard.
-- functions/datetime.html: `format_datetime` uses Joda patterns (MMMM=full month name, yyyy=4-digit year → 'June 2026'); `date_format` MySQL specifiers — **%M = full month name, %b = abbreviated, %Y = 4-digit year; %B is NOT a listed specifier**; to_char exists (Teradata-compat) lowercase numeric-only, cannot emit month names.
-- WebSearch 2026-06-17 confirmed CASE-on-aggregate IS a legal aggregate expression in the SELECT list of a GROUP BY query.
-
-Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all answers fit.
+All 4 Qs verified BOTH directions vs trino.io/docs/467 (sql/select.html UNION defaults to DISTINCT / UNION ALL keeps dups + GROUP BY "all output expressions must be aggregate functions or columns present in GROUP BY" / aggregate NOT allowed in GROUP BY; functions/aggregate.html bool_or=TRUE if any input TRUE, bool_and, ignore NULLs, return NULL for no-rows/all-NULL, count_if exists; functions/datetime.html date_format %M=full-month-name / %b=abbreviated / %Y=4-digit-year, format_datetime Joda MMMM=full-month/yyyy=4-digit) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — answers fit.
 
 ---
 
-## Q1 — clean messy product names, LOWER(TRIM(name)) — 4.6875 CLEAN
-`SELECT LOWER(TRIM(product_name)) AS clean_name FROM events`. VERIFIED: both `lower()` and one-arg `trim()` are valid Trino 467 and behave like Postgres for this use. The "TRIM removes both spaces and tabs" claim is CORRECT — Trino's one-arg `trim()` strips general leading/trailing whitespace (space, tab, newline), not just the space character. Example trace "  Premium Plan  " → "premium plan" correct. No dialect ding.
+## Q1 — UNION vs UNION ALL (active+churned subscriptions); bare UNION slower — 4.6875 CLEAN
+
 Acc 4.75 / Clar 4.75 / App 4.625 / Comp 4.625.
 
-## Q2 ★ — spend-tier bucket then COUNT per tier — 4.0625 (LEAD correct; secondary false-justification ding)
-**THE KEY CHECK — verdict on the two sub-items:**
+VERIFIED CORRECT both directions. Bare `UNION` defaults to DISTINCT (select.html: "If neither is specified, the behavior defaults to DISTINCT") → global dedup via sort/hash-aggregate = the slowdown the engineer observed. `UNION ALL` keeps all rows, cheap (no dedup pass). Guidance "use UNION ALL by default; bare UNION only when you need dedup AND inputs can overlap; if disjoint it's a silent perf killer" is accurate and exactly the right framing — active vs churned subscriptions are disjoint sets, so UNION ALL is correct. LEAD `SELECT * FROM active_subscriptions UNION ALL SELECT * FROM churned_subscriptions` correct. CLEAN.
 
-**(a) aggregate-in-GROUP-BY did NOT recur — LEAD CORRECT + LEGAL.** The two-level CTE: inner `account_spending` groups by `account_id` (raw key) with `SUM(amount)` and the `CASE WHEN SUM(amount)>10000 ... END AS spend_tier` in the SELECT (a legal aggregate expression); outer query `GROUP BY spend_tier` with `COUNT(*)`. VERIFIED LEGAL Trino 467 — the iter983 illegal pattern (CASE-on-SUM placed INSIDE the GROUP BY clause, #25984) did NOT recur. Boundary trace: 10000 → not >10000 → BETWEEN 2000 AND 10000 → 'medium'; 1999 → 'low'; matches the question's tiers. **iter983 aggregate-in-GROUP-BY slip CONFIRMED ONE-OFF (not 2-in-2) — no resource fix, no FIX-A.**
+## Q2 ★ — spend-tier bucket (high>10k/med 2k-10k/low<2k) by TOTAL spend then COUNT per tier — 4.4375 — KEY CHECK: aggregate-in-GROUP-BY DID NOT RECUR
 
-**(b) SECONDARY = FALSE JUSTIFICATION (responder slip).** The responder claims the single-query form `SELECT CASE WHEN SUM(amount)>10000 THEN 'high' ... END AS spend_tier, COUNT(*) FROM invoices GROUP BY account_id` "won't work — you can't aggregate in the SELECT and group by different columns." VERIFIED FALSE: that query IS LEGAL Trino 467. A CASE-on-SUM(amount) is itself an aggregate expression (reduces to one value per group), and COUNT(*) is an aggregate — both satisfy the GROUP BY rule. It COMPILES and runs; it just produces ONE ROW PER ACCOUNT (a per-account label + count), answering a DIFFERENT question, NOT the per-tier count the engineer wants. The responder's "won't work / can't aggregate in SELECT and group by different columns" mis-states legality as the reason. Additionally the "CASE is evaluated at row level not group level" explanation is MUDDLED — you CAN group by a row-level CASE on raw columns; the real reason you cannot group by THIS bucket is that it resolves to an aggregate (CASE-on-SUM), not a row-level expression.
+Acc 4.5 / Clar 4.5 / App 4.5 / Comp 4.25.
 
-**RESOURCE-vs-SLIP = RESPONDER slip (broken-secondary / false-justification family).** The DELIVERABLE (lead) is correct and legal; the ding is for the inaccurate justification appended to rule out the alternative. No resource defect — r07 §A2 GROUP BY anchor correctly shows GROUP-BY-raw-keys + CASE-on-aggregate-in-SELECT. Re-probe-don't-churn.
-Acc 3.75 / Clar 4.25 / App 4.25 / Comp 4.0.
+THE KEY CHECK — VERIFIED CLEAN. Two-level CTE:
+- inner `per_account`: GROUP BY **account_id (raw key)** + `SUM(amount) AS total_spend` — legal.
+- `labeled`: `CASE WHEN total_spend>10000 THEN 'high' WHEN total_spend>=2000 THEN 'medium' ELSE 'low' END` operates on the **ALREADY-AGGREGATED total_spend column** (NOT CASE-on-SUM-inside-GROUP-BY) — legal.
+- outer: `GROUP BY spend_tier COUNT(*)` — legal.
 
-## Q3 — one row per user/day, DISTINCT ON equivalent — 4.75 CLEAN
-`SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY user_id, event_date ORDER BY event_time DESC) AS rn FROM user_events) WHERE rn=1`. VERIFIED: DISTINCT ON (Postgres) is genuinely ABSENT in Trino 467; ROW_NUMBER()=1 subquery is the correct equivalent (row_number starts at 1; DESC → rn=1 = latest). Tiebreaker advice (ORDER BY event_time DESC, event_id DESC) sound for duplicate timestamps. NO QUALIFY misuse — subquery-wrap used correctly (QUALIFY is absent in 467). Projects all needed columns (no missing-CTE-col).
+VERIFIED LEGAL Trino 467. The iter983 illegal CASE-on-SUM-INSIDE-GROUP-BY did **NOT recur**. The responder's stated rule **"GROUP BY expressions cannot contain aggregates / Trino errors"** is **CORRECT this iter** (select.html + WebFetch confirm aggregates not allowed in GROUP BY) — contrast iter984's muddled false "can't aggregate in SELECT and group by different columns"; this iter's explanation is RIGHT. Boundary trace: 10000 → not >10000 → >=2000 → **medium** ✓; 1999 → **low** ✓; >10000 → **high** ✓ — matches the Q tiers.
+
+★ **DISPOSITION: iter983 aggregate-in-GROUP-BY slip CONFIRMED a ONE-OFF over 2 consecutive clean re-probes (iter984 + iter985). NO FIX-A, NO resource edit. The explanation rule is now correct 2 iters running.** (Minor comp, not a defect: did not surface that exact-boundary ties are deterministic — immaterial.)
+
+## Q3 — at-least-one 'payment_failed' per workspace (bool_or / at-least-one-match) — 4.75 CLEAN
+
 Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-## Q4 ★ — format DATE as "June 2026", TO_CHAR equivalent — 4.125 (LEAD correct; broken-secondary %B ding)
-**LEAD CORRECT:** `format_datetime(CAST(due_date AS timestamp), 'MMMM yyyy')` → 'June 2026'. VERIFIED 467 functions/datetime.html — format_datetime uses Joda patterns; MMMM = full text month name, yyyy = 4-digit year; MMM = abbreviated; MM = numeric. CAST(date AS timestamp) is fine/explicit (format_datetime takes a timestamp). The pattern-letter gloss is accurate.
+VERIFIED CLEAN. `bool_or(event_type='payment_failed')` is a valid Trino 467 aggregate (aggregate.html: returns TRUE if any input TRUE, else FALSE; bool_and also exists). bool_or ignores NULLs and returns NULL for no-rows / all-NULL input — so `COALESCE(bool_or(...), false)` edge-case handling is sound and well-reasoned. `GROUP BY workspace_id` correct for per-workspace true/false. Alternative `count_if(event_type='payment_failed')>0` valid (count_if exists in 467). Directly answers "does Trino have bool_or" (yes) and "at-least-one-match without counting" (bool_or). CLEAN.
 
-**ALTERNATIVE = BROKEN SECONDARY (dialect error, responder slip):** `date_format(CAST(due_date AS timestamp), '%B %Y')` claiming "%B = full month name". VERIFIED FALSE against 467 date_format MySQL specifiers — the full-month-name code is **%M**, abbreviated is **%b**; **%B is NOT a valid Trino/MySQL date_format specifier** (it is a C/strftime code). The alternative should be `'%M %Y'`. As written `'%B %Y'` is a dialect error. Broken-secondary-alternative tic — lead correct, appended alternative broken.
+## Q4 ★ — format DATE as "June 2026" (Postgres TO_CHAR equivalent) — 4.0 — LEAD correct, %B broken-secondary (2nd CONSECUTIVE)
 
-**NOTE (do not over-ding):** "TO_CHAR doesn't have a direct Trino equivalent" is slightly imprecise — Trino 467 DOES have `to_char` (Teradata-compat) but with lowercase NUMERIC-only codes (dd/mm/yyyy etc.), NO month names — so to_char genuinely CANNOT produce 'June 2026', and format_datetime IS the right tool. The practical guidance is correct; the lead answers the question.
+Acc 3.75 / Clar 4.25 / App 4.0 / Comp 4.0.
 
-**RESOURCE-vs-SLIP = RESPONDER slip (broken-secondary family).** Lead correct, no resource fix.
-Acc 4.0 / Clar 4.25 / App 4.25 / Comp 4.0.
+LEAD `format_datetime(CAST(due_date AS timestamp), 'MMMM yyyy')` → 'June 2026' VERIFIED CORRECT (Joda MMMM=full month name 'June', yyyy=4-digit year; MMM=abbrev, MM=zero-padded number, lowercase mm=MINUTE — the mm gotcha is correctly called out; CAST optional, DATE→TIMESTAMP(0) coerces — fine). The deliverable is correct.
+
+★ **BROKEN-SECONDARY DEFECT (2-in-2 recurrence):** ALTERNATIVE `date_format(due_date, '%B %Y')` claims "%B = full month name." **VERIFIED WRONG against Trino 467 functions/datetime.html: full month name is `%M`; `%b` = abbreviated month name; `%Y` = 4-digit year. `%B` is a C/strftime code and is NOT a listed Trino/MySQL date_format specifier.** Correct form is `date_format(CAST(due_date AS timestamp), '%M %Y')`. Additional sub-issue: `date_format` is documented as `date_format(timestamp, format)` — passing a bare DATE may need a CAST to timestamp (the LEAD casts; the alternative does not). Claiming both forms have "identical output" is FALSE — the %B alternative would not emit 'June'.
+
+NOTE on whether %B errors or mis-outputs: I could NOT find in the docs an explicit statement of behavior for an unrecognized specifier (throw "Invalid format" vs pass-through literally). The specifier table lists %M and %b (and %Y), NOT %B — so the %M-vs-%B distinction is supported by the table's presence/absence, not by an explicit contrast note. **This is the 2nd CONSECUTIVE instance of the %B-for-full-month error (iter984 Q4 + iter985 Q4).**
+
+★ **DISPOSITION DEFERRED TO ORCHESTRATOR PHASE 6:** I verified the dialect fact only (%M = full month name CORRECT; %B = WRONG / not a valid Trino specifier; %b = abbreviated). The orchestrator MUST grep resources/ to classify:
+- (a) a resource CONTAINS `%B` for month-name → **RESOURCE DEFECT** (fix in place);
+- (b) a resource teaches `%M` correctly + findably → **RESPONDER slip** (synthesis broken-secondary padding, maybe no fix);
+- (c) NO resource covers date_format month-name codes → **findability gap** (candidate for a LIGHT additive note %M=full-month / %b=abbrev / %B=NOT-a-Trino-code).
+Given this is now 2-in-2, a LIGHT defang is warranted IF (b) or (c); do NOT prescribe beyond verifying the fact.
 
 ---
 
-## SCOPE NOTES
-- **Q2 KEY-CHECK verdict: aggregate-in-GROUP-BY did NOT recur — LEAD CORRECT + LEGAL — iter983 slip CONFIRMED ONE-OFF.** No FIX-A, no resource edit.
-- **Q2 single-query "won't work" = FALSE-JUSTIFICATION responder slip** — the query is LEGAL (per-account rows, different question), not illegal. Broken-secondary/false-justification family. No resource fix.
-- **Q4 `%B` should be `%M` = broken-secondary responder slip** — lead (format_datetime 'MMMM yyyy') correct. No resource fix.
-- **Q1 / Q3 CLEAN.**
-- TICS otherwise CLEAN: no QUALIFY-misuse (Q3 subquery-wrap, correctly absent) / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn-or-rule / PARTITIONED-BY-foreign-DDL / mid-churn / missing-CTE-col (Q3 projects all) / JOIN-fan-out / ts-minus-ts. The two slips (Q2 false-justification, Q4 %B) are both RESPONDER broken-secondary/false-justification slips against correct resources, NOT resource defects.
+## Scope notes
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +0.906 STRONG PASS; both dings are responder broken-secondary/false-justification slips with correct leads, no resource/findability gap. The iter983 aggregate-in-GROUP-BY slip is confirmed one-off (lead clean this iter).
-Re-probe next sweep:
-(a) another "compute a bucket/category from an aggregate then group/count" Q — confirm aggregate-in-GROUP-BY stays absent AND watch whether the responder keeps appending a false "single-query won't work" justification (recurrence → LIGHT additive note distinguishing legal-but-different-grain from illegal);
-(b) another Postgres-TO_CHAR / month-name-formatting Q — watch the `%B`/`%M` broken-secondary recur (2-in-2 → LIGHT defang: in any date_format card, mark %M=full-month / %B=NOT-a-Trino-code).
-Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
-NO resource edits. DO NOT bump training/state.json (already 984; passed=true preserved; final_iterations_remaining 0).
+- ★ **Q2 aggregate-in-GROUP-BY did NOT recur** — LEAD + explanation rule both CORRECT and LEGAL 467; **iter983 aggregate-in-GROUP-BY slip CONFIRMED a ONE-OFF over 2 consecutive clean re-probes (iter984 + iter985)**.
+- ★ **Q4 LEAD format_datetime correct; date_format `%B` should be `%M` — 2nd CONSECUTIVE broken-secondary recurrence (iter984 Q4 + iter985 Q4)**; classification (resource defect vs responder slip vs findability gap) **DEFERRED to orchestrator PHASE 6 resource grep**.
+- Q1 / Q3 CLEAN.
+- ALL OTHER TICS CLEAN: no QUALIFY-misuse / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn-or-rule (bool_or, count_if, format_datetime, date_format all real 467) / PARTITIONED-BY-foreign-DDL / mid-churn / missing-CTE-col (Q2 all cols projected+referenced) / JOIN-fan-out / ts-minus-ts / column-scope.
+
+## Recommendation = DEFAULT NO-OP pending PHASE-6 grep on Q4 %M/%B
+
+Margin +0.969 PASS; iter983 aggregate-in-GROUP-BY confirmed one-off. ONLY actionable item is the Q4 %B 2-in-2 broken-secondary — orchestrator grep resources/ to classify; if a resource teaches %M correctly+findably it's a responder synthesis-padding slip (re-probe-don't-churn); if no resource covers date_format month-name codes, a LIGHT additive note (%M=full-month / %b=abbrev / %B=NOT-a-Trino-code, cast DATE→timestamp for date_format) is the candidate fix. Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits this iteration. DO NOT bump training/state.json (already 985; passed=true preserved; final_iterations_remaining 0).
