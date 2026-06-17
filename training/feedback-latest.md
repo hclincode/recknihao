@@ -1,45 +1,43 @@
-# Judge Feedback — iter1030
+# Judge Feedback — iter1031
 
-**OVERALL: 4.78125 (76.5/16) — PASS** (threshold 3.5; margin +1.28125; OVERALL AVERAGE governs, no per-Q veto)
+**Overall: 4.78125 / 5 → PASS** (76.5/16; margin +1.28125; OVERALL AVERAGE governs, no per-Q veto)
 
-Verified BOTH directions vs trino.io/docs/467 (functions/string.html starts_with-EXISTS-literal-prefix / ends_with-ABSENT; functions/comparison.html LIKE `_`=single-char-wildcard / `%`=zero-or-more / ESCAPE-clause-for-literal / GREATEST-LEAST return-NULL-if-any-arg-NULL) — NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO, Hive Metastore) all 4 fit; no federation/auth angle.
+Verified BOTH directions vs RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/:
+- `functions/conversion.md` — typeof EXISTS, "Returns the name of the type of the provided expression" as a varchar; examples `typeof(123)`→`integer`, `typeof('cat')`→`varchar(3)`, `typeof(cos(2)+1.5)`→`double`.
+- `functions/array.md` — all_match EXISTS: "Returns `true` if all the elements match the predicate (a special case is when the array is empty); `false` if one or more don't match; `NULL` if the predicate returns `NULL` for one or more elements and `true` for all others." array_except: "elements in x but not in y, without duplicates."
+- `functions/datetime.md` — from_unixtime(unixtime) → `timestamp(3) with time zone` (CONFIRMED with time zone; seconds since epoch). Overloads: (unixtime), (unixtime, zone), (unixtime, hours, minutes) all → timestamp(3) WITH TIME ZONE; from_unixtime_nanos → timestamp(9) with time zone.
+- `sql/select.md` — INTERSECT "returns only the rows that are in the result sets of both"; defaults to DISTINCT if neither ALL/DISTINCT specified.
 
----
-
-## Per-question scores
-
-### Q1 — literal `promo_` prefix (KEY — FIX-A re-probe) — 4.8125 CLEAN ✅ FIX-A CONFIRMED
-- **LEAD `starts_with(promo_code, 'promo_')` CORRECT/safest** — string.html "Tests whether substring is a prefix of string", literal match, NO wildcard interpretation. The literal underscore in the prefix string is matched literally.
-- **Responder now EXPLICITLY warns `LIKE 'promo_%'` is WRONG** — comparison.html: `_` "matches any single character" (single-char WILDCARD), so bare `LIKE 'promo_%'` matches "promo" + ANY-one-char + rest (e.g. "promoXanything", "promoZcode") — does NOT require a LITERAL underscore as the 6th char.
-- **Escaped alternative `LIKE 'promo\_%' ESCAPE '\'` CORRECT** — ESCAPE clause confirmed comparison.html; escapes `_` to a literal underscore.
-- **iter1028/1029 LIKE-underscore misconception appears RESOLVED.** The iter1029 §651/§653 FIX-A (literal-`_`/`%`-prefix caveat at the starts_with/prefix card) reached the responder: where iter1028 Q2 used bare `LIKE 'ff_%'` as the predicate (3.875) and iter1029 Q1 appended `LIKE 'ff_%'` "works equally well" (4.0 defect, 2-in-2), iter1030 Q1 now (a) leads with `starts_with`, (b) actively flags bare `LIKE 'promo_%'` as wrong with the correct underscore-wildcard reason, and (c) offers the correct ESCAPE form. No relapse.
-- Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-
-### Q2 — device_type value-frequency — 4.75 CLEAN ✅
-- `SELECT device_type, COUNT(*) AS row_count ... GROUP BY device_type ORDER BY row_count DESC` — textbook value-counts. GROUP BY collapses to one row per device_type; COUNT(*) counts rows per group; ORDER BY ... DESC ranks most-frequent first. Correct and idiomatic.
-- Acc 5 / Comp 4.5 / Clar 4.75 / App 4.75
-
-### Q3 — GREATEST across columns + NULL caveat (KEY) — 4.8125 CLEAN ✅
-- `GREATEST(usd_amount, eur_amount, gbp_amount)` across columns CORRECT — comparison.html, row-wise max of the args.
-- **Caveat "GREATEST returns NULL if ANY arg is NULL" VERIFIED** — comparison.html "they return null if any argument is null" (Trino, like Oracle/MySQL/BQ); Postgres-contrast (PG ignores NULLs) correct. On a deals row with one populated + two NULL columns, bare GREATEST returns NULL — so the **COALESCE-wrap (COALESCE(col,0)) to floor NULLs is genuinely needed** to get "largest of the populated". Responder correctly diagnosed this and gave the wrap. Matches reference_trino_greatest_least_null.md.
-- Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-
-### Q4 — UNION ALL two labeled counts — 4.75 CLEAN ✅
-- `SELECT 'mobile' AS device_type, COUNT(*) ... WHERE device_type='mobile' UNION ALL SELECT 'desktop', COUNT(*) ... WHERE device_type='desktop' ORDER BY device_type` — two stacked labeled scalar-count rows. Correct.
-- **UNION ALL no-dedup** correct (keeps all rows, cheaper, no DISTINCT pass). ORDER BY applies to the WHOLE UNION result (trailing, after the final branch) — correct. GROUP BY alternative for many types is the right scaling note.
-- Acc 5 / Comp 4.5 / Clar 4.75 / App 4.75
+Prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore) — all 4 fit; no federation/auth angle.
 
 ---
 
-## TICS check
-CLEAN all 4 — no QUALIFY, no false semi-join, no fabricated function (starts_with real & literal; GREATEST real; ends_with correctly ABSENT), no regex-backslash slip, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no generate_subscripts, no broken "for completeness" secondary alternative. `::` cast ABSENT all 4.
+## Q1 — typeof (check data type of an expression)
+**Acc 4.75 / Comp 4.5 / Clar 4.75 / App 4.75 → 4.6875**
 
-## Defects
-NONE. All 4 fully correct and verified both directions.
+LEAD CORRECT: `typeof(expr)` exists (conversion.md) and returns the type-name as a varchar; `SELECT typeof(raw_payload) FROM orders LIMIT 1` then CAST is exactly the right diagnostic workflow; "one row enough" is correct. Minor: the illustrative `'varchar(255)'` is shown quoted as if it were a string literal output — typeof returns the type-name AS the value (e.g. `varchar(255)` / `json` / `varbinary`), not a quoted literal; harmless presentation. Also note typeof reports the STATIC/declared type after transforms (e.g. `varchar(255)`, or `json` if raw_payload is a JSON column), not a runtime-inferred narrower type — a small completeness nuance, not a defect. Verified-source citation present in answer (conversion.html) and accurate.
 
-## Recommendation — DEFAULT NO-OP
-Margin +1.28125; all 4 clean; both KEY questions resolved in the responder's favor. **The iter1029 §651/§653 LIKE-underscore FIX-A is CONFIRMED WORKING** — the responder now leads with starts_with AND proactively warns bare `LIKE 'promo_%'` is wrong (underscore = single-char wildcard) AND offers the ESCAPE form. The 2-in-2 literal-prefix recurrence is broken. NO resource edit; NO new FIX-A; NO git commit (orchestrator commits).
+## Q2 — all_match (all array strings non-empty, no UNNEST/subquery)
+**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125**
 
-Re-probe (monitor only): (a) literal-`_`/`%`-prefix — FIX-A confirmed working iter1030, downgrade to passive monitor; (b) GREATEST/LEAST NULL-if-any-NULL + Postgres-contrast + COALESCE-wrap; (c) GROUP-BY value-counts ORDER BY DESC; (d) UNION ALL no-dedup + trailing-ORDER-BY-on-whole-result + GROUP-BY-scaling-alternative.
+LEAD CORRECT & VERIFIED: `all_match(tags, x -> length(x) > 0)` — single expression, no UNNEST/subquery, `all_match(array(T), function(T,boolean))->boolean` (array.md). length() on varchar returns char count, >0 == non-empty: correct. The `cardinality(array_except(tags, filter(...nonempty...)))=0` alternative is a sound equivalent for the non-empty check (any empty/short element survives the except → cardinality>0); array_except dedups but that doesn't affect the =0 emptiness test, so not misleading. COMPLETENESS NUANCE (not a defect): empty-array → `all_match` returns `true` (vacuous, array.md special case) and NULL-element → returns NULL; worth a one-liner but immaterial to the asked tags-non-empty check. No fabricated function.
 
-Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310). MUST NOT bump state.json (already 1030; orchestrator commits).
+## Q3 — from_unixtime (epoch seconds → timestamp, group by day)
+**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125**
+
+FULLY CORRECT & VERIFIED: `from_unixtime(created_epoch)` then `date_trunc('day', ...)` to group by day. Result type stated as `timestamp(3) with time zone` — CONFIRMED against datetime.md (carried-correction reference_trino_from_unixtime_tz.md: ALL overloads incl 1-arg return WITH TIME ZONE). The seconds-not-millis warning (divide by 1e3 if millis) is exactly the right footgun to flag for an epoch column. date_trunc('day') for daily grouping correct.
+
+## Q4 — INTERSECT (users in both trial and paid cohorts)
+**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125**
+
+CORRECT & VERIFIED: INTERSECT of two `SELECT user_id ... WHERE plan='trial'/'paid'` returns users present in both (select.md). "INTERSECT dedups (each user_id once)" CORRECT — defaults to DISTINCT (select.md). "NULL-safe" is accurate for Trino set-operation semantics (NULLs compared as equal, consistent with the NULL-safe EXCEPT family) and in any case immaterial here since user_id is non-NULL; not misleading. "No JOIN needed / cleaner than JOIN" correct — INTERSECT avoids dup-fan-out and the explicit join predicate. Good contrast with the JOIN approach.
+
+---
+
+## TICS scan
+`::` ABSENT all 4. No QUALIFY / no false semi-join / no fabricated function (typeof / all_match / from_unixtime / array_except / INTERSECT all real & verified) / no regex-backslash / no INTERVAL quarter-week / no OFFSET-before-LIMIT / no generate_subscripts / no broken-secondary-alternative. The Q2 array_except alternative is sound, not a broken padding append.
+
+## RECOMMENDATION = DEFAULT NO-OP
+Margin +1.28125; all 4 clean and verified both directions; both type-introspection (typeof) and the from_unixtime WITH-TIME-ZONE carried correction resolved in the responder's favor. No source-verified resource defect; no 2+ consecutive same-shape slip. NO resource edit; NO FIX-A; NO git commit.
+
+Re-probe (monitor only, no churn): (a) typeof returns type-name varchar (unquoted value) — watch for presenting it as a quoted string literal or claiming runtime-narrowed type; (b) all_match(arr, x->pred) no-UNNEST + empty-array→true / NULL-element→NULL completeness note; (c) from_unixtime SECONDS-input + timestamp(3) WITH TIME ZONE + millis÷1e3; (d) INTERSECT distinct-default + NULL-equal set semantics + cleaner-than-JOIN. Federation r22 §13.x hard-locked, NOT probed. MUST NOT bump state.json (already 1031; orchestrator handles commits).
