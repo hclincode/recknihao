@@ -1,69 +1,90 @@
-# Judge Feedback — iter1034
+# Judge Feedback — iter1035
 
-**Overall: Q1 4.625 / Q2 4.5 / Q3 4.8125 / Q4 4.75 → 4.671875 PASS** (margin +1.171875; overall average governs, no per-Q veto). Verified BOTH directions vs RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO + Hive Metastore) — all 4 fit; no federation/auth angle, federation hard-locked NOT probed.
+**OVERALL: 4.8125 — PASS** (margin +1.3125 over 3.5 threshold; overall average governs, no per-Q veto)
+
+Verified BOTH directions against RAW git-tag 467 source
+(raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/...), NOT resources/.
+Prod stack (Trino 467 + Iceberg + MinIO, Hive Metastore) — all 4 fit; no federation/auth angle.
 
 ---
 
-## Q1 — approx_percentile ARRAY p50/p90/p99 per service, one call vs three — **4.625**
+## Q1 — week-over-week per customer in ONE query (was 2 queries + app math)
+**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.875 → 4.84375 CLEAN**
 
-Verified `functions/aggregate.md` (RAW 467): approx_percentile has **4 overloads**, including the ARRAY form
-`approx_percentile(x, percentages) -> array<[same as x]>` — accepts an array of percentages and returns an array of values. EXISTS and returns an array. CORRECT.
+- `SUM(metric) FILTER (WHERE ...)` conditional aggregation VERIFIED valid 467 syntax:
+  aggregate.md — "The `FILTER` keyword can be used to remove rows from aggregation processing
+  with a condition expressed using a `WHERE` clause"; form `aggregate_function(...) FILTER (WHERE <condition>)`.
+- this_week = `event_date >= date_trunc('week', current_date)`; last_week =
+  `>= date_trunc('week', current_date) - INTERVAL '7' DAY AND < date_trunc('week', current_date)` —
+  correct half-open windows; both boundaries anchored to the SAME `date_trunc('week')` so they are
+  contiguous and non-overlapping regardless of which weekday the week starts on.
+  `current_date - INTERVAL '7' DAY` is valid date arithmetic; INTERVAL '7' DAY uses a legal DAY qualifier.
+- date_trunc('week') Monday-start (ISO week, Trino day-of-week 1=Monday) — consistent w/ 467; the
+  query is correct even if the user's "week" boundary differs because both columns share the anchor.
+- Single pass, `GROUP BY customer_id`, no self-join — DIRECTLY eliminates the 2-query + app-layer-math
+  pain point. Engineer knows exactly what to do.
 
-- `approx_percentile(response_time_ms, ARRAY[0.5, 0.9, 0.99])` → array of 3 percentiles in input order — CORRECT.
-- Arrays in Trino are **1-based**, so unpacking `pcts[1]` p50 / `pcts[2]` p90 / `pcts[3]` p99 is **CORRECT** SQL.
-- `current_date - INTERVAL '7' DAY` is valid date arithmetic — CORRECT.
-- "One sketch, far faster than 3 separate calls" — CORRECT (single T-Digest pass vs three).
-- GROUP BY service_name + WHERE event_ts >= ... for past week — CORRECT and partition-pruning-friendly.
+## Q2 — sum an array of prices WITHOUT expanding to rows
+**Acc 5 / Comp 4.75 / Clar 4.625 / App 4.75 → 4.78125 CLEAN**
 
-**Prose 0-based slip (assessed):** the explanatory prose says "call them p[0], p[1], p[2]" (0-based) while the actual SQL correctly uses `pcts[1]/[2]/[3]` (1-based). This is a **self-contradictory prose aside sitting next to CORRECT SQL** — the copyable SQL is right. Severity = **minor CLARITY ding only, NOT an accuracy defect**: the engineer who copies the SQL gets the right answer; only the narration is internally inconsistent. Acc 5 / Comp 4.75 / Clar 4.0 / App 4.75 → **4.625**.
+- **array_sum FINDING: `array_sum` does NOT exist in Trino 467.** Verified neutrally against
+  functions/array.md at the 467 git tag — no `array_sum` function is defined anywhere in the file.
+- Therefore `reduce(line_items, 0, (s, price) -> s + price, s -> s)` is the **CANONICAL correct
+  approach**, not merely a workaround. The answer is fully correct AND complete; there is NO
+  completeness gap for omitting array_sum because the built-in does not exist.
+- reduce() 4-arg signature VERIFIED EXACT vs array.md:
+  `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R`.
+  Responder's `(line_items, 0, (sum,price)->sum+price, s->s)` matches positionally; identity
+  output function `s->s` is correct (docs note "It may be the identity function (`i -> i`)").
+- One row in / one row out, no GROUP BY — satisfies "without expanding to rows" exactly.
+- ALT `CROSS JOIN UNNEST(line_items) AS t(price)` + SUM + GROUP BY is a VALID alternative
+  (the very thing the user wanted to avoid, correctly framed as the fallback). Not a broken-secondary.
+- Minor clarity ding only (two paths could mildly distract); nothing inaccurate.
 
-## Q2 — rank customers, ties share rank WITHOUT gaps; user's example "three tied 2nd → next 4th" — **4.5**
+## Q3 — avg days created_at→renewed_at, NULL (not zero/error) on no qualifying rows
+**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125 CLEAN**
 
-Verified `functions/window.md` (RAW 467): **RANK** "tie values in the ordering will produce gaps in the sequence"; **DENSE_RANK** "tie values do not produce gaps in the sequence." Responder's stated behaviors (RANK: tied-2nd → next 5; DENSE_RANK: tied-2nd → next 3) are **EXACTLY correct**.
+- `date_diff('day', created_at, renewed_at)` VERIFIED → bigint
+  (datetime.md `date_diff(unit, timestamp1, timestamp2) -> bigint`).
+- `AVG(...) WHERE renewed_at IS NOT NULL` — AVG ignores NULLs and returns NULL on empty input
+  VERIFIED: aggregate.md "all of these aggregate functions ignore null values and return null for
+  no input rows or when all values are null" → satisfies the "NULL not 0/error" requirement EXACTLY.
+- WHERE renewed_at IS NOT NULL is sufficient; even if created_at were NULL, date_diff yields NULL and
+  AVG skips it — still safe. Correctly explains no special logic needed. Sound.
 
-**Question-intent call (assessed):** The user's requirement is **internally inconsistent** — "WITHOUT leaving gaps" = DENSE_RANK, but the example "three tied 2nd → next 4th" matches NEITHER RANK(=5) NOR DENSE_RANK(=3). No Trino window function yields the muddled example. Choosing **DENSE_RANK** (honoring the EXPLICIT "without gaps" requirement) AND clearly explaining BOTH behaviors so the user can self-diagnose their contradiction is a **sound, defensible answer**. The user's muddled example is NOT ground truth and is correctly not treated as such. This should NOT be penalized heavily.
+## Q4 — split users into 4 equal groups by session length (quartiles)
+**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125 CLEAN**
 
-- `DENSE_RANK() OVER (ORDER BY SUM(order_amount) DESC)` with GROUP BY customer_id — CORRECT (aggregate inside window over grouped rows is valid in Trino).
-- `WHERE date_trunc('month',created_at)=date_trunc('month',current_date)` for "this month" — CORRECT.
-
-Minor App ding: could have flagged the user's example contradiction even more explicitly ("your example matches neither — confirm which you want"); the engineer still must reconcile their own contradictory spec. Acc 5 / Comp 4.5 / Clar 4.5 / App 4.0 → **4.5**.
-
-## Q3 — per-region subtotals + grand total in ONE query, no UNION — **4.8125**
-
-Verified `sql/select.md` (RAW 467): `GROUP BY ROLLUP(x)` single column ≡ `GROUPING SETS ((x), ())` — detail + grand total. GROUPING: "a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise" → detail row GROUPING(region)=0, grand-total row GROUPING(region)=1. Responder's mapping is **EXACT**.
-
-- `GROUP BY ROLLUP(region)` → detail + grand total, no UNION — CORRECT.
-- `CASE GROUPING(region) WHEN 0 THEN 'Region Detail' WHEN 1 THEN 'Grand Total'` — labels CORRECT.
-- `ORDER BY CASE WHEN GROUPING(region)=1 THEN 1 ELSE 0 END, region` — pushes grand total to the bottom, details sorted by region — CORRECT and clean.
-
-Fully correct both directions. Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → **4.8125**.
-
-## Q4 — YoY monthly revenue 2024 vs 2023 side-by-side per row — **4.75**
-
-Verified `functions/datetime.md` (RAW 467): `date_add('month', -12, ts)` — "Subtraction can be performed by using a negative value" — subtracts 12 months, CORRECT. EXTRACT(YEAR/MONTH FROM timestamp) → bigint, both valid.
-
-- Self-join of two identical monthly-aggregate subqueries — CORRECT approach for pulling prior-year into the same row.
-- Join `ON date_add('month',-12,cur.month_start)=prev.month_start` — **fully anchors same-month-prior-year**; the additional `EXTRACT(MONTH FROM cur)=EXTRACT(MONTH FROM prev)` equality is **redundant but harmless** (not a defect; both conditions hold simultaneously).
-- `WHERE cur year=2024` filters output to 2024 rows with 2023 matched — CORRECT.
-- Output month_num, revenue_2024, revenue_2023, `yoy_growth_pct = ROUND((cur-prev)*100.0/NULLIF(prev,0),2)` — NULLIF(prev,0) guards divide-by-zero, CORRECT. (INTEGER/DECIMAL `/` by zero throws in Trino; NULLIF correctly avoids it.)
-
-Produces 2024 vs 2023 side by side correctly. Minor App ding: a self-join is slightly heavier than single-pass conditional aggregation (SUM(CASE WHEN year=2024...)) — but the self-join is correct and readable, not a defect. Acc 5 / Comp 4.75 / Clar 4.75 / App 4.5 → **4.75**.
+- `NTILE(4) OVER (ORDER BY session_duration)` VERIFIED — window.md: "Divides the rows for each window
+  partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."
+  Answers the user's "is there a function?" directly — YES, no manual cutoffs + CASE needed.
+- Remainder distribution VERIFIED EXACT: "If the number of rows in the partition does not divide evenly
+  into the number of buckets, then the remainder values are distributed one per bucket, starting with
+  the first bucket" (docs example 6 rows / 4 buckets → 1 1 2 2 3 4). Responder's "remainder rows go to
+  earliest buckets" is correct.
+- ASC → bucket 1 = bottom 25%; DESC → bucket 1 = top 25% — correct.
+- "NTILE can't be used in WHERE → wrap in CTE then filter" — correct; window functions are not allowed
+  in WHERE (evaluated after WHERE/GROUP BY), so a CTE/subquery wrapper is required. Confirmed.
 
 ---
 
 ## TICS scan
-`::` cast ABSENT all 4. No QUALIFY, no false semi-join, no fabricated function (approx_percentile / RANK / DENSE_RANK / ROLLUP / GROUPING / date_add / EXTRACT all real & verified), no regex-backslash, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no broken-secondary, no over-warning folklore. All SQL is valid Trino 467 dialect.
+`::` ABSENT all 4. CLEAN — no QUALIFY, no false-semi-join, no fabricated functions (reduce / date_diff /
+NTILE / AVG / FILTER all real & verified; array_sum correctly NOT used since it does not exist), no
+regex-backslash, no INTERVAL quarter/week (INTERVAL '7' DAY legal), no OFFSET-before-LIMIT, no
+broken-secondary (Q2 UNNEST alt is valid), no over-warning folklore.
 
-## Source-verified defect
-**NONE.** Q1 prose 0-based slip is a self-contradictory narration aside next to CORRECT 1-based SQL → minor clarity ding, NOT an accuracy defect, NOT a findable resource gap, 1st-occurrence. No 2-in-2 same-shape recurrence.
+## Source-verified defects
+NONE. All four answers fully correct and verified both directions.
 
-## Recommendation — DEFAULT NO-OP
-Margin +1.171875; all 4 PASS; both KEY question-intent calls (Q1 array-overload + 1-based indexing, Q2 DENSE_RANK on contradictory spec) resolved in the responder's favor; Q3 GROUPING bitmask and Q4 self-join YoY both fully correct & source-verified. No source-verified resource defect, no 2-consecutive same-shape slip → **NO resource edit; NO FIX-A; NO git commit.** MUST NOT bump state.json (already 1034; orchestrator commits).
+## RECOMMENDATION — DEFAULT NO-OP
+Margin +1.3125; all 4 clean; the KEY Q2 array_sum-vs-reduce call resolves in the responder's favor
+(reduce is canonical because array_sum does not exist in 467). No source-verified resource defect,
+no 2-in-2 same-shape slip. NO resource edit; NO FIX-A; NO git commit.
+MUST NOT bump state.json (teacher already at 1035; orchestrator commits).
 
-**Monitor only (no action):**
-- (a) approx_percentile ARRAY overload + 1-based array indexing — watch for 0-based prose/SQL relapse; if the SQL itself goes 0-based that IS a defect.
-- (b) RANK gaps vs DENSE_RANK no-gaps when user spec is self-contradictory — confirm responder keeps explaining both.
-- (c) ROLLUP single-col GROUPING 0=detail/1=grand-total mapping.
-- (d) self-join / conditional-aggregation YoY same-month-prior-year via date_add('month',-12,...).
-
+Re-probe (monitor only): (a) FILTER-conditional-aggregation week-over-week single-pass vs self-join;
+(b) reduce() 4-arg array-sum canonical (array_sum absent) vs UNNEST+SUM fallback; (c) date_diff('day')
+bigint + AVG-ignores-NULL/returns-NULL-on-empty for the "NULL not zero" requirement; (d) NTILE(n)
+quartile/quantile + remainder-to-earliest-buckets + ASC/DESC bucket-1 meaning + window-not-in-WHERE-wrap-CTE.
 Federation r22 §13.x hard-locked NOT probed (4.49944/310).
