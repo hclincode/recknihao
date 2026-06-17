@@ -1,83 +1,53 @@
-# iter981 Judge Feedback — EXTENDED PHASE breadth sweep
+# iter982 Judge Feedback — EXTENDED PHASE breadth sweep
 
-**OVERALL 4.6875 STRONG PASS** (Q1 4.75 / Q2 4.75 / Q3 4.5625 / Q4 4.6875 = 18.75/4 = 4.6875; margin +1.19; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.5547 STRONG PASS** (Q1 4.3125 / Q2 4.59375 / Q3 4.5625 / Q4 4.75 = 18.21875/4 = 4.5547; margin +1.05). OVERALL AVERAGE governs — NO per-Q veto.
 
-All 4 questions verified BOTH directions against trino.io/docs/467 (NOT resources/):
-- functions/datetime.html — `date(x)` IS a documented 467 function, exact doc text "This is an alias for CAST(x AS date)"; INTERVAL '90' DAY valid; `current_timestamp - INTERVAL '90' DAY` valid (timestamp ± interval shown in operators table).
-- functions/aggregate.html — FILTER (WHERE ...) clause "supported for all aggregate functions", example `count(*) FILTER (where ...)`.
-- sql/select.html — HAVING must REPEAT the full aggregate expression; SELECT output aliases are NOT referenceable in HAVING (doc example repeats `sum(acctbal)` in HAVING, not the alias `totalbal`).
-- WebSearch 2026-06-17 — LEFT JOIN anti-join recency-filter semantics: a right-table date predicate placed in a post-join WHERE drops NULL-padded unmatched rows and collapses the LEFT JOIN into an INNER JOIN; the filter must live in the ON clause (or in a NOT EXISTS subquery). Standard across all SQL engines incl. Trino.
+All dialect/DDL/logic claims VERIFIED BOTH DIRECTIONS vs trino.io/docs/467 (NOT resources/):
+- connector/iceberg.html — CREATE uses `WITH (partitioning = ARRAY[...])`, ALTER uses `SET PROPERTIES partitioning = ARRAY[...]`, bucket transform `bucket(col, N)` column-first. `PARTITIONED BY (...)` is Spark/Hive and does NOT parse in Trino. CONFIRMED.
+- functions/array.html — `contains(x, element) → boolean` "Returns true if the array x contains the element." CONFIRMED.
+- functions/datetime.html — `date_diff(unit, ts1, ts2)` returns `ts2 - ts1` in whole units (day-aware, complete units); later arg third → positive. CONFIRMED.
+- ANY() array-membership (Postgres) is NOT Trino — Trino's `= ANY (SELECT...)` is a quantified subquery comparison, not array membership; `col = ANY(array_col)` is a parse error. Responder's "not Trino" is correct.
 
-Q2 and Q4 logic TRACED on concrete examples. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all answers fit.
-
----
-
-## Q1 — CTR > 5% per campaign, conditional aggregation + subqueries — 4.75 CLEAN
-
-`COUNT(*) FILTER (WHERE event_type='click')` / `FILTER (WHERE event_type='send')` + `ROUND(100.0*clicks/NULLIF(sends,0),2)` + `HAVING COUNT(*) FILTER (WHERE event_type='send')>0 AND 100.0*COUNT(*) FILTER(WHERE ...click)/NULLIF(COUNT(*) FILTER(WHERE ...send),0) > 5.0 ORDER BY ctr_pct DESC`.
-
-- FILTER clause VERIFIED valid 467 (supported for all aggregates).
-- NULLIF div-guard correct — INTEGER `/` by zero THROWS DIVISION_BY_ZERO in 467; NULLIF(sends,0) makes a 0-send campaign yield NULL not an error.
-- 100.0* forces decimal arithmetic (else integer division floors) — correct.
-- **HAVING-alias verdict: CORRECT.** The HAVING repeats the full FILTER aggregate expressions; it does NOT reference the SELECT alias `ctr_pct`. VERIFIED 467 does NOT allow output aliases in HAVING (doc example repeats the aggregate), so repeating the FILTER expressions is the right (and only valid) form. No defect.
-- CASE WHEN alternative for the conditional aggregation is also valid.
-
-Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q2 — highest single-day revenue per store, past 90d — 4.75 CLEAN — THE DATE() KEY CHECK
-
-`WITH daily_revenue AS (SELECT store_id, DATE(timestamp) AS order_date, SUM(order_total) AS daily_total FROM orders WHERE timestamp >= current_timestamp - INTERVAL '90' DAY GROUP BY store_id, DATE(timestamp)) SELECT store_id, MAX(daily_total) FROM daily_revenue GROUP BY store_id` + which-day JOIN variant + ROW_NUMBER tie note.
-
-- **DATE() VERDICT: VALID 467 FUNCTION — NOT a MySQL/Spark-ism.** VERIFIED trino.io/docs/467 functions/datetime.html: `date(x)` is documented, exact text "This is an alias for CAST(x AS date)". So `DATE(timestamp)` cleanly extracts the calendar date. Q2 is FULLY clean — no dialect ding. (CAST(timestamp AS DATE) / date_trunc('day',ts) are equivalent alternatives, but DATE() is itself a documented built-in, so the responder's choice is correct, not an imported foreign-prior.)
-- Two-level aggregation LOGIC correct: per-store-per-day SUM in CTE -> MAX(daily_total) per store. TRACE store S over 3 days {120, 340, 90}: daily_revenue rows (S,d1,120)(S,d2,340)(S,d3,90) -> MAX=340 the highest single-day. CORRECT.
-- which-day variant (JOIN daily_revenue to max-per-store on store_id AND daily_total; ROW_NUMBER tiebreaker for two days tying the max) correct.
-- `current_timestamp - INTERVAL '90' DAY` VERIFIED valid (DAY is a supported interval qualifier; timestamp ± interval valid).
-- CTE projects store_id/order_date/daily_total — all three referenced downstream, no missing-CTE-column defect.
-
-Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q3 — current total storage per workspace, signed byte_size — 4.5625 CLEAN
-
-`SELECT workspace_id, SUM(byte_size) AS current_total_bytes_used FROM storage_events GROUP BY workspace_id ORDER BY ... DESC`.
-
-- Signed SUM nets correctly: uploads contribute +byte_size, deletions -byte_size; SUM over signed values = net current storage. VERIFIED arithmetic — correct.
-- "current total = cumulative sum of ALL events, no date filter needed" is the RIGHT interpretation. A date filter would give a per-window delta, not the standing total — the responder correctly avoided one.
-- No division / no dedup needed — confirmed; each event is a distinct signed delta.
-- Minor comp note (not a defect): a brief caveat that this assumes no double-counted/duplicate events and that a negative running balance would signal a data-quality issue could add value, but the explicit ask (is a simple GROUP BY SUM enough?) was answered correctly and completely.
-
-Acc 4.625 / Clar 4.625 / App 4.5 / Comp 4.5.
-
-## Q4 — products with ZERO sales this month, anti-join + recency — 4.6875 CLEAN — THE DATE-FILTER-IN-ON-CLAUSE CHECK
-
-`SELECT p.product_id, p.product_name FROM products p LEFT JOIN order_line_items oli ON p.product_id=oli.product_id AND DATE_TRUNC('month', oli.order_timestamp)=DATE_TRUNC('month', current_timestamp) WHERE oli.product_id IS NULL ORDER BY p.product_id` + NOT EXISTS alternative with the date filter INSIDE the subquery.
-
-- **ANTI-JOIN-DATE-FILTER-IN-ON-CLAUSE: CONFIRMED CORRECT.** The responder put the month predicate in the ON clause and EXPLICITLY explained that a post-join WHERE on the right table's column (oli.order_timestamp) would turn the LEFT JOIN into an INNER JOIN and break no-match detection — and showed the WRONG form. VERIFIED correct (standard SQL outer-join semantics, holds in Trino 467).
-- TRACE (products P1/P2/P3; oli: P1 sold this month, P2 sold last month only, P3 never): ON-clause month filter -> P1 matches a this-month row (oli.product_id NOT NULL -> dropped by WHERE IS NULL, correct, P1 HAS this-month sales); P2's only rows are last-month so ON month-condition fails -> NULL-padded -> IS NULL -> KEPT (correct, zero sales THIS month); P3 no rows -> NULL-padded -> KEPT. Result {P2,P3} = exactly products with zero sales this month. CORRECT.
-- Counter-trace of the WRONG form: month filter in WHERE -> P2's NULL-padded row has order_timestamp=NULL -> DATE_TRUNC('month',NULL)=... -> NULL -> UNKNOWN -> row dropped -> P2 wrongly excluded. Responder's explanation matches.
-- NOT EXISTS alternative with the date filter INSIDE the correlated subquery is also correct (the recency predicate scopes the existence check, not a post-join filter).
-- LEFT JOIN/IS NULL correctly described as an anti-join — NOT mislabeled a SemiJoin (the iter960/963/978 false-mechanism family did NOT recur here).
-
-Acc 4.75 / Clar 4.625 / App 4.75 / Comp 4.625.
+Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all answers fit.
 
 ---
 
-## Scope notes
+## Q1 — slow `GROUP BY user_id COUNT(*)` — 4.3125 — THE KEY CHECK (PARTITIONED-BY foreign-DDL, aside slip)
+PERF LEAD CORRECT: "COUNT(*) is NOT the problem — it's the full scan"; filter raw cols in WHERE before GROUP BY (`WHERE occurred_at >= current_date - INTERVAL '30' DAY` → partition pruning); EXPLAIN `constraint=` check. All accurate.
 
-- **Q2 DATE() verdict (explicit per directive): `date(x)` IS a documented Trino 467 function — alias for CAST(x AS date) — NOT a MySQL/Spark-ism.** Q2 is fully clean with no dialect ding.
-- **Q4 anti-join-date-filter-in-ON-clause (explicit per directive): CORRECT.** Date predicate in ON clause + WHERE right.key IS NULL preserves the anti-join; the responder correctly explained the post-join-WHERE-collapses-to-INNER-JOIN trap and gave the NOT EXISTS alternative with the filter inside the subquery.
-- Q1 HAVING repeats the full FILTER aggregate expressions (does NOT use the ctr_pct alias) — correct, since 467 disallows output aliases in HAVING.
+**DEFECT (aside only): twice writes the CREATE-table partition form as `PARTITIONED BY day(occurred_at)`** ("If your events table is partitioned by day (PARTITIONED BY day(occurred_at))..." and "start with PARTITIONED BY day(occurred_at)"). VERIFIED FOREIGN DDL — Trino 467 Iceberg CREATE uses `WITH (partitioning = ARRAY['day(occurred_at)'])`; `PARTITIONED BY (...)` is Spark/Hive and would NOT parse.
 
-## Tics — ALL CLEAN
+- **RESOURCE-vs-SLIP = RESPONDER imported-Spark-prior SLIP, NOT a resource defect.** r09 L127 DO-NOT-WRITE bans `PARTITIONED BY` findably; r09 L73 teaches `WITH(partitioning=ARRAY[...])`.
+- **3rd lifetime PARTITIONED-BY instance (iter945 Q2 + iter977 Q2 + iter982 Q1), NON-CONSECUTIVE** (iter978 partition-DDL re-probe was CLEAN — used correct ALTER SET PROPERTIES).
+- **INTERNAL INCONSISTENCY confirmed: Q3 of THIS SAME response uses the CORRECT `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['identity(plan_name)']` form.** The responder knows the right syntax; it slipped only on the CREATE form in Q1's aside. Reinforces this is an intermittent imported-prior slip, not a knowledge/resource gap.
+- Acc 3.75 / Clar 4.5 / App 4.5 / Comp 4.5.
 
-No QUALIFY-misuse; no false-mechanism semi-join mislabel (Q4 LEFT JOIN/IS NULL correctly named anti-join); no MAX(varchar)-as-latest (Q2 MAX over numeric daily_total + ROW_NUMBER tiebreaker); no percent_rank inversion; no fabricated function/rule (Q2 DATE() VERIFIED REAL — did NOT assume fabrication); no PARTITIONED-BY foreign DDL; no broken secondary / false justification; no mid-churn; no missing-CTE-column (Q2 CTE projects + references all three cols); no JOIN fan-out (Q4 anti-join, no fan-out; Q2 pre-aggregates per store-day); no ts-minus-ts (Q2 uses timestamp - INTERVAL literal, which IS valid arithmetic).
+## Q2 — "event B within N days of event A" without slow self-join — 4.59375 CLEAN (modulo minor comp)
+`(SELECT user_id, MIN(occurred_at) AS signup_ts FROM events WHERE event_type='signup' GROUP BY user_id) s INNER JOIN events p ON s.user_id=p.user_id AND p.event_type='purchase' AND date_diff('day', s.signup_ts, p.occurred_at) BETWEEN 0 AND 7`.
+- **date_diff('day', signup_ts, purchase_ts) BETWEEN 0 AND 7 VERIFIED CORRECT** — day-aware, later-arg-third → positive, BETWEEN inclusive, NO ts-minus-ts (correctly avoided). MIN-signup subquery + INNER JOIN is sound and avoids the slow N×N self-join the engineer feared.
+- **Minor comp ding (NOT a defect):** the Q asked "how many users" (a single count / `COUNT(DISTINCT user_id)`), but the answer returns per-user purchase counts. The date_diff windowing logic — the engineer's actual concern — is fully correct.
+- Acc 4.75 / Clar 4.75 / App 4.625 / Comp 4.25.
 
-## Recommendation = DEFAULT NO-OP
+## Q3 — ACTIVE subscriptions by plan_name scans too much — 4.5625 CLEAN (modulo minor comp)
+`GROUP BY plan_name COUNT(*)` + scan diagnosis (partition pruning works only on partition cols; file-level min/max less effective on a non-partition col with random row order) + fixes: `ALTER TABLE iceberg.subscriptions SET PROPERTIES partitioning = ARRAY['identity(plan_name)']` (low cardinality) or `bucket(plan_name, 16)` (high), or `ARRAY['day(created_at)', 'identity(plan_name)']`, or a daily rollup.
+- **ALTER SET PROPERTIES partitioning form VERIFIED CORRECT Trino 467** (contrast Q1's wrong PARTITIONED BY — same response, right form here). bucket(plan_name,16) column-first correct. Diagnosis is accurate.
+- **Minor comp ding:** dropped the `WHERE status='active'` the question implied ("ACTIVE subscriptions"). The partition/scan reasoning is the substance and is correct.
+- Acc 4.75 / Clar 4.625 / App 4.625 / Comp 4.25.
 
-Margin +1.19, all 4 answers clean, zero responder slips this sweep. No resource defect, no findability gap. No FIX-A. ZERO resource edits.
+## Q4 — array `tags` membership; does Trino-on-Iceberg understand arrays? — 4.75 CLEAN
+`WHERE contains(tags, 'electronics')`.
+- **`contains(array, element) → boolean` VERIFIED valid 467.** Postgres `col = ANY(array)` correctly noted as NOT Trino (parse error). Multi-tag AND/OR composition correct. `CROSS JOIN UNNEST(tags) AS t(tag)` per-tag-row alternative correct.
+- Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-Re-probe next sweep:
-- (a) another date-extraction Q to confirm DATE()/CAST-AS-DATE/date_trunc('day',...) all stay correctly treated (DATE() is a real 467 fn — should never be flagged as foreign).
-- (b) another anti-join-with-recency Q (date filter in ON clause OR NOT EXISTS subquery; confirm the post-join-WHERE-breaks-it explanation + correct anti-join naming both persist; 2 consecutive clean retires the iter978 SemiJoin-mislabel concern further).
+---
 
-Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
-DO NOT bump training/state.json (already 981; passed=true preserved; final_iterations_remaining 0).
+## SCOPE / TICS
+- **Q1 PARTITIONED-BY foreign-DDL = RESPONDER imported-Spark-prior SLIP (aside only), NOT a resource defect** — r09 L127 bans it findably, r09 L73 teaches the correct WITH(partitioning=ARRAY[...]). 3rd lifetime instance (iter945 Q2 + iter977 Q2 + iter982 Q1), NON-CONSECUTIVE. INTERNAL INCONSISTENCY: Q3 same response uses the correct ALTER SET PROPERTIES form → responder knows the syntax, slipped on the CREATE aside.
+- All other tics CLEAN: no QUALIFY / false-mechanism-semi-join-mislabel / MAX(varchar)-as-latest / percent_rank-inversion / fabricated-fn-or-rule / broken-secondary / false-justification / unsupported-perf-claim / mid-churn / missing-CTE-col / JOIN-fan-out (Q2 used a deliberate constrained JOIN, not a fan-out bug) / ts-minus-ts (Q2 correctly uses date_diff).
+
+## RECOMMENDATION = DEFAULT NO-OP
+Margin +1.05; both non-clean items are responder slips/minor-comp, no resource or findability gap. The PARTITIONED-BY slip is the 3rd lifetime instance but NON-CONSECUTIVE and confined to a CREATE-form aside while the response simultaneously demonstrates the correct ALTER form — re-probe-don't-churn. Consider a LIGHT defang near r09 L127 ONLY if PARTITIONED-BY recurs CONSECUTIVELY (2-in-2) on the next sweep.
+
+Re-probe next sweep: (a) another CREATE-partitioned-table / "how do I partition this table" Q — watch whether `WITH (partitioning = ARRAY[...])` is emitted unaided vs the PARTITIONED-BY slip; (b) another array-membership / array-column Q (contains / UNNEST stay correct).
+
+Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits. DID NOT bump training/state.json (already 982; passed=true preserved; final_iterations_remaining 0).
