@@ -1,48 +1,61 @@
-# iter974 Judge Feedback — EXTENDED PHASE breadth sweep
+# iter975 Judge Feedback — EXTENDED PHASE breadth sweep
 
-**OVERALL 4.50 STRONG PASS** (Q1 4.69 / Q2 4.50 / Q3 4.81 / Q4 4.00 = 18.00/4 = 4.50; margin +1.00; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 3.94 PASS** (Q1 3.81 / Q2 2.63 / Q3 4.81 / Q4 4.50 = 15.75/4 = 3.9375; margin +0.44 THIN; OVERALL AVERAGE governs, NO per-Q veto).
 
-All 4 Qs verified BOTH directions vs trino.io/docs/467 (functions/datetime.html date_trunc return type, sql/select.html default window frame, functions/aggregate.html count distinct) + WebSearch on Trino decorrelation/anti-join, 2026-06-17 — NOT against resources/. Q2 conversion logic TRACED on a concrete example. Prod stack (Trino 467 Iceberg + Hive Metastore, on-prem MinIO) — answers fit.
-
----
-
-## Q1 — DISTINCT users per day this month — 4.69 (Acc 4.5 / Clar 4.75 / App 4.75 / Comp 4.75)
-LEAD CORRECT. `SELECT date_trunc('day', login_timestamp) AS login_day, COUNT(DISTINCT user_id) ... GROUP BY 1 ORDER BY 1`.
-- VERIFIED datetime.html: `date_trunc(unit, x) → [same as input]`; with a TIMESTAMP arg it returns a **TIMESTAMP truncated to midnight** (`2022-10-20 00:00:00.000`), **NOT a DATE**. The responder's claim "returning a DATE value" is a **minor type imprecision** — the grouping/ordering still work correctly because all same-day timestamps collapse to the same midnight TIMESTAMP. Only a small accuracy ding.
-- COUNT(DISTINCT user_id) (not COUNT(*)) — CORRECT, exactly the right call for "distinct users".
-- GROUP BY 1 ordinal — VALID Trino.
-- partitioning=ARRAY['day(login_timestamp)'] — valid Iceberg transform (matches r09 canonical).
-- MINOR completeness: did NOT add a `WHERE login_timestamp >= date_trunc('month', current_date)` scope-to-"this-month" filter (Q said "each day this month"). Small comp ding; the per-day aggregation is otherwise exactly what was asked.
-
-## Q2 — % of month's signups who ever purchased — 4.50 (Acc 4.5 / Clar 4.5 / App 4.5 / Comp 4.5)
-LEAD CORRECT. `WITH signup_purchase_matches AS (SELECT DISTINCT s.user_id FROM signups s LEFT JOIN orders o ON o.user_id=s.user_id WHERE o.order_id IS NOT NULL) SELECT COUNT(*) total_signups, (subquery count) signups_with_purchase, 100.0*(subquery)/COUNT(*) pct FROM signups`.
-- TRACE: LEFT JOIN + `o.order_id IS NOT NULL` + DISTINCT = DISTINCT signup-users with >=1 matching order = semantic SEMI-JOIN. pct = 100.0 * matched / COUNT(*) all signups. CORRECT if signups is one-row-per-user. 100.0* decimal promotion correct (avoids integer-division truncation).
-- TERMINOLOGY: calls LEFT JOIN+IS NOT NULL+DISTINCT a "semi-join pattern" — this is **ACCEPTABLE pattern-naming**, NOT the iter960/963 false-mechanism error. It does NOT claim Trino plans it as a SemiJoinNode; it describes the SEMANTICS, which are genuinely those of a semi-join. Borderline-acceptable, not flagged as a mislabel.
-- "LEFT JOIN+filter clearer than INNER JOIN" — defensible stylistic claim; an INNER JOIN + DISTINCT would be equally correct.
-- MINOR completeness: did NOT scope signups to "January / a given month" (`WHERE date_trunc('month', s.signup_date) = ...`). The Q was somewhat general ("in a given month... like January"), so this is a minor comp ding, not a lead defect.
-
-## Q3 — running total of revenue across days — 4.81 (Acc 5 / Clar 4.75 / App 4.75 / Comp 4.75)
-CLEAN. `SUM(revenue) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`.
-- VERIFIED sql/select.html: this is a correct Trino running total. Explicit ROWS frame = row-by-row cumulative.
-- TIED-DATES claim VERIFIED CORRECT: default frame (when omitted, ORDER BY present) = **RANGE UNBOUNDED PRECEDING = RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW**, which "contains all rows from the start of the partition up to the **last peer** of the current row" — i.e., tied/same-day rows ALL get the SAME end-of-group cumulative total. The responder's explanation ("default gives both same-day rows the same cumulative total; add a transaction_id tiebreaker or pre-aggregate") is ACCURATE and a genuine value-add nuance.
-- "window fns work like Postgres" — true for this construct.
-- PARTITION BY tenant_id note for multi-tenant — CORRECT and prod-relevant.
-
-## Q4 — accounts that NEVER sent a support ticket — 4.00 (Acc 3.75 / Clar 4.25 / App 4.0 / Comp 4.0)
-LEAD CORRECT. `accounts a LEFT JOIN support_tickets t ON t.account_id=a.account_id WHERE t.ticket_id IS NULL` — textbook anti-join.
-- NOT IN nullable-column 3VL trap (returns zero rows if the subquery yields any NULL) — CORRECTLY flagged; VERIFIED Trino uses null-aware anti-join semantics for NOT IN, matching the documented hazard.
-- NOT EXISTS as an alternative — correct that it works.
-- **UNSUPPORTED PERF CLAIM (ding):** "NOT EXISTS may be slightly slower internally due to how Trino's optimizer lowers correlated subqueries." VERIFIED via WebSearch: Trino **DECORRELATES** NOT EXISTS into an **anti-join**, typically producing a plan **EQUIVALENT** to LEFT JOIN/IS NULL — **not slower**. This is a loose/unsupported perf aside (mild false-mechanism-ish padding). RESOURCE-vs-SLIP = **RESPONDER SLIP / padding** — resources teach anti-join correctly; this is a volunteered unsupported aside, not a resource defect. Accuracy ding only; the lead + 3VL trap are correct.
-- SELECT DISTINCT account_id subquery refinement — harmless.
+All claims verified BOTH directions vs trino.io/docs/467 + WebSearch 2026-06-17 (Trino IN-subquery SemiJoin blog/wiki; functions/datetime.html year()/current_date; sql/select.html GROUP BY non-grouped-column rule) — NOT against resources/. Q1 alternative + Q2 fan-out + Q4 YoY TRACED on concrete examples (JOIN cardinality + column scope). Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO) — answers fit; no env-incompatibility.
 
 ---
 
-## SCOPE NOTES
-- **Q1 date_trunc verdict: returns TIMESTAMP (truncated to midnight), NOT DATE** — responder's "DATE value" is a minor type imprecision; grouping still correct.
-- **Q3 default-frame verdict: default = RANGE UNBOUNDED PRECEDING; tied peers get the SAME (end-of-group) cumulative total** — responder's tied-dates explanation is CORRECT.
-- **Q4 NOT EXISTS perf-claim verdict: Trino decorrelates NOT EXISTS into an anti-join, plan-EQUIVALENT to LEFT JOIN/IS NULL, NOT slower** — responder's "slightly slower" is UNSUPPORTED (responder padding slip, no resource defect).
-- All 4 LEADS correct; defects are minor (Q1 type word, Q1/Q2 missing month-scope filter, Q4 unsupported perf aside).
-- TICS CLEAN: no QUALIFY; semi-join naming is acceptable pattern-naming NOT false-mechanism mislabel; no MAX(varchar)-as-latest; no percent_rank inversion; no fabricated functions; no missing-CTE-column; no JOIN fan-out cross-product; no ts-minus-ts; no mid-churn. The Q4 unsupported-perf-claim is the only false-justification-family tic and is a one-off responder padding aside.
+## Per-question scores
 
-## RECOMMENDATION = DEFAULT NO-OP
-Strong pass, margin +1.00. No resource defect, no findability gap. Re-probe candidates next sweep: (a) another running-total / cumulative-window Q (confirm ROWS-vs-RANGE tied-dates stays clean); (b) another anti-join "never did X" Q (watch whether the unsupported NOT-EXISTS-slower aside recurs — LIGHT defang ONLY if it recurs lead-level or 2-in-2 consecutive; one-off padding = re-probe-don't-churn per feedback_responder_broken_secondary_alternative.md). Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 974; passed=true preserved; final_iterations_remaining 0).
+### Q1 — single-item orders, cleanest query — 3.81 (Acc 3.5 / Clar 4.0 / App 3.75 / Comp 4.0)
+**LEAD CORRECT.** `SELECT o.* FROM orders o WHERE o.order_id IN (SELECT order_id FROM order_items GROUP BY order_id HAVING COUNT(*)=1)` — single-item orders = order_ids appearing exactly once in order_items; the HAVING COUNT(*)=1 subquery is exactly right.
+
+**"IN (SELECT...) is a SemiJoin in Trino" = LEGITIMATE / ACCURATE label — VERIFIED.** WebSearch confirms Trino plans IN/NOT-IN-over-subquery via a **SemiJoin** plan node (trino.io blog 2019 + trinodb/trino Plan-nodes wiki: `... where custkey in (select custkey from customer)` shows a SemiJoin node in EXPLAIN; the semi-join itself dedups the subquery values, returns each left row at most once). This is the **CORRECT** semi-join label describing a REAL Trino mechanism — **NOT** the iter960/963 false-mechanism mislabel. No ding for the SemiJoin claim.
+
+**ALTERNATIVE IS BROKEN (won't compile) — the ding.** `SELECT DISTINCT o.* FROM orders o LEFT JOIN order_items oi ON o.order_id=oi.order_id WHERE oi.order_id IS NOT NULL GROUP BY o.order_id HAVING COUNT(*)=1` — `SELECT o.*` (ALL order columns) with `GROUP BY o.order_id` ALONE will NOT compile: VERIFIED Trino 467 has NO functional-dependency GROUP BY relaxation — every non-aggregated SELECT column must appear in GROUP BY or be wrapped in an aggregate (sql/select.html). Selecting all of o.* while grouping only by order_id throws the missing-aggregation error. Additionally `SELECT DISTINCT` + `GROUP BY` is redundant. Responder did correctly flag the IN form as "simpler" so the steer toward the lead is right; the alternative is a **broken-secondary-alternative** (responder-slip family iter936/943/948/950/954/958-969). Lead correct, secondary won't-compile → Acc/App dinged moderately, not severely.
+
+### Q2 — % of emails OPENED by campaign (each send opened-or-not, NOT total opens) — 2.63 (Acc 2.0 / Clar 3.0 / App 2.5 / Comp 3.0) — **THE KEY DEFECT: one-to-many JOIN fan-out COUNT(*) denominator inflation**
+**LEAD-LEVEL FAN-OUT BUG — CONFIRMED via TRACE.** Query: `SELECT campaign, COUNT(*) AS total_emails_sent, COUNT(DISTINCT eo.sent_email_id) AS emails_opened, 100.0*COUNT(DISTINCT eo.sent_email_id)/COUNT(*) AS open_rate_pct FROM sent_emails se LEFT JOIN email_opens eo ON se.sent_email_id=eo.sent_email_id GROUP BY se.campaign`.
+
+sent_emails = 1-row-per-send; email_opens = MANY-rows-per-send. **TRACE** campaign with sends {A: 2 opens, B: 0 opens, C: 1 open}:
+- Joined rows after LEFT JOIN: A→2 rows, B→1 row (NULL eo), C→1 row = **4 rows**.
+- `COUNT(*) AS total_emails_sent` = **4** — but TRUE sends = **3** → **DENOMINATOR INFLATED by the fan-out** (counts each send once PER open).
+- `emails_opened = COUNT(DISTINCT eo.sent_email_id)` = {A,C} = **2** — CORRECT (DISTINCT dedupes multiple opens of the same send).
+- `open_rate = 100*2/4 = 50%` vs **TRUE 2/3 = 66.7%** → **WRONG**.
+
+The COUNT(DISTINCT) correctly fixes the NUMERATOR, but the **denominator COUNT(*) is fan-out-inflated**. Correct denominator = `COUNT(DISTINCT se.sent_email_id)` (or pre-aggregate email_opens to one-row-per-send BEFORE joining, then the join is 1:1 and COUNT(*) is safe). The responder **half-acknowledged** the problem ("if email_opens has multiple rows per sent_email_id, the LEFT JOIN will multiply your sent_emails rows... COUNT(DISTINCT) prevents double-counting the metric, but make sure you're grouping correctly") and then **FALSELY concluded** "The query above groups by se.campaign (from the left side), which is correct." Grouping by campaign is fine; the bug is the COUNT(*) on the fanned-out join, NOT the grouping. The false-justification compounds the accuracy hit.
+
+**RESOURCE-vs-SLIP = RESPONDER SYNTHESIS SLIP, NOT a resource defect.** Resources teach JOIN fan-out + COUNT(DISTINCT) dedupe (r23 §multi-COUNT-DISTINCT L183-222 + JOIN-fan-out diagnostic ~L933). Responder reached past the guard (even narrating the multiplication) yet kept COUNT(*) as the denominator → assembly slip.
+
+**FAN-OUT FAMILY = INTERMITTENT, NOT 2-in-2-consecutive.** iter971 Q2 (many-to-many SUM cross-product, fall-in) → iter972 Q3-re-probe CLEAN (pre-aggregated each side) → now iter975 Q2 (one-to-many COUNT(*) denominator inflation, fall-in). iter972 was clean in between, so this is NOT a 2-in-2 consecutive recurrence → **re-probe-don't-churn, LIGHT FIX-A only if it recurs next sweep (would be 2-in-2 from here).**
+
+### Q3 — total tax per US state, GROUP BY gotchas at scale (few hundred M rows) — 4.81 (Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75) — CLEAN
+`SELECT state, SUM(tax_amount) AS total_tax FROM orders WHERE state IS NOT NULL GROUP BY state ORDER BY total_tax DESC` — correct. Perf notes all VERIFIED accurate:
+- Columnar/projection: reads only state + tax_amount — correct (Iceberg/Parquet columnar).
+- Partition pruning needs a BARE partition column in WHERE (no CAST/date_trunc wrapping) — correct, matches r28 DATE-literal pushdown guidance.
+- Low cardinality (~50 states) → small hash table, cheap aggregation — correct.
+- No secondary indexes in Trino/Iceberg — correct.
+- **"HAVING COUNT(*)>N does NOT speed it up — runs AFTER groups are built, trims OUTPUT not INPUT; add WHERE on the partition column instead"** — VERIFIED CORRECT, matches the r07 L37 reconcile (HAVING runs after aggregation, only trims output, does NOT cut GROUP BY build-side memory). The "HAVING trims memory" folklore (iter941/946) did NOT recur here — responder correctly steered to WHERE-on-partition-col. Excellent at-scale answer.
+
+### Q4 — YoY spend per customer, side-by-side + flag who spent more — 4.50 (Acc 4.75 / Clar 4.75 / App 4.5 / Comp 4.0) — strong, minor completeness gap
+`SELECT customer_id, SUM(CASE WHEN year(created_at)=year(current_date) THEN order_total ELSE 0 END) AS revenue_this_year, SUM(CASE WHEN year(created_at)=year(current_date)-1 THEN order_total ELSE 0 END) AS revenue_last_year, [ratio *1.0 + NULLIF guard] AS yoy_ratio FROM orders GROUP BY customer_id HAVING revenue_this_year>0 OR revenue_last_year>0 ORDER BY yoy_ratio DESC`.
+
+VERIFIED CORRECT: conditional-aggregation YoY is the **right pattern** — single GROUP BY pass, mutually-exclusive CASE branches, NO self-join fan-out. Responder explicitly states "not a self-join — single GROUP BY pass, no fan-out, mutually-exclusive CASE branches" = correct and exactly the fan-out-avoidance the harder Qs keep tripping on. `year(created_at)` returns bigint year, `current_date` is a date, `year(current_date)` and `year(current_date)-1` = this/prior year — all VERIFIED (datetime.html). `*1.0` decimal promotion + NULLIF div-by-zero guard correct (division pin). FILTER-syntax equivalent offered = correct secondary (clean this time, not broken).
+
+**MINOR completeness ding:** the question asked to "flag those who spent more this year," but the query delivers side-by-side + yoy_ratio (ordered DESC) WITHOUT an explicit `revenue_this_year > revenue_last_year` flag column or filter. The side-by-side IS delivered (the bulk of the ask) and yoy_ratio>1 implies "spent more," but a `revenue_this_year > revenue_last_year AS spent_more` boolean (or a HAVING/WHERE on it) would have nailed the explicit "flag" request → Comp 4.0.
+
+---
+
+## Scope notes / tic audit
+- **Q1**: IN-subquery=SemiJoin label = LEGITIMATE (verified, real Trino mechanism) — NOT the false-mechanism mislabel. Broken-secondary alternative (`SELECT o.*` + `GROUP BY order_id` only = won't compile; DISTINCT+GROUP BY redundant) = responder-slip, lead correct.
+- **Q2 = THE defect**: one-to-many JOIN fan-out → COUNT(*) denominator inflated (50% vs true 66.7%, TRACED) + false "is correct" justification. RESPONDER SYNTHESIS SLIP (resources r23 L183-222/~L933 teach fan-out + COUNT(DISTINCT) dedupe). **Fan-out family INTERMITTENT (iter971 fall-in → iter972 clean → iter975 fall-in), NOT 2-in-2-consecutive.**
+- **Q3/Q4 CLEAN.** HAVING-after-groups (Q3) matches r07 L37 reconcile. Conditional-agg YoY (Q4) correctly avoids self-join fan-out.
+- TICS otherwise CLEAN: no QUALIFY; no MAX(varchar)-as-latest; no percent_rank inversion; no fabricated function; no missing-CTE-column-projection; no ts-minus-ts; no mid-churn. (Q1 broken-alt + Q2 false-justification are the two slips this set.)
+
+## Recommendation
+**iter976 = DEFAULT NO-OP.** Margin +0.44 thin but PASS; both defects are responder synthesis/assembly slips, no resource defect, no findability gap. Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). Re-probe next sweep:
+1. Another **one-to-many ratio/rate Q** where the denominator must be `COUNT(DISTINCT parent_key)` not `COUNT(*)` over a fanned-out join — confirm whether responder reaches COUNT(DISTINCT se.key) or pre-aggregates (if it falls in AGAIN, that's 2-in-2 → LIGHT FIX-A near r23 ~L933: a one-to-many "rate per parent" canonical: pre-aggregate the child OR COUNT(DISTINCT parent_key) as denominator).
+2. Another **single-item / exactly-N-children Q** — confirm IN(SELECT...HAVING COUNT(*)=N) lead stays clean and the LEFT JOIN alt either gets the columns into GROUP BY or is dropped.
+
+NO resource edits. DO NOT bump training/state.json (already 975; passed=true preserved; final_iterations_remaining 0).
