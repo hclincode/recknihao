@@ -1,68 +1,51 @@
-# iter995 Judge Feedback — EXTENDED PHASE breadth sweep
+# Judge Feedback — iter996 (EXTENDED PHASE breadth sweep)
 
-**OVERALL 4.75 STRONG PASS** (Q1 4.8125 / Q2 4.4375 / Q3 4.875 / Q4 4.875 = 19.0/4 = 4.75; margin +1.25; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.78125 STRONG PASS** (Q1 4.6875 / Q2 4.8125 / Q3 4.75 / Q4 4.875 = 19.125/4 = 4.78125; margin +1.28; OVERALL AVERAGE governs, no per-Q veto).
 
-All 4 questions verified BOTH directions against trino.io/docs/467 (sql/select.html, functions/conditional.html, functions/datetime.html, language/types.html, functions/comparison.html) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
-
----
-
-## Q1 — UNION vs UNION ALL (active + trial subscriptions, got slower) — 4.8125 CLEAN
-
-**VERIFIED:** Bare UNION applies an implicit global DISTINCT. select.html: "If neither [DISTINCT nor ALL] is specified, the behavior defaults to DISTINCT" / "UNION ALL ... all rows are included even if the rows are identical." Responder's mechanism description (UNION = UNION ALL + global dedup via sort/hash-aggregate; UNION ALL just stacks rows) is the LEGIT UNION/UNION ALL distinction — CONFIRMED CORRECT.
-
-★ WATCH CLEARED: This is NOT DISTINCT-vs-GROUP-BY perf-folklore. The responder correctly framed it as the genuine "extra dedup work" cost of bare UNION, not a fabricated "GROUP BY faster than DISTINCT" mechanism. The "disjoint inputs → bare UNION is a silent perf killer" point is accurate and practically valuable (active vs trial subscriptions rarely overlap, so dedup is pure waste). Recommendation to prefer UNION ALL unless dedup is genuinely needed AND inputs can overlap is exactly right. `SELECT ... UNION ALL SELECT ...` lead is the runnable fix.
-
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q2 — CASE returns NULL when nothing matches; guarantee fallback / ELSE on every CASE — 4.4375 CLEAN (minor completeness)
-
-**VERIFIED:** conditional.html: "If no conditions are true, the result from the ELSE clause is returned if it exists, otherwise null is returned." Responder's claims CONFIRMED: a searched CASE with no matching WHEN and no ELSE returns NULL (implicit default); you don't NEED ELSE on every CASE, but add `ELSE <default>` to guarantee a fallback. `ELSE 'Unknown Status'` example is correct and directly answers the ask.
-
-MINOR completeness (not a defect): the answer is correct and actionable but lighter than Q1/Q3/Q4 — it could have noted COALESCE-wrapping the CASE as an equivalent fallback idiom, or that the ELSE result type must be compatible with the WHEN result types (type-coercion). These are nuances, not gaps in the core answer. No tic.
-
-Acc 4.75 / Clar 4.5 / App 4.25 / Comp 4.25.
-
-## Q3 (KEY CHECK) — `WHERE event_ts >= current_date - 7` Postgres-ism — 4.875 CLEAN / STRONG CATCH
-
-★★ **current_date - 7 REJECTION = CORRECT.** VERIFIED both directions against functions/datetime.html + language/types.html:
-- (a) DATE minus a bare INTEGER (`current_date - 7`) is NOT supported in Trino 467 — the operators table shows no integer subtraction from a date; there is no implicit "integer = days" coercion. This is a genuine **Postgres-ism** (Postgres treats date-minus-integer as day subtraction; Trino does not). Responder correctly rejected it. CONFIRMED.
-- (b) `date_add('day', -7, current_date)` VALID — datetime.html: "Subtraction can be performed by using a negative value," ex `date_add('day', -1, TIMESTAMP ...)`. CONFIRMED.
-- (b) `current_timestamp - INTERVAL '7' DAY` VALID — operators section documents `-` with interval, ex `date '2012-08-08' - interval '2' day`. CONFIRMED.
-
-★ **INTERVAL SYNTAX VERDICT CONFIRMED:** `INTERVAL '7' DAY` (number in quotes, unit keyword OUTSIDE quotes, uppercase) is the correct Trino form. `INTERVAL '7 days'` (number AND plural unit both INSIDE the quotes) is a PARSE ERROR — the literal value goes in quotes and the qualifier keyword (DAY, singular) is a separate token. Matches the documented `INTERVAL '2' DAY` form and the known INTERVAL-qualifier constraint (only YEAR/MONTH/DAY/HOUR/MINUTE/SECOND qualifiers; no plural-in-quote form). CONFIRMED CORRECT.
-
-Strong catch of the Postgres-ism with both correct alternatives and the right INTERVAL-singular guidance. The note also fits the prod stack (Trino 467) precisely.
-
-Acc 5.0 / Clar 4.75 / App 5.0 / Comp 4.75.
-
-## Q4 — role NULL silently dropped by `WHERE role <> 'admin'`; null-safe comparison vs OR role IS NULL — 4.875 CLEAN
-
-**VERIFIED:** comparison.html confirms three-valued logic. `NULL <> 'admin'` evaluates to NULL/UNKNOWN → WHERE keeps only TRUE rows, so NULL-role legacy rows are silently dropped. CONFIRMED (matches the symptom).
-
-★ **IS DISTINCT FROM CONFIRMED null-safe & real (NOT a fabrication):** comparison.html: "The IS DISTINCT FROM and IS NOT DISTINCT FROM operators treat NULL as a known value and both operators guarantee either a true or false outcome even in the presence of NULL input." So `role IS DISTINCT FROM 'admin'` returns TRUE when the values differ OR exactly one side is NULL → NULL-role rows are KEPT. CONFIRMED CORRECT, and it is the cleaner single-operator form the user asked for.
-
-Option A `role <> 'admin' OR role IS NULL` is the equivalent explicit form — also CORRECT. Recommending IS DISTINCT FROM as the cleaner option is sound. Both alternatives are runnable and the 3VL explanation is accurate.
-
-Acc 5.0 / Clar 4.75 / App 4.875 / Comp 4.875.
+All 4 questions verified BOTH directions against trino.io/docs/467 (sql/select.html GROUP-BY-ordinal + no-alias + no-QUALIFY; functions/string.html split_part 1-based no-negative; functions/datetime.html EXTRACT(MONTH/YEAR FROM ts); functions/window.html window-funcs-run-after-HAVING-before-ORDER-BY → not in WHERE + row_number valid; functions/aggregate.html max_by(x,y) real) + pinned 467 source (reference_trino_cast_to_integer_rounds: CAST(decimal/double AS integer) ROUNDS half-up, truncate() drops decimals) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
 
 ---
 
-## SCOPE NOTES (per-Q verdicts)
+## Q1 — GROUP BY ordinal (GROUP BY 1, 2) valid vs repeat EXTRACT expressions — **4.6875 CLEAN**
+- GROUP BY ordinal positions VERIFIED valid: select.html "a simple GROUP BY clause may contain any expression composed of input columns or it may be an ordinal number selecting an output column by position (starting at one)." `GROUP BY 1, 2` is correct.
+- EXTRACT(MONTH FROM ts) / EXTRACT(YEAR FROM ts) VERIFIED valid (datetime.html `extract(field FROM x)→bigint`, YEAR/MONTH supported).
+- SELECT-list ALIAS NOT referenceable in GROUP BY (`GROUP BY month, year` fails) — CORRECT. Trino resolves GROUP BY against INPUT columns/ordinals, not output aliases (#16533).
+- MINOR terminology imprecision (not a defect): responder called the alias-in-GROUP-BY failure a "PARSE ERROR"; it is technically an analysis/resolution error ("column cannot be resolved"), not a strict parse error. Substance (aliases don't work in GROUP BY; use ordinal or repeat the full expression) is fully correct. Repeating the EXTRACT expressions also works (verbose) — correct.
+- Acc 4.75 / Clar 4.75 / App 4.5 / Comp 4.75.
 
-- **Q1 — UNION-implicit-DISTINCT:** bare UNION = UNION ALL + global dedup (extra work); UNION ALL stacks cheaply; prefer UNION ALL unless dedup needed AND inputs overlap; disjoint-inputs caveat correct. CLEAN. NOT DISTINCT-vs-GROUP-BY folklore — the legit UNION distinction.
-- **Q2 — CASE-no-ELSE-NULL:** no matching WHEN + no ELSE → NULL (implicit default); ELSE provides fallback; not required on every CASE. CLEAN; minor completeness (COALESCE-wrap / ELSE type-compat unmentioned).
-- **Q3 (KEY) — current_date-7-rejected-CORRECT [Postgres-ism]:** DATE − bare INTEGER NOT valid in Trino (no integer=days coercion); fix = `date_add('day', -7, current_date)` OR `current_timestamp - INTERVAL '7' DAY`. INTERVAL verdict: `INTERVAL '7' DAY` correct, `INTERVAL '7 days'` parse error. ALL CONFIRMED. STRONG catch.
-- **Q4 — IS DISTINCT FROM null-safe:** `NULL <> 'admin'` = UNKNOWN → WHERE drops it (3VL); `role IS DISTINCT FROM 'admin'` null-safe (TRUE when differ OR one side NULL) → keeps NULL rows; `role <> 'admin' OR role IS NULL` equivalent. CLEAN.
+## Q2 — 'Direct'/'Organic'/'Other' Source column; COALESCE gave raw URL — **4.8125 CLEAN**
+- CASE WHEN is the right tool, COALESCE is NOT — CORRECT. COALESCE(referrer_url,'Direct') only substitutes when NULL, otherwise returns the raw URL (exactly the user's symptom); it has no branching for the "contains google" / else cases.
+- `CASE WHEN referrer_url IS NULL THEN 'Direct' WHEN referrer_url LIKE '%google%' THEN 'Organic' ELSE 'Other' END` — correct: top-to-bottom evaluation, first matching WHEN wins, ELSE fallback. IS NULL must come first (LIKE on NULL → UNKNOWN, won't match) — handled correctly by ordering.
+- ELSE optional → defaults NULL when omitted — CORRECT (conditional.html).
+- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+## Q3 — split_part for SKU numeric part + CAST leading zeros — **4.75 CLEAN**
+- Trino HAS split_part — CORRECT (string.html `split_part(string, delimiter, index)→varchar`).
+- 1-based positive index VERIFIED: "Field indexes start with 1." `split_part('SKU-00142','-',2)` = '00142' (index 1 = 'SKU' before dash, index 2 = '00142' after) — CORRECT. (Note: split_part has NO negative index in Trino — not raised here, not needed.)
+- `CAST('00142' AS integer)` = 142 — CORRECT. String→integer parses the numeric value; leading zeros are display formatting only, stripped on conversion.
+- ASIDE (correct, pinned): "CAST ROUNDS not truncates" for decimals — `CAST(47.89 AS integer)` = 48 (rounds half-up), use `truncate(47.89)` = 47 to drop decimals. VERIFIED against pinned 467 source (reference_trino_cast_to_integer_rounds). Responder correctly noted it doesn't affect the '00142' case (an exact-integer string). Good defensive accuracy, NOT the broken-secondary tic.
+- Acc 5.0 / Clar 4.75 / App 4.5 / Comp 4.75.
+
+## Q4 (KEY CHECK — iter994 window-in-WHERE re-probe) — top-3 per workspace — **4.875 CLEAN**
+- Correctly diagnosed: `LIMIT 3` applies to the FINAL result set, giving top-3 OVERALL not per-group (matches user's symptom).
+- Correct pattern VERIFIED: ROW_NUMBER() OVER (PARTITION BY workspace_id ORDER BY COUNT(*) DESC) computed in the INNER subquery SELECT over a GROUP BY workspace_id, page_path; OUTER query `WHERE rn <= 3` references rn as a PLAIN COLUMN (not a window function in WHERE).
+  - (a) VALID Trino 467 — window fn lives in the subquery SELECT; outer WHERE filters a materialized column. CONFIRMED.
+  - (b) ROW_NUMBER() OVER (... ORDER BY COUNT(*) DESC) window-OVER-aggregate inside a GROUP BY query is VALID (window funcs run after HAVING/aggregation — window.html "run after the HAVING clause but before ORDER BY"). CONFIRMED.
+  - (c) "Trino has NO QUALIFY, window funcs can't go directly in WHERE, nest in subquery/CTE and filter the rank outside" — CONFIRMED (select.html has no QUALIFY; window funcs run before ORDER BY but after HAVING, so cannot appear in WHERE).
+- ★ **iter994 window-fn/alias-in-WHERE slip did NOT recur.** Here the responder correctly nested the window in the subquery and filtered rn in the OUTER WHERE — the RIGHT pattern. iter994 NTILE-alias-in-WHERE confirmed a one-off responder padding slip, NOT a resource defect.
+- Single-column top-1 alternative `max_by(page_path, views)` GROUP BY workspace_id over a per-page-count subquery — max_by VERIFIED real (aggregate.html `max_by(x,y)` "value of x associated with the maximum value of y"); valid alternative for top-1 only (responder scoped it correctly as single-column-top-1).
+- Acc 5.0 / Clar 4.75 / App 4.875 / Comp 4.875.
+
+---
+
+## SCOPE NOTES
+- **Q1**: GROUP BY ordinal (GROUP BY 1, 2) VALID + EXTRACT(MONTH/YEAR FROM ts) valid + SELECT-alias-NOT-in-GROUP-BY CORRECT; minor "PARSE ERROR" terminology (technically analysis/resolution error, substance correct).
+- **Q2**: CASE-WHEN-not-COALESCE CORRECT (COALESCE only swaps NULL→single value, no branching; CASE first-match-wins + ELSE-fallback; IS NULL first).
+- **Q3**: split_part 1-based positive index CORRECT (index 2='00142') + CAST('00142' AS int)=142 leading-zeros-stripped CORRECT + CAST-rounds-decimals aside (47.89→48, truncate→47) CORRECT/pinned.
+- **Q4 (KEY)**: top-N-per-group = ROW_NUMBER() in INNER subquery SELECT over GROUP BY + OUTER WHERE rn<=3 (rn as plain column) CORRECT/valid Trino 467; window-over-aggregate-in-GROUP-BY valid; "no QUALIFY, nest+filter-outside" CORRECT; max_by single-column-top-1 alt CORRECT. **window-in-WHERE slip did NOT recur (iter994 one-off CONFIRMED).**
 
 ## TICS — ALL CLEAN
-No QUALIFY / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn (date_add, IS DISTINCT FROM, INTERVAL, UNION ALL ALL real & verified) / regex-backslash / GREATEST-LEAST-NULL / DISTINCT-vs-GROUP-BY-perf-folklore (Q1 = legit UNION distinction, NOT folklore) / date-minus-integer-Postgres-ism (Q3 = responder CORRECTLY REJECTED it) / window-in-WHERE / broken-secondary-false-justification / mid-churn / column-scope / INTERVAL-quarter-week (Q3 used valid DAY qualifier) / ILIKE-conflation.
+no QUALIFY (Q4 correctly says absent + uses subquery) / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn (split_part, ROW_NUMBER, max_by, EXTRACT, truncate ALL real & verified) / regex-backslash / GREATEST-LEAST-NULL / window-in-WHERE (Q4 ABSENT — correct subquery nesting) / GROUP-BY-alias (Q1 correctly rejects alias, uses ordinal) / date-minus-integer / broken-secondary-false-justification (Q3 CAST-rounds aside is accurate, not broken) / mid-churn / column-scope / DISTINCT-vs-GROUP-BY-folklore / ILIKE-conflation / INTERVAL-quarter-week.
 
 ## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.25; all 4 leads correct & verified both directions; zero tics; no findable resource/findability gap; no 2-in-2 recurrence. Q3 (the key check) is a clean, strong catch of the Postgres date-minus-integer idiom with both correct Trino alternatives and the right INTERVAL-singular syntax. Q2's minor completeness lightness is not a defect and not a recurring pattern — re-probe-don't-churn.
-
-Re-probe next sweep:
-- (a) another date-arithmetic Q (esp. interval/period offset) — confirm `current_date - N`-rejection + `date_add`/INTERVAL-singular lead stays; watch INTERVAL-quarter/week qualifier trap.
-- (b) another NULL-comparison / 3VL Q (NOT IN with NULLs, anti-join NULL trap) — confirm IS DISTINCT FROM / IS NULL-guard lead.
-- (c) another UNION / set-op Q — confirm UNION-vs-UNION-ALL dedup distinction stays framed as the legit cost (NOT GROUP-BY-vs-DISTINCT folklore).
-
-Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 995; passed=true preserved; final_iterations_remaining 0).
+Margin +1.28; all 4 leads correct & verified both directions; zero tics; no findable resource/findability gap; no 2-in-2 recurrence; Q4 KEY CHECK clean (window-in-WHERE one-off confirmed, NOT a resource defect). Re-probe next sweep: (a) another top-N-per-group / window-rank Q — confirm ROW_NUMBER-in-subquery + OUTER-WHERE-rank lead stays + watch window-in-WHERE recurrence (still per-instance responder padding if it reappears, not a resource fix); (b) another conditional/fallback Q — confirm CASE-vs-COALESCE distinction stays; (c) another string-parse/CAST Q — confirm split_part-1-based + CAST-rounds-vs-truncate stays. Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 996; passed=true preserved; final_iterations_remaining 0).
