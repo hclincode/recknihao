@@ -1,66 +1,68 @@
-# iter994 Judge Feedback — EXTENDED PHASE breadth sweep
+# iter995 Judge Feedback — EXTENDED PHASE breadth sweep
 
-**OVERALL 4.281 PASS** (Q1 4.8125 / Q2 3.5 / Q3 4.8125 / Q4 4.0 = 17.125/4 = 4.28125; margin +0.781; OVERALL AVERAGE governs, no per-Q veto — Q2 broken-secondary clause does NOT sink the iter).
+**OVERALL 4.75 STRONG PASS** (Q1 4.8125 / Q2 4.4375 / Q3 4.875 / Q4 4.875 = 19.0/4 = 4.75; margin +1.25; OVERALL AVERAGE governs, no per-Q veto).
 
-All dialect / SQL-semantics / logic claims verified BOTH directions vs trino.io/docs/467 (functions/window.html: rank/dense_rank/row_number/ntile/first_value/last_value all real; ntile(n)="divides rows ... into n buckets ranging from 1 to at most n", remainder→earliest buckets [6 rows→1,1,2,2,3,4]; functions/aggregate.html: bool_and "Returns TRUE if every input value is TRUE, otherwise FALSE", ignores NULL + NULL on empty/all-NULL group per general aggregate rule) + WebSearch (window functions evaluated AFTER WHERE → illegal in WHERE; SELECT-list alias not resolvable in WHERE; subquery/CTE workaround) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
-
----
-
-## Q1 — RANK vs ROW_NUMBER for tied leaderboard, WHERE rank<=10 — **4.8125 CLEAN**
-
-★ Tie semantics VERIFIED CORRECT: RANK() ties share rank then SKIP (1,2,2,4); DENSE_RANK() ties share NO skip (1,2,2,3); ROW_NUMBER() arbitrary among ties + always distinct. RANK() is the right pick for "tied for 3rd."
-★ `RANK() OVER (ORDER BY SUM(order_amount) DESC)` window-OVER-aggregate inside a GROUP BY query = VALID 467 (aggregate computed first, window ranks the grouped output).
-★ CTE + outer `WHERE spend_rank <= 10` CORRECT — window result filtered in an OUTER query (not in WHERE at the same level). NO QUALIFY misuse (correctly used a subquery/CTE; QUALIFY is not in 467).
-★ "ties at rank 10 may yield >10 rows" caveat CORRECT and the honest behavior of RANK() for a leaderboard.
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q2 — NTILE(4) quartiles — **3.5 — LEAD CORRECT + WON'T-RUN/POINTLESS appended WHERE (the ding)**
-
-★ NTILE(4) lead is the CORRECT built-in for equal-count quartiles — VERIFIED valid 467 (ntile divides each partition into n buckets 1..n, remainder to earliest buckets; "10→3/3/2/2" exactly matches the doc's remainder-to-first-buckets rule). Quartile 1 = top 25% under `ORDER BY total_spend DESC` CORRECT. "No manual percentile cutoffs / no big CASE needed" CORRECT and exactly answers the ask. A user who runs ONLY the inner query + NTILE gets a fully correct quartile segmentation.
-★ **THE DEFECT** — the example appends `WHERE spend_quartile IN (1,2,3,4)` where `spend_quartile` is the NTILE WINDOW-function alias defined in the SAME SELECT level. This is DOUBLE-illegal in Trino 467 and the query WILL NOT RUN:
-  (a) **column-scope** — Trino does NOT resolve a SELECT-list output alias in WHERE; referencing `spend_quartile` in WHERE → "column 'spend_quartile' cannot be resolved" analysis error.
-  (b) **window-in-WHERE** — even spelling out the NTILE expression, window functions are evaluated AFTER WHERE (after HAVING, before final SELECT/ORDER BY), so a window function may not appear in or behind WHERE at all → analysis error (VERIFIED via WebSearch: window funcs run after WHERE, must be pre-computed in a subquery/CTE to filter).
-  It is ALSO **pointless** — NTILE(4) only ever emits 1–4, so `IN (1,2,3,4)` is a conceptual no-op even if it were legal.
-Classify: NTILE(4) lead CORRECT; the appended WHERE = **broken + useless secondary clause** (column-scope / window-in-WHERE / broken-secondary slip family). RESPONDER slip (the runnable core is right), NOT a resource defect — re-probe-don't-churn. Scored down for shipping a non-running example query.
-Acc 3.0 / Clar 4.0 / App 3.25 / Comp 3.75.
-
-## Q3 — bool_and for "did all rows match" — **4.8125 CLEAN**
-
-★ `bool_and(success = true)` VERIFIED — returns TRUE iff every input is TRUE, else FALSE; far cleaner than `SUM(CASE WHEN success THEN 1 ELSE 0 END)=COUNT(*)`. Exactly the requested aggregate.
-★ NULL handling VERIFIED CORRECT — bool_and ignores NULLs and returns NULL for an empty group / all-NULL group (general aggregate rule; bool_and is NOT in the count/count_if/max_by/min_by/approx_distinct exception list). `COALESCE(bool_and(...), false)` guard for a guaranteed boolean CORRECT.
-Minor (not a ding): `success = true` is redundant — `bool_and(success)` suffices when `success` is already boolean — harmless.
-Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q4 — FIRST_VALUE "same session shows up twice with different first" — **4.0 — TIEBREAKER FIX CORRECT + MISLEADING FRAME HEADLINE + MISSING DEDUP (the dings)**
-
-★ **CORE FIX CORRECT (load-bearing):** the real cause the responder identifies — `event_time` TIES → non-deterministic ORDER BY → FIRST_VALUE picks different rows across the partition's duplicate-timestamp evaluations — and the fix (add a deterministic tiebreaker `ORDER BY event_time, event_id`) is CORRECT and is the actual remedy for the symptom. Also correctly flags (1) genuinely-distinct sessions sharing a session_id as a data-quality cause.
-★ **MISLEADING HEADLINE (ding):** "The problem is likely your default window frame" is WRONG for FIRST_VALUE. VERIFIED: the default value-function frame (RANGE UNBOUNDED PRECEDING → CURRENT ROW) DOES correctly return the partition's first row, because the first row is in EVERY row's frame. The default-frame gotcha is a **LAST_VALUE** issue (LAST_VALUE's frame ends at CURRENT ROW → returns the current row, not the partition last). The responder half-walks-it-back ("default frame usually works for FIRST_VALUE"), so the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` change is HARMLESS-but-UNNECESSARY for FIRST_VALUE — but leading with "likely your frame" mis-diagnoses. (FIRST_VALUE-vs-LAST_VALUE-frame tic.)
-★ **MISSING DEDUP (completeness ding):** the user's literal symptom is "the same session shows up TWICE." `FIRST_VALUE(...) OVER (...)` still returns ONE ROW PER EVENT, not one per session — to truly get one row per session you need a collapse (SELECT DISTINCT session_id, first_page; or a `ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_time, event_id) = 1` subquery; or argmin via `min_by(page_url, event_time)` GROUP BY session_id). The responder did not add the collapse, so even with the tiebreaker the user can still see duplicate rows.
-Classify: tiebreaker/determinism fix CORRECT (responder strength); misleading frame headline = RESPONDER mis-diagnosis (FIRST_VALUE-vs-LAST_VALUE-frame family); missing dedup = completeness gap. RESPONDER-side, re-probe-don't-churn.
-Acc 4.0 / Clar 4.0 / App 4.0 / Comp 4.0.
+All 4 questions verified BOTH directions against trino.io/docs/467 (sql/select.html, functions/conditional.html, functions/datetime.html, language/types.html, functions/comparison.html) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in.
 
 ---
 
-## SCOPE
+## Q1 — UNION vs UNION ALL (active + trial subscriptions, got slower) — 4.8125 CLEAN
 
-- **Q1 RANK/DENSE_RANK/ROW_NUMBER tie semantics CLEAN** — 1,2,2,4 vs 1,2,2,3 vs arbitrary VERIFIED; window-over-aggregate-in-GROUP-BY valid; CTE + outer `WHERE spend_rank<=10` correct (no QUALIFY); ties-at-10 may exceed 10 rows note correct.
-- **Q2 NTILE(4) lead CORRECT** (equal-count quartiles, quartile 1=top 25% DESC, remainder-to-earliest-buckets verified) **+ the appended `WHERE spend_quartile IN (1,2,3,4)` = WON'T-RUN/POINTLESS defect** (column-scope: SELECT alias unresolvable in WHERE; window-in-WHERE: window funcs run after WHERE; AND conceptually a no-op since NTILE(4)∈{1,2,3,4}). Drop the WHERE → correct query.
-- **Q3 bool_and CLEAN** — TRUE iff all TRUE; ignores NULL; NULL on empty/all-NULL; COALESCE(...,false) guard correct; `success=true` redundant-harmless.
-- **Q4 tiebreaker-determinism fix CORRECT (load-bearing) + "frame issue" headline MISLEADING-for-FIRST_VALUE** (default value-frame returns first row fine; the gotcha is LAST_VALUE) **+ MISSING dedup-to-one-row-per-session** (FIRST_VALUE OVER still emits one row per event; need DISTINCT / ROW_NUMBER=1 / min_by).
+**VERIFIED:** Bare UNION applies an implicit global DISTINCT. select.html: "If neither [DISTINCT nor ALL] is specified, the behavior defaults to DISTINCT" / "UNION ALL ... all rows are included even if the rows are identical." Responder's mechanism description (UNION = UNION ALL + global dedup via sort/hash-aggregate; UNION ALL just stacks rows) is the LEGIT UNION/UNION ALL distinction — CONFIRMED CORRECT.
 
-## TICS
+★ WATCH CLEARED: This is NOT DISTINCT-vs-GROUP-BY perf-folklore. The responder correctly framed it as the genuine "extra dedup work" cost of bare UNION, not a fabricated "GROUP BY faster than DISTINCT" mechanism. The "disjoint inputs → bare UNION is a silent perf killer" point is accurate and practically valuable (active vs trial subscriptions rarely overlap, so dedup is pure waste). Recommendation to prefer UNION ALL unless dedup is genuinely needed AND inputs can overlap is exactly right. `SELECT ... UNION ALL SELECT ...` lead is the runnable fix.
 
-CLEAN except Q2 broken-secondary (column-scope/window-in-WHERE) and Q4 FIRST_VALUE-vs-LAST_VALUE-frame headline + missing-dedup: no QUALIFY (Q1 correctly used a CTE not QUALIFY) / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn (RANK/DENSE_RANK/ROW_NUMBER/NTILE/bool_and/FIRST_VALUE/LAST_VALUE ALL real & verified) / regex-backslash / GREATEST-LEAST-NULL / PARTITIONED-BY-foreign-DDL / mid-churn / missing-CTE-col / ts-minus-ts / ILIKE-conflation / INTERVAL-quarter-week / date_diff-boundary.
+Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+## Q2 — CASE returns NULL when nothing matches; guarantee fallback / ELSE on every CASE — 4.4375 CLEAN (minor completeness)
+
+**VERIFIED:** conditional.html: "If no conditions are true, the result from the ELSE clause is returned if it exists, otherwise null is returned." Responder's claims CONFIRMED: a searched CASE with no matching WHEN and no ELSE returns NULL (implicit default); you don't NEED ELSE on every CASE, but add `ELSE <default>` to guarantee a fallback. `ELSE 'Unknown Status'` example is correct and directly answers the ask.
+
+MINOR completeness (not a defect): the answer is correct and actionable but lighter than Q1/Q3/Q4 — it could have noted COALESCE-wrapping the CASE as an equivalent fallback idiom, or that the ELSE result type must be compatible with the WHEN result types (type-coercion). These are nuances, not gaps in the core answer. No tic.
+
+Acc 4.75 / Clar 4.5 / App 4.25 / Comp 4.25.
+
+## Q3 (KEY CHECK) — `WHERE event_ts >= current_date - 7` Postgres-ism — 4.875 CLEAN / STRONG CATCH
+
+★★ **current_date - 7 REJECTION = CORRECT.** VERIFIED both directions against functions/datetime.html + language/types.html:
+- (a) DATE minus a bare INTEGER (`current_date - 7`) is NOT supported in Trino 467 — the operators table shows no integer subtraction from a date; there is no implicit "integer = days" coercion. This is a genuine **Postgres-ism** (Postgres treats date-minus-integer as day subtraction; Trino does not). Responder correctly rejected it. CONFIRMED.
+- (b) `date_add('day', -7, current_date)` VALID — datetime.html: "Subtraction can be performed by using a negative value," ex `date_add('day', -1, TIMESTAMP ...)`. CONFIRMED.
+- (b) `current_timestamp - INTERVAL '7' DAY` VALID — operators section documents `-` with interval, ex `date '2012-08-08' - interval '2' day`. CONFIRMED.
+
+★ **INTERVAL SYNTAX VERDICT CONFIRMED:** `INTERVAL '7' DAY` (number in quotes, unit keyword OUTSIDE quotes, uppercase) is the correct Trino form. `INTERVAL '7 days'` (number AND plural unit both INSIDE the quotes) is a PARSE ERROR — the literal value goes in quotes and the qualifier keyword (DAY, singular) is a separate token. Matches the documented `INTERVAL '2' DAY` form and the known INTERVAL-qualifier constraint (only YEAR/MONTH/DAY/HOUR/MINUTE/SECOND qualifiers; no plural-in-quote form). CONFIRMED CORRECT.
+
+Strong catch of the Postgres-ism with both correct alternatives and the right INTERVAL-singular guidance. The note also fits the prod stack (Trino 467) precisely.
+
+Acc 5.0 / Clar 4.75 / App 5.0 / Comp 4.75.
+
+## Q4 — role NULL silently dropped by `WHERE role <> 'admin'`; null-safe comparison vs OR role IS NULL — 4.875 CLEAN
+
+**VERIFIED:** comparison.html confirms three-valued logic. `NULL <> 'admin'` evaluates to NULL/UNKNOWN → WHERE keeps only TRUE rows, so NULL-role legacy rows are silently dropped. CONFIRMED (matches the symptom).
+
+★ **IS DISTINCT FROM CONFIRMED null-safe & real (NOT a fabrication):** comparison.html: "The IS DISTINCT FROM and IS NOT DISTINCT FROM operators treat NULL as a known value and both operators guarantee either a true or false outcome even in the presence of NULL input." So `role IS DISTINCT FROM 'admin'` returns TRUE when the values differ OR exactly one side is NULL → NULL-role rows are KEPT. CONFIRMED CORRECT, and it is the cleaner single-operator form the user asked for.
+
+Option A `role <> 'admin' OR role IS NULL` is the equivalent explicit form — also CORRECT. Recommending IS DISTINCT FROM as the cleaner option is sound. Both alternatives are runnable and the 3VL explanation is accurate.
+
+Acc 5.0 / Clar 4.75 / App 4.875 / Comp 4.875.
+
+---
+
+## SCOPE NOTES (per-Q verdicts)
+
+- **Q1 — UNION-implicit-DISTINCT:** bare UNION = UNION ALL + global dedup (extra work); UNION ALL stacks cheaply; prefer UNION ALL unless dedup needed AND inputs overlap; disjoint-inputs caveat correct. CLEAN. NOT DISTINCT-vs-GROUP-BY folklore — the legit UNION distinction.
+- **Q2 — CASE-no-ELSE-NULL:** no matching WHEN + no ELSE → NULL (implicit default); ELSE provides fallback; not required on every CASE. CLEAN; minor completeness (COALESCE-wrap / ELSE type-compat unmentioned).
+- **Q3 (KEY) — current_date-7-rejected-CORRECT [Postgres-ism]:** DATE − bare INTEGER NOT valid in Trino (no integer=days coercion); fix = `date_add('day', -7, current_date)` OR `current_timestamp - INTERVAL '7' DAY`. INTERVAL verdict: `INTERVAL '7' DAY` correct, `INTERVAL '7 days'` parse error. ALL CONFIRMED. STRONG catch.
+- **Q4 — IS DISTINCT FROM null-safe:** `NULL <> 'admin'` = UNKNOWN → WHERE drops it (3VL); `role IS DISTINCT FROM 'admin'` null-safe (TRUE when differ OR one side NULL) → keeps NULL rows; `role <> 'admin' OR role IS NULL` equivalent. CLEAN.
+
+## TICS — ALL CLEAN
+No QUALIFY / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn (date_add, IS DISTINCT FROM, INTERVAL, UNION ALL ALL real & verified) / regex-backslash / GREATEST-LEAST-NULL / DISTINCT-vs-GROUP-BY-perf-folklore (Q1 = legit UNION distinction, NOT folklore) / date-minus-integer-Postgres-ism (Q3 = responder CORRECTLY REJECTED it) / window-in-WHERE / broken-secondary-false-justification / mid-churn / column-scope / INTERVAL-quarter-week (Q3 used valid DAY qualifier) / ILIKE-conflation.
 
 ## RECOMMENDATION = DEFAULT NO-OP
-
-Margin +0.781 PASS; all 4 LEADS are correct and verified both directions (RANK ties, NTILE(4) quartiles, bool_and, tiebreaker-determinism). The two dings are RESPONDER-side per-instance slips with NO findable resource/findability gap and NO 2-in-2 recurrence:
-- Q2 broken-secondary `WHERE <window-alias>` is the recurring **broken-secondary / window-in-WHERE / column-scope** padding family (responder nails the lead then appends an illegal "for completeness" clause) — per-instance one-off, NOT a single-resource fix, do not churn. (Note Q1 demonstrated the CORRECT pattern in the SAME iter: compute the window in a CTE, filter in the outer WHERE.)
-- Q4 "frame issue" headline + missing dedup is a RESPONDER mis-diagnosis + completeness gap, not a resource defect.
+Margin +1.25; all 4 leads correct & verified both directions; zero tics; no findable resource/findability gap; no 2-in-2 recurrence. Q3 (the key check) is a clean, strong catch of the Postgres date-minus-integer idiom with both correct Trino alternatives and the right INTERVAL-singular syntax. Q2's minor completeness lightness is not a defect and not a recurring pattern — re-probe-don't-churn.
 
 Re-probe next sweep:
-- (a) another NTILE / equal-count bucketing Q — confirm NTILE(n) lead stays + watch the **window-alias-in-WHERE / broken-secondary** clause recur (2-in-2 on a worked window-bucket Q → per-instance responder padding, still NOT a resource fix; correct filter pattern is CTE/subquery then outer WHERE).
-- (b) another FIRST_VALUE / LAST_VALUE / "first-or-last row per group" Q — confirm tiebreaker-determinism lead + watch the **FIRST_VALUE-vs-LAST_VALUE-frame** confusion recur AND whether the responder adds the dedup-to-one-row collapse (DISTINCT / ROW_NUMBER=1 / min_by/max_by). 2-in-2 on the frame mis-attribution → candidate LIGHT additive note ("default value-function frame returns the FIRST row fine; the frame gotcha is LAST_VALUE, whose frame ends at CURRENT ROW; FIRST_VALUE non-determinism is fixed by an ORDER BY tiebreaker, and one-row-per-group needs a dedup").
-- (c) another RANK/DENSE_RANK vs ROW_NUMBER tie Q — confirm tie-semantics + outer-WHERE (no QUALIFY) lead stays.
+- (a) another date-arithmetic Q (esp. interval/period offset) — confirm `current_date - N`-rejection + `date_add`/INTERVAL-singular lead stays; watch INTERVAL-quarter/week qualifier trap.
+- (b) another NULL-comparison / 3VL Q (NOT IN with NULLs, anti-join NULL trap) — confirm IS DISTINCT FROM / IS NULL-guard lead.
+- (c) another UNION / set-op Q — confirm UNION-vs-UNION-ALL dedup distinction stays framed as the legit cost (NOT GROUP-BY-vs-DISTINCT folklore).
 
-Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 994; passed=true preserved; final_iterations_remaining 0).
+Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 995; passed=true preserved; final_iterations_remaining 0).
