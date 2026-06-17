@@ -1,78 +1,42 @@
-# Judge Feedback — iter1007
+# Judge Feedback — iter1008
 
-**OVERALL: 4.0781 (65.25/16) — PASS** (margin +0.5781; OVERALL AVERAGE governs, no per-Q veto)
+**OVERALL: 4.7734 (76.375/16) — PASS** (margin +1.2734; OVERALL AVERAGE governs, no per-Q veto).
 
-Verified BOTH directions against trino.io/docs/467 (sql/select.html, functions/window.html, functions/comparison.html) + GitHub issues (trinodb/trino #7553, sqlglot #1754) — NOT resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt) — all 4 questions fit; no federation/auth angle. Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310).
+Verified BOTH directions vs trino.io/docs/467 (sql/select.html, functions/comparison.html) + WebSearch on Trino optimizer semi-join decorrelation — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt) — all 4 fit; no federation/auth angle.
 
 ---
 
 ## Per-question scores
 
-| Q | Topic | Acc | Comp | Clar | App | Subtotal |
-|---|---|---|---|---|---|---|
-| Q1 | pagination (page 4 @ 25/pg) | 1.5 | 2.5 | 2.5 | 1.5 | 8.00 |
-| Q2 | self-join employee+manager | 5.0 | 4.75 | 4.75 | 4.75 | 19.25 |
-| Q3 | BETWEEN inclusive endpoints | 5.0 | 4.5 | 4.75 | 4.5 | 18.75 |
-| Q4 | NTILE(4) spend quartiles | 5.0 | 4.75 | 4.75 | 4.75 | 19.25 |
+### Q1 — pagination page 4 @25/page, ORDER BY signup_date DESC, "same as Postgres?" — 4.625 ★PAGINATION FIX HELD
+- Acc 4.5 / Comp 4.75 / Clar 4.5 / App 4.75
+- ★ **The responder NOW produces the CORRECT OFFSET-before-LIMIT form:** `SELECT user_id, signup_date FROM users ORDER BY signup_date DESC OFFSET 75 LIMIT 25;` — VERIFIED valid against the Trino 467 SELECT synopsis (sql/select.html): clause order `[ORDER BY ...] [OFFSET count [ROW|ROWS]] [LIMIT {count|ALL}]` — OFFSET comes after ORDER BY and BEFORE LIMIT. Responder explicitly states "OFFSET comes before LIMIT in clause order." CORRECT.
+- ★★ **This is the 3rd consecutive pagination probe** after the iter1006 r27 L1912 FIX-A and the iter1007 r23 anti-patterns-table-row FIX-A. iter1006 Q4 and iter1007 Q1 BOTH produced the WRONG `LIMIT n OFFSET m` parse-error form (2-in-2). This iter the responder produces the correct `OFFSET 75 LIMIT 25`. **The findability fix appears to have WORKED** — the r23 anti-patterns card (OFFSET m LIMIT n, Page 4 @25/page) now reaches the responder.
+- MINOR nit (the only ding): responder prose says "syntax is the same as Postgres / identical to Postgres." This is imprecise — Postgres accepts BOTH `LIMIT 25 OFFSET 75` AND `OFFSET 75 LIMIT 25`; Trino 467 accepts ONLY the OFFSET-first form (LIMIT-first is a parse error `mismatched input 'OFFSET'`). So the clause-order constraint IS a genuine PG→Trino difference, and "same as Postgres" undersells it. NOT a parse-error defect — the SQL produced is correct — so only a light Acc/Clar deduct, not a sink.
+- Good bonus: "LIMIT alone does not reduce scan cost; pair with a WHERE that prunes files/partitions" — correct Iceberg cost-model framing.
 
-**Total = 65.25 / 16 = 4.0781 → PASS**
+### Q2 — combine subscriptions + legacy_subscriptions; auto-dedup or manual? — 4.8125 CLEAN
+- Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75
+- VERIFIED (sql/select.html set operations): "If ALL is specified all rows are included even if rows are identical. If DISTINCT is specified only unique rows are included. If neither is specified, the behavior defaults to DISTINCT." Responder's "UNION ALL keeps duplicates; bare UNION = UNION ALL + DISTINCT (dedupes, costs extra CPU/IO)" is fully correct, including the default-DISTINCT semantics and the extra-cost caveat. Option1 (UNION ALL keep) vs Option2 (UNION dedupe) decision guidance is actionable and correct.
 
----
+### Q3 — largest of amount_usd/discount_usd/credit_usd per row — 4.84375 CLEAN
+- Acc 5.0 / Comp 4.75 / Clar 4.875 / App 4.75
+- VERIFIED (functions/comparison.html greatest/least): "Like most other functions in Trino, they return null if any argument is null." Responder's "greatest() returns NULL if ANY arg is NULL; wrap each in coalesce(col, 0) (or a domain-safe default)" is fully correct — and correctly NOT the Postgres all-null rule. The COALESCE-wrap workaround is exactly right. The "domain-safe default" hedge is a thoughtful touch (0 may be wrong if negatives are possible). Matches the GREATEST/LEAST-NULL memory card.
 
-## Q1 — pagination — ★ DOUBLE DEFECT (2.0 avg) — ★ SECOND CONSECUTIVE ITERATION
-
-Two independent false claims, plus the headline answer is backwards relative to the question ("different from Postgres?").
-
-### Defect 1 — LIMIT-before-OFFSET is a PARSE ERROR (clause order)
-Responder wrote: `SELECT * FROM orders ORDER BY created_at DESC LIMIT 25 OFFSET 75;` and asserted "Trino uses the EXACT SAME syntax as Postgres for pagination."
-
-**VERDICT: WRONG — this is a Trino 467 PARSE ERROR.** The Trino 467 SELECT synopsis fixes the clause order as:
-```
-[ ORDER BY ... ]
-[ OFFSET count [ ROW | ROWS ] ]
-[ LIMIT { count | ALL } ]
-[ FETCH { FIRST | NEXT } [ count ] { ROW | ROWS } { ONLY | WITH TIES } ]
-```
-OFFSET MUST precede LIMIT. The documented example is `ORDER BY x OFFSET 2 LIMIT 2`. `LIMIT n OFFSET m` (Postgres/MySQL order) throws `mismatched input 'OFFSET'` (trinodb/trino #7553 — offset-after-limit not supported; sqlglot #1754 — "Trino throws error if offset comes after limit").
-
-**CORRECT FORM: `SELECT * FROM orders ORDER BY created_at DESC OFFSET 75 LIMIT 25;`**
-
-Compounding: the question explicitly asks whether pagination is "different from Postgres." The clause ORDER is a genuine PG→Trino difference, and the responder asserted the reverse — "EXACT SAME syntax as Postgres" — which is exactly backwards and would actively mislead the engineer into shipping a query that fails to parse.
-
-### Defect 2 — FETCH FIRST/NEXT IS supported (second false claim)
-Responder gotcha: "if your library tries `LIMIT 25 FETCH NEXT`, that's Oracle/SQL Server syntax and Trino doesn't support it."
-
-**VERDICT: WRONG — Trino 467 DOES support `FETCH { FIRST | NEXT } [count] { ROW | ROWS } { ONLY | WITH TIES }`** (it is listed directly in the SELECT synopsis, immediately after LIMIT). The "Trino doesn't support it" claim is false. (The garbled `LIMIT 25 FETCH NEXT` token combo the responder invented is indeed invalid, but the standalone FETCH FIRST/NEXT clause is fully supported — so the blanket "Trino doesn't support it" is incorrect.)
-
-The only correct part of Q1 is the ORDER-BY-before-pagination determinism point. Both the canonical query and the FETCH claim are wrong → Acc 1.5 / Comp 2.5 / Clar 2.5 / App 1.5.
-
-### ★ RECURRENCE ALERT — 2-in-2
-This is the **SECOND consecutive iteration** the responder produced LIMIT-before-OFFSET (iter1006 Q4 was the FIRST). Per state.json, the teacher landed a FIX-A at r27 §pagination L1912 in iter1006 (canonical `OFFSET 50 LIMIT 50` + warning that LIMIT-before-OFFSET is a parse error). **The responder still produced the wrong order in iter1007**, plus a NEW false FETCH-support claim. This crosses the 2-in-2-same-direction threshold flagged in iter1006's re-probe plan.
-
-**Recommended FIX-A (orchestrator, PHASE 6):**
-- Verify whether the iter1006 r27 L1912 pagination canonical is FINDABLE from generic pagination keywords (page/skip/offset/LIMIT) — the responder did not pull it, so it is either not keyword-magnetic enough or sits only in the Oracle-migration resource (r27) where pagination keywords may not route. Consider a copy-attractive canonical in the general analytical/SQL-best-practices resource (r07/r23) too.
-- Make the copy-attractive block: `ORDER BY created_at DESC OFFSET 75 LIMIT 25` with inline un-copyable defang `-- WRONG: LIMIT 25 OFFSET 75 → parse error 'mismatched input OFFSET' in Trino 467; OFFSET must precede LIMIT (≠ Postgres/MySQL order)`.
-- ADD a FETCH FIRST/NEXT note: `FETCH FIRST/NEXT n ROWS ONLY IS supported in Trino 467 (after LIMIT in clause order)` — to kill the new "Trino doesn't support FETCH" folklore before it recurs.
-- Per memory [New Card Over-Attracts Adjacent]: pair with the existing OFFSET cost-model content; do not let a new pagination card steal the keyset/seek-pagination Q.
+### Q4 — accounts with >=1 ticket, each once, no GROUP BY / subquery dedup — 4.8125 CLEAN
+- Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75
+- Responder gives both `WHERE EXISTS (SELECT 1 FROM support_tickets t WHERE t.account_id=a.account_id)` and `WHERE x IN (subquery)`, both correctly described as executing as a semi-join, returning each account once even with 50 tickets, no GROUP BY needed. VERIFIED conceptually against Trino optimizer behavior (subquery decorrelation → semi-join; EXISTS and IN both transform to semi-join). "Both equally fast, EXISTS slightly more readable" correctly AVOIDS the "EXISTS is faster" folklore. Clean.
 
 ---
 
-## Q2 — self-join (employee + manager) — CLEAN (4.75)
-`SELECT e.employee_id, e.name AS employee_name, m.name AS manager_name FROM employees e LEFT JOIN employees m ON e.manager_id = m.employee_id` — **VERIFIED CORRECT.** Self-join with two aliases of one physical table is correct; LEFT JOIN correctly preserves managerless (top-level) employees with NULL manager_name; INNER JOIN to drop them is the right contrast. "Two aliases = two logical references to the same physical table" is an accurate, beginner-friendly explanation. Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75.
+## TICS / defects
+- `::` PostgreSQL cast ABSENT all 4 (iter1003 one-off did not recur; ban double-locked r23 §3.1C + r27 §4.4A, not exercised).
+- No QUALIFY / false-semi-join-mechanism / MAX-varchar / GREATEST-LEAST-NULL-inversion / fabricated-fn / broken-secondary / INTERVAL-quarter-week / regex-backslash.
+- Sole nit = Q1 "same as Postgres" prose imprecision (minor clarity/accuracy, NOT a parse-error defect — SQL produced is correct).
 
-## Q3 — BETWEEN endpoints — CLEAN (4.6875)
-`amount BETWEEN 10 AND 100` ⇔ `amount >= 10 AND amount <= 100`, **both endpoints inclusive — VERIFIED CORRECT** (comparison.html: BETWEEN equivalent to `>= min AND <= max`). The exclusive rewrite (`amount >= 10 AND amount < 100`) is correct and useful. Acc 5.0 / Comp 4.5 / Clar 4.75 / App 4.5.
-
-## Q4 — NTILE(4) quartiles — CLEAN (4.8125)
-`NTILE(4) OVER (ORDER BY total_spend DESC)` for 4 equal tiers — **VERIFIED CORRECT.** window.html: rows divided into n buckets numbered 1..n, bucket sizes differ by at most 1; remainder distributed one per bucket **starting with the first bucket** (doc example 6 rows/4 buckets → 1 1 2 2 3 4). Responder's "EARLIEST buckets get the extra rows; 101 users → bucket1=26, bucket4=25" is exactly right. With DESC ordering, bucket 1 = top spenders — correct. CTE structure and final ORDER BY are clean. Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75.
-
----
-
-## TICS summary
-- `::` cast shorthand: ABSENT all 4 (ban double-locked r23 §3.1C + r27 §4.4A; not exercised; iter1003 one-off not recurred).
-- No QUALIFY / false-semi-join / MAX-varchar / GREATEST-LEAST-NULL / date-minus-integer / INTERVAL-quarter-week / regex-backslash / broken-secondary-alternative this sweep.
-- ★ Active TIC = **OFFSET/LIMIT clause-order inversion** (Postgres-prior import → Trino parse error) — Q1 only, now SECOND consecutive occurrence (iter1006 Q4 → iter1007 Q1). Imported-prior family. NOW escalated from one-off to 2-in-2 → FIX-A warranted.
-- ★ NEW TIC = **"Trino doesn't support FETCH FIRST/NEXT"** folklore — Q1, first occurrence; fold a corrective note into the same pagination FIX-A.
-
-## Recommendation
-**LIGHT FIX-A on pagination** (orchestrator PHASE 6): the LIMIT-before-OFFSET error has now recurred 2-in-2 despite the iter1006 r27 L1912 fix, indicating a FINDABILITY gap (responder isn't routing to the r27 pagination card) — add/verify a keyword-magnetic OFFSET-before-LIMIT canonical reachable from generic pagination keywords (likely r07/r23, not just r27), plus a FETCH-FIRST-IS-supported note. Do NOT churn the correct keyset/cost-model content. Re-probe pagination again next sweep to confirm the responder picks `OFFSET m LIMIT n` and drops the FETCH folklore. Q2/Q3/Q4 clean — no action. MUST NOT bump state.json (already 1007; orchestrator commits).
+## RECOMMENDATION = DEFAULT NO-OP
+- Margin +1.2734; all 4 deliverables correct & verified both directions; zero parse-error defects this iter.
+- ★ **Pagination OFFSET-before-LIMIT FIX HELD** — 3rd consecutive probe, responder now produces the correct form after the two FIX-As (iter1006 r27 L1912 + iter1007 r23 anti-patterns row). The 2-in-2 wrong-direction streak (iter1006+1007) is BROKEN. No further pagination edit needed.
+- NO resource edit; NO FIX-A.
+- Re-probe next sweep: (a) ONE more pagination Q to confirm the fix is durable across phrasings (3rd-correct → watch for regression, do not churn); (b) another UNION dedup Q — confirm default-DISTINCT framing; (c) another greatest/least multi-column Q — confirm any-NULL→NULL + COALESCE-wrap; (d) another EXISTS/IN semi-join Q — confirm no "EXISTS faster" folklore. Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310).
+- MUST NOT bump state.json (already 1008; passed=true; orchestrator commits).
