@@ -1,51 +1,64 @@
-# iter977 Judge Feedback — EXTENDED PHASE breadth sweep
+# iter978 Judge Feedback — EXTENDED PHASE breadth sweep
 
-**OVERALL 4.41 STRONG PASS** (Q1 4.50 / Q2 3.50 / Q3 4.81 / Q4 4.81 = 17.625/4 = 4.4063; margin +0.91; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.50 STRONG PASS** (Q1 4.75 / Q2 4.4375 / Q3 4.00 / Q4 4.8125 = 18.00/4 = 4.50; margin +1.00; OVERALL AVERAGE governs, no per-Q veto).
 
-All 4 Qs verified BOTH directions vs trino.io/docs/467 (connector/iceberg.html partitioning + optimize, functions/aggregate.html max_by/array_agg) + trinodb/trino PR#14011 (UnwrapDateTruncInComparison) + Trino blog 2023-04-11 date-predicates + WebSearch QUALIFY-absence 2026-06-17 — NOT against resources/. Q4 max_by latest-per-group TRACED. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + dbt) — answers fit.
-
----
-
-## Q1 — tickets-per-agent today-vs-yesterday: **4.50**
-Two half-open-range queries (`closed_at >= TIMESTAMP '2026-06-11 00:00:00' AND closed_at < '2026-06-12...'`; prior day for yesterday) + GROUP BY agent_id — CORRECT. Auto-updating form `closed_at >= date_trunc('day', current_date) AND closed_at < date_trunc('day', current_date) + INTERVAL '1' DAY` — VERIFIED: date_trunc('day', current_date) returns a timestamp (date→timestamp midnight) and `+ INTERVAL '1' DAY` is valid; half-open prevents boundary double-count. Bare-range-most-portable + don't-wrap-partition-col advice correct.
-
-★ **KEY CONFIRMATION — SimplifyDateTrunc fabrication did NOT recur.** Responder explicitly attributed pruning of wrapped `date_trunc('day', closed_at) = DATE '...'` forms to the `UnwrapDateTruncInComparison` optimizer rule — VERIFIED this is the REAL 467 rule name (trinodb/trino PR#14011 "Simplify predicates involving date_trunc", PR#14161 hour-unit follow-up). This is the CORRECT name; the iter960/976 "SimplifyDateTrunc (or similar)" hallucination did NOT repeat. Responder also correctly credits these wrapped forms as DOES-prune (not the iter976 under-crediting pessimism).
-
-Minor completeness ding: Q said "today VERSUS yesterday" (side-by-side); responder gave two SEPARATE queries rather than one conditional-aggregation row (`COUNT(*) FILTER (WHERE closed_at >= today_start) AS closed_today, COUNT(*) FILTER (WHERE ... yesterday) AS closed_yesterday ... GROUP BY agent_id`). Not wrong — both correct — but the side-by-side single-pass form is the more elegant fit for the asked comparison. Acc 4.75 / Clar 4.5 / App 4.5 / Comp 4.25.
-
-## Q2 — partition-pruning on non-partition col account_tier: **3.50** — THE KEY CHECK
-Pruning DIAGNOSIS is CORRECT and well-explained: two-layer pruning (partition-level event_date prunes by day + file-level min/max footers for non-partition cols; account_tier min/max only helps if data is SORTED, else min/max spans the whole range → no skip). SHOW CREATE TABLE to inspect `partitioning = ARRAY[...]` correct. The "genuine scan-killer" note (opaque expressions on partition cols like `LOWER(event_date)=...` / `event_date + INTERVAL '1' DAY=...` defeat pruning; verify with EXPLAIN) is correct and a good value-add.
-
-★ **DEFECT — FOREIGN-DDL SLIP: `PARTITIONED BY (day(event_date), account_tier)`.** VERIFIED against trino.io/docs/467 connector/iceberg.html: Trino 467 Iceberg does NOT use `PARTITIONED BY (...)` — that is Spark/Hive/Postgres-ish DDL. The correct forms are:
-- CREATE: `CREATE TABLE ... WITH (partitioning = ARRAY['day(event_date)', 'account_tier'])`
-- existing table: `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['day(event_date)', 'account_tier']`
-
-The responder's `PARTITIONED BY` recommendation would not parse on Trino-Iceberg. RESOURCE-vs-SLIP: r09 L127 teaches the CORRECT `WITH (partitioning = ARRAY['day(occurred_at)','tenant_id'])` string-transform form FINDABLY → this is a **RESPONDER DIALECT SLIP (foreign Spark/Hive DDL), NOT a resource defect**. This is the PARTITIONED-BY-foreign-DDL slip family; **prior instance iter945 Q2 — NON-CONSECUTIVE** (intervening partition-spec Qs used WITH(partitioning=ARRAY[...]) correctly).
-
-The advice to add account_tier as a second partition dimension (only if low-cardinality) is conceptually sound; only the DDL syntax is wrong.
-
-★ `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` — VERIFIED VALID 467 syntax (optimize table procedure; merges files below threshold, default 100MB). "respects sorted_by" correct.
-
-Acc 3.0 (foreign-DDL would-not-parse on the lead actionable recommendation, but diagnosis + optimize() correct) / Clar 3.75 / App 3.5 / Comp 3.75.
-
-## Q3 — customers buying from >=3 DISTINCT categories: **4.81** CLEAN
-`SELECT customer_id FROM orders GROUP BY customer_id HAVING COUNT(DISTINCT product_category) >= 3` — CORRECT, clean single-pass GROUP BY, NO subquery-per-customer (directly answers the "clean query or subquery-per-customer?" framing — correctly recommends the clean aggregation over the correlated form). `array_agg(DISTINCT product_category ORDER BY product_category)` variant VERIFIED valid (aggregate.html supports ORDER BY within array_agg; DISTINCT also supported). HAVING-runs-after-aggregation (trims OUTPUT; add WHERE before GROUP BY to reduce INPUT) matches r07 L37 reconcile — the HAVING-trims-memory folklore did NOT recur. "Don't use ROW_NUMBER for counting distinct" correct steer. Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
-
-## Q4 — most-recent price per SKU from append-log: **4.81** CLEAN
-`SELECT sku_id, max_by(price, changed_at) AS current_price, MAX(changed_at) AS last_changed FROM price_history GROUP BY sku_id` — VERIFIED CORRECT: max_by(x, y) returns the value of x associated with the MAXIMUM value of y (aggregate.html) → price at the latest changed_at. This is the CORRECT as-of/argmax pattern, NOT the MAX(varchar)-as-latest trap (responder did NOT use MAX(price)). `max_by` for other columns correct. `ROW_NUMBER() OVER (PARTITION BY sku_id ORDER BY changed_at DESC) = 1` subquery for ALL columns correct (matches r23 §3.1G L1734 leading canonical).
-
-★ Proactive + CORRECT: "Trino does NOT support QUALIFY ... Never write QUALIFY ROW_NUMBER()=1 — it will parse-fail." VERIFIED — QUALIFY is absent from Trino (Teradata/Snowflake/Redshift only; matches r23 L1755). Legitimate volunteered guard, NOT the false-mechanism tic. `INSERT INTO current_prices` export example fits the prod stack (ad-hoc INSERT...AS SELECT + MinIO download). Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+All 4 verified BOTH directions vs trino.io/docs/467 (connector/iceberg.html ALTER SET PROPERTIES partitioning + EXECUTE optimize + EXECUTE expire_snapshots + bucket transform; sql/select.html EXISTS/IN) + GitHub trinodb/trino issue #21859 (FETCHED DIRECTLY) + WebSearch anti-join/semi-join 2026-06-17 — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — answers fit.
 
 ---
 
-## SCOPE NOTES
-- **Q1 SimplifyDateTrunc-did-NOT-recur CONFIRMED**: responder used the CORRECT rule name `UnwrapDateTruncInComparison` (VERIFIED PR#14011) and correctly credited wrapped forms as DOES-prune. The iter960/976 "SimplifyDateTrunc" fabrication did not repeat → fabrication-family INTERMITTENT, candidate LIGHT defang near r23 L2451 NOT warranted.
-- **Q2 PARTITIONED-BY foreign-DDL VERDICT**: confirmed FOREIGN-DDL slip (Trino-Iceberg = `WITH (partitioning = ARRAY[...])` CREATE / `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[...]` existing). **RESPONDER DIALECT SLIP, NOT a resource defect** (r09 L127 teaches correct form findably). PARTITIONED-BY-foreign-DDL family; **prior instance iter945 Q2 — NON-CONSECUTIVE.** Re-probe-don't-churn; LIGHT FIX-A (defang near r09 L127) ONLY if recurs next sweep (would be 2-in-2).
-- **Q2 optimize() syntax VERIFIED valid**; diagnosis correct.
-- Q3/Q4 CLEAN.
+## Q1 — add region as 2nd partition dim to existing day-partitioned billions-row table — **4.75** (THE PARTITION-DDL RE-PROBE — DECISIVE, CLEAN)
 
-## TICS
-CLEAN except the Q2 PARTITIONED-BY slip. NO recurrence of: SimplifyDateTrunc fabrication (Q1 correct name), false-mechanism semi-join mislabel, MAX(varchar)-as-latest (Q4 used max_by correctly), percent_rank inversion, PERCENTILE_CONT fabrication, QUALIFY-as-valid (Q4 correctly says absent), broken-secondary/false-justification/unsupported-perf-claim, mid-churn, missing-column-in-CTE-projection, JOIN fan-out, ts-minus-ts.
+LEAD CORRECT and the iter977 slip did NOT recur.
+- `ALTER TABLE iceberg.analytics.events SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(region, 16)']` — **VERIFIED trino.io/docs/467 connector/iceberg.html: this is the CORRECT Trino-Iceberg form, metadata-only, affects NEW writes only; old files keep the day-only spec; Trino reads BOTH at query time.** Exactly right.
+- `bucket(region, 16)` — **column-first VERIFIED correct** (docs: `bucket(x, nbuckets)`); not the Spark count-first form. The bucket-over-identity advice (bound partition count for high-cardinality region) is sound design guidance.
+- Step 2 Spark `CALL iceberg.system.rewrite_data_files(...)` for backfilling old data — **CORRECTLY ATTRIBUTED to Spark; VERIFIED rewrite_data_files is NOT a Trino Iceberg procedure** (Trino has optimize/expire_snapshots/remove_orphan_files/drop_extended_stats only). Fits prod (Spark ingestion present).
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +0.91; Q2 defect is a responder dialect slip (no resource defect / no findability gap — r09 L127 correct + findable). Re-probe (a) another add-a-partition-dimension / SET PROPERTIES Q (watch PARTITIONED-BY recurrence → 2-in-2 LIGHT defang near r09 L127; does responder reach WITH(partitioning=ARRAY[...]) / ALTER SET PROPERTIES), (b) another today-vs-yesterday or period-vs-period comparison Q (does responder reach single-pass conditional aggregation `COUNT(*) FILTER (WHERE today)` vs `FILTER (WHERE yesterday)`). Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 977; passed=true preserved; final_iterations_remaining 0).
+**KEY VERDICT — iter977 Q2 PARTITIONED-BY foreign-DDL slip = CONFIRMED INTERMITTENT / ONE-OFF.** This structurally-identical partition-DDL re-probe is CLEAN: responder reached `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY[...]` unaided, did NOT emit the foreign `PARTITIONED BY (...)`. **NO FIX-A; r09 coverage (L73 WITH(partitioning=ARRAY[...]), L127 PARTITIONED-BY ban, L153 SET-PROPERTIES metadata-only myth) is SUFFICIENT and findable.** Acc 5.0 / Clar 4.5 / App 4.75 / Comp 4.75.
+
+---
+
+## Q2 — discount-code revenue, COUNT+SUM grouped, EXCLUDE null discount_code — **4.4375** (CLEAN)
+
+`SELECT discount_code, COUNT(*), SUM(revenue) FROM orders WHERE discount_code IS NOT NULL GROUP BY discount_code`.
+- `WHERE discount_code IS NOT NULL` BEFORE GROUP BY — CORRECT, and the WHERE-not-HAVING for the null filter (filter input, not output) is the right idiom.
+- GROUP BY no-SELECT-alias note (use column or ordinal) — CORRECT for Trino 467.
+Minor completeness ding only: did NOT add `HAVING SUM(revenue) > 0` for the "drove revenue / at least some revenue" reading — but the EXPLICIT ask was the NULL exclusion, which it nailed. Acc 4.75 / Clar 4.5 / App 4.5 / Comp 4.0.
+
+---
+
+## Q3 — users who signed up but NEVER logged in (LEFT JOIN/IS NULL still right? more efficient at scale?) — **4.00** (THE KEY CHECK: SemiJoin MISLABEL stands, but issue#21859 is REAL + perf direction supported)
+
+LEAD CORRECT: `users u LEFT JOIN login_history l ON u.user_id=l.user_id WHERE l.user_id IS NULL` — textbook ANTI-JOIN; "anti-join" naming correct. NOT-IN-nullable-3VL trap (one NULL → all rows filtered) correctly flagged. These are right.
+
+Three mechanism claims assessed:
+
+**(a) "Trino optimizes [the hand-written LEFT JOIN/IS NULL] into a SemiJoin node" — FALSE-MECHANISM MISLABEL (semi-join family, iter960/963 lineage).** An outer-join + IS NULL filter is an ANTI-JOIN (an outer join whose unmatched-only rows survive), NOT a SemiJoin. SemiJoin backs positive existence (IN / EXISTS). The "decorrelates into a direct semi-join that short-circuits" phrasing repeats the same mislabel. This is the accuracy ding.
+
+**(b) Trino issue #21859 — REAL, NOT FABRICATED (CREDIT).** FETCHED github.com/trinodb/trino/issues/21859 directly: title **"Improve performance of correlated NOT EXISTS queries"**, and it is EXACTLY about correlated NOT EXISTS being rewritten into a `LeftJoin` that generates multiple rows per match when only one is needed (proposes a `singleMatch` JoinNode flag to halt enumeration). **This REVISES the directive's premise** — the directive expected a fabricated issue# (PERCENTILE_CONT/SimplifyDateTrunc family); it is instead a real, on-topic open issue. Do NOT score this as a fabrication.
+
+**(c) "correlated NOT EXISTS may be slower (enumerates all matches before filtering)" — SUPPORTED by the real open #21859, NOT the unsupported aside the directive anticipated.** The directive cited iter974 (NOT EXISTS decorrelates to a plan-equivalent anti-join, not slower). #21859 documents a KNOWN inefficiency in the current NOT EXISTS lowering (multi-row enumeration) that is the subject of an open improvement — so the responder's "prefer LEFT JOIN + IS NULL" leaning has real grounding, not a hallucinated perf claim. NOTE the tension with iter974: treat iter974's "plan-equivalent / not slower" as the decorrelated-IDEAL, and #21859 as the documented current-gap; the responder's claim is on the defensible side here. No perf-claim accuracy ding beyond (a).
+
+**RESOURCE-vs-SLIP:** resources teach the anti-join LEFT JOIN/IS NULL + NOT EXISTS correctly (r23 §10). The SemiJoin mislabel is a **RESPONDER false-mechanism slip, NOT a resource defect.** Semi-join-mislabel family is INTERMITTENT (lead + 3VL-trap correct; mislabel in a justification aside). Re-probe-don't-churn. Acc 3.25 / Clar 4.0 / App 4.25 / Comp 4.5.
+
+---
+
+## Q4 — Iceberg small-files compaction: under the hood + how often — **4.8125** (CLEAN)
+
+- `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` — **VERIFIED valid Trino 467** (docs: default 100MB; files below threshold merged). Correct.
+- rewrite_data_files = Spark procedure — **CORRECTLY attributed** (not a Trino procedure; VERIFIED).
+- `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` to reclaim storage — **VERIFIED valid Trino 467** (must meet iceberg.expire-snapshots.min-retention). Correct add-on.
+- "Iceberg never auto-optimizes by design" — CORRECT.
+- Cadence advice (streaming ~4h / nightly / weekly) — sound, fits prod. (Cites resource 17 — citation detail, no factual error.)
+Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+---
+
+## Scope notes / tic ledger
+
+- **Q1 PARTITIONED-BY-did-NOT-recur (ALTER SET PROPERTIES used) → iter977 Q2 slip CONFIRMED INTERMITTENT/ONE-OFF; r09 coverage sufficient, NO FIX-A.**
+- **Q3 SemiJoin-mislabel = RESPONDER false-mechanism slip (anti-join mislabeled SemiJoin), NOT a resource defect; intermittent.** Issue #21859 = REAL ("Improve performance of correlated NOT EXISTS queries"), NOT fabricated. NOT-EXISTS-may-be-slower = SUPPORTED by #21859's documented current-lowering gap (not an unsupported aside). Direction defensible; only the SemiJoin label is wrong.
+- Other tics CLEAN: no QUALIFY, no MAX(varchar)-as-latest, no percent_rank inversion, no PERCENTILE_CONT/SimplifyDateTrunc fabrication, no PARTITIONED-BY foreign DDL (CLEAN this time), no broken-secondary, no mid-churn, no missing-CTE-column, no JOIN fan-out, no ts-minus-ts.
+- Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN).
+
+## Recommendation = DEFAULT NO-OP
+Margin +1.00; the lone accuracy defect (Q3 SemiJoin mislabel) is a responder slip with no resource/findability gap. Re-probe next sweep: (a) another anti-join "never did X" Q — watch whether the LEFT JOIN/IS NULL gets mislabeled "SemiJoin" again (2-in-2 → LIGHT defang near r23 §10 distinguishing anti-join vs semi-join NODE names); (b) another add-a-partition-dimension / SET PROPERTIES Q (confirm PARTITIONED-BY stays absent). NO resource edits. DO NOT bump training/state.json (already 978; passed=true; final_iterations_remaining 0).
