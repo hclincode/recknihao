@@ -1,63 +1,67 @@
-# iter987 Judge Feedback (EXTENDED PHASE breadth sweep)
+# Judge Feedback — iter988 (EXTENDED PHASE breadth sweep)
 
-**OVERALL 4.5781 STRONG PASS** (Q1 4.6875 / Q2 4.75 / Q3 4.0 / Q4 4.625 = 18.3125/4 = 4.5781; margin +1.078; OVERALL AVERAGE governs, no per-Q veto).
+**OVERALL 4.78125 — STRONG PASS** (Q1 4.75 / Q2 4.75 / Q3 4.8125 / Q4 4.8125 = 19.125/4 = 4.78125; margin +1.281; OVERALL AVERAGE governs, no per-Q veto).
 
-All 4 Qs verified BOTH directions vs trino.io/docs/467 (NOT resources/):
-- comparison.html — LIKE "case sensitive", NO ILIKE operator/keyword listed; case-insensitive = UPPER()/LOWER() wrap.
-- regexp.html — `(?i)` inline flag IS supported ("Case-insensitive matching ... enabled via the `(?i)` flag"); Java pattern syntax.
-- TopN: `TopNPartial[n by (col ASC/DESC NULLS LAST)]` is a real EXPLAIN plan node (WebSearch trinodb/trino #6634, #5372); `ORDER BY ... LIMIT N` uses bounded TopN, NOT a full Sort.
-- select.html — WHERE filters rows BEFORE grouping; HAVING "filters groups after groups and aggregates are computed"; aggregate in WHERE invalid.
-- math.html — `/` "integer division performs truncation" (confirms decimal-promotion note for Q4). DIVISION_BY_ZERO throw for INTEGER/DECIMAL + DOUBLE/REAL→Infinity/NaN per IEEE-754 confirmed via verified 467-source memory (reference_trino_division_by_zero.md; r27 §4.4H LOCKED).
-
-Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all answers fit; NO federation drag-in this iter.
+All 4 questions verified BOTH directions against trino.io/docs/467 (functions/map.html, functions/array.html, sql/select.html GROUPING/ROLLUP, comparison.html + NOT-IN/NULL 3VL via WebSearch) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt): all four answers fit; NO federation drag-in, NO out-of-stack tooling.
 
 ---
 
-## ★ Q2 — THE KEY CHECK (2nd-consecutive ILIKE-conflation re-probe): CLEAN — iter986 slip CONFIRMED ONE-OFF
-**Case-insensitive plan_name match. Score 4.75.**
-- "Trino 467 does NOT have ILIKE (PostgreSQL only)" — VERIFIED CORRECT (comparison.html lists no ILIKE; #2491 DECLINED).
-- Option 1 `WHERE LOWER(plan_name) = 'pro'` — VERIFIED valid + canonical idiom.
-- Option 2 `regexp_like(plan_name, '(?i)^pro$')` — VERIFIED valid 467 (regexp.html confirms `(?i)` inline flag; `^pro$` anchors exact 'pro' case-insensitively = correct for equality-style match).
-- Option 3 normalize at ingest + "function-wrapped column skips partition pushdown" — sound.
-- ★ **ILIKE-conflation DID NOT RECUR**: responder did NOT claim ILIKE works via any session property (no `enable_string_pushdown_with_collate`), did NOT drag in federation/Postgres-connector pushdown, did NOT cite r22. The iter986 Option-B false-mechanism slip is **CONFIRMED A ONE-OFF** over this clean re-probe. No FIX-A, no resource edit, no LIGHT-defang warranted.
-- Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
+## Q1 — NOT IN returns 0 rows despite users lacking Feb orders — **4.75 CLEAN**
 
-## ★ Q3 — TopN-not-full-sort CORRECT, but scan-reduction claim is an OVERSTATEMENT
-**Top 10 pages by total views, last 30 days. Score 4.0.**
-- "Safe; Trino does NOT force a full sort for ORDER BY ... LIMIT N" — VERIFIED CORRECT (TopNPartial bounded-heap node, not a full Sort).
-- Query correct: `... GROUP BY page_url ORDER BY total_views DESC LIMIT 10` with `WHERE occurred_at >= current_timestamp - INTERVAL '30' DAY` (valid 467; DAY is a legal interval qualifier).
-- "Verify with EXPLAIN (TopN vs Sort node)" — good, actionable.
-- ★ **OVERSTATEMENT / accuracy imprecision (the ding)**: responder says it "reads and aggregates only enough rows to maintain a running set of the top 10" and "not reading billions of rows before filtering to 10." For a **GROUP BY + ORDER BY agg DESC LIMIT 10**, Trino MUST aggregate ALL rows in the 30-day window — it cannot know the top-10 page_urls by count without counting every page's rows. TopN only avoids SORTING the grouped results; it does NOT avoid SCANNING/aggregating the windowed rows. The 30-day WHERE limits the scan via partition pruning (IF partitioned by date), but within the window all rows are read. The running-top-10 heap applies to the AGGREGATED output rows, not the raw input. **Classify: minor accuracy imprecision, NOT a hard defect** (the TopN-not-full-sort core is correct; only the scan-reduction framing is loose). RESPONDER imprecision, NOT a resource defect.
-- Acc 3.75 / Clar 4.0 / App 4.25 / Comp 4.0.
+VERIFIED CORRECT. The `NOT IN (subquery)` + NULL three-valued-logic trap is exactly right: if `orders.user_id` contains even one NULL, `user_id NOT IN (..., NULL, ...)` evaluates to UNKNOWN for every outer row (`x <> NULL` is UNKNOWN; NOT-UNKNOWN is UNKNOWN), the WHERE keeps only TRUE rows, so everything is filtered out → 0 rows. Confirmed standard SQL behavior (Postgres/MySQL/BigQuery/Snowflake identical) and confirmed Trino 467 behavior.
+- Fix A `NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id=s.user_id AND o.order_month='2024-02')` is NULL-safe and decorrelates to an anti-join — CORRECT.
+- Fix B `LEFT JOIN ... WHERE o.user_id IS NULL` is the equivalent **anti-join** — and the responder NAMED IT CORRECTLY as an anti-join. ★ NO false-mechanism semi-join mislabel (a known tic).
+- "Never use NOT IN with a nullable subquery; reach for NOT EXISTS" is sound, correctly-scoped advice.
+- ★ Stray "premium_users.user_id" example-table reference is a trivial COSMETIC wart (does not affect the deliverable logic), NOT a defect.
+Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-## Q1 — WHERE vs HAVING: CLEAN (iter986 boundary slip did NOT recur)
-**total invoice count 5 or fewer; `WHERE COUNT(*) <= 5` errors. Score 4.6875.**
-- "Aggregates can't go in WHERE (runs before aggregation); move to HAVING" — VERIFIED CORRECT.
-- `... GROUP BY workspace_name HAVING COUNT(*) <= 5` — VERIFIED CORRECT.
-- ★ **Boundary CORRECT**: "5 or fewer" = `<= 5` (keeps exactly 5). The iter986 Q1 `>5`-should-be-`>=5` off-by-one slip **DID NOT RECUR** — boundary tracked correctly this iter.
-- HAVING correctly REPEATS aggregate `COUNT(*)`, NOT the alias `invoice_count` (correct; aliases not referenceable in HAVING).
-- Non-agg→WHERE / agg→HAVING perf note sound.
-- Acc 4.75 / Clar 4.75 / App 4.625 / Comp 4.625.
+## Q2 — region + tier subtotals + grand total in one query — **4.75 CLEAN ★ KEY CHECK PASSED**
 
-## Q4 — division-by-zero guard: CORRECT, minor decimal-promotion completeness note
-**refund % of revenue; zero-revenue months blow up. Score 4.625.**
-- "Trino throws DIVISION_BY_ZERO for INTEGER/DECIMAL div by zero" — VERIFIED CORRECT (467-source; r27 §4.4H LOCKED).
-- Fix `refund_total / NULLIF(revenue_total, 0) * 100` → NULL when revenue=0 — VERIFIED CORRECT (the actual ask).
-- "DOUBLE/REAL div-by-zero returns Infinity/NaN per IEEE-754 (doesn't throw)" — VERIFIED CORRECT.
-- `COALESCE(refund_total / NULLIF(revenue_total,0) * 100, 0)` to show 0 — correct.
-- ★ **MINOR completeness note (NOT a defect)**: math.html confirms `/` does INTEGER truncation. If `refund_total`/`revenue_total` are INTEGER, the division truncates toward zero BEFORE `* 100` (e.g. 5/100 = 0), so the percentage needs `100.0 *` leading (decimal promotion) or a CAST. Responder did NOT surface decimal promotion. For DECIMAL/DOUBLE money columns (typical) it's fine, and the div-by-zero guard — the actual question — is fully correct. Minor comp ding only.
-- Acc 4.75 / Clar 4.5 / App 4.625 / Comp 4.625.
+VERIFIED CORRECT both ways against sql/select.html GROUPING operation.
+- `GROUP BY ROLLUP(region, tier)` is valid Trino 467 and produces: detail rows {region,tier}, region subtotal {region} with tier rolled up, and grand total {} with both rolled up — CONFIRMED.
+- ★ **GROUPING(region, tier) bitmask CONFIRMED PRECISELY:** docs state grouping() returns a bit set where bit=1 when the column is NOT in the grouping (rolled up) and bit=0 when it IS a grouping column, and the **leftmost argument is the most-significant bit**. Therefore:
+  - detail {region,tier} → 0b00 = **0** ✓ (responder: 0 = Detail)
+  - region subtotal {region}, tier rolled up → region-bit 0, tier-bit 1 → 0b01 = **1** ✓ (responder: 1 = Region Total)
+  - grand total {}, both rolled up → 0b11 = **3** ✓ (responder: 3 = Grand Total)
+- ★ **"No value 2 for ROLLUP — don't write WHEN 2" CONFIRMED CORRECT:** value 2 = 0b10 = region rolled away + tier present = the {tier}-only grouping, which ROLLUP does NOT emit (that combination only comes from CUBE or explicit GROUPING SETS). Excellent, precise teaching.
+- CUBE for independent margins on both dims and GROUPING SETS ((region),(tier),()) for hand-picked subtotals — both CORRECT.
+The whole GROUPING-bitmask answer is subtle and the responder got every value right. ★ NO grouping-bitmask error (a watched tic). The only reason this isn't 5.0: clarity could note that NULL appears in the rolled-up columns of subtotal/total rows (the GROUPING() row_type label addresses this, but a beginner may still wonder where the NULLs come from).
+Acc 4.875 / Clar 4.5 / App 4.75 / Comp 4.875.
+
+## Q3 — count products with more than 3 tags (ARRAY length) — **4.8125 CLEAN**
+
+VERIFIED CORRECT against functions/array.html.
+- `count(*) ... WHERE cardinality(tags) > 3` — `cardinality(array)` returns the element count, CONFIRMED. `> 3` correctly maps to "more than 3" (keeps 4+). No sargability/function-wrap issue worth flagging here.
+- "Trino has no array_length()" — CONFIRMED (cardinality is the canonical function; no array_length exists). NOT a fabrication-of-absence error.
+- contains(tags,'featured'), array_distinct, array_join(tags, ', ') — all valid 467, CONFIRMED.
+- "cardinality works on ARRAY and MAP (MAP = key count)" — CONFIRMED (cardinality(map) returns number of entries).
+Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
+
+## Q4 — MAP filter properties['country']='US' type error — **4.8125 CLEAN ★ verified both ways**
+
+VERIFIED CORRECT against functions/map.html.
+- ★ **Subscript `map[key]` THROWS on a missing key — CONFIRMED.** Docs: the subscript operator "throws an error if the key is not contained in the map." `element_at(map, key)` "Returns value for given key, or NULL if the key is not contained in the map." So the element_at fix is exactly right: `element_at(properties,'country')='US'` returns NULL on missing keys, the WHERE drops them, no error. CORRECT both ways.
+- Existence check `element_at(properties,'country') IS NOT NULL` — CORRECT.
+- ★ NOTE: the user reported a "type error"; the actual production failure is most likely the missing-key RUNTIME error ("Key not present in map: ..."), not a static type error. The responder's element_at fix is correct regardless of which the user hit — NO ding. (Minor: the answer could have noted the user's "type error" wording might actually be the runtime missing-key error, but this is non-load-bearing.)
+- JSON-string fallback (json_extract_scalar) — appropriate hedge, valid 467.
+- ★ MAP type spelling: `MAP(VARCHAR,VARCHAR)` parens-syntax CORRECT; `MAP<VARCHAR,VARCHAR>` is Hive/Spark and parse-errors in Trino 467 — CONFIRMED. Good dialect-trap callout, no PARTITIONED-BY-style foreign-DDL drag-in.
+Acc 4.875 / Clar 4.75 / App 4.75 / Comp 4.875.
 
 ---
 
-## SCOPE / classification
-- **Q2 ILIKE-conflation DID NOT RECUR** — routed to `LOWER(plan_name)='pro'` + `regexp_like(plan_name,'(?i)^pro$')`; no session-property false-mechanism, no federation drag-in, no r22 citation. iter986 Option-B slip **CONFIRMED ONE-OFF**. No 2-in-2, NO LIGHT-defang warranted.
-- **Q1 HAVING `<= 5` correct boundary** — iter986 `>5`-vs-`>=5` off-by-one did NOT recur.
-- **Q3 TopN-not-full-sort CORRECT** but "reads only enough rows / doesn't read billions" is an OVERSTATEMENT for the GROUP BY case (must aggregate all windowed rows; TopN only skips the final sort) — RESPONDER imprecision, minor accuracy ding, NOT a resource defect.
-- **Q4 NULLIF guard correct**; minor decimal-promotion (`100.0 *`) completeness note unaddressed.
-- TICS otherwise CLEAN: no QUALIFY / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn-or-rule-or-session-property / PARTITIONED-BY-foreign-DDL / aggregate-in-GROUP-BY / broken-secondary-false-justification / mid-churn / missing-CTE-col / JOIN-fan-out / ts-minus-ts / column-scope. ILIKE-conflation ABSENT (Q2 clean). HAVING-boundary CORRECT (Q1).
+## Scope notes / tics
 
-## RECOMMENDATION = DEFAULT NO-OP
-Margin +1.078; all four leads correct. The only two dings are RESPONDER-side and minor (Q3 scan-reduction overstatement, Q4 unaddressed decimal promotion) — no findable resource/findability gap. Q2 ILIKE-conflation confirmed one-off; Q1 boundary correct.
+- **Q1**: NOT-IN+NULL 3VL trap CORRECT; ★ anti-join CORRECTLY NAMED (no semi-join mislabel); stray "premium_users" = cosmetic wart only.
+- **Q2 (KEY CHECK)**: ROLLUP valid; ★ GROUPING bitmask 0=detail / 1=region-subtotal / 3=grand-total CONFIRMED CORRECT (leftmost=MSB, bit=1 when rolled up); ★ "no value 2 for ROLLUP" CONFIRMED CORRECT (2=0b10={tier}-only, CUBE/GROUPING-SETS-only). NO grouping-bitmask error.
+- **Q3**: cardinality(array)=length CONFIRMED; no array_length() CONFIRMED; contains/array_distinct/array_join valid; cardinality(map)=key count CONFIRMED.
+- **Q4**: ★ subscript `map[key]` THROWS on missing key + element_at returns NULL — CONFIRMED both ways; element_at fix correct; MAP(...) parens correct, MAP<> Hive/Spark parse-error CONFIRMED.
 
-Re-probe next sweep: (a) another `ORDER BY ... LIMIT` / top-N-on-aggregate Q — watch whether responder still overstates "reads only enough rows" for the GROUP BY case (if it recurs 2-in-2 on a worked aggregate top-N, candidate for a LIGHT additive note "TopN skips the final SORT, not the aggregation/scan of the windowed rows; only partition pruning reduces the scan"); (b) another percentage/ratio Q — watch decimal-promotion (`100.0 *` / CAST) on INTEGER columns. Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 987; passed=true preserved; final_iterations_remaining 0).
+TICS OTHERWISE CLEAN: no QUALIFY-misuse / false-mechanism-semi-join-mislabel (Q1 anti-join correctly named) / MAX(varchar) / percent_rank-inversion / fabricated-fn-or-rule (cardinality, element_at, GROUPING, ROLLUP, contains, array_join all real 467; array_length correctly stated ABSENT) / PARTITIONED-BY-foreign-DDL / aggregate-in-GROUP-BY / broken-secondary-false-justification / ILIKE-conflation / grouping-bitmask-error / mid-churn / missing-CTE-col / JOIN-fan-out / ts-minus-ts / column-scope.
+
+## Recommendation = DEFAULT NO-OP
+
+Margin +1.281; all 4 leads correct; all dialect/logic claims verified both directions. The only blemishes are sub-cosmetic (Q1 stray table name; Q2 NULLs-in-subtotal-rows could be spelled out for beginners). NO findable resource defect, NO findability gap, NO 2-in-2 recurrence. Q2 GROUPING-bitmask and Q4 map-subscript-throws — both subtle, both nailed.
+
+Re-probe next sweep: (a) another GROUPING/CUBE/GROUPING SETS Q to confirm the bitmask convention stays correct under CUBE (where value 2 DOES appear) — watch whether the responder correctly emits/explains the {tier}-only row; (b) another MAP/ARRAY collection-access Q to confirm element_at-vs-subscript and cardinality stay correct.
+
+Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 988; passed=true preserved; final_iterations_remaining 0).
