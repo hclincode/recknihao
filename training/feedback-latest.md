@@ -1,37 +1,78 @@
-# Judge Feedback — iter1012
+# Judge Feedback — iter1013
 
-**OVERALL: 4.75 (76.0/16) — PASS** (threshold ≥ 3.5; margin +1.25). OVERALL AVERAGE governs — no per-Q veto.
+**OVERALL: 4.625 (74.0/16) — PASS** (threshold 3.5; margin +1.125; OVERALL AVERAGE governs, no per-Q veto)
 
-All four answers verified BOTH directions against trino.io/docs/467 (functions/array.html, functions/window.html, sql/select.html) + WebSearch on EXCEPT vs NOT-IN NULL semantics — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt) — all 4 fit. No federation/auth angle this sweep.
+Verified BOTH directions vs trino.io/docs/467 (functions/datetime.html, math.html, aggregate.html, sql/select.html) + RAW git-tag 467 source (MathFunctions roundLong = RoundingMode.HALF_UP) + Joda-Time DateTimeFormat (E text-field rule) + WebSearch (GROUP-BY/ORDER-BY "must be an aggregate expression or appear in GROUP BY clause"). NOT resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark + dbt) — all 4 fit; no federation/auth angle.
 
-## Per-question scores
+---
 
-| Q | Topic | Acc | Comp | Clar | App | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | window SUM OVER PARTITION, no row collapse | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
-| Q2 | ORDER BY CAST(varchar AS integer) numeric sort | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
-| Q3 | trial-not-converted anti-join (EXCEPT / LEFT JOIN IS NULL) | 5 | 4.75 | 4.75 | 4.75 | 4.8125 |
-| Q4 | contains(array, element) array membership | 4.75 | 4.5 | 4.75 | 4.5 | 4.625 |
+## Q1 — first session's channel (MIN gave alphabetical) — 4.75 CLEAN
+`FIRST_VALUE(channel) OVER (PARTITION BY user_id ORDER BY session_time ASC)` + `SELECT DISTINCT`, alt `min_by(channel, session_time) GROUP BY user_id`. Critique correct.
+- VERIFIED `min_by(x, y)` = "the value of x associated with the minimum value of y" (aggregate.html) → returns the channel at the earliest session_time. CORRECT.
+- VERIFIED `MIN(channel)` returns the alphabetically smallest channel string, NOT the value at the earliest timestamp — responder's critique is exactly right.
+- FIRST_VALUE with default frame (RANGE UNBOUNDED PRECEDING → CURRENT ROW) returns the first row's value within the ordered partition → earliest-session channel; correct. FIRST_VALUE is safe under the default frame (LAST_VALUE is the documented trap, not in play here). DISTINCT to collapse is correct.
+- **Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75**
 
-Sub-score sum = 76.0 / 16 = **4.75**.
+## Q2 — round int cents to 2dp dollars — 4.6875 CLEAN
+`ROUND(total_cents/100.0, 2)`; ROUND(x,n) HALF_UP (away from zero); examples ROUND(49.555,2)=49.56, ROUND(49.545,2)=49.55; cast money to DECIMAL(18,2).
+- VERIFIED round(x, d) exists (math.html). VERIFIED HALF_UP / round-half-away-from-zero via git-tag MathFunctions source (RoundingMode.HALF_UP).
+- Examples consistent: `49.555`/`49.545` are exact DECIMAL literals in Trino (not float), so HALF_UP gives 49.56 and 49.55 respectively — both correct as stated.
+- `/100.0` makes the operand DECIMAL (not integer division) → correct dollar value; DECIMAL(18,2) recommendation for money is sound (avoids float drift). Good practical guidance.
+- **Acc 5 / Comp 4.5 / Clar 4.75 / App 4.5**
 
-## Resolved verdicts (with citations)
+## Q3 — IDs in BOTH lists without a JOIN — 4.71875 CLEAN
+`SELECT customer_id FROM customer_ids INTERSECT SELECT customer_id FROM paying_customers`; defaults DISTINCT, INTERSECT ALL keeps dups, NULL-safe, implemented as semi-join; alt INNER JOIN + DISTINCT.
+- VERIFIED INTERSECT and INTERSECT ALL both exist in 467 (select.html: "INTERSECT returns only the rows that are in the result sets of both"; "If neither is specified, the behavior defaults to DISTINCT").
+- NULL-safe claim correct: set ops compare by distinctness (NULL not distinct from NULL → matched) — no NOT-IN 3VL trap.
+- Semi-join implementation note matches r23 L1714 lock. INNER JOIN + DISTINCT alt is a valid equivalent.
+- **Acc 5 / Comp 4.75 / Clar 4.625 / App 4.5**
 
-1. **Q4 `contains(feature_flags, 'dark_mode')` — CORRECT.** trino.io/docs/467/functions/array.html: `contains(x, element) → boolean`, "Returns true if the array `x` contains the `element`." Argument order is (array, element) exactly as responder used. Recommending `contains()` over EXISTS+UNNEST for a simple membership test is the idiomatic call; UNNEST is correctly reserved for exploding-to-rows. Mild ding: didn't mention NULL-element edge, but not required for the question.
+## Q4 — weekday NAME label from timestamp — 4.34375 (BROKEN-SECONDARY DEFECT in appended aggregation example)
 
-2. **Q3 EXCEPT NULL-safety + anti-join — CORRECT.** sql/select.html: EXCEPT exists, "If neither is specified, the behavior defaults to DISTINCT." Set operations are defined in terms of *distinctness* (NULL is NOT distinct from NULL → treated as equal), so EXCEPT does NOT inherit the NOT-IN three-valued-logic trap — verified via SQL-spec/Postgres-list discussion of EXCEPT-vs-NOT-IN. Responder's NOT-IN-breaks-on-NULL warning is accurate, and the `LEFT JOIN conversions c ON ... WHERE c.user_id IS NULL` anti-join is the standard equivalent. Both forms correct.
+**PRIMARY answer CORRECT:**
+- VERIFIED no `dayname()` in Trino 467 (datetime.html lists none).
+- VERIFIED `format_datetime(ts, 'EEEE')` → full weekday name ('Monday'); Joda-Time DateTimeFormat: text field 'E', "4 or more pattern letters → full form", 3 → abbreviated → `'EEE'`='Mon'. Correct.
+- VERIFIED `day_of_week(x)` returns ISO 1 (Monday) .. 7 (Sunday). Correct as a sortable number.
+- DATE→TIMESTAMP implicit coercion / CAST is fine.
 
-3. **Q1 `SUM(mrr) OVER (PARTITION BY plan_name)` — CORRECT.** functions/window.html: window functions "run after the HAVING clause but before the ORDER BY clause" (i.e. after WHERE) and return one output per input row (do NOT collapse like GROUP BY). `SUM(...) OVER ()` for grand total correct; "no join needed" is the right idiom for detail+total in one pass.
+**SECONDARY (appended aggregation example) — DEFECT, broken-secondary pattern:**
+```
+SELECT format_datetime(CAST(created_at AS timestamp),'EEEE') AS day_of_week, COUNT(*)
+FROM events
+GROUP BY format_datetime(CAST(created_at AS timestamp),'EEEE')
+ORDER BY day_of_week(created_at)          -- INVALID
+```
+`ORDER BY day_of_week(created_at)` references the RAW, ungrouped `created_at` column — it is neither a grouping expression (only `format_datetime(...,'EEEE')` is grouped) nor wrapped in an aggregate. Trino 467 REJECTS this in a grouped query with an error of the form **"'created_at' must be an aggregate expression or appear in GROUP BY clause"** (confirmed via Trino GROUP-BY/ORDER-BY semantics; same error family as trinodb/trino #16984). This is a genuine analysis error, not a stylistic nit.
 
-4. **Q2 `ORDER BY CAST(version_code AS integer)` — CORRECT.** CAST(varchar→integer) works for '9'/'10'/'11' and yields numeric ordering (9,10,11) rather than lexicographic ('10','11','9'); ORDER BY on an expression does not change the stored column type. `TRY_CAST` for non-numeric rows is the right guard.
+CORRECT FIXES (any one):
+- `ORDER BY min(day_of_week(created_at))` — wrap in an aggregate; or
+- `GROUP BY format_datetime(CAST(created_at AS timestamp),'EEEE'), day_of_week(created_at) ORDER BY day_of_week(created_at)` — also group the sort key (cleaner: pre-compute `day_of_week` in a CTE alongside the name, group by both); or
+- compute `day_of_week(created_at)` as a selected column in a subquery/CTE and ORDER BY that.
 
-## Defects / notes
+Textbook broken-secondary pattern: responder nails the LEAD (weekday-name label) and appends a "for completeness" aggregation example with an invalid sort. The primary deliverable the user asked for ('Monday' label) is fully correct.
+- **Acc 4.0 / Comp 4.25 / Clar 4.5 / App 4.625**
 
-- **Zero parse-error defects. Zero dialect tics.** No `::` cast anywhere (ban double-locked r23 §3.1C + r27 §4.4A — not exercised). No QUALIFY / false-semi-join / MAX-varchar / GREATEST-LEAST-NULL / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / broken-secondary-alternative.
-- Q4 is the lowest only on completeness/applicability for not noting array-NULL edge cases — a nicety, not an error.
+---
 
-## Recommendation: DEFAULT NO-OP
+## Sub-score grid
+| Q | Acc | Comp | Clar | App |
+|---|---|---|---|---|
+| Q1 | 5 | 4.75 | 4.75 | 4.75 |
+| Q2 | 5 | 4.5 | 4.75 | 4.5 |
+| Q3 | 5 | 4.75 | 4.625 | 4.5 |
+| Q4 | 4.0 | 4.25 | 4.5 | 4.625 |
 
-Margin +1.25; all 4 answers correct and verified both directions; no findable resource gap, no resource defect, no 2-in-2 recurrence. NO resource edit; NO FIX-A; do NOT bump state.json (orchestrator commits).
+Sum = 74.0 / 16 = **4.625 → PASS**
 
-**Re-probe next sweep:** (a) another window-aggregate-vs-GROUP-BY Q (watch frame-default trap on FIRST_VALUE/LAST_VALUE); (b) another varchar→numeric CAST/sort Q (watch TRY_CAST necessity messaging); (c) another anti-join Q — confirm EXCEPT NULL-safe + NOT-IN-3VL warning durable; (d) another array-membership Q — confirm contains(array, element) order + UNNEST reserved for explode. Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310).
+`::` cast shorthand ABSENT all 4 (ban holds). No QUALIFY / false-semi-join / MAX-varchar / GREATEST-LEAST-NULL / fabricated-fn (min_by, ROUND, INTERSECT/ALL, format_datetime, day_of_week ALL real & verified) / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT. ONE active TIC: Q4 broken-secondary ORDER-BY-ungrouped-column.
+
+## RECOMMENDATION — DEFAULT NO-OP
+Margin +1.125; 3/4 clean; Q4 PRIMARY (the actual ask) correct. The Q4 ORDER-BY-ungrouped defect is in an APPENDED "for completeness" aggregation example — a textbook **broken-secondary one-off**, NOT a findable resource gap (the question is "weekday NAME label," which the primary answers correctly). Matches the established broken-secondary family (iter936/943/948/950/954) where the lead passes and Haiku pads with a flawed alternative. No single resource fix addresses responder padding. NO resource edit; NO FIX-A.
+
+Re-probe next sweep:
+- (a) another first/earliest-event-attribute Q — confirm FIRST_VALUE default-frame + min_by; watch LAST_VALUE default-frame trap (the actual landmine, not exercised here).
+- (b) another money/round Q — ROUND HALF_UP + DECIMAL(p,s) for money.
+- (c) another set-membership/intersection Q — INTERSECT default-DISTINCT + INTERSECT ALL + semi-join.
+- (d) another weekday/temporal-label Q — format_datetime EEEE full / EEE short + day_of_week ISO; **watch whether the GROUP-BY + ORDER-BY-by-ungrouped-derived-key secondary recurs.** If `ORDER BY <fn>(ungrouped_col)` in a grouped query appears a SECOND consecutive time (2-in-2), grep resources for grouped-ORDER-BY guidance and consider a LIGHT findability nudge (pin "ORDER BY in a GROUP BY query must reference a grouping expression or an aggregate; wrap derived sort keys in min()/group them too"). Until then, monitor only — do not churn.
+
+Federation r22 §13.x hard-locked, NOT probed (stays 4.49944/310). MUST NOT bump state.json (already 1013; orchestrator commits).
