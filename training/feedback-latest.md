@@ -1,63 +1,53 @@
-# iter991 Judge Feedback — 2026-06-17 (EXTENDED PHASE breadth sweep)
+# iter992 Judge Feedback — EXTENDED PHASE breadth sweep
 
-## Verdict: OVERALL 4.81 STRONG PASS
+**OVERALL 4.6719 STRONG PASS** (Q1 4.8125 / Q2 4.8125 / Q3 4.3125 / Q4 4.75 = 18.6875/4 = 4.6719; margin +1.17; OVERALL AVERAGE governs, no per-Q veto).
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Q-avg |
-|---|---|---|---|---|---|
-| Q1 LEFT-vs-INNER / find disappearing orders | 5.0 | 4.5 | 4.75 | 4.75 | 4.75 |
-| Q2 regexp_replace + extract "Chrome" | 5.0 | 4.5 | 4.75 | 4.75 | 4.75 |
-| Q3 date_trunc 'hour'/'week' valid units | 5.0 | 4.75 | 4.75 | 4.875 | 4.84 |
-| Q4 earliest non-null date across columns | 5.0 | 5.0 | 4.75 | 4.875 | 4.91 |
-
-**Overall = (4.75 + 4.75 + 4.84 + 4.91) / 4 = 4.81 → STRONG PASS** (margin +1.31; overall average governs, no per-Q veto). All dialect/logic claims verified BOTH directions vs trino.io/docs/467 + git-tag 467 raw source — NOT against resources/.
-
-Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 Qs fit; no federation drag-in.
+All 4 questions verified BOTH directions against trino.io/docs/467 + raw git-tag 467 source (datetime.md, select.html) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — all 4 fit; NO federation drag-in. r22 §13.x hard-locked, NOT probed (OVERRIDDEN).
 
 ---
 
-## Per-question verification
+## Q1 — count distinct combinations of two columns (COUNT(DISTINCT user_id, month) parse-errored) — 4.8125 CLEAN
 
-### Q1 — LEFT-vs-INNER semantics + anti-join diagnostic — 4.75 CLEAN
-- INNER keeps only left rows with a right match; LEFT keeps all left rows (no-match → NULL right cols). VERIFIED CORRECT.
-- The `r.refund_id IS NULL` filter on a LEFT JOIN is the textbook **anti-join** diagnostic — correctly referenced as the no-match set. **NO semi-join mislabel** (the known tic is clean here).
-- Counting the IS NULL rows = the gap between LEFT and INNER row counts: correct.
-- **Minor completeness gap (not a defect):** if `refunds` is one-to-many per order, the LEFT JOIN FANS OUT, so the LEFT-vs-INNER count delta is no longer purely "orders with no refund" (matched orders get multiplied). The responder did not mention fan-out / `COUNT(DISTINCT o.order_id)`. Only a Comp ding (4.5); the anti-join IS-NULL diagnostic itself correctly isolates the no-match orders regardless of fan-out.
+- VERIFIED: `count()` is documented single-arg (`count(*)`, `count(x)`); bare multi-arg `COUNT(DISTINCT user_id, month)` IS a parse error (matches user symptom). Confirmed against aggregate functions doc + pinned memory `reference_trino_count_distinct_single_arg` (iter925 disposition).
+- VERIFIED CORRECT: ROW-wrap forms `COUNT(DISTINCT ROW(user_id, month))` and `COUNT(DISTINCT (user_id, month))` are the valid Trino 467 way to count distinct COMBINATIONS — both treat the pair as one composite ROW value. (Search-engine "not supported" hits conflate the bare-comma multi-arg form; the ROW-wrap form is the canonical fix.)
+- MINOR (not a defect): the question already does `GROUP BY month` for "unique users per month," so `COUNT(DISTINCT user_id)` alone suffices — the `month` inside the ROW is redundant-but-harmless. Cosmetic.
+- Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-### Q2 — regexp_replace + the REGEX BACKSLASH CHECK — 4.75 CLEAN
-- **regexp_replace 3-arg `(string, pattern, replacement)` and 2-arg `(string, pattern)` removal form: BOTH VALID Trino 467** (functions/regexp.html raw source). CONFIRMED.
-- **Capture-group backreference is `$1` / `$2`, NOT `\1`: CONFIRMED CORRECT.** Raw-source example: `regexp_replace('1a 2b 14m', '(\d+)([ab]) ', '3c$2 ')` uses `$2`. The responder's "$1 not \1 (\1 emits a literal backslash in Trino)" claim is accurate.
-- **★ BACKSLASH VERDICT — responder's SINGLE-backslash `'(\d{3})(\d{3})(\d{4})'` is CORRECT working Trino. DO NOT FLAG.** Verified three ways:
-  1. **types.md (467 raw source):** Trino does NOT process backslash escapes in standard single-quoted VARCHAR literals — a backslash is a LITERAL character (only `''` escapes a quote; only `U&'...'` strings use `\` escapes). So `'\d'` passes the two literal chars `\d` straight to the Java regex engine = digit class = WORKS. Conversely `'\\d'` would pass `\\d` to Java = escaped-backslash + `d` = matches a literal-backslash-then-d, which would NOT match a digit.
-  2. **regexp.md (467 RAW markdown source):** the official examples write SINGLE backslash — `regexp_extract('1a 2b 14m', '\d+')`, `regexp_count('1a 2b 14m', '\s*[a-z]+\s*')`. (The HTML-rendered docs page shows `\\d` — that is a Sphinx/markdown RENDERING ARTIFACT, not the literal convention.)
-  3. WebSearch confirmed the mechanism: Trino does no escape pre-processing; `'\d'` reaches Java regex as the digit class and works.
-  - **Correction logged:** my 7-day-old `reference_trino_regex_backslash` memory asserted DOUBLE-backslash is canonical and single is "non-canonical/broken" — that was based on a misread of the HTML-rendered (escaped) example and is SUPERSEDED. The authoritative raw source + types.md escape semantics establish single-backslash `'\d'` as the correct working form. This is exactly the imported-prior self-error zone the directive flagged; verify-first prevented a false flag.
-- Char-classes `[A-Za-z]` / `[^A-Za-z]` (which the responder also used) sidestep the backslash question entirely and are the safest copy-attractive form — good.
-- **Minor completeness (Comp 4.5, not a defect):** the user asked to "extract just Chrome." The responder used the whole-string match-and-replace-with-`$1` trick and flagged it illustrative — acceptable — but **`regexp_extract(user_agent, 'Chrome', 0)` or `regexp_extract(user_agent, '(Chrome)/[0-9.]+', 1)` is the more natural EXTRACTION tool** for this exact ask. Mentioning regexp_extract would have improved the answer. Noted as a minor scope point, not an error.
+## Q2 — explode array tags to rows keeping event_id AND array position — 4.8125 CLEAN
 
-### Q3 — date_trunc valid units — 4.84 CLEAN
-- **'hour' and 'week' BOTH valid date_trunc units: CONFIRMED** (datetime.html / raw datetime.md).
-- **'week' truncates to MONDAY: CONFIRMED** (raw-source example truncates to a Monday, ISO-8601). Responder's "Monday start, ISO-8601" is correct.
-- **★ 'millisecond' VERDICT — the responder's inclusion of 'millisecond' is CORRECT, NOT an over-inclusion. DO NOT FLAG.** Verified: the 467 raw datetime.md date_trunc unit table lists `millisecond` as the first row, and GitHub issue #20427 ("date_trunc has `millisecond` support but missing in the doc") confirms millisecond IS supported (it was merely absent from some doc renderings). The full valid list — millisecond, second, minute, hour, day, week, month, quarter, year — matches the responder exactly. No date_trunc-unit-fabrication tic.
-- **Minor clarity (Clar 4.75):** "NO sub-hour unit like 'minute'" is muddled phrasing — `minute` (and `second`/`millisecond`) ARE valid date_trunc units. The responder clearly MEANS "no built-in for custom N-minute buckets (5/15-min) — that needs arithmetic," which is correct. Cosmetic wording slip, not a logic error.
+- VERIFIED against select.html: `CROSS JOIN UNNEST(properties) WITH ORDINALITY AS t(tag, position)` is valid Trino 467. WITH ORDINALITY appends the ordinal as the **LAST** column and it is **1-based** — confirmed by the doc example `UNNEST(...) WITH ORDINALITY AS t(a, b, rownumber)` (rownumber last, starts at 1). The `AS t(tag, position)` alias correctly names value-then-ordinal.
+- VERIFIED: the "don't mix comma with CROSS JOIN" caveat is sound — implicit comma-join + CROSS JOIN UNNEST mixing is a known footgun.
+- No fabrication, no tic. Acc 5.0 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-### Q4 — earliest non-null date across columns — 4.91 CLEAN / STRONG
-- **MIN is an AGGREGATE (reduces rows); multi-arg `MIN(a,b,c)` row-wise is WRONG/errors: CONFIRMED.** Correct diagnosis of the user's error.
-- **`LEAST(c1,c2,c3)` is the row-wise scalar minimum across columns: CONFIRMED** (functions/comparison.html). GREATEST/LEAST = scalar row-wise; MAX/MIN = aggregate down rows. Mental-model contrast is accurate.
-- **★ LEAST returns NULL if ANY argument is NULL in Trino 467: CONFIRMED CORRECT** (comparison.md raw source: "Like most other functions in Trino, they return null if any argument is null" — explicitly contrasted with PostgreSQL which returns null only if ALL are null). The responder's "CRITICAL: LEAST returns NULL if ANY argument is NULL" is exactly right — this is the GREATEST/LEAST-NULL rule, and the responder did NOT fall into the Postgres-prior trap.
-- **★ COALESCE-with-far-future-sentinel workaround CORRECT:** `LEAST(COALESCE(c1, DATE '2099-12-31'), ...)` makes NULL columns lose the LEAST comparison, so the result is the earliest NON-NULL date per row — the right idiom and it correctly addresses the user's actual intent (earliest non-null, not earliest-or-null). Strong, complete answer.
+## Q3 — rows in A with no match in B without a big LEFT JOIN + filter — 4.3125, LEAD CORRECT + BROKEN-SECONDARY slip
+
+- LEAD CORRECT: `NOT EXISTS (SELECT 1 FROM messages m WHERE m.workspace_id = w.workspace_id)` is the correct correlated **anti-join** (anti-join correctly referenced, NO semi-join mislabel tic). NULL-safe contrast vs `NOT IN`'s NULL trap CONFIRMED CORRECT.
+- Primary alternative CORRECT: `LEFT JOIN ... GROUP BY ... HAVING COUNT(m.message_id) = 0` correctly counts only non-null child keys (the null-padded no-match row contributes 0).
+- ★ BROKEN-SECONDARY SLIP (the ding): the aside "or HAVING COUNT(*) = 1 if only w columns selected" is WRONG. Over a LEFT JOIN, `COUNT(*) = 1` is TRUE for a no-match workspace (one null-padded row) BUT ALSO TRUE for a workspace with exactly ONE message — so `HAVING COUNT(*) = 1` does NOT isolate no-match rows (it's ambiguous/incorrect). The correct guard is the `COUNT(m.message_id) = 0` form the responder already gave. Classification: RESPONDER broken-secondary/false-justification slip (lead + primary correct), per-instance one-off — re-probe-don't-churn, NOT a resource defect.
+- MINOR completeness: the "signed up in Q1" date filter (on workspaces) was dropped — the answer finds never-activated across ALL signups, not just Q1. Minor completeness gap, not a logic error.
+- Acc 4.0 / Clar 4.5 / App 4.5 / Comp 4.25.
+
+## Q4 — plain TIMESTAMP refunded_at → local time per a varchar timezone COLUMN (AT TIME ZONE seemed to use UTC) — 4.75 CLEAN (THE KEY CHECK)
+
+VERIFICATION VERDICTS (against trino.io/docs/467/functions/datetime + raw git-tag datetime.md):
+
+- ★ **`at_timezone(timestamp(p) with time zone, zone) → timestamp(p) with time zone` EXISTS — NOT a fabrication.** Doc text: "Converts a `timestamp(p) with time zone` to a time zone specified in `zone`." The responder did NOT invent this function. The fabrication-risk concern is REFUTED — it is a real Trino 467 function.
+- ★ **`with_timezone(timestamp(p), zone) → timestamp(p) with time zone` EXISTS and behaves as described.** Doc text: "Returns the timestamp specified in `timestamp` with the time zone specified in `zone` with precision `p`." It takes a timestamp WITHOUT tz and ATTACHES the given zone (sets wall-clock as being in that zone), producing timestamp-with-tz — exactly the responder's "attaches UTC without changing wall-clock" description. CORRECT.
+- ★ **CONCEPTUAL MECHANISM CORRECT:** a plain TIMESTAMP that stores a UTC instant must FIRST be labeled UTC (`with_timezone(refunded_at, 'UTC')`), THEN converted to the per-row target zone (`at_timezone(..., timezone_col)`). The user's symptom (AT TIME ZONE "seems to use UTC"/wrong result) is because applying `AT TIME ZONE` to a timestamp-WITHOUT-tz treats the input AS being in that zone rather than converting from UTC — so the label-then-convert two-step is the right fix. The recommended dynamic form `at_timezone(with_timezone(refunded_at, 'UTC'), timezone_col)` is CORRECT and produces per-row conversion using the column zone. The "if already TIMESTAMP WITH TIME ZONE, skip with_timezone → at_timezone(refunded_at, timezone_col)" note is also CORRECT.
+- ★ **AT-TIME-ZONE column-vs-literal verdict:** the 467 docs do NOT explicitly forbid a column/varchar-expression zone operand for the `AT TIME ZONE` operator (examples use literals only; no stated constant-only restriction). So the responder's claim "AT TIME ZONE 'literal' only works with a hardcoded zone string" is a MINOR IMPRECISION/over-statement — but it is NOT load-bearing: the responder steered the user to the `at_timezone()` FUNCTION form which unambiguously accepts a column-expression zone and is verified-valid. Because the recommended solution is correct and uses a real function, this is a minor clarity ding, not a defect.
+- ★ **Correct dynamic-tz-conversion form (for the record):** `at_timezone(with_timezone(refunded_at, 'UTC'), timezone_col)` — this is what the responder gave and it is correct. Equivalent operator form would be `with_timezone(refunded_at, 'UTC') AT TIME ZONE timezone_col`.
+- NO fabricated-function tic (both at_timezone and with_timezone are real). Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
 ---
 
-## Tic scan — ALL CLEAN
-No QUALIFY / no false-mechanism semi-join mislabel (Q1 anti-join correctly referenced) / no MAX(varchar) / no percent_rank inversion / no fabricated functions (regexp_replace 2&3-arg, regexp_extract, LEAST/GREATEST, date_trunc 'millisecond'..'year' ALL REAL & correct) / no regex-backslash-error (Q2 single `\d` VERIFIED correct — NOT flagged) / no date_trunc-unit-fabrication (Q3 'millisecond' VERIFIED real) / no GREATEST-LEAST-NULL error (Q4 any-arg-NULL→NULL CORRECT) / no PARTITIONED-BY foreign DDL / no broken-secondary false-justification / no mid-churn / no column-scope / no ILIKE conflation.
+## TICS scan — ALL CLEAN except Q3 broken-secondary
 
-## Scope notes
-- **Q2 backslash:** single `'\d'` = CORRECT working Trino (types.md no-escape semantics + raw regexp.md single-backslash convention + mechanism confirmed); HTML `\\d` is a render artifact; `$1` backreference (not `\1`) CONFIRMED; regexp_replace 2&3-arg CONFIRMED; regexp_extract would be the more natural extractor (minor).
-- **Q3:** 'hour' + 'week' valid, week=Monday CONFIRMED; **'millisecond' IS a real date_trunc unit (NOT over-inclusion)** per #20427 + raw source; "no sub-hour unit" phrasing is a minor clarity slip (means no custom N-minute bucket).
-- **Q4:** LEAST-not-MIN CONFIRMED; **LEAST-NULL-propagation (any-arg-NULL→NULL) CONFIRMED CORRECT**; COALESCE-far-future-sentinel for earliest-non-null CONFIRMED CORRECT.
-- **Q1:** anti-join IS-NULL diagnostic CORRECT; minor fan-out completeness gap (one-to-many refunds inflate the LEFT count) — Comp ding only.
+No QUALIFY / false-mechanism-semi-join-mislabel (Q3 anti-join correctly referenced) / MAX(varchar) / percent_rank-inversion / fabricated-fn (at_timezone, with_timezone, UNNEST WITH ORDINALITY, COUNT(DISTINCT ROW()) ALL real & correct) / regex-backslash / GREATEST-LEAST-NULL / COUNT-DISTINCT-multiarg-error (correctly diagnosed) / PARTITIONED-BY-foreign-DDL / mid-churn / missing-CTE-col / ts-minus-ts / column-scope / ILIKE-conflation.
 
-## Recommendation = DEFAULT NO-OP
-Margin +1.31; all 4 leads correct & verified both directions; zero tics; no findable resource/findability gap; no 2-in-2 recurrence. Re-probe next sweep: (a) another regex-extraction Q — confirm single-`\d` stays correct + watch for regexp_extract suggestion; (b) another date_trunc/bucketing Q — confirm millisecond/week-Monday + the N-minute-arithmetic phrasing; (c) STILL OWED from iter989: another DISTINCT-vs-GROUP-BY/dedup Q to settle the perf-folklore one-off (2-in-2 → trace to resource root cause). Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. **MUST NOT bump training/state.json** (already 991; passed=true preserved; final_iterations_remaining 0).
+Sole blemish = Q3 `HAVING COUNT(*) = 1` broken-secondary aside (lead + primary correct) + dropped Q1 date filter (minor completeness). Both RESPONDER-side, per-instance — re-probe-don't-churn (broken-secondary padding family, no single resource fix; consistent with the long-standing "responder appends a broken for-completeness alternative" pattern).
 
-**Self-correction this iter:** `reference_trino_regex_backslash` memory (DOUBLE-backslash canonical) is SUPERSEDED — single `'\d'` is the correct working form per types.md + raw regexp.md; HTML `\\d` was a render artifact I previously misread.
+## RECOMMENDATION = DEFAULT NO-OP
+
+Margin +1.17 STRONG PASS; all 4 LEADS correct & verified both directions; Q4 (the key check) fully clean on function existence; only ding = Q3 broken-secondary aside (responder padding, not a resource/findability gap, no 2-in-2). Re-probe next sweep: (a) another dynamic-timezone / AT-TIME-ZONE-on-plain-TIMESTAMP Q — confirm with_timezone+at_timezone label-then-convert lead stays + watch the "AT TIME ZONE literal-only" over-statement; (b) another anti-join / no-match-in-B Q — confirm NOT EXISTS lead + watch the COUNT(*)=N broken-secondary recur (2-in-2 → scope per-instance, still responder padding); (c) another COUNT(DISTINCT) combinations Q — confirm ROW-wrap stays.
+
+Federation r22 §13.x hard-locked NOT probed (OVERRIDDEN). NO resource edits. DO NOT bump training/state.json (already 992; passed=true preserved; final_iterations_remaining 0).
