@@ -1,43 +1,56 @@
-# Judge Feedback — iter1018
+# Judge Feedback — iter1019
 
-**OVERALL: 4.71875 (75.5/16) — PASS** (threshold 3.5; margin +1.21875). OVERALL AVERAGE governs — no per-Q veto.
+**OVERALL: 4.65625 / 5 (74.5 / 16) — PASS** (threshold 3.5; margin +1.15625; OVERALL AVERAGE governs, NO per-question veto)
 
-Verification done BOTH directions against trino.io/docs/467 (functions/string.html, functions/aggregate.html, functions/regexp.html, language/types.html) + WebSearch — NOT resources/. Prod stack (Trino 467 + Iceberg + Hive Metastore + MinIO, on-prem k8s) — all 4 questions are pure SQL-dialect, fit cleanly; no federation/auth angle exercised.
+Verified BOTH directions against trino.io/docs/467 (sql/select.html, functions/math.html) + WebSearch — NOT resources/. Production stack (hundreds-of-millions-row `page_views` on Trino 467 + Iceberg + MinIO) fits all 4 answers; no federation/auth angle this iter.
 
 ---
 
 ## Per-question scores
 
-### Q1 — events(target_url) contains 'app.' / position: strpos vs LIKE — 4.8125 CLEAN
-- **Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75**
-- VERIFIED (string.html): `strpos(string, substring) -> bigint`, "Positions start with 1. If not found, 0 is returned." 3-arg `strpos(string, substring, instance)` returns the N-th occurrence (negative instance searches from end). All exactly as the responder stated.
-- `WHERE strpos(target_url,'app.') > 0` as a contains-test = correct. Responder correctly says strpos is NOT inherently faster than LIKE for a pure contains check (both scan; neither prunes on a non-partition substring predicate), and to reach for strpos only when you need the position — accurate, no OLTP-index folklore.
-- 3-arg N-th-occurrence form correctly cited.
+| Q | Topic | Acc | Comp | Clar | App | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | NULLS LAST on DESC sort | 5 | 4.75 | 4.75 | 4.75 | **4.8125** |
+| Q2 | sign() vs CASE for +/-/0 flag | 5 | 4.5 | 4.75 | 4.75 | **4.75** |
+| Q3 | running count reset per calendar year | 5 | 4.75 | 4.5 | 4.75 | **4.71875** |
+| Q4 | TABLESAMPLE ~1% no full scan | 3.5 | 4.0 | 3.875 | 4.0 | **3.84375** |
 
-### Q2 — subscriptions(status) case-insensitive match — 4.75 CLEAN
-- **Acc 5 / Comp 4.5 / Clar 4.75 / App 4.75**
-- VERIFIED: `WHERE LOWER(status) = 'active'` (both sides lowered) = the canonical Trino 467 case-insensitive equality. Responder correctly states there is **no native ILIKE in Trino 467** (ILIKE is PostgreSQL-connector pushdown only — matches hard-locked r23 §3257 / r22 §13.x disambiguation and the no-native-ILIKE memory). `regexp_like(status,'(?i)^active$')` alternative VERIFIED (regexp.html: "Case-insensitive matching (enabled via the (?i) flag) is always performed in a Unicode-aware manner"); `^...$` anchors make it an exact match. No false "ILIKE-via-session-property" mechanism invented (watch-item (h) resolved in responder's favor).
-
-### Q3 (KEY re-probe) — device_readings: ONE row per device = its most recent metric_value — 4.71875 CLEAN
-- **Acc 5 / Comp 4.75 / Clar 4.625 / App 4.75**
-- **iter1017 slip CONFIRMED ONE-OFF — did NOT recur.** Form 1: `ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY recorded_at DESC) AS rn` in a subquery, outer `WHERE rn=1` → returns exactly one row per device, the latest by recorded_at. CORRECT and standard (no DISTINCT ON in Trino; QUALIFY not in 467 — responder correctly used the subquery+WHERE form, not QUALIFY).
-- Form 2: `max_by(metric_value, recorded_at) GROUP BY device_id` — VERIFIED (aggregate.html: "Returns the value of x associated with the maximum value of y over all input values"), one row per device, the metric_value at the max recorded_at. Correct single-column shortcut.
-- **Critically, the responder did NOT repeat the iter1017 mistake** (which on a LAST_VALUE question wrongly prescribed a look-BACK frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` that returns the current row instead of the partition-latest). Here the responder uses two unambiguously-correct partition-latest patterns. The iter1017 (m) most-recent-per-group slip is confirmed a one-off; responder now uses max_by + ROW_NUMBER-DESC correctly. Carried verified fact (max_by(x,ts) OR ROW_NUMBER DESC = most-recent-per-group) holds.
-
-### Q4 — support_tickets(is_escalated boolean): count escalated per month; SUM(is_escalated) errors — 4.625 CLEAN
-- **Acc 4.75 / Comp 4.5 / Clar 4.75 / App 4.5**
-- VERIFIED: `SUM(CAST(is_escalated AS integer))` — boolean→integer cast is supported (types.html confirms casting among boolean/integer/bigint types); true→1, false→0 is standard Trino/Presto semantics. SUM accepts numeric, not boolean, so `SUM(is_escalated)` on a raw boolean is a type error — responder correctly diagnoses the user's error.
-- `count_if(is_escalated)` VERIFIED (aggregate.html: "Returns the number of TRUE input values. Equivalent to count(CASE WHEN x THEN 1 END)") — exists, idiomatic, same result as the CAST+SUM. Both correctly grouped per month. Responder correctly calls count_if the idiomatic choice.
-- Sole nit (not a defect): no explicit note about NULL is_escalated handling is immaterial here (both CAST+SUM and count_if skip NULL); light Acc trim only.
+Sum 74.5 / 16 = **4.65625 → PASS**
 
 ---
 
-## TICS / defects
-- `::` cast shorthand ABSENT all 4 (double-lock r23 §3.1C + r27 §4.4A holds).
-- No QUALIFY, no false-semi-join, no fabricated function (strpos/max_by/count_if/regexp_like all real & verified), no regex-backslash slip, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no generate_subscripts/generate_series PG-series slip, no broken-secondary "for completeness" alternative.
-- **Q3: the iter1017 look-back-frame mistake did NOT recur — confirmed one-off.**
+## The 5 resolved verdicts (with citations)
 
-## Recommendation: DEFAULT NO-OP
-Margin +1.21875; all 4 correct and verified both directions; KEY Q3 re-probe confirms the iter1017 most-recent-per-group slip was a one-off (responder now uses max_by + ROW_NUMBER-DESC correctly). No source-verified findable gap, no resource defect, no 2-in-2 recurrence. NO resource edit; NO FIX-A; NO git commit (consistent with iter1001-1017 clean NO-OPs).
+1. **Q4 TABLESAMPLE clause order (PRIORITY) — SECOND example is INVALID.**
+   VERIFIED: TABLESAMPLE attaches to the table reference in the FROM clause (`sampledRelation` grammar: `aliasedRelation [ TABLESAMPLE method (percentage) ]`). It CANNOT follow the WHERE clause. The responder's first example `FROM page_views TABLESAMPLE SYSTEM (1) LIMIT 1000` is correct; the SECOND example `FROM page_views WHERE page_view_date = CURRENT_DATE TABLESAMPLE SYSTEM (1) LIMIT 1000` is a **clause-order PARSE ERROR**. Correct form: `FROM page_views TABLESAMPLE SYSTEM (1) WHERE page_view_date = CURRENT_DATE LIMIT 1000`. (Source: trino.io/docs/467/sql/select.html — sampledRelation grammar; corroborated by WebSearch on TABLESAMPLE FROM-clause placement / SampledRelation AST node.)
 
-Re-probe (monitor only): (a) most-recent-per-group — max_by / ROW_NUMBER-DESC lead holds, watch any look-back-frame relapse; (b) case-insensitive LOWER()=LOWER() + no-native-ILIKE + (?i) flag; (c) boolean→int SUM(CAST) / count_if; (d) strpos position vs LIKE contains. Federation r22 §13.x hard-locked NOT probed (stays 4.49944/310). MUST NOT bump state.json (already 1018; orchestrator commits).
+2. **Q4 SYSTEM vs BERNOULLI — CORRECT.** SYSTEM divides the table into logical segments and selects/skips whole segments (data-skipping, faster, but clustered/biased; result depends on connector storage layout). BERNOULLI selects each row independently with the given probability but scans all physical blocks (no I/O savings). Responder's characterization matches docs exactly. (Source: trino.io/docs/467/sql/select.html.)
+
+3. **Q1 NULL ordering — CORRECT.** Trino default IS `NULLS LAST` regardless of ASC/DESC. `ORDER BY renewed_at DESC NULLS LAST` is correct and the responder correctly contrasts Oracle/Postgres (DESC → NULLS FIRST). (Source: select.html "The default null ordering is NULLS LAST, regardless of the ordering direction.")
+
+4. **Q2 sign() — EXISTS and CORRECT.** `sign(x)` returns -1 / 0 / 1 for negative / zero / positive. Both `CASE WHEN sign(revenue)=1 ...` and plain `CASE WHEN revenue>0 ...` are valid and equivalent. (Source: trino.io/docs/467/functions/math.html — signum.)
+
+5. **Q3 year-reset running count — CORRECT approach.** `PARTITION BY user_id, EXTRACT(YEAR FROM session_start)` resets ROW_NUMBER()/running SUM(1) per calendar year. The prose "window functions alone cannot restart mid-query" is awkward/slightly misleading, but the SQL the responder then provides IS the canonical partition-by-derived-key reset pattern. Verified against window-function frame semantics.
+
+---
+
+## Defects / notes
+
+- **Q4 (the only real defect): broken-secondary example.** Primary example + SYSTEM/BERNOULLI explanation + the "avoid WHERE rand()<0.01 (reads every row)" warning are all CORRECT and well-targeted to the hundreds-of-millions-row scale. The defect is the appended SECOND example placing `TABLESAMPLE` AFTER the WHERE clause — a clause-order parse error. **Classification: broken-secondary-example one-off, NOT a findable resource gap** (broken-secondary family: iter936/943/948/950/954/1013). There is no single resource fix for responder padding-with-an-invalid-variant; correct form must immediately follow the table reference, before WHERE.
+- Q3 minor: the "cannot restart mid-query" framing costs a light Clarity point but does not change correctness — the delivered SQL is right.
+- Q2 minor: no float-edge note (NaN→NaN, -0.0), immaterial for revenue.
+- `::` shorthand absent in all 4. No QUALIFY / no false semi-join / no fabricated functions / no regex-backslash / no INTERVAL-quarter-week / no OFFSET-before-LIMIT.
+
+---
+
+## Recommendation
+
+**DEFAULT NO-OP.** Margin +1.156; 3/4 answers clean including the KEY Q4 primary + SYSTEM/BERNOULLI characterization. The lone Q4 defect is a first-occurrence broken-secondary clause-order slip — a per-instance responder-padding one-off, not a source-verified findable gap and not 2-in-2 recurrence. NO resource edit, NO FIX-A, NO git commit.
+
+**Re-probe (monitor only):**
+- (a) TABLESAMPLE clause-order — watch for `WHERE ... TABLESAMPLE` relapse; if it recurs 2-in-2, apply a LIGHT findability nudge (TABLESAMPLE binds to the FROM table reference, before WHERE).
+- (b) NULLS LAST default on DESC.
+- (c) sign() -1/0/1.
+- (d) partition-by-derived-key window reset.
+
+Federation r22 §13.x hard-locked, NOT probed (stays 4.49944 / 310). state.json already at 1019 — orchestrator commits; do not bump.
