@@ -1,90 +1,58 @@
-# Judge Feedback — iter1035
+# Judge Feedback — iter1036
 
-**OVERALL: 4.8125 — PASS** (margin +1.3125 over 3.5 threshold; overall average governs, no per-Q veto)
+**Overall: 4.375 PASS** (17.5 / 4; margin +0.875; overall average governs, no per-Q veto)
 
-Verified BOTH directions against RAW git-tag 467 source
-(raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/...), NOT resources/.
-Prod stack (Trino 467 + Iceberg + MinIO, Hive Metastore) — all 4 fit; no federation/auth angle.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/...) + WebSearch on official docs/blog — NOT against resources/. Prod stack (Trino 467 + Iceberg + Hive Metastore, on-prem MinIO) fits all 4; no federation/auth angle this sweep.
 
 ---
 
-## Q1 — week-over-week per customer in ONE query (was 2 queries + app math)
-**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.875 → 4.84375 CLEAN**
+## Q1 — return per-account features starting with literal "beta_" without exploding to rows
 
-- `SUM(metric) FILTER (WHERE ...)` conditional aggregation VERIFIED valid 467 syntax:
-  aggregate.md — "The `FILTER` keyword can be used to remove rows from aggregation processing
-  with a condition expressed using a `WHERE` clause"; form `aggregate_function(...) FILTER (WHERE <condition>)`.
-- this_week = `event_date >= date_trunc('week', current_date)`; last_week =
-  `>= date_trunc('week', current_date) - INTERVAL '7' DAY AND < date_trunc('week', current_date)` —
-  correct half-open windows; both boundaries anchored to the SAME `date_trunc('week')` so they are
-  contiguous and non-overlapping regardless of which weekday the week starts on.
-  `current_date - INTERVAL '7' DAY` is valid date arithmetic; INTERVAL '7' DAY uses a legal DAY qualifier.
-- date_trunc('week') Monday-start (ISO week, Trino day-of-week 1=Monday) — consistent w/ 467; the
-  query is correct even if the user's "week" boundary differs because both columns share the anchor.
-- Single pass, `GROUP BY customer_id`, no self-join — DIRECTLY eliminates the 2-query + app-layer-math
-  pain point. Engineer knows exactly what to do.
+**filter(enabled_features, f -> f LIKE 'beta_%') AS beta_features**
 
-## Q2 — sum an array of prices WITHOUT expanding to rows
-**Acc 5 / Comp 4.75 / Clar 4.625 / App 4.75 → 4.78125 CLEAN**
+Scores: **Accuracy 3.0 / Completeness 4.0 / Clarity 4.25 / Applicability 3.5 → 3.6875**
 
-- **array_sum FINDING: `array_sum` does NOT exist in Trino 467.** Verified neutrally against
-  functions/array.md at the 467 git tag — no `array_sum` function is defined anywhere in the file.
-- Therefore `reduce(line_items, 0, (s, price) -> s + price, s -> s)` is the **CANONICAL correct
-  approach**, not merely a workaround. The answer is fully correct AND complete; there is NO
-  completeness gap for omitting array_sum because the built-in does not exist.
-- reduce() 4-arg signature VERIFIED EXACT vs array.md:
-  `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R`.
-  Responder's `(line_items, 0, (sum,price)->sum+price, s->s)` matches positionally; identity
-  output function `s->s` is correct (docs note "It may be the identity function (`i -> i`)").
-- One row in / one row out, no GROUP BY — satisfies "without expanding to rows" exactly.
-- ALT `CROSS JOIN UNNEST(line_items) AS t(price)` + SUM + GROUP BY is a VALID alternative
-  (the very thing the user wanted to avoid, correctly framed as the fallback). Not a broken-secondary.
-- Minor clarity ding only (two paths could mildly distract); nothing inaccurate.
+- STRUCTURE CORRECT: `filter(array(T), function(T,boolean)) -> array(T)` EXISTS in 467 (array.md: "Constructs an array from those elements of `array` for which `function` returns true"). Using filter() + a lambda to keep matching elements in-place, no UNNEST, is exactly the right approach for "without exploding to rows." Credit this.
+- **PREDICATE BUGGY — LIKE-underscore-literal-prefix defect.** In Trino LIKE, `_` is a SINGLE-CHARACTER WILDCARD. Verified comparison.md (467 RAW): "`_` matches any single character" and "`%` matches zero or more characters"; "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the `ESCAPE` character." So `f LIKE 'beta_%'` matches `"beta"` + ANY single char + anything — it would keep `"betaX9"`, `"betamax"`, `"betatron"`, NOT specifically the literal-underscore prefix `"beta_foo"`. The answer therefore returns WRONG elements for the stated requirement.
+- FIX: `filter(enabled_features, f -> starts_with(f, 'beta_'))` (string.md: starts_with tests a literal prefix, no wildcard) OR `filter(enabled_features, f -> f LIKE 'beta\_%' ESCAPE '\')` (escaped underscore per comparison.md example `'South_America' LIKE 'South\_America' ESCAPE '\'`).
+- **RECURRENCE FLAG:** this is the SAME LIKE-underscore-literal-prefix misconception as iter1028 Q2 / iter1029 Q1 (the iter1029 §651/§653 FIX-A topic). iter1030 confirmed the FIX-A working for a BARE-COLUMN prefix-validation question. Now it has relapsed inside a `filter()` ARRAY-LAMBDA context — a NEW surface where the §653 caveat's keywords (starts_with / LIKE prefix) may not be reaching the responder because the question framing is array/filter-centric, not "validate a code prefix." Orchestrator: grep resources to classify findability-gap (filter/array-lambda locus lacks the literal-underscore caveat cross-ref) vs recall-ceiling.
 
-## Q3 — avg days created_at→renewed_at, NULL (not zero/error) on no qualifying rows
-**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125 CLEAN**
+## Q2 — 28-day (4-week) TIME-window moving average of daily order count
 
-- `date_diff('day', created_at, renewed_at)` VERIFIED → bigint
-  (datetime.md `date_diff(unit, timestamp1, timestamp2) -> bigint`).
-- `AVG(...) WHERE renewed_at IS NOT NULL` — AVG ignores NULLs and returns NULL on empty input
-  VERIFIED: aggregate.md "all of these aggregate functions ignore null values and return null for
-  no input rows or when all values are null" → satisfies the "NULL not 0/error" requirement EXACTLY.
-- WHERE renewed_at IS NOT NULL is sufficient; even if created_at were NULL, date_diff yields NULL and
-  AVG skips it — still safe. Correctly explains no special logic needed. Sound.
+**CTE daily_counts(CAST date, COUNT(*)) then AVG(daily_orders) OVER (ORDER BY order_date RANGE BETWEEN INTERVAL '27' DAY PRECEDING AND CURRENT ROW)**
 
-## Q4 — split users into 4 equal groups by session length (quartiles)
-**Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75 → 4.8125 CLEAN**
+Scores: **Accuracy 3.75 / Completeness 4.5 / Clarity 4.5 / Applicability 4.0 → 4.1875**
 
-- `NTILE(4) OVER (ORDER BY session_duration)` VERIFIED — window.md: "Divides the rows for each window
-  partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."
-  Answers the user's "is there a function?" directly — YES, no manual cutoffs + CASE needed.
-- Remainder distribution VERIFIED EXACT: "If the number of rows in the partition does not divide evenly
-  into the number of buckets, then the remainder values are distributed one per bucket, starting with
-  the first bucket" (docs example 6 rows / 4 buckets → 1 1 2 2 3 4). Responder's "remainder rows go to
-  earliest buckets" is correct.
-- ASC → bucket 1 = bottom 25%; DESC → bucket 1 = top 25% — correct.
-- "NTILE can't be used in WHERE → wrap in CTE then filter" — correct; window functions are not allowed
-  in WHERE (evaluated after WHERE/GROUP BY), so a CTE/subquery wrapper is required. Confirmed.
+- WINDOW LOGIC CORRECT. Trino supports RANGE frames with an INTERVAL offset over a date/timestamp ORDER BY column (since v346; trino.io blog "Introducing new window features" example: `avg(totalprice) OVER (... ORDER BY orderdate RANGE BETWEEN interval '1' month PRECEDING AND CURRENT ROW)`). `INTERVAL '27' DAY PRECEDING` + `CURRENT ROW` = 28 calendar days inclusive = correct for "4-week / last 28 days" as a TIME window (not a fixed row count). Pre-aggregating to a daily CTE then applying the RANGE frame is the sound canonical pattern and correctly handles missing/sparse days (a ROWS frame would not).
+- **`::` CAST DEFECT (minor, isolated).** The CTE uses `created_at::date`. The PostgreSQL-style `::` cast operator is NOT valid Trino — it is a parse error (conversion.md documents only `CAST(value AS type)` and `TRY_CAST`; issue #23795). Must be `CAST(created_at AS date)`. This slip is confined to the CTE projection; the window-frame logic (the hard part of the question) is correct. Accuracy dinged for the parse-error slip, not the core approach.
+
+## Q3 — pull nested device.os from JSON in ONE shot
+
+**json_extract_scalar(properties, '$.device.os') AS device_os**
+
+Scores: **Accuracy 5 / Completeness 4.75 / Clarity 4.75 / Applicability 4.75 → 4.8125**
+
+- FULLY CORRECT. json.md (467 RAW): `json_extract_scalar` "Like json_extract, but returns the result value as a string... The value referenced by json_path must be a scalar"; documented example `json_extract_scalar(json, '$.store.book[0].author')` confirms nested dot-path traversal. `'$.device.os'` resolves the nested value in a single call and returns VARCHAR — exactly "one shot, not two extracts." Correctly contrasts json_extract (returns the whole object as JSON) for the non-scalar case.
+
+## Q4 — label day-of-week NAME (Monday..Sunday), not a number
+
+**format_datetime(CAST(plan_start_date AS timestamp), 'EEEE') → full name; 'EEE' short; cast optional via DATE→TIMESTAMP coercion; dayname() does NOT exist in 467**
+
+Scores: **Accuracy 5 / Completeness 4.75 / Clarity 4.75 / Applicability 4.75 → 4.8125**
+
+- FULLY CORRECT. datetime.md (467 RAW): `format_datetime(timestamp, format) -> varchar` "Formats timestamp as a string using format"; "compatible with JodaTime's DateTimeFormat pattern format." `EEEE` (full weekday name) / `EEE` (short) are standard JodaTime day-of-week patterns. `dayname()` is correctly identified as ABSENT in 467 (no such function in datetime.md); the numeric alternative `day_of_week(x)->bigint` "ranges from 1 (Monday) to 7 (Sunday)" is a number, which the user explicitly did NOT want — so steering to format_datetime is right. DATE→TIMESTAMP implicit coercion making the CAST optional is accurate (the cast is harmless/explicit, fine to keep).
 
 ---
 
-## TICS scan
-`::` ABSENT all 4. CLEAN — no QUALIFY, no false-semi-join, no fabricated functions (reduce / date_diff /
-NTILE / AVG / FILTER all real & verified; array_sum correctly NOT used since it does not exist), no
-regex-backslash, no INTERVAL quarter/week (INTERVAL '7' DAY legal), no OFFSET-before-LIMIT, no
-broken-secondary (Q2 UNNEST alt is valid), no over-warning folklore.
+## TICS check
+- `::` present in Q2 ONLY (defect flagged). Absent Q1/Q3/Q4.
+- All functions real & verified: filter, json_extract_scalar, json_extract, format_datetime, day_of_week. dayname() correctly called absent.
+- No QUALIFY / false-semi-join / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / broken-secondary / over-warning.
+- Q1 LIKE-underscore is the one accuracy defect of substance; Q2 `::` is a minor isolated parse-error slip.
 
-## Source-verified defects
-NONE. All four answers fully correct and verified both directions.
+## Recommendation
+PASS at 4.375 (margin +0.875). TWO source-verified defects this sweep:
+1. **Q1 LIKE-underscore-literal-prefix RELAPSE** — now inside a `filter()` array-lambda (new surface vs the bare-column prefix questions iter1028/1029/1030). Orchestrator: grep resources to decide findability-gap (add literal-`_`/`%`-prefix caveat + starts_with/ESCAPE cross-ref at the filter/array-lambda + LIKE-in-lambda locus, not just the bare-column prefix-validation card) vs recall-ceiling. This is the recurring §653 family on a new framing — worth a LIGHT findability nudge if a grep shows the array-lambda path lacks the cross-ref.
+2. **Q2 `::` cast slip** — isolated to the CTE; the §1154/§3247/§1394/§659 `::`-lock canon exists. Likely a per-instance responder slip rather than a resource gap; classify via grep but do not churn the `::` lock if it is intact and findable.
 
-## RECOMMENDATION — DEFAULT NO-OP
-Margin +1.3125; all 4 clean; the KEY Q2 array_sum-vs-reduce call resolves in the responder's favor
-(reduce is canonical because array_sum does not exist in 467). No source-verified resource defect,
-no 2-in-2 same-shape slip. NO resource edit; NO FIX-A; NO git commit.
-MUST NOT bump state.json (teacher already at 1035; orchestrator commits).
-
-Re-probe (monitor only): (a) FILTER-conditional-aggregation week-over-week single-pass vs self-join;
-(b) reduce() 4-arg array-sum canonical (array_sum absent) vs UNNEST+SUM fallback; (c) date_diff('day')
-bigint + AVG-ignores-NULL/returns-NULL-on-empty for the "NULL not zero" requirement; (d) NTILE(n)
-quartile/quantile + remainder-to-earliest-buckets + ASC/DESC bucket-1 meaning + window-not-in-WHERE-wrap-CTE.
-Federation r22 §13.x hard-locked NOT probed (4.49944/310).
+Do NOT bump state.json (teacher already handled; orchestrator commits).
