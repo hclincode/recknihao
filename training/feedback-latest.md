@@ -1,61 +1,75 @@
-# iter985 Judge Feedback — EXTENDED PHASE breadth sweep
+# Judge Feedback — iter986
 
-**OVERALL 4.46875 PASS** (Q1 4.6875 / Q2 4.4375 / Q3 4.75 / Q4 4.0 = 17.875/4 = 4.46875; margin +0.969; OVERALL AVERAGE governs, no per-Q veto).
+**EXTENDED PHASE breadth sweep. OVERALL 4.40625 PASS** (Q1 4.0625 / Q2 3.9375 / Q3 4.75 / Q4 4.875 = 17.625/4 = 4.40625; margin +0.906; OVERALL AVERAGE governs, no per-Q veto).
 
-All 4 Qs verified BOTH directions vs trino.io/docs/467 (sql/select.html UNION defaults to DISTINCT / UNION ALL keeps dups + GROUP BY "all output expressions must be aggregate functions or columns present in GROUP BY" / aggregate NOT allowed in GROUP BY; functions/aggregate.html bool_or=TRUE if any input TRUE, bool_and, ignore NULLs, return NULL for no-rows/all-NULL, count_if exists; functions/datetime.html date_format %M=full-month-name / %b=abbreviated / %Y=4-digit-year, format_datetime Joda MMMM=full-month/yyyy=4-digit) — NOT against resources/. Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — answers fit.
+All claims verified BOTH directions against trino.io/docs/467 (NOT resources/):
+- functions/comparison.html: LIKE is case-sensitive; **NO ILIKE operator/keyword** in Trino grammar.
+- GitHub trinodb/trino #2491: Trino DECIDED NOT to add ILIKE syntax — case-insensitive matching is `LOWER(x)=LOWER(y)` / `LOWER(x) LIKE LOWER(pattern)`.
+- connector/postgresql.html: `postgresql.experimental.enable-string-pushdown-with-collate` / session `enable_string_pushdown_with_collate` is REAL but governs **range-predicate pushdown of collated string columns to PostgreSQL** — it does NOT add an ILIKE token to Trino's parser.
+- functions/string.html: concat_ws(sep, s1, s2, ...) exists; "Any null values provided in the arguments after the separator are skipped"; `||`/concat() is SQL-standard NULL-propagating.
+- functions/datetime.html: format_datetime(timestamp, format) uses JodaTime DateTimeFormat ('EEEE' = full weekday text name); day_of_week(x)→bigint 1=Mon..7=Sun; **NO dayname()** in 467.
+
+Prod stack (Trino 467 Iceberg + Hive Metastore on-prem MinIO + Spark ingestion + dbt) — answers fit; Option B's federation drag-in is OUT of stack scope (no Postgres federation in play).
 
 ---
 
-## Q1 — UNION vs UNION ALL (active+churned subscriptions); bare UNION slower — 4.6875 CLEAN
+## Q1 — WHERE vs HAVING, alias not visible in WHERE — 4.0625 (LEAD CORRECT, minor boundary slip)
 
-Acc 4.75 / Clar 4.75 / App 4.625 / Comp 4.625.
+Acc 4.0 / Clar 4.25 / App 4.0 / Comp 4.0.
 
-VERIFIED CORRECT both directions. Bare `UNION` defaults to DISTINCT (select.html: "If neither is specified, the behavior defaults to DISTINCT") → global dedup via sort/hash-aggregate = the slowdown the engineer observed. `UNION ALL` keeps all rows, cheap (no dedup pass). Guidance "use UNION ALL by default; bare UNION only when you need dedup AND inputs can overlap; if disjoint it's a silent perf killer" is accurate and exactly the right framing — active vs churned subscriptions are disjoint sets, so UNION ALL is correct. LEAD `SELECT * FROM active_subscriptions UNION ALL SELECT * FROM churned_subscriptions` correct. CLEAN.
+CORRECT core: WHERE filters raw rows BEFORE aggregation, HAVING filters AFTER aggregation/grouping — VERIFIED. The SELECT alias `invoice_count` is NOT referenceable in WHERE (resolved after GROUP BY) — VERIFIED 467 (output aliases not visible in WHERE/GROUP BY/HAVING). The HAVING form correctly **repeats the aggregate `COUNT(*)`** rather than referencing the alias — CORRECT (Trino disallows output aliases in HAVING). Perf note sound: HAVING is the correct position for an aggregate predicate (not slower); a non-aggregate predicate belongs in WHERE.
 
-## Q2 ★ — spend-tier bucket (high>10k/med 2k-10k/low<2k) by TOTAL spend then COUNT per tier — 4.4375 — KEY CHECK: aggregate-in-GROUP-BY DID NOT RECUR
+★ **MINOR BOUNDARY / OFF-BY-ONE SLIP**: question says hide groups with total invoice count **under 5** (count < 5) → KEEP count >= 5. Responder wrote `HAVING COUNT(*) > 5`, which ALSO excludes groups of exactly 5 (should be `HAVING COUNT(*) >= 5`). Lead mechanism (WHERE vs HAVING, alias scope, repeat-the-aggregate) is fully correct; this is a `>5`-should-be-`>=5` predicate-boundary slip. RESPONDER slip (not a resource defect — the WHERE/HAVING/alias-scope teaching is correct and findable). Comp/App dinged for the boundary miss.
 
-Acc 4.5 / Clar 4.5 / App 4.5 / Comp 4.25.
+---
 
-THE KEY CHECK — VERIFIED CLEAN. Two-level CTE:
-- inner `per_account`: GROUP BY **account_id (raw key)** + `SUM(amount) AS total_spend` — legal.
-- `labeled`: `CASE WHEN total_spend>10000 THEN 'high' WHEN total_spend>=2000 THEN 'medium' ELSE 'low' END` operates on the **ALREADY-AGGREGATED total_spend column** (NOT CASE-on-SUM-inside-GROUP-BY) — legal.
-- outer: `GROUP BY spend_tier COUNT(*)` — legal.
+## Q2 — Trino ILIKE? or LOWER the column? — 3.9375 (LEAD/Option A CORRECT; ★ Option B = FALSE-MECHANISM broken-secondary slip + federation drag-in)
 
-VERIFIED LEGAL Trino 467. The iter983 illegal CASE-on-SUM-INSIDE-GROUP-BY did **NOT recur**. The responder's stated rule **"GROUP BY expressions cannot contain aggregates / Trino errors"** is **CORRECT this iter** (select.html + WebFetch confirm aggregates not allowed in GROUP BY) — contrast iter984's muddled false "can't aggregate in SELECT and group by different columns"; this iter's explanation is RIGHT. Boundary trace: 10000 → not >10000 → >=2000 → **medium** ✓; 1999 → **low** ✓; >10000 → **high** ✓ — matches the Q tiers.
+Acc 3.75 / Clar 4.0 / App 4.0 / Comp 4.0.
 
-★ **DISPOSITION: iter983 aggregate-in-GROUP-BY slip CONFIRMED a ONE-OFF over 2 consecutive clean re-probes (iter984 + iter985). NO FIX-A, NO resource edit. The explanation rule is now correct 2 iters running.** (Minor comp, not a defect: did not surface that exact-boundary ties are deterministic — immaterial.)
+★ **THE KEY CHECK — verified BOTH directions:**
 
-## Q3 — at-least-one 'payment_failed' per workspace (bool_or / at-least-one-match) — 4.75 CLEAN
+LEAD CORRECT: "Trino does NOT have ILIKE native like Postgres; `WHERE plan_type ILIKE 'pro'` won't work out of the box" — VERIFIED. ILIKE is NOT a token in Trino's SQL grammar (the project explicitly declined to add ILIKE syntax, #2491). **Option A `WHERE LOWER(plan_type) = LOWER('PRO')` is CORRECT** and is the canonical Trino case-insensitive idiom (LOWER both sides; `LOWER(x) LIKE LOWER(pattern)` for pattern matching). Recommending Option A is right.
+
+★ **OPTION B = FALSE-MECHANISM broken-secondary RESPONDER slip.** Responder claimed that, for Postgres-via-federation data, an "experimental session property" `SET SESSION enable_string_pushdown_with_collate = true` makes `WHERE plan_type ILIKE 'pro'` work. VERIFIED WRONG on the load-bearing mechanism:
+- `ILIKE` is NOT in Trino's parser, so `WHERE plan_type ILIKE 'pro'` is a **PARSE error regardless of any session property**. No setting can make it parse.
+- The property IS real (`postgresql.experimental.enable-string-pushdown-with-collate` / session `enable_string_pushdown_with_collate`), but it governs **pushdown of RANGE predicates on collated string columns to PostgreSQL** — it has NOTHING to do with adding an ILIKE keyword. So the cited cause→effect is fabricated.
+- Improperly drags in **federation** (the responder cited r22): the prod stack is Iceberg/Hive Metastore, no Postgres connector in play; the suggestion is both wrong AND out-of-stack.
+
+Classification: **RESPONDER broken-secondary / false-mechanism slip (lead + Option A correct)**, same family as prior false-justification/broken-secondary tics. The `ILIKE`-doesn't-parse fact and the session-property's real behavior are exactly as the directive described. Note for disposition: r22 federation is HARD-LOCKED zero-edits, so no fix there regardless; this is a responder synthesis slip on a secondary aside, NOT a resource defect (the LOWER() lead is correct). Dinged Acc primarily for the false mechanism, App for the misleading/out-of-stack secondary.
+
+---
+
+## Q3 — `||` returns NULL when last_name NULL; how to handle — 4.75 CLEAN
 
 Acc 4.75 / Clar 4.75 / App 4.75 / Comp 4.75.
 
-VERIFIED CLEAN. `bool_or(event_type='payment_failed')` is a valid Trino 467 aggregate (aggregate.html: returns TRUE if any input TRUE, else FALSE; bool_and also exists). bool_or ignores NULLs and returns NULL for no-rows / all-NULL input — so `COALESCE(bool_or(...), false)` edge-case handling is sound and well-reasoned. `GROUP BY workspace_id` correct for per-workspace true/false. Alternative `count_if(event_type='payment_failed')>0` valid (count_if exists in 467). Directly answers "does Trino have bool_or" (yes) and "at-least-one-match without counting" (bool_or). CLEAN.
-
-## Q4 ★ — format DATE as "June 2026" (Postgres TO_CHAR equivalent) — 4.0 — LEAD correct, %B broken-secondary (2nd CONSECUTIVE)
-
-Acc 3.75 / Clar 4.25 / App 4.0 / Comp 4.0.
-
-LEAD `format_datetime(CAST(due_date AS timestamp), 'MMMM yyyy')` → 'June 2026' VERIFIED CORRECT (Joda MMMM=full month name 'June', yyyy=4-digit year; MMM=abbrev, MM=zero-padded number, lowercase mm=MINUTE — the mm gotcha is correctly called out; CAST optional, DATE→TIMESTAMP(0) coerces — fine). The deliverable is correct.
-
-★ **BROKEN-SECONDARY DEFECT (2-in-2 recurrence):** ALTERNATIVE `date_format(due_date, '%B %Y')` claims "%B = full month name." **VERIFIED WRONG against Trino 467 functions/datetime.html: full month name is `%M`; `%b` = abbreviated month name; `%Y` = 4-digit year. `%B` is a C/strftime code and is NOT a listed Trino/MySQL date_format specifier.** Correct form is `date_format(CAST(due_date AS timestamp), '%M %Y')`. Additional sub-issue: `date_format` is documented as `date_format(timestamp, format)` — passing a bare DATE may need a CAST to timestamp (the LEAD casts; the alternative does not). Claiming both forms have "identical output" is FALSE — the %B alternative would not emit 'June'.
-
-NOTE on whether %B errors or mis-outputs: I could NOT find in the docs an explicit statement of behavior for an unrecognized specifier (throw "Invalid format" vs pass-through literally). The specifier table lists %M and %b (and %Y), NOT %B — so the %M-vs-%B distinction is supported by the table's presence/absence, not by an explicit contrast note. **This is the 2nd CONSECUTIVE instance of the %B-for-full-month error (iter984 Q4 + iter985 Q4).**
-
-★ **DISPOSITION DEFERRED TO ORCHESTRATOR PHASE 6:** I verified the dialect fact only (%M = full month name CORRECT; %B = WRONG / not a valid Trino specifier; %b = abbreviated). The orchestrator MUST grep resources/ to classify:
-- (a) a resource CONTAINS `%B` for month-name → **RESOURCE DEFECT** (fix in place);
-- (b) a resource teaches `%M` correctly + findably → **RESPONDER slip** (synthesis broken-secondary padding, maybe no fix);
-- (c) NO resource covers date_format month-name codes → **findability gap** (candidate for a LIGHT additive note %M=full-month / %b=abbrev / %B=NOT-a-Trino-code).
-Given this is now 2-in-2, a LIGHT defang is warranted IF (b) or (c); do NOT prescribe beyond verifying the fact.
+CORRECT: `||` (= concat()) is NULL-propagating per SQL standard — any NULL operand yields NULL (matches the engineer's symptom) — VERIFIED. `concat_ws(' ', first_name, last_name)` is the clean fix: VERIFIED 467 "any null values ... after the separator are skipped" → NULL last_name yields just 'Jane' (no trailing separator), both NULL yields '' (empty string), exactly as the responder stated. The COALESCE alternative `COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')` is also correct, with the responder correctly noting it can leave a leading/trailing space — accurate caveat. Recommending concat_ws as cleaner is right. CLEAN.
 
 ---
 
-## Scope notes
+## Q4 ★ — display day-of-week as a word ('Monday') — 4.875 CLEAN (date-format defang family HOLDING)
 
-- ★ **Q2 aggregate-in-GROUP-BY did NOT recur** — LEAD + explanation rule both CORRECT and LEGAL 467; **iter983 aggregate-in-GROUP-BY slip CONFIRMED a ONE-OFF over 2 consecutive clean re-probes (iter984 + iter985)**.
-- ★ **Q4 LEAD format_datetime correct; date_format `%B` should be `%M` — 2nd CONSECUTIVE broken-secondary recurrence (iter984 Q4 + iter985 Q4)**; classification (resource defect vs responder slip vs findability gap) **DEFERRED to orchestrator PHASE 6 resource grep**.
-- Q1 / Q3 CLEAN.
-- ALL OTHER TICS CLEAN: no QUALIFY-misuse / false-mechanism-semi-join-mislabel / MAX-varchar / percent_rank-inversion / fabricated-fn-or-rule (bool_or, count_if, format_datetime, date_format all real 467) / PARTITIONED-BY-foreign-DDL / mid-churn / missing-CTE-col (Q2 all cols projected+referenced) / JOIN-fan-out / ts-minus-ts / column-scope.
+Acc 5.0 / Clar 4.75 / App 5.0 / Comp 4.75.
 
-## Recommendation = DEFAULT NO-OP pending PHASE-6 grep on Q4 %M/%B
+★ CORRECT: `format_datetime(CAST(created_at AS timestamp), 'EEEE')` → full weekday name — VERIFIED. format_datetime uses JodaTime DateTimeFormat; 'EEEE' is the full text day-of-week token (e.g. 'Wednesday'). CAST(created_at AS timestamp) is fine.
 
-Margin +0.969 PASS; iter983 aggregate-in-GROUP-BY confirmed one-off. ONLY actionable item is the Q4 %B 2-in-2 broken-secondary — orchestrator grep resources/ to classify; if a resource teaches %M correctly+findably it's a responder synthesis-padding slip (re-probe-don't-churn); if no resource covers date_format month-name codes, a LIGHT additive note (%M=full-month / %b=abbrev / %B=NOT-a-Trino-code, cast DATE→timestamp for date_format) is the candidate fix. Federation r22 §13.x hard-locked — NOT probed (OVERRIDDEN). NO resource edits this iteration. DO NOT bump training/state.json (already 985; passed=true preserved; final_iterations_remaining 0).
+★ **NO FABRICATION — date-format defang family HOLDING on the weekday side:**
+- Responder correctly flags `dayname()` as ABSENT in 467 (Postgres/MySQL only) — VERIFIED no dayname() in functions/datetime.html.
+- Responder correctly warns `CAST(day_of_week(created_at) AS VARCHAR)` returns the NUMBER ('3') not the name — VERIFIED day_of_week(x)→bigint 1=Mon..7=Sun.
+- **No `%A` / no `%W` weekday fabrication and no `dayname()` invention** — the iter985 date-format defang family (%M/%b/%B month-codes + %A/%a weekday) is HOLDING on the weekday side.
+- Ordered-grouping guidance (group by numeric day_of_week() + CASE, or repeat format_datetime in GROUP BY) is sound and a useful add. CLEAN.
+
+---
+
+## SCOPE / TIC LEDGER
+
+- **Q1**: HAVING-repeats-COUNT(*) (NOT alias) CORRECT + WHERE/HAVING boundary-of-aggregation correct; **minor `>5`-should-be-`>=5` boundary/off-by-one RESPONDER slip** (under-5 → keep >=5). Lead correct, no resource defect.
+- ★ **Q2**: LEAD + Option A (`LOWER(plan_type)=LOWER('PRO')`) CORRECT; **Option B (ILIKE via `enable_string_pushdown_with_collate` session property) = FALSE-MECHANISM broken-secondary RESPONDER slip** — ILIKE does NOT parse in Trino regardless of any property; the property is real but governs collated-string range-predicate pushdown to PostgreSQL, not an ILIKE keyword; ALSO improperly drags in federation (out of Iceberg/Hive stack). Responder cited r22 (HARD-LOCKED zero-edits — no fix there). Responder synthesis slip, NOT a resource defect.
+- **Q3**: concat_ws skips NULLs + `||` NULL-propagating + COALESCE-with-space-caveat all CLEAN.
+- ★ **Q4**: `format_datetime(...,'EEEE')` full-weekday CORRECT + dayname()-absent correctly flagged + day_of_week()-is-numeric correctly warned + **NO %A/dayname fabrication** = iter985 date-format defang family HOLDING.
+
+Other tics ALL CLEAN: no QUALIFY-misuse / no false-mechanism semi-join mislabel / no MAX(varchar) / no percent_rank inversion / no PARTITIONED-BY foreign DDL / no aggregate-in-GROUP-BY / no mid-churn / no missing-CTE-col / no JOIN fan-out / no ts-minus-ts / no HAVING-alias misuse (Q1 repeats the aggregate). The only two dings are RESPONDER slips on secondary/boundary points (Q2 Option B false mechanism, Q1 `>` vs `>=`); both leads correct.
+
+## iter987 RECOMMENDATION = DEFAULT NO-OP
+Margin +0.906 PASS; both dings are responder slips with correct leads, no findable resource/findability gap (Q2's LOWER lead is the correct teaching; Q1's WHERE/HAVING/alias teaching is correct). Federation r22 §13.x HARD-LOCKED — NOT probed (OVERRIDDEN). Re-probe next sweep: (a) another case-insensitive-match Q (confirm LOWER()=LOWER() lead stays + no ILIKE-via-session-property false-mechanism recurs → if it recurs, 2-in-2 candidate for a LIGHT additive defang "ILIKE never parses in Trino, no session property changes that; LOWER() is the only path"); (b) another count-threshold/HAVING Q (watch `>` vs `>=` boundary tracking). NO resource edits. DO NOT bump training/state.json (already 986; passed=true preserved; final_iterations_remaining 0).
