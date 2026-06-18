@@ -1,43 +1,46 @@
-# iter1092 Judge Feedback (2026-06-18)
+# Judge Feedback — iter1093 (2026-06-18)
 
-Verified BOTH directions against RAW git-tag 467 source (functions/array.md, functions/map.md, functions/aggregate.md, functions/datetime.md). Clean sweep; ZERO source-verified defects.
+Verified BOTH directions vs RAW git-tag 467 source: functions/aggregate.md, functions/datetime.md, functions/array.md, functions/window.md. Production stack (Trino 467 + Iceberg + Hive Metastore on-prem) — all four answers are pure analytic SQL, fully stack-compatible. Clean sweep; ZERO source-verified defects.
 
-## Q1 — array adjacency, 'assigned' directly after 'triaged' without exploding (ADJACENCY RE-PROBE of iter1091 FIX-A)
-**Score: 5.00**
-- Responder used `WHERE contains_sequence(status_history, ARRAY['triaged','assigned'])`.
-- **FIX-A REACHED. CANONICAL USED (CORRECT).** The responder used the purpose-built `contains_sequence`, NOT the iter1091-defective hand-rolled `array_position(...) = array_position(...) + 1` arithmetic. This is exactly the resolution the iter1091 FIX-A targeted, and it reached the responder on the second-angle re-probe.
-- array.md VERIFIED: `contains_sequence` "Return true if array `x` contains all of array `seq` as a subsequence (all values in the same consecutive order)." So `contains_sequence(x, ARRAY['triaged','assigned'])` is TRUE only when 'triaged' is immediately followed by 'assigned' (contiguous, same order) — exactly the "directly after, nothing in between" requirement.
-- The responder's explicit claim that it **handles repeated elements correctly** is VERIFIED CORRECT: contains_sequence scans for the contiguous pair anywhere in the array, so `['submitted','triaged','assigned','triaged','resolved']` still matches on the first 'triaged'→'assigned' adjacency. This is precisely the case where the old array_position arithmetic produced false negatives (array_position returns only the FIRST occurrence). No-explosion requirement satisfied (pure boolean predicate, no UNNEST).
+## Q1 — spread of response_time_ms (variance/stddev)
+`stddev(response_time_ms)` (= stddev_samp); notes variance + stddev_pop variants; bare stddev = sample default.
+- **Accuracy 5** — aggregate.md VERIFIED: stddev "This is an alias for stddev_samp" (sample, N-1 denominator); stddev_pop = population; variance = alias of var_samp. All named functions real and accurately described. Correctly maps "how spread out" → standard deviation.
+- **Completeness 5** — gives the default, names the population variant and the variance siblings, explains sample-vs-population.
+- **Clarity 5** — "clustered near average vs all over the place" mapped to stddev with plain framing; zero assumed knowledge.
+- **Actionability 5** — drop-in single aggregate; engineer knows exactly what to run.
+- Q1 avg = **5.00**
 
-## Q2 — MAP column, pull list of all KEYS in a row as a plain list
-**Score: 4.94**
-- `map_keys(metadata) AS key_list`. map.md VERIFIED: `map_keys(x(K,V)) -> array(K)` "Returns all the keys in the map x." Returns ARRAY<VARCHAR> per row exactly as the responder stated.
-- Correctly answers the literal ask (plain list per row, no explosion) and helpfully notes `CROSS JOIN UNNEST(map_keys(metadata))` as the later rows-form option without forcing it. Clean.
+## Q2 — INTEGER epoch-seconds → readable timestamp
+`from_unixtime(created_at)` → timestamp with time zone; 1704067200 → 2024-01-01 00:00:00; expects SECONDS (divide by 1e3 if ms); CAST(... AS DATE) for day only.
+- **Accuracy 5** — datetime.md VERIFIED: `from_unixtime(unixtime) -> timestamp(3) with time zone`, "unixtime is the number of seconds since 1970-01-01 00:00:00 UTC". 1704067200 s = 2024-01-01 00:00:00 UTC EXACT. Return-type-with-time-zone claim correct. SECONDS-not-millis caveat correct (divide-by-1000 for ms). CAST(timestamp AS DATE) valid (date() is the alias for CAST AS date).
+- **Completeness 5** — covers the conversion, the worked example, the ms-vs-s gotcha, and the date-only variant.
+- **Clarity 5** — concrete example value shown; "plain INTEGER seconds" addressed directly.
+- **Actionability 5** — exact function + the one trap (units) that bites in practice.
+- Q2 avg = **5.00**
 
-## Q3 — count DISTINCT calendar days with any activity
-**Score: 4.91**
-- `COUNT(DISTINCT CAST(event_timestamp AS DATE)) AS days_with_activity`. datetime.md VERIFIED: `date(x)` "is an alias for CAST(x AS date)", confirming `CAST(timestamp AS DATE)` is valid in 467 and extracts the calendar date (drops time). Distinct-count of those dates = distinct calendar days = correct.
-- `date_trunc('day', event_timestamp)` is a valid alternative (keeps timestamp type at midnight), but CAST AS DATE is cleaner for calendar-day distinctness. Answer is correct and idiomatic.
+## Q3 — all of an array's tags in an approved list, no explosion
+`all_match(tags, x -> contains(approved_tags, x))`; example WHERE all_match(tags, x -> contains(ARRAY['beta','enterprise','high-usage','verified'], x)); TRUE iff every tag approved, no UNNEST.
+- **Accuracy 5** — array.md VERIFIED: all_match "Returns true if all the elements match the predicate (special case when the array is empty)"; contains "Returns true if the array x contains the element". Lambda `x -> contains(approved, x)` is the canonical "every element in approved set" test. Purpose-built no-explosion tool — exactly what was asked.
+- **Completeness 4.5** — fully answers the core. Minor unstated edge (NOT penalized per directive): empty tags array → all_match returns TRUE (vacuously approved), and a NULL tag element makes the predicate NULL → all_match returns NULL under 3VL (row dropped by WHERE). Harmless for typical data, would be a nice footnote.
+- **Clarity 5** — lambda explained in words ("returns TRUE only if every tag is in the approved list"); WITHOUT-explosion requirement called out.
+- **Actionability 5** — copy-paste WHERE clause with a concrete approved array.
+- Q3 avg = **4.875**
 
-## Q4 — standard deviation across all rows; built-in or manual?
-**Score: 4.94**
-- `stddev(response_ms)`; also lists stddev_samp (N-1), stddev_pop (N), variance/var_pop/var_samp. aggregate.md VERIFIED: `stddev` "is an alias for stddev_samp" (sample, divides by N-1); `stddev_pop` is population (divides by N); `variance` is an alias for `var_samp`; all six exist.
-- The responder's alias relationship and N-1 vs N distinction are exactly correct. "Built-in, no manual computation needed" answered directly. Correctly frames bare `stddev` as the sample default. Clean — NOT a broken-secondary; every listed function is real and accurately described.
-
-## Negative-family screen
-No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary/Spark-Oracle-spillover.
+## Q4 — session with a user's SECOND-highest page_views
+`dense_rank() OVER (PARTITION BY user_id ORDER BY page_views DESC) AS rank` in a subquery, WHERE rank = 2; notes row_number() if exactly-one-row-per-rank wanted; dense_rank handles ties.
+- **Accuracy 5** — window.md VERIFIED: dense_rank "similar to rank, except that tie values do not produce gaps". PARTITION BY user_id + ORDER BY page_views DESC then filter = 2 returns the second-highest DISTINCT page_views per user. Window functions CANNOT be filtered in WHERE → subquery/CTE wrap is REQUIRED and correct. dense_rank-vs-row_number distinction explained accurately (row_number = exactly one row, breaks ties arbitrarily; dense_rank = all tied rows share rank). NOT a broken-secondary — the alternative is correct and the trade-off is real.
+- **Completeness 5** — wrap requirement, partition semantics, and the tie-handling choice all covered.
+- **Clarity 5** — "without manually sorting and skipping rows" answered with the rank-then-filter idiom; tie behavior explained plainly.
+- **Actionability 5** — full subquery pattern given; engineer can adapt directly.
+- Q4 avg = **5.00**
 
 ## Overall
-| Q | Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|---|
-| Q1 | 5 | 5 | 5 | 5 |
-| Q2 | 5 | 4.75 | 5 | 5 |
-| Q3 | 5 | 4.75 | 5 | 4.88 |
-| Q4 | 5 | 5 | 4.88 | 4.88 |
+(5.00 + 5.00 + 4.875 + 5.00) / 4 = **4.969**
 
-Per-question means: Q1 5.00, Q2 4.94, Q3 4.91, Q4 4.94.
-**Overall average: 4.95 — PASS.**
+**PASS** (margin +1.47 over 3.5 threshold).
 
-ZERO source-verified defects. Q1 confirms the iter1091 contains_sequence FIX-A reached the responder and is the correct canonical.
+**Source-verified defects: ZERO.**
 
-RECOMMENDATION = DEFAULT NO-OP (margin +1.45); NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1092).
+No instances of any tracked failure family: no ::-cast, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash trap, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no over-warning folklore, no broken-secondary alternative, no Spark/Oracle dialect spillover. Q4's row_number aside is a correct, well-scoped trade-off — the opposite of the broken-secondary pattern.
+
+RECOMMENDATION = DEFAULT NO-OP. NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1093).
