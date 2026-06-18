@@ -1,64 +1,86 @@
-# Judge Feedback — iter1053
+# Judge Feedback — iter1054
 
-**Overall: Q1 4.875 / Q2 4.9375 / Q3 4.875 / Q4 4.8125 → average 4.875 — PASS** (margin +1.375)
+**Overall: 4.7890625 → PASS** (margin +1.289 over 3.5 threshold)
 
-Verified BOTH directions vs RAW git-tag 467 + trino.io/docs/467. RAW source dispositive. No federation probe (hard-locked). Production fit: all four are pure Trino-467/Iceberg SQL+DDL questions, fully within the on-prem Trino 467 + Iceberg-connector + Hive-Metastore stack (no cloud/tool/pricing claims to vet).
+Per-question: Q1 4.375 / Q2 4.9375 / Q3 4.9375 / Q4 4.90625
 
----
-
-## Q1 — events ~500M rows: one table or split? — 4.875
-
-**Accuracy 5 / Completeness 5 / Clarity 4.75 / Actionability 5**
-
-Verified (trino.io/docs/467 connector/iceberg.html):
-- `partitioning = ARRAY['day(occurred_at)', 'bucket(tenant_id, 32)']` — ARRAY-of-strings DDL form CONFIRMED. Doc canonical example `partitioning = ARRAY['month(order_date)', 'bucket(account_number, 10)', 'country']` matches the shape exactly.
-- `bucket()` is COLUMN-FIRST in Trino: doc example `bucket(account_number, 10)` → responder's `bucket(tenant_id, 32)` is correct (NOT Spark count-first `bucket(N, col)`). Memory card [Trino bucket() Arg Order] re-confirmed.
-- `day(occurred_at)` partition transform valid (per-day partition, integer day-diff from 1970-01-01).
-- identity()-on-high-cardinality-tenant → small-file explosion caution is SOUND.
-- Nightly compaction via `ALTER TABLE ... EXECUTE optimize` / rewrite_data_files to ~128-512MB CONFIRMED (`optimize(file_size_threshold => '128MB')`, default 100MB threshold).
-- `format=PARQUET`, `format_version=2` correct (2 is the default; required for row-level deletes).
-- "partitioning spec is hard to change later" — accurate caution (partition evolution exists but reorganizes only new data).
-
-"Keep ONE table, partition strategically" is the correct architectural call for 500M rows. Minor clarity ding only: dense for a true beginner, but design framing is right.
-
-## Q2 — month-over-month revenue side-by-side — 4.9375 (KEY ITEM, watch v)
-
-**Accuracy 5 / Completeness 4.875 / Clarity 4.875 / Actionability 5**
-
-**WATCH (v) STAYS CLOSED — iter1049 nested-window error did NOT recur.**
-
-`LAG(SUM(amount)) OVER (ORDER BY date_trunc('month', order_date))` inside a `GROUP BY date_trunc('month', order_date)` query is VALID Trino = the canonical **window-over-aggregate** pattern. The argument to LAG is `SUM(amount)`, a PLAIN aggregate computed by GROUP BY — window functions are logically evaluated AFTER GROUP BY/HAVING and operate over the already-aggregated rows, so a window fn whose argument is a group aggregate is legal (same family as `SUM(SUM(x)) OVER (...)`).
-
-This is CATEGORICALLY DISTINCT from the iter1049 INVALID lead `LAG(SUM(amount) OVER (PARTITION BY ...)) OVER (...)` where the LAG argument was ITSELF a window function (`SUM ... OVER`) → illegal nested windows. iter1053 used the legal non-nested form → the nested-window error did NOT recur; watch (v) remains passive/closed. r07 Pattern A2 (window-over-aggregate) + the nested-SUM(SUM) OVER guard are intact and correctly mirrored. lag signature `lag(x[,offset[,default]])` confirmed (window.md).
-
-`pct_change` variant with `NULLIF(LAG(SUM(amount)) OVER (...), 0)` is a sound div-by-zero guard (integer/DECIMAL `/0` throws DIVISION_BY_ZERO; NULLIF returns NULL instead). ORDER BY month for output ordering correct. Tiny completeness note: first month's prev = NULL (expected, no default supplied) — acceptable, often desired.
-
-## Q3 — orders.tags: ≥1 tag starting with literal "promo_" — 4.875 (watch c/o)
-
-**Accuracy 5 / Completeness 4.75 / Clarity 4.875 / Actionability 4.875**
-
-**BROKEN-SECONDARY LIKE ASIDE DID NOT RECUR — clean again (consecutive clean re-probe after iter1049/1050/1052; iter1037/1051 streak does NOT advance).**
-
-Verified (array.md + string.md):
-- `any_match(tags, tag -> starts_with(tag, 'promo_'))` — `any_match(array(T), function(T,boolean))→boolean`, returns true if ≥1 element matches; ideal for "at least one". CONFIRMED.
-- `filter(tags, tag -> starts_with(tag,'promo_'))` with `cardinality(...) > 0` — valid equivalent (filter→array(T), then nonempty test). CONFIRMED.
-- `starts_with(s, sub)` does a LITERAL prefix match with NO wildcards (RAW string.md "Tests whether substring is a prefix of string") — so `'promo_'` correctly matches a literal underscore, the exact semantics the question demands.
-- Crucially, the responder offered NO bare `LIKE 'promo_%'` "if you prefer" alternative. That aside would be WRONG (`_` is a single-char wildcard, so `'promo_%'` over-matches `'promoX...'`). Its absence keeps the answer clean.
-
-Minor completeness ding only: could note empty-array → any_match returns false (fine for this question).
-
-## Q4 — subscriptions per plan_type: active/cancelled/trial in one row — 4.8125
-
-**Accuracy 5 / Completeness 4.75 / Clarity 4.75 / Actionability 4.75**
-
-Verified (aggregate.md): `FILTER (WHERE ...)` is supported on ALL aggregate functions; doc example `count(*) FILTER (where petal_length_cm > 4)`. `COUNT(*) FILTER (WHERE status='active') ... GROUP BY plan_type` produces exactly one row per plan with three conditional counts — directly answers "no 3 separate queries". The `SUM(CASE WHEN status=... THEN 1 ELSE 0 END)` alternative is an equivalent, portable form. Both correct. Pivot/conditional-aggregation pattern is the right tool.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...) and trino.io/docs, NOT resources/. RAW source dispositive. Federation NOT probed (hard-locked).
 
 ---
 
-## Cross-cutting
+## Q1 — approx-distinct distinct-users-per-event-type this month — 4.375 PASS
 
-No `::` cast / QUALIFY / false semi-join / fabricated function / regex-backslash / INTERVAL quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary across all four. Window-over-aggregate (Q2) and the literal-underscore prefix family (Q3) both clean.
+Scores: Accuracy 4 / Completeness 4 / Clarity 5 / Actionability 4.5
+
+**The actual ask is answered correctly.** `approx_distinct(user_id) GROUP BY event_type` is the right tool for a fast approximate distinct count on a dashboard:
+- aggregate.md (467 RAW): approx_distinct "Returns the approximate number of distinct input values," an approximation of count(DISTINCT x), documented **2.3% standard error** (standard deviation of the approximately-normal error distribution). VERIFIED. (Note: the doc does not name HyperLogLog for approx_distinct specifically — HLL is named under approx_set — but HLL is the underlying impl; calling it HLL is accurate, just not doc-literal. No ding.)
+- `SET SESSION distinct_aggregations_strategy='pre_aggregate'` is a LEGAL 467 session property (PRE_AGGREGATE strategy for multiple distinct aggregations; verified vs optimizer-properties docs). Offering it as the exact-count fallback is reasonable.
+- Nightly HLL sketch table + "2.3% not for billing-critical" caveat are sound, useful extras.
+
+**FINDING (1) — Q1 date-window off-by-one-month (this-month vs last-month):** The WHERE filter
+```
+event_date >= DATE_TRUNC('month', current_date) - INTERVAL '1' MONTH
+AND event_date <  DATE_TRUNC('month', current_date)
+```
+selects `[start of PREVIOUS month, start of current month)` = the **previous complete month**, NOT "THIS month" as asked. For "this month" the correct filter is:
+```
+event_date >= DATE_TRUNC('month', current_date)   -- start of current month, through now
+```
+The DATE_TRUNC + INTERVAL '1' MONTH arithmetic itself is VALID Trino (datetime.md confirms date_trunc('month',...) → first of month; `date + INTERVAL '1' MONTH` valid). This is purely a window-boundary logic slip, not a dialect error.
+
+**Severity = per-instance minor slip.** The technique that was actually requested (faster approximate distinct) is correct and complete; only the month window is off by one. Dings Accuracy and Completeness one tier each; does NOT cause a FAIL and is NOT a resource defect (it is a one-off logic mistake on a specific date predicate, not a taught-wrong pattern). Monitor; re-probe a "this month" window next sweep. Escalate only if the same DATE_TRUNC - INTERVAL '1' MONTH "this month" off-by-one recurs 2-in-2.
+
+## Q2 — average days-active before cancellation, cancelled-only — 4.9375 PASS
+
+Scores: Accuracy 5 / Completeness 4.875 / Clarity 5 / Actionability 4.875
+
+Fully correct. `AVG(date_diff('day', started_at, cancelled_at)) WHERE cancelled_at IS NOT NULL`:
+- datetime.md (467 RAW): date_diff('day', ts1, ts2) → bigint, **complete-units / day-aware**, returns timestamp2 - timestamp1 in whole days. VERIFIED.
+- aggregate.md: avg() **ignores NULL values and returns NULL for no input rows** — so the WHERE cancelled_at IS NOT NULL correctly restricts to cancelled subs and avoids counting still-active as zero; AVG-ignores-NULL explanation is accurate. VERIFIED.
+- The `AVG(date_diff('day', date(started_at), date(cancelled_at)))` calendar-day variant is sound (casts to date so partial days don't shift the count). Good completeness.
+
+No errors.
+
+## Q3 — users with ≥1 flag starting with literal "beta_", no unnest — 4.9375 PASS
+
+Scores: Accuracy 5 / Completeness 4.875 / Clarity 5 / Actionability 4.875
+
+Both forms correct and the broken-secondary did NOT recur:
+- `any_match(feature_flags, flag -> starts_with(flag, 'beta_'))` — array.md: any_match returns boolean true if ≥1 element matches the predicate. IDEAL for the ≥1-match ask. VERIFIED.
+- `cardinality(filter(feature_flags, flag -> starts_with(flag, 'beta_'))) > 0` — filter returns the matching-elements array, cardinality its size; >0 ⇔ at least one match. Valid equivalent. VERIFIED.
+- string.md (467 RAW): starts_with(string, substring) → boolean, "tests whether substring is a **prefix**" — a LITERAL prefix, NOT a wildcard. Responder correctly states this and that it is not a wildcard, so the literal underscore in "beta_" is matched literally. VERIFIED.
+
+**FINDING (2) — Q3 broken-secondary LIKE aside did NOT recur (clean re-probe AGAIN).** No bare `LIKE 'beta_%'` "if you prefer" alternative was offered. `_` is a single-char wildcard in LIKE (comparison.md), so `'beta_%'` would over-match `'betaX...'` and is NOT equivalent to a literal-`beta_` prefix; correctly NOT suggested. This is the **3rd consecutive clean re-probe** after the iter1052/iter1053 clean runs (and well past the iter1037/iter1051 occurrences). The iter1051-noted "escalate if it recurs a 3rd time" streak does NOT advance — it has reversed. FIX-A (r23 §653 bare-column LIKE literal-`_`/`%` caveat + r07 ~L759 filter-lambda literal-prefix) is durable. Score HIGH, watch stays passive.
+
+## Q4 — order-amount histogram into 5 buckets, no huge CASE — 4.90625 PASS
+
+Scores: Accuracy 4.875 / Completeness 4.875 / Clarity 5 / Actionability 4.875
+
+`width_bucket(order_amount, ARRAY[25.0, 50.0, 100.0, 250.0]) AS bucket_id GROUP BY 1` is the right "no huge CASE" tool:
+- math.md (467 RAW) + verified boundary semantics: width_bucket(x, bins) with bins sorted ascending returns the bin number; for **n bounds you get n+1 buckets**, lower-bound-INCLUSIVE:
+  - x < 25 → **0**
+  - 25 ≤ x < 50 → **1**
+  - 50 ≤ x < 100 → **2**
+  - 100 ≤ x < 250 → **3**
+  - x ≥ 250 → **4**
+  VERIFIED (n+1 buckets, 0 for below first bound, n+1 for ≥ last bound, lower-inclusive).
+
+**FINDING (3) — Q4 width_bucket CASE labels complete AND correct (contrast iter1046).** The CASE label form maps:
+`0 → '$0-25', 1 → '$25-50', 2 → '$50-100', 3 → '$100-250', 4 → '$250+'`
+Every label matches its bucket EXACTLY against the verified 0..4 mapping. This is a clean improvement over iter1046, where buckets 3-4 were mislabeled '$50+'. All five labels present and correct this time. Score HIGH.
+
+(Trivial nit: using ARRAY[25.0,...] DECIMAL literals vs DECIMAL order_amount is fine; width_bucket coerces to double internally — no correctness impact. Tiny Accuracy shade only.)
+
+---
+
+## Clean-bill checklist (none present)
+No `::`-cast misuse, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash error, no INTERVAL quarter/week, no OFFSET-before-LIMIT inversion, no over-warning folklore, no broken-secondary alternative.
 
 ## RECOMMENDATION — DEFAULT NO-OP
 
-Margin +1.375 over threshold; every dialect fact source-verified; no resource defect and no 2-in-2 same-shape slip. NO resource edit, NO commit, NO state.json bump (already 1053). Watch (v) window-over-aggregate stays CLOSED (non-recurrence confirmed); watch (c)/(o) broken-secondary LIKE stays CLOSED (non-recurrence confirmed).
+Margin +1.289. No source-verified resource defect and no 2-in-2 same-shape slip.
+- Q1 date-window off-by-one-month = per-instance logic slip on a date predicate, NOT a taught-wrong pattern → monitor, re-probe a "this month" window; do NOT churn resources.
+- Q3 broken-secondary LIKE = 3rd consecutive non-recurrence → FIX-A durable, watch passive.
+- Q4 width_bucket labels = complete+correct, iter1046 regression not reproduced.
+
+NO resource edit; NO commit. MUST NOT bump state.json (already 1054).
