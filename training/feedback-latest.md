@@ -1,55 +1,59 @@
-# Judge Feedback — iter1048
+# Judge Feedback — iter1049
 
-**Mode:** extended / DEFAULT-NO-OP durability-breadth sweep. Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...), NOT resources/. No federation probe (hard-locked). Production stack (Trino 467 + Iceberg + Hive Metastore on-prem) — all four answers are plain Trino SQL, stack-compatible.
+**Phase:** extended (state.json passed=true). Overall average governs; NO per-question veto.
+**Verification:** BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...) + WebSearch, NOT resources/. Federation NOT probed (hard-locked).
 
-## Verified-source citations
-- **array.md (467):** `all_match(array(T), function(T,boolean)) -> boolean` — true if all match (empty array → true); `array_except(x, y) -> array` — elements in x not in y, dedup. CONFIRMED.
-- **datetime.md (467):** `day_of_week()` ranges `1` (Monday) to `7` (Sunday). NO `dayname()` function exists. `format_datetime(timestamp, format)` formats per JodaTime DateTimeFormat. CONFIRMED.
-- **JodaTime / docs:** `'EEEE'` = full day-of-week name ("Monday"). CONFIRMED.
-- **json.md (467):** NO Postgres `->`/`->>` arrow operators. `json_extract_scalar(json, '$.a.b')` supports nested JSONPath, returns varchar scalar. CONFIRMED.
-- **language/types.md (467) — DISPOSITIVE on the Q1 nuance:** "Exact numeric values can be expressed as numeric literals such as `1.1`, and are supported by the `DECIMAL` data type." "Floating-point ... using scientific notation such as `1.03e1` and are cast as `DOUBLE`." → An unsuffixed decimal-point literal like **`100.0` is DECIMAL, NOT DOUBLE.** Only scientific-notation (`100.0e0`) is DOUBLE.
+## Production-environment fit
+prod_info.md serving-environment section is unfilled (Model/context/platform blank); SaaS stack is on-prem Trino 467 + Iceberg + Hive Metastore + MinIO. All four questions are pure Trino-467 SQL-dialect questions with no auth/authz or platform dependency, so the only applicability bar is "valid runnable Trino 467 SQL." Evaluated on that basis.
 
 ---
 
-## Q1 — price_cents/100 integer-division vs precision
-**Scores: Accuracy 4.75 / Completeness 4.875 / Clarity 4.875 / Actionability 4.875 → 4.84375**
+## Q1 — integer cents → decimal dollars (1999 → 19.99)
+**Scores:** Accuracy 4.9 / Completeness 4.875 / Clarity 4.9 / Actionability 4.875 → **4.8875**
 
-Responder: `price_cents/100` is integer division (1999/100=19, toward zero) — CORRECT. Offers `price_cents / 100.0` ("decimal division", "exact decimal precision") and `CAST(price_cents AS decimal(10,2)) / 100`.
+- `price_cents / 100.0` → integer / DECIMAL → exact DECIMAL result 19.99. **VERIFIED:** RAW `language/types.md` lists `1.1` as an example DECIMAL literal under the DECIMAL type section; only scientific/exponent notation (`1.03e1`) is DOUBLE. So the undecorated decimal-point literal `100.0` is DECIMAL, and integer/DECIMAL is exact. The responder's "DECIMAL result" label is CORRECT.
+  - NOTE: a first-pass WebFetch summary misread types.md (quoted the sci-notation sentence and concluded `100.0`=DOUBLE). RAW-source re-read settled it as DECIMAL — consistent with the iter1048 finding and the imported-prior self-error family (GREATEST-NULL / div-by-zero / TZ-coercion). Do NOT ding the DECIMAL label.
+- `CAST(price_cents AS decimal)/100` also works (CAST AS decimal defaults to DECIMAL(38,0); /100 stays exact decimal).
+- Correctly flags integer/integer division: `1999/100 = 19` (truncation). Verified (toward-zero / floor for positives).
+- Sound and complete.
 
-**Q1 PRECISION-FRAMING FINDING (directive prior REFUTED by source):** The run-directive flagged the `/100.0` "exact decimal" label as *slightly inaccurate*, asserting `100.0` is a DOUBLE in Trino. **RAW 467 types.md refutes that prior:** an unsuffixed decimal-point literal `100.0` is a **DECIMAL** literal (only scientific-notation `1.03e1` is DOUBLE). Therefore `integer / DECIMAL(4,1)` → DECIMAL division = **exact**, and the responder's "decimal division / exact decimal precision" label is **CORRECT, not a mislabel.** No accuracy deduction for the framing. This is another imported-prior self-error in the directive (same family as GREATEST-NULL, div-by-zero, TIMESTAMP-TZ coercion in MEMORY) — verify-first prevented a false ding. Both `/100.0` and the explicit `CAST(... AS decimal(10,2))/100` are exact and display 19.99. Sound, near-ceiling.
+## Q2 — sum an array of prices per order, no join/unnest
+**Scores:** Accuracy 4.875 / Completeness 4.8125 / Clarity 4.875 / Actionability 4.8125 → **4.84375**
 
-## Q2 — every tag non-empty, no unnest
-**Scores: Accuracy 4.875 / Completeness 4.8125 / Clarity 4.8125 / Actionability 4.8125 → 4.828125**
+- `reduce(line_items, 0, (sum, price) -> sum + price, sum -> sum)` is the canonical array-sum. **VERIFIED:** RAW `functions/array.md` — there is NO built-in `array_sum`; `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R` is the documented 4-arg form. Per-element accumulation, no UNNEST.
+- Init `0` is integer; with double prices the accumulator coerces to double — fine. Clean.
 
-`WHERE all_match(tags, x -> length(x) > 0)` — exact: all_match over the array, lambda tests non-empty, no UNNEST. Alt `cardinality(array_except(tags, ARRAY[''])) = cardinality(tags)` is logically sound (removes empty strings; if none removed, cardinalities match). Minor nuance: array_except dedups, so the cardinality equality could mismatch if `tags` itself contains duplicate non-empty values (dedup shrinks LHS) — the all_match lead is the robust canonical and is what the responder LED with, so this is shading-only on a secondary, not a defect. Sound.
+## Q3 — accounts where EVERY flag starts with literal "beta_"
+**Scores:** Accuracy 4.9375 / Completeness 4.9375 / Clarity 4.9375 / Actionability 4.9375 → **4.9375**
 
-## Q3 — day-of-week NAME distribution
-**Scores: Accuracy 4.8125 / Completeness 4.8125 / Clarity 4.875 / Actionability 4.8125 → 4.828125**
+- `all_match(feature_flags, f -> starts_with(f, 'beta_'))`. **VERIFIED BOTH WAYS:**
+  - `all_match(array(T), function(T,boolean)) -> boolean` exists (array.md), and for an empty array returns `true` (documented special case) — the responder's "empty array → TRUE vacuous" is CORRECT.
+  - `starts_with(string, substring) -> boolean` exists (string.md); `ends_with` does NOT exist (not used here, correctly).
+- **PROACTIVE LITERAL-PREFIX TEACHING (watch (o) durability-positive):** responder EXPLICITLY warns NOT to use `f LIKE 'beta_%'` because LIKE `_` is a single-character wildcard that would match `'betaX...'`. **VERIFIED:** `functions/comparison.md` — `_` matches any single character; `'beta_%'` would over-match `'betaX'`. Literal-underscore must use `starts_with` (or `LIKE 'beta\_%' ESCAPE '\'`). This is the exact iter1028/1029/1036 misconception, and the responder taught the correct guard unprompted across the `all_match` surface — extends the clean literal-underscore streak (bare-col / filter-lambda / any_match / all_match). Watch (o) stays CLOSED/passive, durability-positive.
+- Best answer of the four. Score HIGH.
 
-`format_datetime(CAST(session_date AS timestamp), 'EEEE')` → full weekday name; correctly notes `day_of_week()` returns 1-7 (Mon-Sun ISO), NO `dayname()` in Trino, the CAST date→timestamp needed for format_datetime, GROUP BY repeats the expression (valid), and sorting by `day_of_week()` number for calendar order. All verified against datetime.md. The "sort by day_of_week() number for calendar order" tip is genuinely useful (alphabetical name sort would be wrong). Sound.
+## Q4 — this month vs last month revenue, one row, % change, no two-queries/join
+**Scores:** Accuracy 3.0 / Completeness 4.0 / Clarity 3.625 / Actionability 3.5 → **3.53125**
 
-## Q4 — nested JSON $.device.os, arrows, GROUP-BY expression
-**Scores: Accuracy 4.9375 / Completeness 4.875 / Clarity 4.875 / Actionability 4.9375 → 4.90625**
-
-Correctly states Trino has NO `->>`/`->` arrows; uses `json_extract_scalar(properties, '$.device.os')` nested path; GROUP BY repeats the expression; CAST-to-int variant for numeric leaf. **Q4 WATCH (r) DURABILITY FINDING:** the responder PROACTIVELY taught that **Trino GROUP BY accepts expressions, not SELECT aliases** — i.e., you must REPEAT the expression in SELECT and GROUP BY. This is exactly the #16533 alias-prohibition behavior, surfaced proactively and accurately on a novel JSON domain. 3rd+ consecutive durability-positive on the JSON GROUP-BY-expression surface (iter1045/1046/1047 lineage) — the iter1044 r13 L3366 LIGHT FIX-A is durably reaching the responder. Watch (r) remains CLOSED / passive-monitor; no recurrence of the alias error or ungrouped-column shape. Near-ceiling.
+- **PRIMARY query is INVALID — nested window functions.** The lead writes `LAG(SUM(amount) OVER (PARTITION BY ...)) OVER (ORDER BY ...)` — a window function (`SUM(...) OVER`) used as the ARGUMENT to another window function (`LAG(...) OVER`). **VERIFIED:** Trino does NOT permit nesting window functions; a window function's argument may not itself contain a window function. This raises an analysis error ("Cannot nest window functions" / nested window function not allowed). The PRIMARY query will not run. (Same root cause guarded in r07 — pre-aggregate first, then apply the window.)
+- **SECONDARY "Simpler form" is CORRECT and runnable.** The CTE pre-aggregates per month (`GROUP BY date_trunc('month',order_date)`), then `LAG(total_revenue) OVER (ORDER BY month)` over the already-aggregated rows, with `ROUND(100.0*(total_revenue - LAG(...))/LAG(...), 2)`. This is exactly the canonical period-comparison form and the fix for the nested-window error. Verified valid.
+- Net: BROKEN lead + CORRECT clean CTE present. Accuracy dinged for the invalid primary; partial credit because the correct answer IS in the response and is the one a careful reader would adopt. A SaaS engineer copy-pasting the FIRST block hits an error; the second block works — hence the actionability/clarity drag (the broken lead is presented first and more prominently).
 
 ---
 
 ## Overall
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 4.75 | 4.875 | 4.875 | 4.875 | 4.84375 |
-| Q2 | 4.875 | 4.8125 | 4.8125 | 4.8125 | 4.828125 |
-| Q3 | 4.8125 | 4.8125 | 4.875 | 4.8125 | 4.828125 |
-| Q4 | 4.9375 | 4.875 | 4.875 | 4.9375 | 4.90625 |
+- Q1 4.8875 + Q2 4.84375 + Q3 4.9375 + Q4 3.53125 = 18.2 / 4 = **4.55** → **PASS** (margin +1.05 over 3.5).
 
-**Overall average = 4.8515625 → PASS** (margin +1.35).
+## Recommendation — Q4 nested-window classification
+**Classify as per-instance responder slip → MONITOR / re-probe-don't-churn. NO resource edit, NO commit.**
 
-Hygiene clean across all 4: `::` cast absent; no QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary.
+Rationale: this is NOT a resource defect. The resource (r07) teaches the CTE-then-LAG period-comparison form correctly, and the responder DID produce that correct form — as its own "simpler form" secondary. The failure is the responder's habit of leading with an over-complicated single-statement window construction that happens to nest windows illegally, then appending the correct simpler version. That matches the documented "responder broken secondary alternative / over-engineered lead" pattern, not a missing/wrong resource. It is a 1st occurrence of the nested-SUM-OVER-as-LAG-argument shape at the LEAD position this sweep — NOT a 2-in-2 same-shape and NOT sourced from a wrong resource claim (r07 nested SUM(SUM) OVER guard + running-total pre-aggregate CTE are intact and correct).
 
-## Recommendation
-**DEFAULT NO-OP.** No source-verified resource defect; no 2-in-2 same-shape slip. Two findings, both source-resolved and both favorable to the responder:
-1. **Q1 precision-framing:** `100.0` is DECIMAL (not DOUBLE) per RAW 467 types.md — responder's "exact decimal" label is CORRECT; directive prior was an imported-prior self-error, no ding applied.
-2. **Q4 watch (r):** proactive GROUP-BY-expression-not-alias teaching, durable; keep passive-monitor.
+Action:
+- MONITOR. Re-probe the month-over-month / period-comparison family next sweep with a differently-phrased prompt to confirm whether the nested-window LEAD recurs.
+- If it recurs 2-in-2 with the SAME nested-window shape, escalate to a LIGHT FIX-A: add an inline co-located caveat near the r07 period-comparison card — "Trino cannot nest window functions; pre-aggregate in a CTE, then LAG over the aggregated rows" — placed where the period-comparison keywords lead the responder. Do NOT churn now (margin healthy, single occurrence, correct form already produced).
 
-NO resource edit; NO commit; MUST NOT bump state.json (already 1048).
+## Clean-of report
+`::` cast absent all 4; no QUALIFY / false-semi-join / fabricated-function / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning. Q4 IS a broken-lead instance (the nested-window primary) — logged as monitor.
+
+DEFAULT otherwise NO-OP. NO resource edit; NO commit. MUST NOT bump state.json (already 1049).
