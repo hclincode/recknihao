@@ -1,104 +1,121 @@
-# Judge Feedback — iter1044
+# Judge Feedback — iter1045
 
-**Overall: 4.015625 → PASS** (threshold 3.5; margin +0.515625)
-
-Verified BOTH directions against RAW git-tag 467 source (array.md, json.md, datetime.md, window.md) + WebSearch/#16533 — NOT resources/. RAW git-tag source dispositive. Production stack confirmed Trino 467 + Iceberg on-prem k8s/MinIO (prod_info.md); all four answers are pure-SQL, stack-appropriate. NO federation probe (hard-locked).
-
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5.0 | 5.0 | 4.5 | 5.0 | 4.875 |
-| Q2 | 2.5 | 2.5 | 4.5 | 3.5 | 3.25 |
-| Q3 | 2.5 | 3.0 | 4.0 | 3.0 | 3.125 |
-| Q4 | 5.0 | 4.75 | 4.5 | 5.0 | 4.8125 |
-
-Overall = (4.875 + 3.25 + 3.125 + 4.8125) / 4 = **4.015625 PASS**
+**Verification basis:** All dialect facts checked BOTH directions against RAW git-tag 467 source
+(raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/{array,json,datetime,aggregate}.md)
++ WebSearch/#16533, NOT against resources/. RAW git-tag source is dispositive. Production stack confirmed
+Trino 467 + Iceberg on-prem k8s/MinIO (prod_info.md); all four answers are pure-SQL and stack-appropriate.
+NO federation probe (hard-locked).
 
 ---
 
-## Q1 — array discount via transform — 4.875 (CLEAN)
+## Q1 — nested JSON extract + count per OS  → **4.875**
 
-`transform(line_items, price -> price * 0.9) AS discounted_items`
-
-VERIFIED vs array.md (RAW 467): `transform(array(T), function(T,U)) -> array(U)` — "Returns an array that is the result of applying `function` to each element of `array`." The lambda multiplies each element by 0.9 and returns a NEW array, no UNNEST / no re-aggregate — exactly the constraint. Sound.
-
-Note (not a defect): `0.9` is a DOUBLE literal; result type follows Trino numeric coercion. If `line_items` is `decimal`, the product is coerced; for exact money the engineer could `price * CAST(0.9 AS decimal(...))`, but the question did not request exact-decimal preservation. Minor clarity-only shading (-0.5) for not flagging the literal type.
-
-## Q2 — % cancelled within 30 days, div-zero-safe — 3.25 (DENOMINATOR-SCOPE SEMANTIC ERROR; technique correct)
-
+Answer:
 ```sql
-SELECT COUNT(*) FILTER (WHERE date_diff('day', started_at, cancelled_at) <= 30) * 100.0
-       / NULLIF(COUNT(*), 0) AS pct_cancelled_within_30_days
-FROM subscriptions
-WHERE cancelled_at IS NOT NULL;
-```
-
-VERIFIED technique is all correct:
-- `date_diff('day', ts1, ts2) -> bigint` (datetime.md RAW 467: "Returns `timestamp2 - timestamp1` expressed in terms of `unit`").
-- `COUNT(*) FILTER (WHERE ...)` conditional aggregate — valid.
-- `* 100.0` forces DOUBLE division (no integer truncation), `NULLIF(COUNT(*),0)` guards divide-by-zero on an empty/all-active table — both correct.
-
-**DEFECT — wrong denominator scope.** The question asks for the percentage of **subscriptions** (the natural population = ALL subscriptions, active + cancelled) cancelled within 30 days. The trailing `WHERE cancelled_at IS NOT NULL` restricts the WHOLE query — both numerator and denominator — to cancelled rows only. So `NULLIF(COUNT(*),0)` counts ONLY cancelled subscriptions, and the result computes "% of CANCELLED subscriptions that cancelled within 30 days," NOT "% of ALL subscriptions." For a mostly-active table this OVERSTATES the metric substantially.
-
-**FIX — remove `WHERE cancelled_at IS NOT NULL`.** Active subscriptions have `cancelled_at` NULL → `date_diff('day', started_at, NULL)` → NULL → `NULL <= 30` is not TRUE → correctly EXCLUDED from the FILTER numerator, while still counted in the `COUNT(*)` denominator. The div-zero guard still protects the empty-table case. Correct form:
-```sql
-SELECT COUNT(*) FILTER (WHERE date_diff('day', started_at, cancelled_at) <= 30) * 100.0
-       / NULLIF(COUNT(*), 0) AS pct_cancelled_within_30_days
-FROM subscriptions;   -- no WHERE
-```
-Accuracy/Completeness scored down for the wrong denominator scope; technique credited (clarity high; actionability partial — the engineer gets a runnable-but-wrong-answer query).
-
-## Q3 — nested JSON properties.geo.country, GROUP BY country — 3.125 (BROKEN ON TWO COUNTS; core json correct)
-
-```sql
-SELECT event_id, json_extract_scalar(properties, '$.geo.country') AS country
-FROM events GROUP BY country;
-```
-
-VERIFIED core guidance correct: `json_extract_scalar(json, json_path)` returns the value as a plain string (json.md RAW 467: "returns the result value as a string"), and nested dot-path `$.geo.country` is supported (doc example `$.store.book[0].author`). The extraction technique is right.
-
-**DEFECT 1 — GROUP BY references a SELECT ALIAS.** `GROUP BY country` references the SELECT-list alias `country`, which Trino does NOT allow (analysis error; trinodb/trino **#16533** — "Using alias in group by is not supported by Trino," confirmed dispositive from the issue itself + SELECT doc: GROUP BY accepts expressions or ordinals only, no alias). Fix: repeat the expression `GROUP BY json_extract_scalar(properties, '$.geo.country')` or use the ordinal `GROUP BY 1`.
-
-**DEFECT 2 — `event_id` is neither grouped nor aggregated** → second analysis error. The query would not run even after fixing the alias. For the stated intent ("GROUP BY country"), the correct shape is a per-country aggregation:
-```sql
-SELECT json_extract_scalar(properties, '$.geo.country') AS country, COUNT(*) AS n
+SELECT json_extract_scalar(properties, '$.device.os') AS operating_system, COUNT(*) AS event_count
 FROM events
-GROUP BY 1;
+GROUP BY json_extract_scalar(properties, '$.device.os')
+ORDER BY event_count DESC;
 ```
 
-**RECURRENCE — 2nd occurrence, same shape as iter1039 Q3** (nested-JSON-extract-then-GROUP-BY-the-alias + ungrouped passthrough column). See recommendation.
+**THE KEY ITEM — GROUP-BY-alias defect DID NOT RECUR.** This is a re-probe of the 2x-relapsed
+shape (iter1039 Q3, iter1044 Q3). The responder **repeated the full expression**
+`GROUP BY json_extract_scalar(properties, '$.device.os')` rather than referencing the SELECT alias
+`operating_system`. This is valid Trino — the #16533 alias-in-GROUP-BY prohibition applies only when
+GROUP BY names a SELECT alias; a repeated expression (or an ordinal) is allowed. The `ORDER BY event_count`
+DOES reference the alias, which is valid because ORDER BY can resolve SELECT aliases (GROUP BY/WHERE cannot).
 
-## Q4 — quartile bucketing by total spend — 4.8125 (CLEAN; NTILE-over-aggregate VALID)
+- `json_extract_scalar(varchar/json, jsonpath) -> varchar` confirmed (json.md); nested `$.device.os`
+  path supported (json.md shows nested `$.store.book[0].author` examples). Scalar (string) value — correct fn choice.
+- `COUNT(*)` per group → one row per OS. Mentions `WHERE ... IS NOT NULL` to drop events missing the path — good completeness touch (json_extract_scalar returns NULL for absent paths).
+- No ungrouped/unaggregated column (contrast iter1039/1044 which also dragged an ungrouped `event_id`). Clean.
+
+Acc 5 / Clar 4.75 / App 5 / Comp 4.75. **The iter1039+iter1044 GROUP-BY-alias error is ABSENT.**
+
+## Q2 — sum an array of prices per order  → **4.625**
 
 ```sql
-WITH ranked_customers AS (
-  SELECT customer_id, SUM(amount) AS total_spend,
-         NTILE(4) OVER (ORDER BY SUM(amount) DESC) AS spend_tier
-  FROM orders GROUP BY customer_id)
-SELECT customer_id, total_spend,
-       CASE spend_tier WHEN 1 THEN 'Top 25%' ... END AS tier_label
-FROM ranked_customers;
+reduce(line_items, 0.0, (accumulator, price) -> accumulator + price, x -> x) AS total_value
 ```
 
-VERIFIED vs window.md (RAW 467): `NTILE(n)` "Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`," remainder distributed from the first bucket (e.g. 6 rows / 4 → 1 1 2 2 3 4). NTILE(4) → quartiles, `ORDER BY ... DESC` → bucket 1 = top spenders. Correct.
+- There is **no `array_sum` built-in** in Trino 467 (array.md — absence verified). `reduce` is the idiomatic
+  array-sum. 4-arg signature `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R`
+  matches exactly: init `0.0` (DOUBLE, matches the `12.99`-style decimals), accumulate `acc+price`, identity output `x->x`.
+- The question asked "built-in or manual?" — the honest answer is **no built-in array_sum; reduce is the manual idiom.**
+  The responder produced the correct reduce form but did **not explicitly say "there's no array_sum built-in"**, which
+  is the literal framing the question solicited. Minor completeness ding only; the SQL is fully correct and runnable.
 
-**KEY VALIDITY CONFIRMATION — this is NOT the iter1038/1040 invalid bare-SUM-OVER case.** Here `SUM(amount)` inside `OVER (ORDER BY SUM(amount) DESC)` is an AGGREGATE in a `GROUP BY customer_id` query; window functions run AFTER GROUP BY, and ordering a window by an aggregate of a grouped query is VALID (the iter1038/1040 error was a BARE non-grouping column `revenue` inside OVER — that does NOT apply here because `amount` is wrapped in SUM). Window-not-in-WHERE → correctly wrapped in a CTE. CASE-on-spend_tier labelling is clean. -0.25 completeness shading only (does not note NTILE distributes any remainder to the earliest buckets for non-divisible customer counts).
+Acc 5 / Clar 4.5 / App 4.75 / Comp 4.25.
+
+## Q3 — active in EVERY week of last month  → **4.75**
+
+```sql
+SELECT customer_id FROM customer_weekly_activity
+WHERE week_date >= date_add('week', -4, date_trunc('week', current_date))
+  AND week_date <  date_trunc('week', current_date)
+GROUP BY customer_id
+HAVING COUNT(DISTINCT week_date) = 4;
+```
+
+- `date_add('week', n, x)` valid — 'week' is a documented unit for date_add/date_trunc (datetime.md unit list:
+  millisecond/second/minute/hour/day/**week**/month/quarter/year). `date_trunc('week', current_date)` valid.
+- **"all weeks meet condition" via COUNT(DISTINCT week_date) = N** is the sound set-based idiom: each customer who
+  has a row in all 4 distinct weeks passes; missing any week → count < 4 → excluded. No self-join, no manual per-week
+  counting. Directly satisfies "without many JOINs/manual counting."
+- Half-open window `[start, current-week-start)` correctly excludes the current partial week, so "4 complete weeks."
+  `bool_and` is a valid alternative but COUNT(DISTINCT)=N is fully correct.
+- Tiny nuance: "last month" ≈ 4 ISO weeks is a reasonable operational reading; only worth a hair of completeness shading.
+
+Acc 5 / Clar 4.75 / App 4.75 / Comp 4.5.
+
+## Q4 — this month vs last month revenue, side by side  → **4.8125**
+
+```sql
+SELECT
+  SUM(amount) FILTER (WHERE month(order_date)=month(current_date) AND year(order_date)=year(current_date)) AS this_month_revenue,
+  SUM(amount) FILTER (WHERE ... year-1) AS last_year_same_month_revenue,
+  SUM(amount) FILTER (WHERE order_date >= date_trunc('month',current_date) - INTERVAL '1' MONTH
+                        AND order_date <  date_trunc('month',current_date)) AS last_month_revenue
+FROM orders;
+```
+
+- `FILTER (WHERE ...)` is "supported for all aggregate functions" (aggregate.md) — SUM-with-FILTER over multiple
+  periods in ONE pass is valid and is exactly the no-app-side-math, two-columns-side-by-side answer requested.
+- `month()`/`year()` both exist (datetime.md). `date_trunc('month', current_date) - INTERVAL '1' MONTH` half-open
+  range is the robust last-month idiom; `INTERVAL '1' MONTH` is a valid literal (datetime.md operators table).
+- NULLIF div-zero guard for the growth-% note is sound.
+- Over-delivery: a 3rd `last_year_same_month_revenue` column beyond the 2 asked — harmless; **both requested columns
+  (this_month, last_month) are present and correct.** Slight extra-column noise relative to the literal ask = tiny clarity ding.
+
+Acc 5 / Clar 4.625 / App 5 / Comp 4.75.
 
 ---
 
-## Recommendation
+## Overall
 
-**(1) Q2 denominator-scope error — PER-INSTANCE SLIP, no resource gap.** The technique (COUNT(*) FILTER, NULLIF div-zero guard, 100.0 float division, date_diff->bigint) is all taught correctly and rendered correctly — this is a one-off reading error where the responder over-restricted the population with a `WHERE cancelled_at IS NOT NULL` that should have been omitted (active subs are correctly excluded by the NULL-propagating FILTER predicate alone, while remaining in the denominator). This is a NULL-aware-denominator reasoning miss, not a missing card. Classify as RESPONDER SLIP (watch, low-expectation); re-probe a "% of total population conditioned on a nullable timestamp" question next sweep. NO resource edit for this one.
+| Q | Score |
+|---|---|
+| Q1 | 4.875 |
+| Q2 | 4.625 |
+| Q3 | 4.75 |
+| Q4 | 4.8125 |
 
-**(2) Q3 GROUP-BY-alias — RECURRENCE (2nd occurrence, iter1039 Q3 shape) → LIGHT FIX-A warranted (FINDABILITY GAP at the JSON card).** GREP findings:
-- The #16533 "GROUP BY the expression/ordinal, NOT the alias" caveat IS well-anchored generically in r07 (L2000, L2051 worked-GROUP-BY notes; L2777 "Trino GROUP BY rules" anchor) and r23.
-- BUT the primary JSON-extraction card (r13 §"store as VARCHAR", L3363-3369) shows `GROUP BY 1` (the SAFE ordinal form) WITHOUT a co-located inline caveat that `GROUP BY <alias>` is an error. A Haiku responder pulling `json_extract_scalar` from the JSON context lands at the r13 card, mirrors the SELECT-list alias into GROUP BY, and never traverses ~700+ lines into the r07 GROUP-BY-rules anchor.
+**Overall average = 4.765625 → PASS** (well above 3.5; no per-question veto).
 
-Same buried-guard findability pattern as iter1040 Q1 (running-total). Two occurrences of the JSON-extract-then-group-by-alias shape (iter1039 Q3 + iter1044 Q3) satisfy the 2-in-2 bar for a LIGHT, ADDITIVE FIX-A:
+TICS clean across all four: no `::`, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash
+trap, no INTERVAL quarter/week qualifier (note: 'week' here is a date_add UNIT string, NOT an interval qualifier — correct),
+no OFFSET-before-LIMIT, no over-warning folklore, no broken "for completeness" secondary form.
 
-> **Teacher LIGHT FIX-A (additive, no reconcile — existing content is correct):** At the r13 json_extract_scalar GROUP BY example (~L3366), add a one-line inline caveat co-located with the card:
-> `-- GROUP BY 1 (ordinal) or repeat json_extract_scalar(properties,'$.geo.country') — Trino does NOT allow GROUP BY <select alias> (#16533).`
-> Do the same for any other json_extract_scalar example immediately followed by a GROUP BY. Keep it inline at the copy-attractive card so keyword→resource matching surfaces it together with the extraction recipe. Do NOT touch the r07/r23 anchors (intact).
+## Recommendation — Q1 FIX-A CONFIRMATION
 
-The `event_id` ungrouped passthrough is part of the same responder synthesis miss; the existing per-country `SELECT expr, COUNT(*) ... GROUP BY 1` pattern at r13 L3366 already models the correct full shape — no extra card needed for the passthrough.
+The iter1044 LIGHT FIX-A (the inline r13 ~L3366 GROUP-BY-alias caveat co-located with the JSON
+json_extract_scalar+COUNT(*) card) **reached the responder.** On this fresh nested-JSON group-and-count probe,
+Q1 correctly **GROUP BY the repeated expression** (not the alias) and carried no ungrouped column — the
+iter1039/iter1044 GROUP-BY-alias error did **NOT** recur. The FIX-A is confirmed by behavior on a novel
+domain (`device.os` vs prior `geo.country`/`context.os`).
 
-**Overall:** PASS at 4.0156. Single additive FIX-A recommended (Q3 JSON-card GROUP-BY caveat). No reconcile, no lock edits, federation untouched. MUST NOT bump state.json (already 1044).
+**Action: DEFAULT NO-OP this iter (margin +1.27). DOWNGRADE the JSON GROUP-BY-alias watch (r) → passive monitor
+(FIX-A confirmed).** Re-probe the GROUP-BY-alias shape once more from a different angle (e.g. a non-JSON computed
+GROUP BY expression with a SELECT alias) next sweep to certify durability before closing the watch entirely.
+Q2 "no array_sum built-in" explicit framing = per-instance completeness monitor, not a resource gap. NO resource
+edit; NO commit. MUST NOT bump state.json (already 1045).
