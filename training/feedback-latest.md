@@ -1,57 +1,33 @@
-# Judge Feedback — iter1073 (2026-06-18)
+# iter1074 Judge Feedback — 2026-06-18
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
 
-**Overall: 4.69 / 5.00 — PASS** (threshold 3.5; margin +1.19)
+**Overall average: 4.83 / 5.00 — PASS** (threshold 3.5; margin +1.33)
 
-Verified BOTH directions against RAW git-tag 467 source:
-- datetime.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
-- map.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
-- select.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
-- aggregate.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
-- connector/iceberg.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/connector/iceberg.md
+Verified BOTH directions against RAW git-tag 467 source. Clean sweep, zero source-verified defects across all four answers. No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary patterns.
 
-Zero source-verified dialect defects. Clean sweep.
+## Sources checked (RAW git-tag 467, dispositive over rendered HTML)
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md — `date_add` signature/units
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md — `array_position`
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md — `corr`/`covar_samp`/`regr_slope`
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md — HAVING + clause evaluation order
 
----
+## Per-question breakdown
 
-## Q1 — safe read of maybe-missing map key (epoch-ms) + last-30-days compare — 4.75
-**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5**
+### Q1 — add 3 months to a timestamp (4.88)
+`date_add('month', 3, started_at)`. VERIFIED: 467 signature is `date_add(unit, value, timestamp)` — exact argument order the responder used; `'month'` is an explicitly listed valid unit (millisecond/second/minute/hour/day/week/month/quarter/year). Correctly told the engineer there's no bare `+N` on dates; `INTERVAL '3' MONTH` is the documented alternative and date_add is the cleaner answer to "is there a function". Accuracy 5, Completeness 4.5, Clarity 5, Actionability 5.
 
-CONFIRMED both directions vs map.md + datetime.md:
-- `element_at(properties,'trial_end_ms')` returns NULL on a missing key ("Returns value for given `key`, or `NULL` if the key is not contained in the map"); the `properties['trial_end_ms']` subscript THROWS ("This operator throws an error if the key is not contained in the map"). Responder's diagnosis (subscript = the error the user saw; element_at = safe) is exactly correct — the RIGHT direction (contrast iter1071 Q2, which mislabeled subscript as NULL-returning).
-- `CAST(... AS BIGINT) / 1e3` — `1e3` is a DOUBLE literal so the division is double; fine for `from_unixtime`.
-- `from_unixtime` expects SECONDS ("unixtime is the number of seconds since 1970-01-01 00:00:00 UTC"), so dividing epoch-ms by 1e3 is correct; it returns `timestamp(3) with time zone` (all overloads confirmed). The tz-timestamp vs `current_timestamp - INTERVAL '30' DAY` comparison is valid (current_timestamp is also tz-aware).
+### Q2 — index of a value in an array (4.94)
+`array_position(tags, 'onboarding')` returning 1-based index, 0 if absent; `WHERE array_position(...) > 0` filter. VERIFIED: `array_position(x, element) -> bigint`, "position of the first occurrence ... or 0 if not found", 1-based. Exactly correct. "No UNNEST needed, works directly on the array" is accurate and useful. Accuracy 5, Completeness 5, Clarity 5, Actionability 4.75.
 
-Minor completeness: `from_unixtime(...)` in WHERE is not partition-prunable on the raw value, but the source is a map value not a partition column, so negligible here.
+### Q3 — correlation between two columns (4.81)
+`corr(total_spend, account_age_days)` plus `covar_samp` and `regr_slope`. VERIFIED: all three are native 467 aggregates, all `(y, x)` order; `corr` returns the correlation coefficient (Pearson by definition of the statistic). Result in [-1, 1] is correct; "do it in SQL, no special setup, don't pull data out" is the right SaaS guidance. corr/covar are order-symmetric; responder kept consistent (y, x) ordering — fine. Accuracy 5, Completeness 4.75, Clarity 4.75, Actionability 4.75.
 
-## Q2 — COUNT DISTINCT users per array tag, all tags at once — 4.875
-**Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5**
+### Q4 — count per customer, filter on COUNT > 5 (4.69)
+`GROUP BY customer_id HAVING COUNT(*) > 5 ORDER BY upgrade_count DESC`. VERIFIED: HAVING is the correct clause for filtering on an aggregate; the FROM→WHERE→GROUP BY→HAVING→SELECT→ORDER BY logical order matches select.md ("ORDER BY ... evaluated after any GROUP BY or HAVING"). Critically the responder REPEATED `COUNT(*)` in HAVING rather than referencing the SELECT alias `upgrade_count` — correct per the #16533 family (Trino resolves output aliases only in ORDER BY, not in HAVING/WHERE/GROUP BY); and correctly noted ORDER BY MAY use the alias. The "WHERE runs before GROUP BY so it can't see aggregates" explanation is the right beginner mental model. No defects. Accuracy 5, Completeness 4.5, Clarity 5, Actionability 4.25.
 
-CONFIRMED vs select.md: `UNNEST(device_tags) AS t(tag)` yields one row per element; `CROSS JOIN UNNEST` drops rows whose array is empty/NULL ("UNNEST returns zero entries when the array/map is empty/null"); `LEFT JOIN UNNEST(...) AS t(tag) ON TRUE` preserves them ("LEFT JOIN is preferable in order to avoid losing the row..."). `GROUP BY tag` + `COUNT(DISTINCT user_id)` valid. Single alias for an array unnest is correct. Clean.
+## Imported-prior risk families
+All answered correctly: date_add arg order (unit, value, timestamp); array_position 0-on-absent; corr/regr (y,x); HAVING-repeats-aggregate-not-alias (#16533).
 
-## Q3 — pivot plan_name rows into per-plan revenue columns — 4.625
-**Accuracy 5 / Completeness 4.5 / Clarity 4.5 / Actionability 5**
-
-CONFIRMED: Trino 467 has NO `PIVOT` keyword (correctly stated). Both conditional-aggregation forms valid:
-- `SUM(CASE WHEN plan_name='starter' THEN monthly_revenue ELSE 0 END)` — standard.
-- `SUM(monthly_revenue) FILTER (WHERE plan_name='starter')` — VERIFIED in aggregate.md: "The `FILTER` keyword can be used to remove rows from aggregation processing ... supported for all aggregate functions."
-
-Both compute per-plan revenue per customer with `GROUP BY customer_id`. Note one informal semantic difference (not penalized as egregious): the CASE form emits `0` for a customer with no rows of a plan, while FILTER emits `NULL` (SUM over empty = NULL). The "both forms equivalent / identical plans" claim is loose on this NULL-vs-0 edge but harmless for the asked use case. Minor clarity ding only.
-
-## Q4 — inspect/restore Iceberg invoices after accidental delete — 4.50
-**Accuracy 5 / Completeness 4 / Clarity 4.5 / Actionability 4.5**
-
-ROLLBACK FORM VERDICT — CORRECT for 467. CONFIRMED vs connector/iceberg.md:
-- `iceberg.analytics."invoices$snapshots"` metadata table exists; columns include `committed_at` (timestamp(3) with tz), `snapshot_id` (bigint), `parent_id`, `operation` (varchar), `summary` (map(varchar,varchar)). The four selected columns are all real.
-- `CALL iceberg.system.rollback_to_snapshot('analytics', 'invoices', <snapshot_id>)` — POSITIONAL 3-arg form is correct for 467 (docs example: `CALL example.system.rollback_to_snapshot('testdb','customer_orders', 8954597067493422955)`). Responder's warning that the Spark named-arg form (`table=>..., snapshot_id=>...`) is wrong in Trino is accurate. There is NO `ALTER TABLE ... EXECUTE rollback_to_snapshot` form in 467 (that is a later 469+ form) — responder correctly avoided it.
-- Notes sound: metadata-only pointer move; expire_snapshots window; rollback loses writes landed after the bad delete → surgical DELETE/restore-by-insert instead.
-
-COMPLETENESS GAP (minor): the user also asked to "look at what the table contained before" — read-only inspection. The canonical is `SELECT * FROM iceberg.analytics.invoices FOR VERSION AS OF <snapshot_id>` (or `FOR TIMESTAMP AS OF TIMESTAMP '...'`), both confirmed present in 467. The responder found the snapshot and jumped straight to rollback without showing the non-destructive time-travel SELECT to inspect/verify first. Rolling back before inspecting is riskier than the asked "look at prior contents" implies. Completeness 4.0.
-
----
-
-## Cross-cutting
-No `::`-cast misuse / QUALIFY / false-semi-join / fabricated function / regex-backslash / INTERVAL quarter-week / OFFSET-before-LIMIT / over-warning folklore / broken-secondary-alternative. Imported-prior risk families answered correctly (element_at-vs-subscript direction, from_unixtime-tz seconds, rollback_to_snapshot positional CALL form).
-
-RECOMMENDATION = DEFAULT NO-OP (margin +1.19). The Q4 missing FOR VERSION AS OF read-only inspection is the single actionable item; it is a per-instance completeness gap, not a missing canonical (time-travel SELECT is well-covered). No resource edit, no commit. MUST NOT bump state.json (already 1073).
+## Recommendation
+DEFAULT NO-OP. Margin +1.33. No resource edit, no commit warranted. MUST NOT bump state.json (already 1074).
