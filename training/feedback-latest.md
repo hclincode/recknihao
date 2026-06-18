@@ -1,69 +1,56 @@
-# Judge Feedback — iter1055
+# Judge Feedback — iter1056
 
-**Overall: Q1 4.875 / Q2 4.9375 / Q3 4.9375 / Q4 4.90625 → 4.9140625 PASS** (margin +1.414)
+**Overall: 4.914 PASS** (Q1 4.875 / Q2 4.9375 / Q3 4.9375 / Q4 4.90625) — margin +1.414
 
-Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/. NO federation probe this iter. RECOMMENDATION = **DEFAULT NO-OP** — zero source-verified resource defects, zero 2-in-2 same-shape slips.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...) AND trino.io/docs/467 — NOT resources/. RAW git-tag dispositive.
 
----
-
-## Q1 — current month-to-date revenue (watch (w) re-probe) — 4.875
-
-`SELECT SUM(amount) AS monthly_revenue FROM orders WHERE order_date >= date_trunc('month', current_date) AND order_date < current_date + INTERVAL '1' DAY;`
-
-**Verified (datetime.md):**
-- `date_trunc('month', x)` truncates to first-day-of-month at 00:00 (doc: `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00') -- 2022-10-01 00:00:00.000`). With `current_date` → first day of THIS month. CORRECT lower bound.
-- `current_date` = current date as of query start (date type). `current_date + INTERVAL '1' DAY` = start of tomorrow; operators table confirms `date + interval day` valid (`date '2012-08-08' + interval '2' day`).
-- Half-open `>= start_of_month AND < start_of_tomorrow` correctly captures month-start through end-of-today inclusive, no double-count, boundary-safe regardless of order_date being timestamp (date↔timestamp coercion implicit; bare column on the left preserves partition pruning).
-
-**FINDING (1) — watch (w): iter1054 last-month off-by-one DID NOT RECUR.** iter1054 used `date_trunc('month',current_date) - INTERVAL '1' MONTH`, selecting the PREVIOUS complete month. This question asked for CURRENT month-to-date and correctly used `date_trunc('month', current_date)` with NO month subtraction. The off-by-one is CLEAN. Per-instance logic slip resolved; not a resource issue either way.
-
-Half-open, bare-column-left, pruning-friendly canonical form. Minor clarity note (no tier ding): the `current_date + INTERVAL '1' DAY` upper bound is exactly right; an equivalent `date_trunc('day', current_timestamp)+INTERVAL '1' DAY` could have been mentioned but isn't needed.
+Production-stack fit: all four are pure Trino-467 SQL questions (analytical query patterns), fully compatible with the on-prem Trino 467 + Iceberg + Hive Metastore stack in prod_info.md. No auth/authz/federation surface touched.
 
 ---
 
-## Q2 — features array contains ALL of {'api_access','sso'} — 4.9375
+## Q1 — count starts per month by plan_type, sort month DESC + plan_type ASC — 4.875
 
-`WHERE cardinality(array_except(ARRAY['api_access','sso'], features)) = 0;` AND alt `all_match(ARRAY['api_access','sso'], x -> contains(features, x))`.
+`SELECT DATE_TRUNC('month', started_at) AS month, plan_type, COUNT(*) AS subscription_count FROM subscriptions GROUP BY DATE_TRUNC('month', started_at), plan_type ORDER BY DATE_TRUNC('month', started_at) DESC, plan_type ASC`
 
-**Verified (array.md):**
-- `array_except(x, y)` = "elements in x but not in y, without duplicates." With `x = required`, `y = features`: result = required-elements-NOT-present-in-features. Empty (cardinality 0) ⇔ every required element present. CORRECT all-of-set logic — required is correctly the first arg.
-- `all_match(array(T), function) -> boolean`: true iff every element matches; checks each required element is `contains(features, x)`. Equivalent and correct.
-- `contains(x, element) -> boolean` membership confirmed.
+- **Verified (select.md):** ORDER BY supports multiple keys each with its own direction — synopsis `ORDER BY expression [ ASC | DESC ] [ NULLS {FIRST|LAST} ] [, ...]`. The mixed `DATE_TRUNC(...) DESC, plan_type ASC` is valid Trino. ✔
+- **Verified (select.md):** GROUP BY "may contain any expression composed of input columns" — repeating `DATE_TRUNC('month', started_at)` in GROUP BY (not the `month` alias) is the CORRECT form. GROUP BY does NOT resolve SELECT aliases (#16533 family) — responder correctly repeated the expression rather than `GROUP BY month`. ✔
+- **Verified (datetime.md):** `date_trunc('month', x)` returns first-day-of-month at midnight. Grouping months by truncation is sound. ✔
+- Newest-first + alphabetical-within-month satisfied exactly. No defect.
 
-Both forms valid and correctly distinguish ALL-of (vs ANY-of). Excellent.
+## Q2 — users with AT LEAST ONE feature_flag starting with literal "beta_" — 4.9375
 
----
+`WHERE any_match(feature_flags, flag -> starts_with(flag, 'beta_'))`
+plus JSON-string-column note: `any_match(CAST(json_parse(feature_flags) AS ARRAY(VARCHAR)), flag -> starts_with(flag,'beta_'))`
 
-## Q3 — average completed session length in minutes — 4.9375
+- **Verified (array.md):** `any_match(array(T), function(T,boolean)) -> boolean` returns true if ≥1 element matches the predicate — exactly the "at least one flag" semantics. ✔
+- **Verified (string.md):** `starts_with(string, substring) -> boolean` is a LITERAL prefix test, NO wildcards. So `starts_with(flag, 'beta_')` correctly matches the literal underscore — NOT a wildcard. This is the dialect-correct way to match a literal `beta_` prefix. ✔
+- **Verified (json.md):** `json_parse(string)` returns a JSON value; CAST to `ARRAY(VARCHAR)` is supported for homogeneous string arrays. The bonus note for a JSON-string-typed column is sound and genuinely useful. ✔
+- **Q2 BROKEN-SECONDARY LIKE DID NOT RECUR — 4th CONSECUTIVE CLEAN RE-PROBE (streak fully reversed).** The responder offered NO bare `LIKE 'beta_%'` "if you prefer" alternative. The escalation watch from iter1051 (2nd-occ `LIKE 'promo_%'` aside) and iter1037 is now reversed across iter1053 / iter1054 / iter1055 / iter1056 — four clean literal-prefix re-probes in a row. The FIX-A pair (r23 §653 LIKE literal-`_`/`%` + r07 ~L759 filter-lambda literal-prefix) is DURABLE; the bare-`LIKE 'X_%'`-as-equivalent secondary is NOT recurring. Watch stays CLOSED/passive. No 3rd-occurrence escalation trigger fired. Best answer of the set.
 
-`SELECT AVG(date_diff('minute', started_at, ended_at)) AS avg_session_minutes FROM sessions WHERE ended_at IS NOT NULL;`
+## Q3 — average session length in MINUTES, only valid ended_at — 4.9375
 
-**Verified (datetime.md / aggregate.md):**
-- `date_diff(unit, ts1, ts2) -> bigint`, "returns ts2 - ts1 expressed in terms of unit," complete/truncated units. `date_diff('minute', started_at, ended_at)` → whole minutes elapsed. CORRECT.
-- `WHERE ended_at IS NOT NULL` filters to completed sessions (NULL = incomplete). AVG additionally ignores NULL, so the filter is correct AND defensively redundant.
-- AVG over bigint → double average; returns NULL on empty set (acceptable).
+`SELECT AVG(CAST(DATE_DIFF('second', started_at, ended_at) AS DOUBLE) / 60) AS avg_session_minutes FROM sessions WHERE ended_at IS NOT NULL` + an `AVG(...) FILTER (WHERE ended_at IS NOT NULL)` variant.
 
-Tight and correct. Sub-minute precision not requested; complete-minute granularity is the natural reading of "in minutes."
+- **Verified (datetime.md):** `date_diff('second', a, b)` returns `bigint`, complete-units (truncating, drops fractional). Casting to DOUBLE then `/60` yields FRACTIONAL minutes — strictly MORE precise than `date_diff('minute', ...)` which would drop the partial minute (complete-units). Good choice for an average. ✔
+- **Verified (aggregate.md):** AVG "does not include null values in the count" — NULL `ended_at` rows are ignored by AVG; the explicit `WHERE ended_at IS NOT NULL` is defensively redundant and correct (also prunes the date_diff input). ✔
+- **Verified (aggregate.md):** the `FILTER (WHERE ...)` clause "is supported for all aggregate functions" — the FILTER variant is a legitimate equivalent. ✔
+- Fully addresses "only valid ended_at" two ways. No defect.
 
----
+## Q4 — total revenue per customer formatted "$1,234.56" (amount = integer cents) — 4.90625
 
-## Q4 — group events by nested JSON device.os (watch (r) re-test) — 4.90625
+`SELECT customer_id, format('$%,.2f', SUM(amount) / 100.0) AS total_revenue FROM orders GROUP BY customer_id`
 
-`SELECT json_extract_scalar(metadata, '$.device.os') AS os_type, COUNT(*) ... GROUP BY json_extract_scalar(metadata, '$.device.os') ORDER BY event_count DESC.` Proactively warns Trino does NOT allow GROUP BY to reference a SELECT alias (#16533).
-
-**Verified (json.md / sql/select.md):**
-- Trino has NO Postgres-style `->`/`->>` arrow operators (json.md lists json_extract/json_extract_scalar/json_query/json_value only). Responder correctly translated the user's Postgres `metadata -> 'device' -> 'os'` to `json_extract_scalar(metadata, '$.device.os')`.
-- `json_extract_scalar(json, json_path) -> varchar`; doc example `'$.store.book[0].author'` confirms nested-path scalar extraction → `'$.device.os'` is the correct nested form.
-- **#16533 caveat ACCURATE:** select.md states GROUP BY accepts "any expression composed of input columns OR an ordinal number selecting an output column by position" — it does NOT list SELECT-list aliases. So `GROUP BY os_type` → "Column 'os_type' cannot be resolved"; `GROUP BY 1` or repeating the expression is required. Responder repeated the expression in GROUP BY (valid) AND proactively taught the alias prohibition.
-
-**FINDING (2) — watch (r): JSON GROUP-BY-expression + #16533 proactive caveat is DURABLE.** Consecutive positive JSON-group-by re-probe (cf. iter1048 Q4). The r13 L3371/L3366 FIX-A teaching the #16533 caveat and the no-arrow translation continues to surface correctly. Watch (r) stays CLOSED/passive.
-
-Minor clarity note (no tier ding): could have led with an outright "Trino has no `->` arrow operator," but it translated correctly and the caveat it foregrounded (#16533) is the higher-value gotcha.
+- **Verified (conversion.md):** `format()` follows java.util.Formatter; doc example `format('%,.2f', 1234567.89)` → `'1,234,567.89'`. `%,.2f` = comma grouping + 2 decimals. The `$` literal prefix in the format string is fine. → `"$1,234.56"` exactly. ✔
+- **Verified (types.md):** undecorated `100.0` is a DECIMAL literal (only scientific notation like `1.03e1` is DOUBLE). `SUM(amount)` is bigint; `bigint / DECIMAL` → DECIMAL (mixed numeric arithmetic). `%,.2f` consumes the DECIMAL (the doc example's `1234567.89` is itself a DECIMAL literal), so NO cast-to-DOUBLE is needed and there is no float-rounding hazard. ✔
+- GROUP BY customer_id → one row per customer. ✔
+- Cents-to-dollars handled by `/100.0` (DECIMAL division, exact). Implicitly answers "SQL-side or app" by formatting SQL-side; a brief note that locale-aware currency formatting is often left to the app layer would have been the only marginal addition — not materially dinged.
 
 ---
 
-## Cross-cutting
+## Cross-cutting clean checks
 
-No `::`-cast, QUALIFY, false-semi-join, fabricated function, regex-backslash, INTERVAL quarter/week, OFFSET-before-LIMIT, over-warning folklore, or broken-secondary-alternative in any of the 4. Both prior watch items confirmed clean: (w) current-month window correct / off-by-one non-recurrence; (r) JSON group-by + #16533 durable.
+No `::`-cast, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash trap, no INTERVAL quarter/week, no OFFSET-after-LIMIT, no over-warning folklore, no broken-secondary padding. All four leads are runnable Trino 467.
 
-**RECOMMENDATION: DEFAULT NO-OP.** No resource edit, no commit. MUST NOT bump state.json (already 1055).
+## Recommendation — DEFAULT NO-OP
+
+Margin +1.414 over the 3.5 threshold. No source-verified resource defect. No 2+-consecutive same-shape slip — the only standing watch (Q2 broken-secondary LIKE) is now 4-in-a-row CLEAN and reversed, not advancing. Do NOT churn resources. No commit/push. Do NOT bump state.json (already 1056).
