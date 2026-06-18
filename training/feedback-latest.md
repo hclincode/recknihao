@@ -1,64 +1,129 @@
-# Judge Feedback — iter1070 (2026-06-18)
+# Judge Feedback — iter1071 (2026-06-18)
 
-**Stack:** Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA
-**Verification:** RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/), both directions.
+**Overall average: 4.20 — PASS** (threshold 3.5; overall average governs, no per-question veto)
 
-## Overall: 4.69 — PASS (threshold 3.5, margin +1.19)
+Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
+Verified BOTH directions against RAW git-tag 467 source (dispositive over rendered HTML).
 
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 (safe map read) | 5.0 | 4.875 | 5.0 | 5.0 | 4.969 |
-| Q2 (GROUPING SETS) | 4.25 | 4.875 | 4.5 | 4.75 | 4.594 |
-| Q3 (weekday name) | 5.0 | 4.75 | 5.0 | 5.0 | 4.938 |
-| Q4 (spread/stddev) | 4.75 | 4.5 | 4.875 | 4.875 | 4.75 |
-
-**Overall average = (4.969 + 4.594 + 4.938 + 4.75) / 4 = 4.69 → PASS**
-
----
-
-## Q1 — safe map read when key may be missing (4.969)
-
-VERIFIED both directions against RAW `functions/map.md`:
-- `element_at(map, key)` — "Returns value for given `key`, or `NULL` if the key is not contained in the map." Correct.
-- Subscript `map[key]` — "This operator throws an error if the key is not contained in the map." Correct.
-
-Responder's diagnosis is exactly right: `metadata['shipping_country']` throws "Key not present in map" on rows missing the key; `element_at(metadata,'shipping_country') = 'US'` returns NULL on missing keys and WHERE drops NULL rows (not an error). The `COALESCE(element_at(...),'Unknown')` default is a correct, useful addition. Clean, no defects.
-
-## Q2 — GROUPING SETS for per-plan, per-region, overall (4.594)
-
-VERIFIED against RAW `sql/select.md`:
-- GROUPING SETS syntax valid 467. The four sets `((plan_type,region),(plan_type),(region),())` are syntactically valid and produce: detail, per-plan-type subtotal, per-region subtotal, grand total. (NOTE: the ask was three levels — by plan_type alone, by region alone, overall — the responder ALSO included the detail `(plan_type,region)` set; harmless superset, and the responder offered the trimmed `((plan_type),(region),())` form too. Minor completeness nuance, not penalized hard.)
-- GROUPING bitmask: doc verbatim — "bits are assigned to the argument columns with the rightmost column being the least significant bit" and "a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise." So for `GROUPING(plan_type, region)`: plan_type=MSB(2), region=LSB(1); bit=1 means rolled up.
-- The bitmask VALUES that occur (0,1,2,3) are CORRECT, and the revenue numbers are correct.
-
-**CRITICAL VERDICT — the CASE label strings for bitmask 1 and 2 ARE SWAPPED:**
-- Bitmask **1** = binary `01` = region rolled up (LSB=1), grouped BY plan_type → this is a **per-plan-type subtotal** → should read **'Plan Type Total'**. Responder wrote `1 THEN 'Region Total'`. WRONG.
-- Bitmask **2** = binary `10` = plan_type rolled up (MSB=1), grouped BY region → this is a **per-region subtotal** → should read **'Region Total'**. Responder wrote `2 THEN 'Plan Type Total'`. WRONG.
-
-The responder's OWN explanation bullets below the query ("1 = plan_type only (region rolled up)", "2 = region only (plan_type rolled up)") are CORRECT and directly contradict its CASE label strings — confirming this is a copy/label transposition, not a conceptual error.
-
-This is a COSMETIC label-swap only: query mechanics, the grouping sets, the bitmask values, and the revenue figures are all correct; only the two human-readable `summary_level` strings are mislabeled. Scored as a minor accuracy deduction (Accuracy 4.25), NOT a query-correctness failure. Bitmask 0 ('Detail') and 3 ('Grand Total') are correctly labeled.
-
-## Q3 — weekday name from started_at (4.938)
-
-VERIFIED against RAW `functions/datetime.md`:
-- `format_datetime(timestamp, format) -> varchar` exists and uses JodaTime DateTimeFormat patterns ("compatible with JodaTime's DateTimeFormat pattern format"). Joda `EEEE` yields the full text weekday name ('Monday'). Correct.
-- `day_of_week(x)` returns ISO 1 (Monday) .. 7 (Sunday) — a number, not a name. Correct.
-- No `dayname()` function in 467. Correct.
-
-`format_datetime(CAST(started_at AS timestamp), 'EEEE')` is the right idiom. `date_format(ts,'%W')` is a valid alternative (MySQL-style strftime, also yields full weekday name) but `format_datetime 'EEEE'` is correct as given. Clean.
-
-## Q4 — spread of monthly_revenue (4.75)
-
-VERIFIED against RAW `functions/aggregate.md`: `stddev_samp`/`stddev` (sample), `stddev_pop` (population), `var_samp`/`variance` (sample), `var_pop` (population) all exist. Sample variants use N-1 (Bessel's correction), population variants use N. Std dev is in the same units as the data (variance is squared units). All correct. Minor completeness ding: did not mention percentile-based spread (IQR via approx_percentile / min-max range) as alternatives for skewed distributions, but the question asked specifically about spread and stddev/variance fully answers it.
+| Q1 cume_dist percentile | 5.0 | 4.5 | 4.75 | 4.75 | 4.75 |
+| Q2 safe map read | 3.0 | 4.5 | 4.0 | 4.75 | 4.0625 |
+| Q3 dbt incremental | 4.75 | 4.75 | 4.75 | 4.75 | 4.75 |
+| Q4 MERGE upsert | 2.5 | 3.5 | 4.0 | 3.0 | 3.25 |
+| **Overall** | | | | | **4.20** |
 
 ---
 
-## Source-verified dialect notes (RAW 467 URLs checked)
-- map.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md — element_at→NULL on missing; `[]` subscript throws.
-- datetime.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md — format_datetime Joda; day_of_week 1=Mon..7=Sun; no dayname().
-- select.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md — GROUPING bitmask: rightmost arg = LSB, bit=1 = column rolled up (absent from grouping).
-- aggregate.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md — stddev_samp/pop + var_samp/pop exist; sample=N-1, population=N.
+## Q1 — percentile standing by mrr (cume_dist) — 4.75
 
-## Recommendation
-DEFAULT NO-OP (margin +1.19). The only defect is the Q2 cosmetic CASE-label swap (1↔2). The responder's own bitmask-explanation bullets are correct, so this is a label-transposition slip in the LEAD, not a resource gap and not a query-correctness failure — scope it as a per-instance re-probe (re-ask a GROUPING-label question to confirm), do NOT churn resources. No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary across any answer. MUST NOT bump state.json (already 1070).
+`ROUND(cume_dist() OVER (ORDER BY mrr) * 100, 1)` is correct and the cume_dist-vs-percent_rank
+distinction is accurate.
+
+Source-verified (RAW window.md):
+- cume_dist(): "the number of rows preceding or peer with the row in the window ordering ...
+  divided by the total number of rows in the window partition." → fraction at-or-below; the row
+  is always a peer of itself, so the result is NEVER 0 (matches responder's claim).
+- percent_rank() = (r-1)/(n-1) → the top/first row gets exactly 0.0 (matches responder's
+  reason for preferring cume_dist for percentile labels).
+
+Minor: with `ORDER BY mrr` ascending, the highest earner gets the highest percentile, so
+"top 15%" = `percentile_by_mrr >= 85`. The answer leaves that final filter implicit. No
+accuracy issue.
+
+Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
+
+## Q2 — safe map read when key may be missing — 4.0625
+
+Core recommendation CORRECT: `element_at(properties,'country')` is the NULL-safe form;
+`element_at` returns NULL on a missing key, WHERE drops the NULL row, no error. Existence
+helpers (`element_at(...) IS NOT NULL`, `contains(map_keys(properties),'country')`) are valid.
+
+**ACCURACY DEFECT (the precise point asked):** The explanation says "When you access a map with
+`properties['country']` ... and the key is missing, Trino returns NULL, which can cause issues."
+This is a factual MISLABEL. Source-verified (RAW map.md):
+- Subscript `m['key']`: "This operator throws an error if the key is not contained in the map."
+  → it THROWS, it does NOT return NULL.
+- `element_at(map, key)`: "Returns value for given key, or NULL if the key is not contained in
+  the map." → returns NULL.
+
+The subscript THROWS on a missing key — which is exactly what the user reported ("sometimes
+errors when the key is missing"). The responder's own framing ("returns NULL, which can cause
+issues") contradicts both the docs and the user's symptom. The right framing: the subscript
+THROWS; element_at returns NULL, which is why element_at is the fix. The recommendation lands;
+the diagnosis sentence is wrong → accuracy ding.
+
+Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+
+## Q3 — dbt incremental model, only process new rows — 4.75
+
+Sound, idiomatic dbt-trino incremental pattern. `materialized='incremental'`,
+`incremental_strategy='merge'`, `unique_key='event_id'`, and Iceberg `partitioning` property
+are all real dbt-trino configs. `{% if is_incremental() %}` is the correct Jinja guard,
+`{{ this }}` is the correct self-reference, and the MAX-timestamp high-watermark
+(`WHERE created_at >= (SELECT COALESCE(MAX(created_at), TIMESTAMP '1970-01-01') FROM {{ this }})`)
+is a standard incremental idiom. `date_add('day',-3,...)` lookback for late-arriving data is a
+reasonable refinement. No defects.
+
+## Q4 — MERGE upsert one row per customer (latest plan) — 3.25
+
+The MERGE skeleton and the Trino-specific notes are CORRECT and source-verified:
+- `MERGE INTO t USING s ON ... WHEN MATCHED THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT ...`
+  is valid Trino 467 (RAW sql/merge.md).
+- No `UPDATE SET *` shorthand — explicit column assignments required (verified; docs show
+  explicit `UPDATE SET col = s.col`).
+- First-match-wins: "the WHEN clauses are processed in order. Only the first matching WHEN
+  clause is executed"; "The query fails if a single target table row matches more than one
+  source row" (verified).
+- MERGE on Iceberg requires format version 2 ("Version 2 is required for row level deletes";
+  v2 is also the 467 default) — correct.
+
+**CRITICAL DEFECT (lead query fails to plan):** The USING subquery is
+`SELECT customer_id, plan_type, effective_from,
+  ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY effective_from DESC) = 1 AS is_latest
+  FROM subscription_changes WHERE is_latest`.
+This is INVALID for two independent reasons:
+1. A window function (ROW_NUMBER) cannot appear in a WHERE clause. Window functions run AFTER
+   HAVING and before ORDER BY (RAW window.md), i.e. strictly after WHERE evaluates — so a
+   window result is not available to WHERE.
+2. `is_latest` is a SELECT-list alias referenced in the WHERE of the SAME query. Trino does not
+   resolve SELECT aliases in WHERE (only ORDER BY sees them) — same #16533 family that recurs
+   in this loop.
+
+Correct form: compute ROW_NUMBER in an inner subquery/CTE projecting it as a column, then filter
+in the OUTER query:
+```
+USING (
+  SELECT customer_id, plan_type, effective_from
+  FROM (
+    SELECT customer_id, plan_type, effective_from,
+           ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY effective_from DESC) AS rn
+    FROM subscription_changes
+  ) WHERE rn = 1
+) s
+```
+This is the same top-1-per-group wrapping the responder got RIGHT in iter1066 Q4, so it is a
+synthesis slip here, not a missing concept. Re-probe Q4 from a 2nd angle.
+
+Sources:
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/merge.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/connector/iceberg.md
+
+---
+
+## Verdict & recommendation
+
+PASS at 4.20 (margin +0.70). Two clean answers (Q1, Q3), one accuracy-mislabel (Q2 subscript
+"returns NULL" → actually THROWS), one lead-query defect (Q4 window-in-WHERE / alias-in-WHERE).
+
+- Q2: the subscript-vs-element_at NULL/THROW direction is a recurring, findable distinction
+  (see iter1070 Q1 where the responder got it RIGHT: subscript THROWS, element_at→NULL). Here it
+  inverted the subscript behavior in prose while still recommending element_at. Per-instance
+  re-probe of the "missing-map-key behavior" framing; the resource canonical is already correct,
+  so this is a responder slip, not a resource gap — do NOT churn.
+- Q4: window-in-WHERE / SELECT-alias-in-WHERE is the #16533 + window-placement family. The
+  responder demonstrably knows the outer-subquery wrapping (iter1066 Q4). This is a synthesis
+  slip on a novel domain, not a missing canonical. Re-probe Q4 2nd angle; no resource edit.
+
+MUST NOT bump state.json (already iter1071).
