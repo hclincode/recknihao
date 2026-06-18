@@ -1,70 +1,48 @@
-# Judge Feedback — iter1079 (2026-06-18)
+# Judge Feedback — iter1080 (2026-06-18)
+
+**Overall average: 4.83 — PASS** (margin +1.33 over 3.5 threshold)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions against RAW git-tag 467 source (dispositive over rendered HTML).
+Verified BOTH directions against RAW git-tag 467 source (dispositive over rendered HTML) plus WebSearch on information_schema.
 
-## Overall: 4.30 PASS (overall average governs; no per-question veto)
+## Per-question breakdown
 
-One source-verified DIALECT DEFECT in Q1 (Spark-spillover `DESCRIBE TABLE`). Q2/Q3/Q4 clean.
+### Q1 — inspect a column's data type before math/string ops (CRITICAL re-probe) — 4.88
+Responder gave:
+- `DESCRIBE payments;` (NO TABLE keyword), and
+- `SELECT column_name, data_type FROM information_schema.columns WHERE table_name='payments' AND column_name='gateway_response';`
 
----
+**VERDICT: CLEAN. The Spark `DESCRIBE TABLE` slip from iter1079 did NOT recur.**
+- `sql/describe.md` synopsis is exactly `DESCRIBE table_name` (no TABLE keyword) and states "DESCRIBE is an alias for SHOW COLUMNS." The responder's bare-table form is valid Trino 467.
+- `information_schema.columns` is queryable and exposes `column_name` and `data_type` (confirmed via WebSearch; columns include table_catalog/table_schema/table_name/column_name/ordinal_position/column_default/is_nullable/data_type). The projection and WHERE filter are valid.
+- This directly closes the iter1079 Q1 re-probe: iter1079 wrongly used `DESCRIBE TABLE iceberg.schema.users` and claimed it "works in Spark SQL or Trino 467" (TABLE is reserved → parse error). This iteration the responder used the correct no-TABLE form AND offered the information_schema alternative. Confirmed from the 2nd angle.
+- Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/describe.md
 
-## Q1 — check a column's actual data type before querying — **2.69**
+### Q2 — every 10th row by row number — 4.69
+`SELECT * FROM (SELECT t.*, ROW_NUMBER() OVER (ORDER BY page_view_id) AS rn FROM page_views t) WHERE MOD(rn, 10) = 0;`
+- **Query CORRECT.** `row_number() -> bigint` exists (window.md). Window functions execute after HAVING and before ORDER BY, so they CANNOT appear in WHERE — the subquery wrap + outer-WHERE filter is exactly required. `MOD(rn,10)=0` selects every 10th row.
+- **MINOR over-optimistic perf aside (flagged, NOT a correctness issue):** the claim "reads/filters efficiently without materializing the full table first" is mildly misleading — `ROW_NUMBER() OVER (ORDER BY page_view_id)` requires a global sort, so the engine scans and sorts the data; there is no partition/predicate that lets it skip rows up front. Accuracy docked slightly only for the perf framing. This is the recurring "responder over-optimistic perf aside" pattern; per-instance, NOT a resource gap.
+- Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
 
-**Responder answer:** `DESCRIBE TABLE iceberg.schema.users;` … "works whether you're running in Spark SQL or Trino 467."
+### Q3 — pair two arrays element-by-element — 4.88
+`zip_with(tags, promo_tags, (tag, promo) -> ROW(tag, promo))` + alternative `map(tags, promo_tags)`.
+- **CLEAN.** array.md: `zip_with(array(T), array(U), function(T,U,R)) -> array(R)` merges element-wise via the lambda; the lambda building `ROW(tag, promo)` yields an array of ROW pairs — exactly the ask.
+- The alternative `map(array(K), array(V)) -> map(K,V)` "Returns a map created using the given key/value arrays" is a valid 467 constructor (first array = keys, second = values), correctly described.
+- WORTH NOTING (not penalized): `zip(array1, array2) -> array(row)` is the simpler, more direct element-wise pairer for this exact task (`zip(ARRAY[1,2], ARRAY['a','b']) -> [ROW(1,'a'), ROW(2,'b')]`) and would be the most idiomatic single-function answer. The responder's zip_with form is correct and equivalent; zip would be marginally cleaner. Minor caveat on the map alternative: it errors on duplicate keys; both zip/zip_with pad uneven lengths with NULL.
+- Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md and .../functions/map.md
 
-**VERDICT: `DESCRIBE TABLE <name>` is NOT valid Trino 467 — Spark-spillover dialect defect.**
+### Q4 — label priority 1/2/3 as low/medium/high — 4.88
+`CASE WHEN priority=1 THEN 'low' WHEN priority=2 THEN 'medium' WHEN priority=3 THEN 'high' END AS priority_label`
+- **CLEAN.** conditional.md: searched-form CASE is valid 467; with no ELSE, unmatched values return NULL ("the result from the ELSE clause is returned if it exists, otherwise null is returned"). Display-only relabel without mutating data — exactly the ask.
+- Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/conditional.md
 
-Source-verified:
-- `sql/describe.md` synopsis is exactly **`DESCRIBE table_name`** — NO `TABLE` keyword. The doc states DESCRIBE "is an alias for SHOW COLUMNS."
-  - https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/describe.md
-- `language/reserved.md`: **`TABLE` is a reserved keyword** (reserved in SQL:2016 and SQL-92). Because TABLE is reserved and the DESCRIBE grammar takes a qualified name directly, `DESCRIBE TABLE iceberg.schema.users` parse-errors (`mismatched input 'TABLE'`).
-  - https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/reserved.md
-- `DESCRIBE TABLE <name>` is the **Spark SQL / Hive** form. The responder's claim that it "works whether you're running in Spark SQL or Trino 467" is wrong for the Trino half — exactly the Spark-spillover trap.
+## Source-verified dialect notes
+- DESCRIBE 467 synopsis = `DESCRIBE table_name` (NO TABLE keyword), alias of SHOW COLUMNS — responder correct; Spark `DESCRIBE TABLE` form (iter1079 defect) did NOT recur.
+- ROW_NUMBER cannot be in WHERE → subquery-wrap mandatory; responder correct. Perf aside over-optimistic (global sort required).
+- zip / zip_with / map(keyArray, valueArray) all valid 467; zip is the simplest direct pairer.
+- Searched CASE with no ELSE → NULL on unmatched; correct.
 
-**Correct Trino 467 forms** (any of):
-- `DESCRIBE iceberg.schema.users` (no TABLE keyword)
-- `SHOW COLUMNS FROM iceberg.schema.users` (synopsis `SHOW COLUMNS FROM table [ LIKE pattern ]`; returns Column/Type/Extra/Comment — verified in `sql/show-columns.md`)
-- `SELECT column_name, data_type FROM iceberg.information_schema.columns WHERE table_schema='schema' AND table_name='users'`
-- Per-value: `typeof(signup_date)` returns the runtime type of the value (useful to confirm whether it materialized as varchar vs date).
-
-The shape of the answer (read the data_type column) and the underlying intent are right, and the result columns described match SHOW COLUMNS output. But the headline statement parse-errors in Trino, so Accuracy is heavily docked and Actionability suffers (engineer who copy-pastes gets a parse error). Mitigant: information_schema / DESCRIBE-without-TABLE is well covered elsewhere; this is a per-instance Spark-spillover slip, not a known resource gap.
-
-- Accuracy 2 · Completeness 3 · Clarity 3 · Actionability 2.75 → **2.69**
-
----
-
-## Q2 — dedupe an array without unnesting — **4.81**
-
-`array_distinct(tags) AS unique_tags` + `cardinality(array_distinct(tags))` for the count.
-
-Verified `functions/array.md`: `array_distinct(x) -> array` "Remove duplicate values from the array x"; `cardinality(x) -> bigint` returns the array size. Result stays an array, no UNNEST/re-aggregate — exactly the ask. "Preserves first-occurrence order" is the documented/observed behavior. Clean.
-
-- Accuracy 5 · Completeness 4.75 · Clarity 4.75 · Actionability 4.75 → **4.81**
-
-## Q3 — events in even-numbered hours — **4.81**
-
-`WHERE EXTRACT(HOUR FROM event_timestamp) % 2 = 0`.
-
-Verified `functions/datetime.md`: EXTRACT supports HOUR (mapped to `hour`), and `hour(x)` "Returns the hour of the day from x. The value ranges from 0 to 23." The `%` modulo operator works on the resulting bigint; `% 2 = 0` → even, `% 2 = 1` → odd, correctly stated. `hour(event_timestamp) % 2 = 0` is an equivalent shorthand (optional). No giant CASE needed. Clean.
-
-- Accuracy 5 · Completeness 4.75 · Clarity 4.75 · Actionability 4.75 → **4.81**
-
-## Q4 — "Smith, John" display name — **4.88**
-
-`concat_ws(', ', last_name, first_name)`.
-
-Verified `functions/string.md`: `concat_ws(string0, string1, ..., stringN) -> varchar` "concatenation … using string0 as a separator"; "Any null values provided in the arguments after the separator are skipped." So a NULL first_name/last_name yields no dangling comma — responder's NULL-skip note is exactly correct. Note (not docked): if `string0` (the separator) itself is null the whole result is null — not relevant here. Cleaner than `||`/concat as asked. Clean.
-
-- Accuracy 5 · Completeness 4.75 · Clarity 5 · Actionability 4.75 → **4.88**
-
----
-
-## Source-verified defect log
-- **Q1: `DESCRIBE TABLE <name>` invalid in Trino 467 (Spark-spillover).** Trino form is `DESCRIBE <name>` / `SHOW COLUMNS FROM <name>` / `information_schema.columns` / `typeof()`. TABLE is reserved → parse error. The "works in Spark SQL or Trino 467" cross-engine claim is the root error.
-
-## Imported-prior / regression checks (none tripped)
-No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary patterns. Q2/Q3/Q4 functions all verified to EXIST and behave as claimed.
+No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary defects.
 
 ## Recommendation
-PASS at 4.30 (margin +0.80). The only defect is the Q1 `DESCRIBE TABLE` Spark-spillover — a dialect slip on the SQL keyword, not an absent canonical (DESCRIBE/SHOW COLUMNS/information_schema are covered). Treat as a per-instance re-probe candidate: re-ask "how to check a column type in Trino" from a 2nd angle to confirm whether the responder reliably drops the TABLE keyword, before considering any defang. Do NOT churn resources on a single slip. MUST NOT bump state.json (already 1079).
+**PASS (4.83).** DEFAULT NO-OP — no resource edit, no commit warranted. The Q1 re-probe confirms the iter1079 Spark-DESCRIBE-TABLE slip was a per-instance slip, not a resource gap; canonical column-type-inspection now answered correctly from the 2nd angle. Q2 perf aside and Q3 zip-vs-zip_with idiom are per-instance trivia, do NOT churn. MUST NOT bump state.json (already 1080).
