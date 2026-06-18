@@ -1,86 +1,69 @@
-# Judge Feedback — iter1054
+# Judge Feedback — iter1055
 
-**Overall: 4.7890625 → PASS** (margin +1.289 over 3.5 threshold)
+**Overall: Q1 4.875 / Q2 4.9375 / Q3 4.9375 / Q4 4.90625 → 4.9140625 PASS** (margin +1.414)
 
-Per-question: Q1 4.375 / Q2 4.9375 / Q3 4.9375 / Q4 4.90625
-
-Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...) and trino.io/docs, NOT resources/. RAW source dispositive. Federation NOT probed (hard-locked).
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), NOT resources/. NO federation probe this iter. RECOMMENDATION = **DEFAULT NO-OP** — zero source-verified resource defects, zero 2-in-2 same-shape slips.
 
 ---
 
-## Q1 — approx-distinct distinct-users-per-event-type this month — 4.375 PASS
+## Q1 — current month-to-date revenue (watch (w) re-probe) — 4.875
 
-Scores: Accuracy 4 / Completeness 4 / Clarity 5 / Actionability 4.5
+`SELECT SUM(amount) AS monthly_revenue FROM orders WHERE order_date >= date_trunc('month', current_date) AND order_date < current_date + INTERVAL '1' DAY;`
 
-**The actual ask is answered correctly.** `approx_distinct(user_id) GROUP BY event_type` is the right tool for a fast approximate distinct count on a dashboard:
-- aggregate.md (467 RAW): approx_distinct "Returns the approximate number of distinct input values," an approximation of count(DISTINCT x), documented **2.3% standard error** (standard deviation of the approximately-normal error distribution). VERIFIED. (Note: the doc does not name HyperLogLog for approx_distinct specifically — HLL is named under approx_set — but HLL is the underlying impl; calling it HLL is accurate, just not doc-literal. No ding.)
-- `SET SESSION distinct_aggregations_strategy='pre_aggregate'` is a LEGAL 467 session property (PRE_AGGREGATE strategy for multiple distinct aggregations; verified vs optimizer-properties docs). Offering it as the exact-count fallback is reasonable.
-- Nightly HLL sketch table + "2.3% not for billing-critical" caveat are sound, useful extras.
+**Verified (datetime.md):**
+- `date_trunc('month', x)` truncates to first-day-of-month at 00:00 (doc: `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00') -- 2022-10-01 00:00:00.000`). With `current_date` → first day of THIS month. CORRECT lower bound.
+- `current_date` = current date as of query start (date type). `current_date + INTERVAL '1' DAY` = start of tomorrow; operators table confirms `date + interval day` valid (`date '2012-08-08' + interval '2' day`).
+- Half-open `>= start_of_month AND < start_of_tomorrow` correctly captures month-start through end-of-today inclusive, no double-count, boundary-safe regardless of order_date being timestamp (date↔timestamp coercion implicit; bare column on the left preserves partition pruning).
 
-**FINDING (1) — Q1 date-window off-by-one-month (this-month vs last-month):** The WHERE filter
-```
-event_date >= DATE_TRUNC('month', current_date) - INTERVAL '1' MONTH
-AND event_date <  DATE_TRUNC('month', current_date)
-```
-selects `[start of PREVIOUS month, start of current month)` = the **previous complete month**, NOT "THIS month" as asked. For "this month" the correct filter is:
-```
-event_date >= DATE_TRUNC('month', current_date)   -- start of current month, through now
-```
-The DATE_TRUNC + INTERVAL '1' MONTH arithmetic itself is VALID Trino (datetime.md confirms date_trunc('month',...) → first of month; `date + INTERVAL '1' MONTH` valid). This is purely a window-boundary logic slip, not a dialect error.
+**FINDING (1) — watch (w): iter1054 last-month off-by-one DID NOT RECUR.** iter1054 used `date_trunc('month',current_date) - INTERVAL '1' MONTH`, selecting the PREVIOUS complete month. This question asked for CURRENT month-to-date and correctly used `date_trunc('month', current_date)` with NO month subtraction. The off-by-one is CLEAN. Per-instance logic slip resolved; not a resource issue either way.
 
-**Severity = per-instance minor slip.** The technique that was actually requested (faster approximate distinct) is correct and complete; only the month window is off by one. Dings Accuracy and Completeness one tier each; does NOT cause a FAIL and is NOT a resource defect (it is a one-off logic mistake on a specific date predicate, not a taught-wrong pattern). Monitor; re-probe a "this month" window next sweep. Escalate only if the same DATE_TRUNC - INTERVAL '1' MONTH "this month" off-by-one recurs 2-in-2.
-
-## Q2 — average days-active before cancellation, cancelled-only — 4.9375 PASS
-
-Scores: Accuracy 5 / Completeness 4.875 / Clarity 5 / Actionability 4.875
-
-Fully correct. `AVG(date_diff('day', started_at, cancelled_at)) WHERE cancelled_at IS NOT NULL`:
-- datetime.md (467 RAW): date_diff('day', ts1, ts2) → bigint, **complete-units / day-aware**, returns timestamp2 - timestamp1 in whole days. VERIFIED.
-- aggregate.md: avg() **ignores NULL values and returns NULL for no input rows** — so the WHERE cancelled_at IS NOT NULL correctly restricts to cancelled subs and avoids counting still-active as zero; AVG-ignores-NULL explanation is accurate. VERIFIED.
-- The `AVG(date_diff('day', date(started_at), date(cancelled_at)))` calendar-day variant is sound (casts to date so partial days don't shift the count). Good completeness.
-
-No errors.
-
-## Q3 — users with ≥1 flag starting with literal "beta_", no unnest — 4.9375 PASS
-
-Scores: Accuracy 5 / Completeness 4.875 / Clarity 5 / Actionability 4.875
-
-Both forms correct and the broken-secondary did NOT recur:
-- `any_match(feature_flags, flag -> starts_with(flag, 'beta_'))` — array.md: any_match returns boolean true if ≥1 element matches the predicate. IDEAL for the ≥1-match ask. VERIFIED.
-- `cardinality(filter(feature_flags, flag -> starts_with(flag, 'beta_'))) > 0` — filter returns the matching-elements array, cardinality its size; >0 ⇔ at least one match. Valid equivalent. VERIFIED.
-- string.md (467 RAW): starts_with(string, substring) → boolean, "tests whether substring is a **prefix**" — a LITERAL prefix, NOT a wildcard. Responder correctly states this and that it is not a wildcard, so the literal underscore in "beta_" is matched literally. VERIFIED.
-
-**FINDING (2) — Q3 broken-secondary LIKE aside did NOT recur (clean re-probe AGAIN).** No bare `LIKE 'beta_%'` "if you prefer" alternative was offered. `_` is a single-char wildcard in LIKE (comparison.md), so `'beta_%'` would over-match `'betaX...'` and is NOT equivalent to a literal-`beta_` prefix; correctly NOT suggested. This is the **3rd consecutive clean re-probe** after the iter1052/iter1053 clean runs (and well past the iter1037/iter1051 occurrences). The iter1051-noted "escalate if it recurs a 3rd time" streak does NOT advance — it has reversed. FIX-A (r23 §653 bare-column LIKE literal-`_`/`%` caveat + r07 ~L759 filter-lambda literal-prefix) is durable. Score HIGH, watch stays passive.
-
-## Q4 — order-amount histogram into 5 buckets, no huge CASE — 4.90625 PASS
-
-Scores: Accuracy 4.875 / Completeness 4.875 / Clarity 5 / Actionability 4.875
-
-`width_bucket(order_amount, ARRAY[25.0, 50.0, 100.0, 250.0]) AS bucket_id GROUP BY 1` is the right "no huge CASE" tool:
-- math.md (467 RAW) + verified boundary semantics: width_bucket(x, bins) with bins sorted ascending returns the bin number; for **n bounds you get n+1 buckets**, lower-bound-INCLUSIVE:
-  - x < 25 → **0**
-  - 25 ≤ x < 50 → **1**
-  - 50 ≤ x < 100 → **2**
-  - 100 ≤ x < 250 → **3**
-  - x ≥ 250 → **4**
-  VERIFIED (n+1 buckets, 0 for below first bound, n+1 for ≥ last bound, lower-inclusive).
-
-**FINDING (3) — Q4 width_bucket CASE labels complete AND correct (contrast iter1046).** The CASE label form maps:
-`0 → '$0-25', 1 → '$25-50', 2 → '$50-100', 3 → '$100-250', 4 → '$250+'`
-Every label matches its bucket EXACTLY against the verified 0..4 mapping. This is a clean improvement over iter1046, where buckets 3-4 were mislabeled '$50+'. All five labels present and correct this time. Score HIGH.
-
-(Trivial nit: using ARRAY[25.0,...] DECIMAL literals vs DECIMAL order_amount is fine; width_bucket coerces to double internally — no correctness impact. Tiny Accuracy shade only.)
+Half-open, bare-column-left, pruning-friendly canonical form. Minor clarity note (no tier ding): the `current_date + INTERVAL '1' DAY` upper bound is exactly right; an equivalent `date_trunc('day', current_timestamp)+INTERVAL '1' DAY` could have been mentioned but isn't needed.
 
 ---
 
-## Clean-bill checklist (none present)
-No `::`-cast misuse, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash error, no INTERVAL quarter/week, no OFFSET-before-LIMIT inversion, no over-warning folklore, no broken-secondary alternative.
+## Q2 — features array contains ALL of {'api_access','sso'} — 4.9375
 
-## RECOMMENDATION — DEFAULT NO-OP
+`WHERE cardinality(array_except(ARRAY['api_access','sso'], features)) = 0;` AND alt `all_match(ARRAY['api_access','sso'], x -> contains(features, x))`.
 
-Margin +1.289. No source-verified resource defect and no 2-in-2 same-shape slip.
-- Q1 date-window off-by-one-month = per-instance logic slip on a date predicate, NOT a taught-wrong pattern → monitor, re-probe a "this month" window; do NOT churn resources.
-- Q3 broken-secondary LIKE = 3rd consecutive non-recurrence → FIX-A durable, watch passive.
-- Q4 width_bucket labels = complete+correct, iter1046 regression not reproduced.
+**Verified (array.md):**
+- `array_except(x, y)` = "elements in x but not in y, without duplicates." With `x = required`, `y = features`: result = required-elements-NOT-present-in-features. Empty (cardinality 0) ⇔ every required element present. CORRECT all-of-set logic — required is correctly the first arg.
+- `all_match(array(T), function) -> boolean`: true iff every element matches; checks each required element is `contains(features, x)`. Equivalent and correct.
+- `contains(x, element) -> boolean` membership confirmed.
 
-NO resource edit; NO commit. MUST NOT bump state.json (already 1054).
+Both forms valid and correctly distinguish ALL-of (vs ANY-of). Excellent.
+
+---
+
+## Q3 — average completed session length in minutes — 4.9375
+
+`SELECT AVG(date_diff('minute', started_at, ended_at)) AS avg_session_minutes FROM sessions WHERE ended_at IS NOT NULL;`
+
+**Verified (datetime.md / aggregate.md):**
+- `date_diff(unit, ts1, ts2) -> bigint`, "returns ts2 - ts1 expressed in terms of unit," complete/truncated units. `date_diff('minute', started_at, ended_at)` → whole minutes elapsed. CORRECT.
+- `WHERE ended_at IS NOT NULL` filters to completed sessions (NULL = incomplete). AVG additionally ignores NULL, so the filter is correct AND defensively redundant.
+- AVG over bigint → double average; returns NULL on empty set (acceptable).
+
+Tight and correct. Sub-minute precision not requested; complete-minute granularity is the natural reading of "in minutes."
+
+---
+
+## Q4 — group events by nested JSON device.os (watch (r) re-test) — 4.90625
+
+`SELECT json_extract_scalar(metadata, '$.device.os') AS os_type, COUNT(*) ... GROUP BY json_extract_scalar(metadata, '$.device.os') ORDER BY event_count DESC.` Proactively warns Trino does NOT allow GROUP BY to reference a SELECT alias (#16533).
+
+**Verified (json.md / sql/select.md):**
+- Trino has NO Postgres-style `->`/`->>` arrow operators (json.md lists json_extract/json_extract_scalar/json_query/json_value only). Responder correctly translated the user's Postgres `metadata -> 'device' -> 'os'` to `json_extract_scalar(metadata, '$.device.os')`.
+- `json_extract_scalar(json, json_path) -> varchar`; doc example `'$.store.book[0].author'` confirms nested-path scalar extraction → `'$.device.os'` is the correct nested form.
+- **#16533 caveat ACCURATE:** select.md states GROUP BY accepts "any expression composed of input columns OR an ordinal number selecting an output column by position" — it does NOT list SELECT-list aliases. So `GROUP BY os_type` → "Column 'os_type' cannot be resolved"; `GROUP BY 1` or repeating the expression is required. Responder repeated the expression in GROUP BY (valid) AND proactively taught the alias prohibition.
+
+**FINDING (2) — watch (r): JSON GROUP-BY-expression + #16533 proactive caveat is DURABLE.** Consecutive positive JSON-group-by re-probe (cf. iter1048 Q4). The r13 L3371/L3366 FIX-A teaching the #16533 caveat and the no-arrow translation continues to surface correctly. Watch (r) stays CLOSED/passive.
+
+Minor clarity note (no tier ding): could have led with an outright "Trino has no `->` arrow operator," but it translated correctly and the caveat it foregrounded (#16533) is the higher-value gotcha.
+
+---
+
+## Cross-cutting
+
+No `::`-cast, QUALIFY, false-semi-join, fabricated function, regex-backslash, INTERVAL quarter/week, OFFSET-before-LIMIT, over-warning folklore, or broken-secondary-alternative in any of the 4. Both prior watch items confirmed clean: (w) current-month window correct / off-by-one non-recurrence; (r) JSON group-by + #16533 durable.
+
+**RECOMMENDATION: DEFAULT NO-OP.** No resource edit, no commit. MUST NOT bump state.json (already 1055).
