@@ -1,101 +1,43 @@
-# Judge Feedback — iter1091 (2026-06-18)
+# iter1092 Judge Feedback (2026-06-18)
 
-Verified BOTH directions vs RAW git-tag 467 sources:
-- functions/array.md — `contains_sequence` EXISTS; `array_position` first-occurrence/1-based/0-if-absent
-- functions/datetime.md — `day_of_week` ISO 1=Mon..7=Sun; `format_datetime` Joda; NO `dayname`
-- functions/comparison.md — GREATEST/LEAST return NULL if ANY arg null (NOT Postgres all-null rule)
-- functions/conditional.md — COALESCE "first non-null value"
-- WebSearch corroboration of `contains_sequence` consecutive-subsequence semantics
+Verified BOTH directions against RAW git-tag 467 source (functions/array.md, functions/map.md, functions/aggregate.md, functions/datetime.md). Clean sweep; ZERO source-verified defects.
 
----
+## Q1 — array adjacency, 'assigned' directly after 'triaged' without exploding (ADJACENCY RE-PROBE of iter1091 FIX-A)
+**Score: 5.00**
+- Responder used `WHERE contains_sequence(status_history, ARRAY['triaged','assigned'])`.
+- **FIX-A REACHED. CANONICAL USED (CORRECT).** The responder used the purpose-built `contains_sequence`, NOT the iter1091-defective hand-rolled `array_position(...) = array_position(...) + 1` arithmetic. This is exactly the resolution the iter1091 FIX-A targeted, and it reached the responder on the second-angle re-probe.
+- array.md VERIFIED: `contains_sequence` "Return true if array `x` contains all of array `seq` as a subsequence (all values in the same consecutive order)." So `contains_sequence(x, ARRAY['triaged','assigned'])` is TRUE only when 'triaged' is immediately followed by 'assigned' (contiguous, same order) — exactly the "directly after, nothing in between" requirement.
+- The responder's explicit claim that it **handles repeated elements correctly** is VERIFIED CORRECT: contains_sequence scans for the contiguous pair anywhere in the array, so `['submitted','triaged','assigned','triaged','resolved']` still matches on the first 'triaged'→'assigned' adjacency. This is precisely the case where the old array_position arithmetic produced false negatives (array_position returns only the FIRST occurrence). No-explosion requirement satisfied (pure boolean predicate, no UNNEST).
 
-## Q1 — funnel: did 'add_to_cart' go DIRECTLY to 'checkout' without exploding the array
+## Q2 — MAP column, pull list of all KEYS in a row as a plain list
+**Score: 4.94**
+- `map_keys(metadata) AS key_list`. map.md VERIFIED: `map_keys(x(K,V)) -> array(K)` "Returns all the keys in the map x." Returns ARRAY<VARCHAR> per row exactly as the responder stated.
+- Correctly answers the literal ask (plain list per row, no explosion) and helpfully notes `CROSS JOIN UNNEST(map_keys(metadata))` as the later rows-form option without forcing it. Clean.
 
-**Scores: Accuracy 2.0 / Completeness 2.5 / Clarity 4.0 / Actionability 2.5**
+## Q3 — count DISTINCT calendar days with any activity
+**Score: 4.91**
+- `COUNT(DISTINCT CAST(event_timestamp AS DATE)) AS days_with_activity`. datetime.md VERIFIED: `date(x)` "is an alias for CAST(x AS date)", confirming `CAST(timestamp AS DATE)` is valid in 467 and extracts the calendar date (drops time). Distinct-count of those dates = distinct calendar days = correct.
+- `date_trunc('day', event_timestamp)` is a valid alternative (keeps timestamp type at midnight), but CAST AS DATE is cleaner for calendar-day distinctness. Answer is correct and idiomatic.
 
-CORRECTNESS DEFECT (PRIMARY answer, not an aside). The responder used
-`array_position(funnel_steps,'checkout') = array_position(funnel_steps,'add_to_cart') + 1`.
-`array_position` returns ONLY the **first occurrence** of each value (verified RAW array.md:
-"Returns the position of the first occurrence of the `element` in array `x` (or 0 if not found)").
+## Q4 — standard deviation across all rows; built-in or manual?
+**Score: 4.94**
+- `stddev(response_ms)`; also lists stddev_samp (N-1), stddev_pop (N), variance/var_pop/var_samp. aggregate.md VERIFIED: `stddev` "is an alias for stddev_samp" (sample, divides by N-1); `stddev_pop` is population (divides by N); `variance` is an alias for `var_samp`; all six exist.
+- The responder's alias relationship and N-1 vs N distinction are exactly correct. "Built-in, no manual computation needed" answered directly. Correctly frames bare `stddev` as the sample default. Clean — NOT a broken-secondary; every listed function is real and accurately described.
 
-Counterexample (source-verified failure): `funnel_steps = ARRAY['add_to_cart','view','add_to_cart','checkout']`.
-The user DID go add_to_cart→checkout back-to-back (positions 3→4). But
-`array_position('add_to_cart')=1` (first occ) and `array_position('checkout')=4`, so `1+1=2 ≠ 4`
-→ the expression returns **FALSE → a FALSE NEGATIVE**. The approach is correct ONLY when each step
-value appears at most once in the array. Repeated steps are the norm in real event/funnel arrays
-(users add to cart, browse, add again, then check out), so this is a genuine correctness defect for
-the general case, not a stylistic nit. The complementary case `ARRAY['add_to_cart','checkout','add_to_cart']`
-returns TRUE only by luck.
-
-MISSED CANONICAL: Trino 467 has the purpose-built function
-`contains_sequence(x, seq)` — VERIFIED in RAW functions/array.md: "Return true if array `x` contains
-all of array `seq` as a subsequence" (WebSearch confirms: consecutive, same order). The exact, robust,
-no-explosion answer is:
-`contains_sequence(funnel_steps, ARRAY['add_to_cart','checkout'])`.
-This handles duplicates correctly, expresses "directly followed by" natively, and needs no WHERE guard
-or position arithmetic. The responder did not mention it. Clarity is decent (the array_position mechanics
-are explained accurately in isolation), but the assembled solution does not correctly answer the question.
-
-## Q2 — first non-null of preferred_name, full_name, email (no nested CASE)
-
-**Scores: Accuracy 5.0 / Completeness 4.75 / Clarity 5.0 / Actionability 5.0**
-
-`COALESCE(preferred_name, full_name, email) AS display_name` is exactly right. Verified RAW
-conditional.md: COALESCE "Returns the first non-null `value` in the argument list." Left-to-right
-first-non-null is precisely COALESCE's contract; no CASE needed. Clean, canonical, zero defects.
-
-## Q3 — day-of-week NAME like "Wednesday" from a timestamp
-
-**Scores: Accuracy 4.88 / Completeness 4.88 / Clarity 5.0 / Actionability 4.88**
-
-`format_datetime(CAST(created_at AS timestamp), 'EEEE')` returns the full weekday name. Verified
-RAW datetime.md: format_datetime "Formats `timestamp` as a string using `format`" with JodaTime
-DateTimeFormat patterns; `EEEE` is the Joda token for the full text weekday name (Monday..Sunday).
-The responder correctly warns NOT to use `CAST(day_of_week(ts) AS VARCHAR)` (that yields the NUMBER),
-and correctly notes `day_of_week(created_at)` returns ISO 1=Monday..7=Sunday (verified RAW: "Returns
-the ISO day of the week... `1` (Monday) to `7` (Sunday)"). There is NO `dayname()` built-in in 467
-(verified — responder did not fabricate one). The `CAST(... AS timestamp)` is harmless/defensive when
-the column is already a timestamp; `date_format(created_at, '%W')` is an equally-valid alternative not
-shown. No defect.
-
-## Q4 — largest of wholesale_cost, retail_price, discounted_price in one row (no CASE)
-
-**Scores: Accuracy 5.0 / Completeness 5.0 / Clarity 5.0 / Actionability 5.0**
-
-`GREATEST(wholesale_cost, retail_price, discounted_price)` is exactly right. Verified RAW
-comparison.md: GREATEST/LEAST "return null if any argument is null. Note that in some other databases,
-such as PostgreSQL, they only return null if all arguments are null." The responder's caveat ("GREATEST
-returns NULL if ANY arg is NULL") is correct AND the `GREATEST(COALESCE(col,0), ...)` workaround to
-treat NULLs as 0 is valid. Matches the [Trino GREATEST/LEAST NULL] pin. Fully correct both directions.
-
----
+## Negative-family screen
+No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary/Spark-Oracle-spillover.
 
 ## Overall
+| Q | Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|---|
+| Q1 | 5 | 5 | 5 | 5 |
+| Q2 | 5 | 4.75 | 5 | 5 |
+| Q3 | 5 | 4.75 | 5 | 4.88 |
+| Q4 | 5 | 5 | 4.88 | 4.88 |
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 2.0 | 2.5 | 4.0 | 2.5 | 2.75 |
-| Q2 | 5.0 | 4.75 | 5.0 | 5.0 | 4.94 |
-| Q3 | 4.88 | 4.88 | 5.0 | 4.88 | 4.91 |
-| Q4 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
+Per-question means: Q1 5.00, Q2 4.94, Q3 4.91, Q4 4.94.
+**Overall average: 4.95 — PASS.**
 
-**Dimension averages:** Accuracy (2.0+5.0+4.88+5.0)/4 = 4.22; Completeness (2.5+4.75+4.88+5.0)/4 = 4.28;
-Clarity (4.0+5.0+5.0+5.0)/4 = 4.75; Actionability (2.5+5.0+4.88+5.0)/4 = 4.345.
+ZERO source-verified defects. Q1 confirms the iter1091 contains_sequence FIX-A reached the responder and is the correct canonical.
 
-**Overall average = (2.75 + 4.94 + 4.91 + 5.0) / 4 = 4.40 → PASS** (overall ≥ 3.5; no per-question veto).
-
-### Source-verified defects
-- **Q1 (correctness defect):** `array_position`-arithmetic is a FALSE-NEGATIVE solution whenever a step
-  value repeats in the array (verified counterexample `['add_to_cart','view','add_to_cart','checkout']`).
-  The MISSED canonical is `contains_sequence(funnel_steps, ARRAY['add_to_cart','checkout'])` — the
-  purpose-built consecutive-subsequence function (RAW functions/array.md). This is NOT merely a
-  less-robust alternative; for the general funnel question (which permits repeats) it returns the wrong
-  answer. Recommend the teacher add a findable `contains_sequence` card for "step A directly followed by
-  step B in an array" funnel questions, and re-probe from a 2nd angle (e.g. "did event X come immediately
-  before event Y") to confirm the responder reaches for `contains_sequence` rather than position math.
-- Q2/Q3/Q4: zero source-verified defects.
-
-No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/
-over-warning/broken-secondary issues elsewhere. Iteration PASSES on the overall average, but Q1 is a
-real correctness gap on the array-funnel-adjacency pattern — this is the actionable finding this sweep.
-MUST NOT bump state.json (already 1091). NO federation probe.
+RECOMMENDATION = DEFAULT NO-OP (margin +1.45); NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1092).
