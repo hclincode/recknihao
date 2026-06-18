@@ -1,59 +1,50 @@
-# Judge Feedback — iter1040
+# Judge Feedback — iter1041
 
-**Overall: 4.484375 → PASS** (margin +0.984375; overall average governs, no per-Q veto)
-
-Verified BOTH directions vs trino.io/docs/467 + RAW git-tag 467 source (functions/array.md, functions/datetime.md, functions/window.html) + WebSearch (Trino #16984 / AWS re:Post error-class), NOT resources/. Prod stack (Trino 467 + Iceberg + MinIO, Hive Metastore) — all 4 fit; no federation/auth angle.
-
----
+Verified BOTH directions against RAW git-tag 467 source (datetime.md, array.md, map.md) + WebSearch (trino.io SQL-standard special-form note), NOT resources/. Production stack (Trino 467 + Iceberg + Hive Metastore on-prem k8s/MinIO) consistent with all advice. No federation probe.
 
 ## Per-question scores
 
-### Q1 — running total of revenue BY DAY on raw `orders` (MANY rows/day): **3.5 — INVALID LEAD (2-IN-2 RECURRENCE)**
-Acc 2.5 / Comp 4.0 / Clar 4.5 / App 3.0
+### Q1 — cumulative signups week-over-week from RAW one-row-per-signup table — **4.8125**
+Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75
 
-```sql
-SELECT DATE(created_at) AS day,
-       SUM(revenue) AS daily_total,
-       SUM(revenue) OVER (ORDER BY DATE(created_at) ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total
-FROM orders GROUP BY DATE(created_at) ORDER BY day;
+**THE KEY ITEM — FIX-A CONFIRMED, invalid form did NOT recur.** The answer pre-aggregates correctly:
 ```
+WITH weekly_signups AS (
+  SELECT DATE_TRUNC('week', created_at) AS signup_week, COUNT(*) AS new_signups
+  FROM signups GROUP BY DATE_TRUNC('week', created_at))
+SELECT signup_week, new_signups,
+  SUM(new_signups) OVER (ORDER BY signup_week ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_signups
+FROM weekly_signups ORDER BY signup_week;
+```
+- The CTE collapses the raw one-row-per-signup table to ONE ROW PER WEEK (`DATE_TRUNC('week', created_at)` + `COUNT(*)` + `GROUP BY DATE_TRUNC('week', created_at)` — GROUP BY repeats the expr, NOT the alias, so no #16533 alias-in-GROUP-BY error).
+- The OUTER query applies `SUM(new_signups) OVER (...)` on the **already-aggregated** CTE result. `new_signups` is a real materialized column of `weekly_signups`, NOT a raw per-row column inside a GROUP BY. There is therefore **NO bare-SUM-OVER-beside-GROUP-BY error** — the exact invalid shape that scored 3.5 in iter1038 (Q2) and 3.5 in iter1040 (Q1) is **ABSENT**. This is the correct pre-aggregate-CTE-then-window pattern.
+- `DATE_TRUNC('week', ...)` truncates to ISO Monday-start (Trino ISO day-of-week 1=Mon..7=Sun convention; datetime.md). `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the correct inclusive running-total frame (each week = its own new signups + all earlier weeks).
+- `ORDER BY signup_week` at the outer level gives a clean chronological cumulative series.
+Minor: complete and directly runnable on the engineer's raw table. **2-in-2 relapse did NOT recur** — the iter1040 FIX-A reached the responder.
 
-**The query does NOT run.** `daily_total = SUM(revenue)` (plain aggregate over the GROUP BY) is correct, and `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the right running-total frame. The DEFECT is the cumulative expression: a **bare `SUM(revenue) OVER (...)`** where `revenue` is NEITHER a grouping column NOR wrapped in a GROUP-BY aggregate. Window functions run AFTER aggregation (trino.io/docs/467/functions/window.html: window functions "run after the HAVING clause but before ORDER BY"), so after `GROUP BY DATE(created_at)` the bare column `revenue` no longer exists per-row → Trino raises **"'revenue' must be an aggregate expression or appear in GROUP BY clause"** (error class confirmed via Trino #16984 + AWS re:Post).
+### Q2 — sum an array of prices into an order total per row, no joins — **4.8125**
+Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75
+`reduce(line_items, 0, (sum, price) -> sum + price, sum -> sum)` — VERIFIED canonical. RAW array.md 467: signature `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R` — the answer's 4-arg form with identity output lambda `sum -> sum` matches EXACTLY. **array_sum does NOT exist in 467** (absent from array.md function index), so reduce is the canonical answer, not a workaround. One row in / one row out, no joins, no UNNEST — exactly as asked. Sound.
 
-**Correct forms** (both taught verbatim in r07):
-- Nested aggregate: `SUM(SUM(revenue)) OVER (ORDER BY DATE(created_at) ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — Pattern A2 (r07 L2763+), the `SUM(SUM(amount)) OVER` window-over-aggregate.
-- Pre-aggregate CTE: `WITH daily AS (SELECT DATE(created_at) AS day, SUM(revenue) AS daily_total FROM orders GROUP BY DATE(created_at)) SELECT day, daily_total, SUM(daily_total) OVER (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM daily` — r07 L2682-2697 (iter667 BROADEN), the EXACT "per-day running total from row-grain orders" recipe, which ALSO contains the verbatim warning: *"Do NOT try to fix this by writing `SUM(amount) OVER (ORDER BY order_date ROWS ...)` directly on the row-grain `orders` table."*
+### Q3 — count DISTINCT keys across all rows of a MAP(varchar,varchar) — **4.8125**
+Acc 5.0 / Comp 4.75 / Clar 4.75 / App 4.75
+`SELECT COUNT(DISTINCT key) FROM events CROSS JOIN UNNEST(map_keys(properties)) AS t(key)` — VERIFIED. RAW map.md 467: `map_keys(x(K,V)) -> array(K)` returns all keys as an array. CROSS JOIN UNNEST(array) AS t(key) flattens keys to rows, COUNT(DISTINCT key) gives the distinct-key count across all rows. Valid and idiomatic. The `SELECT DISTINCT key ... ORDER BY key` listing variant is a sound complementary offer (shows WHICH keys), not a broken secondary. Sound.
 
-**RECURRENCE — this is the SECOND occurrence of this exact invalid shape.** iter1038 Q2 was the first (bare single-`SUM(revenue) OVER` beside `GROUP BY order_date`, scored 3.5). iter1039 Q1 dodged it by assuming a pre-aggregated `daily_revenue` table (no GROUP BY → valid running total). iter1040 Q1 puts the broken shape back, now with the GROUP BY explicitly present → 2-in-2 on the real (orders, many-rows-per-day) surface. The resource is COMPLETE and CORRECT on this case (Pattern A / A2 / iter667 BROADEN), so this is a **FINDABILITY / synthesis gap**, not a resource gap — the responder anchors on the base Pattern A example (window over raw rows, no GROUP BY) and bolts a `GROUP BY` onto it without switching to the nested/CTE form.
+### Q4 — current_timestamp vs now(): different or not? which to use? — **4.78125**
+Acc 4.875 / Comp 4.75 / Clar 4.75 / App 4.75
+Sub-claims verified against RAW datetime.md 467 + WebSearch:
+- **(a) current_timestamp and now() both return timestamp(3) with time zone, equal at query start — TRUE.** datetime.md: current_timestamp "Returns the current timestamp with time zone as of the start of the query, with 3 digits of subsecond precision"; now() "This is an alias for current_timestamp."
+- **(b) current_timestamp usable WITHOUT parentheses as a SQL-standard special form — TRUE.** datetime.md note: "The following SQL-standard functions do not use parenthesis: current_date, current_time, current_timestamp, localtime, localtimestamp."
+- **(c) current_timestamp() with EMPTY parentheses is a PARSE ERROR — TRUE.** current_timestamp is a SQL-standard special syntactic form, not a regular function; empty parens are not accepted (corroborated by the documented "do not add parentheses" guidance and the special-form grammar — an empty-paren call is invalid).
+- **(d) current_timestamp(p) precision overload exists, returns timestamp(p) with time zone — TRUE.** datetime.md has a separate `current_timestamp(p)` entry returning "current timestamp with time zone as of the start of the query, with p digits of subsecond precision."
+- **(e) now() is the alias and is written WITH parens — TRUE.** now() is documented as "an alias for current_timestamp" and, being a regular function, is invoked as `now()`. The answer's framing "now() is the parenthesized alias" is accurate.
+Tiny clarity nuance only: the contrast (special-form `current_timestamp` no-paren / overload `current_timestamp(p)` / function `now()`) is correctly drawn. Functionally identical, either is fine. Sound.
 
-### Q2 — most recent event per user: **4.8125 CLEAN**
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75. `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY changed_at DESC)` then `WHERE rn = 1` in a CTE = canonical top-1-per-group. Window functions are not allowed in `WHERE`, so the CTE wrap is required and correct. Fully sound.
+## Tics scan
+`::` absent all 4. No QUALIFY, no false semi-join, no fabricated function, no regex-backslash, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no over-warning folklore, no broken-secondary padding. The Q3 second offering is complementary not broken. The iter1038/iter1040 bare-SUM-OVER-in-GROUP-BY shape did NOT recur on Q1.
 
-### Q3 — sessions whose `page_views` array contains a pricing URL: **4.8125 CLEAN**
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75. `contains(page_views, 'https://...')` → boolean membership (array.md verbatim: "Returns true if the array x contains the element"; signature `contains(x, element) -> boolean`); case-sensitive. The case-insensitive variant `contains(transform(page_views, x -> lower(x)), lower('...'))` is sound — `transform(array(T), function(T,U)) -> array(U)` lowercases each element, then `contains` checks membership. Both functions real & verified.
+## Overall
+(4.8125 + 4.8125 + 4.8125 + 4.78125) / 4 = **4.8046875 PASS** (margin +1.3047 over 3.5).
 
-### Q4 — monthly revenue trend, HAVING above $10,000: **4.8125 CLEAN**
-Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75. `date_trunc('month', created_at)` valid, returns timestamp truncated to month (datetime.md: `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00') -- 2022-10-01 00:00:00.000`). `GROUP BY DATE_TRUNC('month', created_at)` REPEATS the expression (correct — NOT the SELECT alias, avoids #16533). `HAVING SUM(revenue) > 10000` filters post-aggregation; `> 10000` = strictly above (excludes exactly 10000), matches "above $10,000". WHERE-runs-before / HAVING-runs-after explanation correct. Note: this Q4 demonstrates the responder CORRECTLY uses an aggregate over the GROUP BY in HAVING — contrast with the Q1 window-stage error, confirming the gap is specifically the window-over-aggregate nesting, not GROUP BY aggregates generally.
-
----
-
-## TICS check
-`::` ABSENT all 4. Clean except Q1 (no QUALIFY / false-semi-join / fabricated-fn [ROW_NUMBER/contains/transform/date_trunc all real & verified] / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary).
-
----
-
-## Recommendation
-
-**Q1 finding: the bare-`SUM(x) OVER`-beside-`GROUP BY` form is INVALID in 467 (will not run), and this is the 2nd occurrence (iter1038 Q2 first; iter1039 re-probe dodged it by assuming a pre-aggregated table).** This is now a confirmed 2-in-2 on the real row-grain shape.
-
-Classification: **FINDABILITY GAP, not a resource gap.** Grep confirms r07 ALREADY teaches the correct form thoroughly:
-- iter667 BROADEN (L2679-2699) — the EXACT "per-day running total from row-grain orders, many rows per day" CTE recipe + the verbatim "Do NOT write `SUM(amount) OVER (...)` directly on the row-grain `orders` table" warning.
-- Pattern A2 (L2763+) — `GROUP BY` + `SUM(SUM(x)) OVER` window-over-aggregate canonical + GROUP BY rules anchor + DO-NOT-WRITE matrix.
-
-The responder is anchoring on the BASE Pattern A example (L2554-2568: window over raw `daily_revenue` rows, NO GROUP BY) and bolting a `GROUP BY` onto it without promoting to the nested/CTE form. The iter667 BROADEN guard and Pattern A2 live ~120-200 lines BELOW Pattern A, so the keyword-matching Haiku responder grabs Pattern A first and never reaches the guard.
-
-**Recommend a LIGHT FIX-A: a prominent INLINE guard at Pattern A (immediately after the L2554-2568 base example, before the ROWS-vs-RANGE digression)** with the exact router cue: *"MANY rows per grouping key (e.g. raw `orders`, many orders per day) and you want a running total BY that key? Do NOT write `SUM(x) OVER (...)` beside a `GROUP BY` — `x` is not a grouping column and the window stage runs after aggregation, so Trino errors 'must be an aggregate expression or appear in GROUP BY clause'. Pre-aggregate in a CTE first (see iter667 BROADEN below) OR nest as `SUM(SUM(x)) OVER (...)` (see Pattern A2 below)."* Pull the guard UP to Pattern A so the responder hits it on the first keyword match, with forward-links to the two existing correct recipes. This is additive (no reconcile needed — existing content is correct); it closes the findability gap that the deep-buried guards aren't reaching the responder.
-
-If the responder STILL relapses after the guard is hoisted, reclassify as a Haiku synthesis ceiling (can find the recipe but can't assemble it on a novel domain) and stop churning.
-
-No other action: Q2/Q3/Q4 all clean and resolved in the responder's favor. Do NOT bump state.json (already 1040; orchestrator commits).
+## Recommendation — DEFAULT NO-OP; Q1 watch DOWNGRADE to monitor (FIX-A confirmed)
+**Q1 FIX-A confirmation:** The iter1040 hoisted running-total guard at r07 ~L2576 (the prominent inline "MANY rows per grouping key? do NOT write SUM(x) OVER beside GROUP BY — INVALID" callout, with the pre-aggregate-CTE form and nested SUM(SUM) form + forward-links) **reached the responder.** Q1 used the CTE pre-aggregate form (`DATE_TRUNC('week') + COUNT(*) GROUP BY` in the CTE, then `SUM(new_signups) OVER` on the aggregated result) and the dangerous bare-SUM-OVER-in-GROUP-BY shape did **NOT** recur — first clean running-total LEAD on the raw-table-many-rows surface since the iter1038/1040 relapses. **Recommend downgrading watch (q) to passive monitor: FIX-A confirmed.** No resource edit, no new FIX-A, no commit. Re-probe the running-total surface once more next sweep from a different grain (e.g. monthly revenue from a raw orders table) to confirm durability before fully retiring the watch. MUST NOT bump state.json (already 1041; orchestrator commits).
