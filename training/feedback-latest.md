@@ -1,47 +1,70 @@
-# Judge Feedback — iter1078 (2026-06-18)
+# Judge Feedback — iter1079 (2026-06-18)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
+Verified BOTH directions against RAW git-tag 467 source (dispositive over rendered HTML).
 
-**Overall: 4.81 PASS** (margin +1.31). Verified BOTH directions vs RAW git-tag 467 source. Clean sweep, zero source-verified defects. **Q1 FIX-A REACHED: responder now uses the canonical `IS NOT DISTINCT FROM`** (contrast iter1077 Q4, which only offered COALESCE-sentinel and OR-form workarounds).
+## Overall: 4.30 PASS (overall average governs; no per-question veto)
 
-## Per-question breakdown
+One source-verified DIALECT DEFECT in Q1 (Spark-spillover `DESCRIBE TABLE`). Q2/Q3/Q4 clean.
 
-### Q1 — null-safe join (NULL matches NULL) — 4.94
-`LEFT JOIN ... ON u.region_code IS NOT DISTINCT FROM s.region_code`, explaining `=` returns UNKNOWN on NULL (drops both-NULL rows) while `IS NOT DISTINCT FROM` returns TRUE when both NULL, FALSE when one NULL.
+---
 
-VERIFIED against comparison.md (RAW 467): "the `IS DISTINCT FROM` and `IS NOT DISTINCT FROM` operators treat `NULL` as a known value and both operators guarantee either a true or false outcome even in the presence of `NULL` input." Docs example verbatim: `SELECT NULL IS NOT DISTINCT FROM NULL; -- true`. Result is always TRUE/FALSE, never NULL/UNKNOWN — usable directly in a JOIN ON clause.
+## Q1 — check a column's actual data type before querying — **2.69**
 
-**FIX-A CONFIRMED:** the responder used the purpose-built canonical null-safe equality operator, not a COALESCE-sentinel or `(=) OR (both IS NULL)` workaround. This is exactly what the "NULL match NULL" question asked for, and closes the iter1077 Q4 completeness gap. The explanation of why `=` drops both-NULL rows (UNKNOWN, not TRUE) is correct and beginner-clear. LEFT JOIN vs INNER JOIN is a reasonable modeling choice; the ON IS NOT DISTINCT FROM makes NULL match NULL either way — not a defect.
+**Responder answer:** `DESCRIBE TABLE iceberg.schema.users;` … "works whether you're running in Spark SQL or Trino 467."
 
-### Q2 — array membership without unnesting — 4.88
-`WHERE contains(tags, 'featured')`.
+**VERDICT: `DESCRIBE TABLE <name>` is NOT valid Trino 467 — Spark-spillover dialect defect.**
 
-VERIFIED against array.md (RAW 467): `contains(x, element) -> boolean` is listed. Correct membership test, no UNNEST needed. Clean.
+Source-verified:
+- `sql/describe.md` synopsis is exactly **`DESCRIBE table_name`** — NO `TABLE` keyword. The doc states DESCRIBE "is an alias for SHOW COLUMNS."
+  - https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/describe.md
+- `language/reserved.md`: **`TABLE` is a reserved keyword** (reserved in SQL:2016 and SQL-92). Because TABLE is reserved and the DESCRIBE grammar takes a qualified name directly, `DESCRIBE TABLE iceberg.schema.users` parse-errors (`mismatched input 'TABLE'`).
+  - https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/reserved.md
+- `DESCRIBE TABLE <name>` is the **Spark SQL / Hive** form. The responder's claim that it "works whether you're running in Spark SQL or Trino 467" is wrong for the Trino half — exactly the Spark-spillover trap.
 
-### Q3 — sum integers in an array — 4.81
-`reduce(scores, 0, (s, x) -> s + x, s -> s) AS total_score`, noting Trino has NO array_sum.
+**Correct Trino 467 forms** (any of):
+- `DESCRIBE iceberg.schema.users` (no TABLE keyword)
+- `SHOW COLUMNS FROM iceberg.schema.users` (synopsis `SHOW COLUMNS FROM table [ LIKE pattern ]`; returns Column/Type/Extra/Comment — verified in `sql/show-columns.md`)
+- `SELECT column_name, data_type FROM iceberg.information_schema.columns WHERE table_schema='schema' AND table_name='users'`
+- Per-value: `typeof(signup_date)` returns the runtime type of the value (useful to confirm whether it materialized as varchar vs date).
 
-VERIFIED against array.md (RAW 467):
-- **NO array_sum** — not in the list (confirms carried pin; array_sum/array_avg are the absent ones, array_max/min/distinct/sort DO exist).
-- `reduce(array(T), initialState S, inputFunction(S,T,S), outputFunction(S,R)) -> R` is the documented 4-arg fold.
+The shape of the answer (read the data_type column) and the underlying intent are right, and the result columns described match SHOW COLUMNS output. But the headline statement parse-errors in Trino, so Accuracy is heavily docked and Actionability suffers (engineer who copy-pastes gets a parse error). Mitigant: information_schema / DESCRIBE-without-TABLE is well covered elsewhere; this is a per-instance Spark-spillover slip, not a known resource gap.
 
-The fold is correct: start 0, `(s,x)->s+x` accumulates each element, `s->s` returns the accumulator unchanged. The explicit "Trino has NO array_sum, use reduce" framing nails the imported-prior trap. Clean.
+- Accuracy 2 · Completeness 3 · Clarity 3 · Actionability 2.75 → **2.69**
 
-### Q4 — pick any one value per group — 4.81
-`SELECT assignee_id, arbitrary(ticket_id) AS sample_ticket ... GROUP BY assignee_id`, noting it's non-deterministic and an alias for any_value().
+---
 
-VERIFIED against aggregate.md (RAW 467):
-- `arbitrary(x)`: "Returns an arbitrary non-null value of `x`, if one exists. Identical to any_value."
-- `any_value(x)`: "Returns an arbitrary non-null value `x`, if one exists."
+## Q2 — dedupe an array without unnesting — **4.81**
 
-Both exist, return an arbitrary non-null value per group, and are the right tool for "any one value per group." The alias relationship and non-determinism note are both correct. Clean.
+`array_distinct(tags) AS unique_tags` + `cardinality(array_distinct(tags))` for the count.
 
-## Source notes
-- comparison.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/comparison.md
-- array.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
-- aggregate.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
+Verified `functions/array.md`: `array_distinct(x) -> array` "Remove duplicate values from the array x"; `cardinality(x) -> bigint` returns the array size. Result stays an array, no UNNEST/re-aggregate — exactly the ask. "Preserves first-occurrence order" is the documented/observed behavior. Clean.
 
-No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary-alternative observed.
+- Accuracy 5 · Completeness 4.75 · Clarity 4.75 · Actionability 4.75 → **4.81**
+
+## Q3 — events in even-numbered hours — **4.81**
+
+`WHERE EXTRACT(HOUR FROM event_timestamp) % 2 = 0`.
+
+Verified `functions/datetime.md`: EXTRACT supports HOUR (mapped to `hour`), and `hour(x)` "Returns the hour of the day from x. The value ranges from 0 to 23." The `%` modulo operator works on the resulting bigint; `% 2 = 0` → even, `% 2 = 1` → odd, correctly stated. `hour(event_timestamp) % 2 = 0` is an equivalent shorthand (optional). No giant CASE needed. Clean.
+
+- Accuracy 5 · Completeness 4.75 · Clarity 4.75 · Actionability 4.75 → **4.81**
+
+## Q4 — "Smith, John" display name — **4.88**
+
+`concat_ws(', ', last_name, first_name)`.
+
+Verified `functions/string.md`: `concat_ws(string0, string1, ..., stringN) -> varchar` "concatenation … using string0 as a separator"; "Any null values provided in the arguments after the separator are skipped." So a NULL first_name/last_name yields no dangling comma — responder's NULL-skip note is exactly correct. Note (not docked): if `string0` (the separator) itself is null the whole result is null — not relevant here. Cleaner than `||`/concat as asked. Clean.
+
+- Accuracy 5 · Completeness 4.75 · Clarity 5 · Actionability 4.75 → **4.88**
+
+---
+
+## Source-verified defect log
+- **Q1: `DESCRIBE TABLE <name>` invalid in Trino 467 (Spark-spillover).** Trino form is `DESCRIBE <name>` / `SHOW COLUMNS FROM <name>` / `information_schema.columns` / `typeof()`. TABLE is reserved → parse error. The "works in Spark SQL or Trino 467" cross-engine claim is the root error.
+
+## Imported-prior / regression checks (none tripped)
+No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary patterns. Q2/Q3/Q4 functions all verified to EXIST and behave as claimed.
 
 ## Recommendation
-DEFAULT NO-OP (margin +1.31). The Q1 null-safe-join FIX-A is confirmed reached from a 2nd angle (iter1077 Q4 join + WHERE forms → iter1078 Q1 LEFT JOIN ON form); responder now reaches for the canonical operator. NO resource edit; NO commit. MUST NOT bump state.json (already 1078).
+PASS at 4.30 (margin +0.80). The only defect is the Q1 `DESCRIBE TABLE` Spark-spillover — a dialect slip on the SQL keyword, not an absent canonical (DESCRIBE/SHOW COLUMNS/information_schema are covered). Treat as a per-instance re-probe candidate: re-ask "how to check a column type in Trino" from a 2nd angle to confirm whether the responder reliably drops the TABLE keyword, before considering any defang. Do NOT churn resources on a single slip. MUST NOT bump state.json (already 1079).
