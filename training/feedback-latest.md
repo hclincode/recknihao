@@ -1,65 +1,47 @@
-# iter1075 Judge Feedback (2026-06-18)
+# Judge Feedback — iter1076 (2026-06-18)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
+Verified BOTH directions vs RAW git-tag 467 source (conditional.md / array.md / window.md / language/types.md). Clean sweep, zero source-verified defects.
 
-**Overall average: 4.73 / 5.00 — PASS** (threshold 3.5; margin +1.23)
+## Per-question breakdown
 
-Verified BOTH directions against RAW git-tag 467 source:
-- array.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
-- aggregate.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
-- select.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
-- conversion.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/conversion.md
+### Q1 — sentinel '0' string → NULL so aggregates skip it (don't delete rows)
+**Score: 4.81** (Acc 5, Comp 4.75, Clar 5, Act 4.5)
+- `NULLIF(plan_type, '0')` is correct. VERIFIED conditional.md: "NULLIF(value1, value2) Returns null if value1 equals value2, otherwise returns value1." So plan_type='0' → NULL, all other values pass through unchanged.
+- "NULL is automatically skipped by COUNT/SUM/AVG" is correct (SQL standard aggregate NULL semantics; COUNT(col) and SUM/AVG ignore NULLs).
+- Both examples land: the in-aggregate / keep-all-rows form directly satisfies the "don't delete rows" ask; the optional `WHERE NULLIF(...) IS NOT NULL` filter is a valid alternative when row removal IS wanted.
+- Minor: one illustrative example applied NULLIF to `customer_id` rather than `plan_type` — illustrative liberty, does not change correctness; tiny completeness/actionability ding only.
 
-Clean sweep on query correctness. One minor implementation-detail aside on Q2 (T-Digest claim) is the only source-flagged nit; it does NOT affect query correctness.
+### Q2 — number of tags per row (array length)
+**Score: 4.94** (Acc 5, Comp 5, Clar 5, Act 4.75)
+- `cardinality(tags)` is correct and canonical. VERIFIED array.md: "cardinality(x) Returns the cardinality (size) of the array x," return type bigint.
+- Worked example `ARRAY['foo','bar','baz'] → 3` is correct. No `length()`-on-array confusion (length is for varchar). Clean.
 
----
+### Q3 — top 3 products by revenue per category, cleanly (CRITICAL watch re-probe)
+**Score: 4.88** (Acc 5, Comp 5, Clar 4.75, Act 5)
+- WINDOW-WRAP VERDICT: CORRECT. Responder wrapped `ROW_NUMBER() OVER (PARTITION BY category ORDER BY SUM(price*quantity) DESC)` in an inner subquery (with `GROUP BY category, product_id`), then filtered `WHERE rank_in_category <= 3` in the OUTER query. This is the required canonical Trino top-N-per-group form.
+- Window functions cannot appear in WHERE — per window.md they run after HAVING but before ORDER BY, so they are only legal in SELECT/ORDER BY; filtering on the rank therefore REQUIRES the subquery wrap + outer-WHERE on the alias. Responder did this correctly.
+- ROW_NUMBER over the aggregate `SUM(price*quantity)` inside a GROUP BY query is valid — window functions evaluate after GROUP BY/aggregation.
+- Confirmed the responder did NOT put the window function directly in WHERE and did NOT reference the rank alias illegally at the same SELECT level. This cleanly contrasts the iter1071 Q4 MERGE window-in-WHERE / alias-in-WHERE slip — the synthesis held this time.
+- row_number() returns unique sequential bigint per partition (VERIFIED window.md), so exactly 3 rows per category result; RANK/DENSE_RANK would be the alt if all tied rows should surface (minor unmentioned nuance, not penalized).
 
-## Q1 — lowercase every element of tags array without unnesting (4.94)
-`SELECT product_id, transform(tags, tag -> lower(tag)) AS lowercase_tags FROM products;`
+### Q4 — users who signed up in last 7 days; Postgres NOW() - INTERVAL '7 days' translation
+**Score: 4.81** (Acc 5, Comp 4.75, Clar 5, Act 4.5)
+- INTERVAL SYNTAX VERDICT: CORRECT. Responder used `current_date - INTERVAL '7' DAY` (and `current_timestamp - INTERVAL '7' DAY` for timestamps). VERIFIED language/types.md: INTERVAL literals are quoted-number + singular unit keyword (`INTERVAL '2' DAY`, `INTERVAL '3' MONTH`). The Postgres `INTERVAL '7 days'` (plural, unit inside the quotes) is NOT the Trino form — responder correctly translated it.
+- `current_date` (date, start of today) and `current_timestamp` exist in 467; `date - INTERVAL '7' DAY` arithmetic is valid and returns a date; `>=` captures the rolling 7-day window. Correct and idiomatic.
+- Minor: did not flag that NOW() is itself a Trino-valid alias for current_timestamp (so the Postgres→Trino delta is really only the interval literal, not NOW()). Small completeness note; the recommended query is correct.
 
-- **Accuracy 5** — array.md VERIFIED `transform(array(T), function(T,U)) -> array(U)` "Returns an array that is the result of applying `function` to each element of `array`." `lower()` is standard. Result stays an array; no UNNEST. Exactly correct.
-- **Completeness 5** — fully answers; correctly stresses no UNNEST needed (the user's explicit ask).
-- **Clarity 5** — lambda mechanic explained plainly.
-- **Actionability 5** — copy-paste ready.
+## Overall
+Overall average = (4.81 + 4.94 + 4.88 + 4.81) / 4 = **4.86**
+**PASS** (threshold 3.5; margin +1.36)
 
-## Q2 — median + p95 of contract_value (4.50)
-`approx_percentile(contract_value, ARRAY[0.5, 0.95])` → `percentiles[1]` median, `percentiles[2]` p95.
+No `::`-cast / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning-folklore / broken-secondary-alternative observed.
 
-- **Accuracy 4** — Array-form VERIFIED: aggregate.md confirms `approx_percentile(x, percentages_array)` "returns the approximate percentile ... at each of the specified percentages," yielding an array. Array indexing is 1-based (array.md) so `[1]`=0.5=median, `[2]`=0.95=p95 — CORRECT. `percentile_cont`/`percentile_disc`/`median` are CONFIRMED ABSENT from 467 aggregate.md — `approx_percentile` is indeed the answer. **NIT:** the "uses T-Digest sketching under the hood" claim is NOT supported by the 467 docs — aggregate.md does not state which sketch backs `approx_percentile` (it documents t-digest and qdigest as separate function families but never attributes either to `approx_percentile`). Treat as an unverified implementation-detail aside, NOT a query-correctness issue. The array-form query is correct regardless of the backing sketch. Minor accuracy ding only.
-- **Completeness 5** — covers built-in vs manual sort, the no-exact-percentile fact, and billion-row suitability.
-- **Clarity 4.5** — clear; the T-Digest aside risks overstating a detail the engineer might quote.
-- **Actionability 5** — directly usable; subquery-then-index pattern shown.
+## Source-verified dialect notes (RAW 467 URLs checked)
+- NULLIF: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/conditional.md — "Returns null if value1 equals value2, otherwise returns value1."
+- cardinality: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md — "Returns the cardinality (size) of the array x" (bigint).
+- ROW_NUMBER + window execution order: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md — windows run after HAVING, before ORDER BY → not allowed in WHERE → subquery-wrap + outer filter is mandatory; row_number() = unique sequential bigint per partition.
+- INTERVAL literal: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/types.md — `INTERVAL '3' MONTH` / `INTERVAL '2' DAY` (quoted number, singular unit); Postgres `INTERVAL '7 days'` is not the Trino form.
 
-## Q3 — GROUP BY plan_type + grand-total row, one query (4.81)
-`GROUP BY ROLLUP(plan_type)` + `CASE GROUPING(plan_type) WHEN 0 THEN plan_type WHEN 1 THEN 'Grand Total' END` + `ORDER BY GROUPING(plan_type), plan_type`.
-
-- **Accuracy 5** — select.md VERIFIED: `ROLLUP(c)` emits detail rows + one grand-total row (rolled-up column NULL). `GROUPING(col)` "a bit is set to 0 if the corresponding column is included in the grouping and to 1 otherwise" → single-arg returns 0 for detail (plan_type present), 1 for the grand total. **CASE LABELS ARE CORRECT, NOT SWAPPED** (0→plan_type, 1→'Grand Total'). `ORDER BY GROUPING(plan_type)` puts the grand total (1) last. Contrast iter1070 Q2 multi-arg bitmask label transposition — single-arg here is right.
-- **Completeness 5** — single query, no UNION, labels + ordering, all as asked.
-- **Clarity 4.75** — explains ROLLUP and GROUPING bit clearly.
-- **Actionability 5** — production-ready.
-
-## Q4 — TRY_CAST varchar status to integer, NULL on failure (4.69)
-`SELECT order_id, status, TRY_CAST(status AS INTEGER) AS status_code FROM orders;`
-
-- **Accuracy 5** — conversion.md VERIFIED `try_cast` "Like cast, but returns null if the cast fails." `'completed'`→NULL, `'2'`/`'3'`→integers; query completes (CAST would throw). Correct.
-- **Completeness 4.5** — answers fully; `WHERE status_code IS NOT NULL` filter note correct. Did not mention NULL-vs-empty edge, but not required.
-- **Clarity 5** — TRY_CAST-vs-CAST distinction crisp.
-- **Actionability 5** — directly usable.
-
----
-
-## Per-question averages
-- Q1: 4.94
-- Q2: 4.50
-- Q3: 4.81
-- Q4: 4.69
-
-**Overall: 4.73 — PASS**
-
-## Source-verified verdicts requested
-- **Q2 T-Digest claim:** UNVERIFIED. 467 aggregate.md does NOT state `approx_percentile` is backed by t-digest; t-digest and qdigest are documented as separate function families with no link to `approx_percentile`. Minor implementation-detail nit; query is correct regardless.
-- **Q3 GROUPING labels:** CORRECT, not swapped. Single-arg `GROUPING(plan_type)`: 0=detail (column present)→plan_type, 1=rolled-up grand total→'Grand Total'. Matches select.md bit semantics.
-
-No `::`-cast / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary defects.
-
-RECOMMENDATION = DEFAULT NO-OP (margin +1.23). Q2 T-Digest aside is a per-instance responder slip on an implementation detail, NOT a resource gap — do not churn. MUST NOT bump state.json (already 1075).
+## Recommendation
+DEFAULT NO-OP. All four headline queries are correct and source-verified; the Q3 window-wrap re-probe confirms the iter1071 synthesis slip did not recur on this domain. Q1 customer_id-in-example and Q4 NOW()-alias note are per-instance trivia, NOT resource gaps — do not churn. NO resource edit; NO commit beyond the rubric score line. MUST NOT bump state.json (already 1076).
