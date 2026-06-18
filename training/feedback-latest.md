@@ -1,53 +1,99 @@
-# Judge Feedback — iter1063 (2026-06-18)
+# Judge Feedback — iter1064 (2026-06-18)
+
+**Overall: 4.82 / 5 — PASS** (threshold 3.5; margin +1.32)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions against RAW git-tag 467 source + trino.io/docs + WebSearch. Scored against real Trino 467 behavior, NOT resources/.
+Verified BOTH directions against RAW git-tag 467 source
+(raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/) and trino.io/docs/467.
+Scored against real Trino 467 behavior, NOT resources/.
+Sources checked:
+- functions/datetime.md (date_diff, current_timestamp, now)
+- functions/json.md (json_extract_scalar, json_extract, JSON_VALUE)
+- functions/array.md (array_intersect, cardinality, any_match, contains, arrays_overlap)
+- language/types.md (numeric literal typing — DECIMAL vs DOUBLE)
+- functions/math.md (division operator)
+- Memory pins: reference_trino_division_by_zero (git-tag-verified), reference_trino_timestamp_tz_coercion.
 
-## Overall: 4.86 PASS (margin +1.36)
+---
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 (array superset / all-elements-present) | 5.0 | 4.75 | 4.75 | 4.875 | 4.84375 |
-| Q2 (ROLLUP subtotals + grand total) | 5.0 | 5.0 | 4.75 | 5.0 | 4.9375 |
-| Q3 (duration bucket via date_diff) | 5.0 | 4.75 | 4.875 | 4.875 | 4.875 |
-| Q4 (% of monthly total via window) | 5.0 | 4.5 | 4.75 | 4.875 | 4.78125 |
-| **Overall** | | | | | **4.859375** |
+## Q1 — recency bucketing (today/this week/this month/older) — 4.75
 
-## Q1 — per-row "features contains EVERY element of required set" (4.84)
-Both forms are valid Trino 467 and both correctly test "required set is a SUBSET of features".
-- `cardinality(array_except(ARRAY['sso','api_access'], features)) = 0`: array_except(x,y) "Returns an array of elements in x but not in y, without duplicates" (array.md). Required elements not found in `features` → empty diff → cardinality 0 → all present. Arg order is correct (required set is x).
-- `all_match(ARRAY['sso','api_access'], x -> contains(features, x))`: all_match "Returns whether all elements of an array match the given predicate ... true if all the elements match (special case: empty array)" (array.md). contains(features, x) verified. This is the LEGITIMATE per-row use of all_match — it tests all ELEMENTS of the required-set array against the row's `features` array inside a row-level WHERE clause. Materially different from (and does NOT repeat) the invalid iter1061 Q3 misuse, which put all_match over an UNGROUPED per-row column inside a HAVING/group aggregate (planner error). No regression. Both forms typecheck and return boolean per row.
-- Minor: no note on NULL-element 3VL edge (typical string-feature arrays have no NULLs → immaterial).
+Query CORRECT. `date_diff('day', occurred_at, current_timestamp)` verified to return
+`timestamp2 - timestamp1` as a **bigint** day count (datetime.md). CASE ladder
+`=0` / `BETWEEN 1 AND 6` / `BETWEEN 7 AND 30` / `ELSE` maps the four buckets correctly,
+top-to-bottom (mutually exclusive, no overlap). `current_timestamp` (no parens) and `now()`
+both valid; `now()` is documented as an alias for `current_timestamp`. current_timestamp
+returns **timestamp WITH TIME ZONE**, and mixing it with the plain-timestamp `occurred_at`
+is NOT a type error — implicit TIMESTAMP→TIMESTAMP WITH TIME ZONE coercion exists in 467
+(git-tag TypeCoercion.java). Postgres-likeness addressed well.
 
-## Q2 — ROLLUP subtotals + grand total, GROUPING bitmask (4.94)
-GROUPING BITMASK VERDICT: 0/1/3 are CORRECT.
-- ROLLUP(region, product_category) is equivalent to GROUPING SETS ((region, product_category), (region), ()) — detail, per-region subtotal (product_category NULL), grand total (both NULL) (select.md). Correct.
-- GROUPING(region, product_category): "rightmost column = least significant bit ... bit set to 0 if the column is included in the grouping, 1 otherwise" (select.md). So region = MSB (value 2), product_category = LSB (value 1); bit=1 means rolled-up/aggregated-away:
-  - Detail (both present): 00 = **0** → 'Detail' OK
-  - Region subtotal (region present, category rolled up): 01 = **1** → 'Region Total' OK
-  - Grand total (both rolled up): 11 = **3** → 'Grand Total' OK
-  - The 10 = 2 case (region rolled up, category present) does NOT occur under ROLLUP — correctly omitted.
-- ROLLUP takes plain column names here (region, product_category) — compliant.
-- ORDER BY GROUPING(...), region NULLS LAST, product_category NULLS LAST cleanly sorts detail→subtotal→grand and keeps the NULL subtotal/grand rows last within each level. Correct and idiomatic.
+- Accuracy 4.75 / Completeness 4.5 / Clarity 4.75 / Actionability 5.0
+- Caveat (completeness only): `date_diff('day', ...)` counts complete ~24h day-units, not a
+  calendar-date difference — e.g. 23:00 yesterday vs 01:00 today = 0 → labeled "today".
+  A legitimate approximation for this use; worth a one-line note but not a defect.
 
-## Q3 — duration buckets (4.88)
-- date_diff('minute', started_at, ended_at) -> bigint, "timestamp2 - timestamp1 expressed in terms of unit", complete-units / fractional discarded (datetime.md). Correct.
-- CASE ladder <1 / <5 / <30 / else evaluates top-to-bottom and correctly maps to Under 1 / 1-5 / 5-30 / Over 30. Boundaries are right (a 5-minute session lands in '5-30', a 30-minute session lands in 'Over 30' — consistent with the half-open reading of the requested bands). width_bucket alternative not needed; CASE is fine and clearer here.
+## Q2 — extract browser from JSON string, GROUP BY it — 4.97
 
-## Q4 — % of month total via window (4.78)
-- SUM(revenue) OVER (PARTITION BY month) is a valid window aggregate that repeats the per-month total on every row — correct, no GROUP BY conflict (pure window over an already-aggregated source table monthly_customer_revenue).
-- 100.0 is a DECIMAL literal in Trino 467 (undecorated number with a fractional part = DECIMAL; only sci-notation = DOUBLE per types.md). So 100.0 * revenue forces decimal arithmetic — the percentage is computed in decimal, NOT integer-truncated. ROUND(x, 2) valid. Correct.
-- WHERE month >= date_trunc('month', current_date) - INTERVAL '12' MONTH: MONTH is a valid INTERVAL qualifier (QUARTER/WEEK would be parse errors; MONTH is fine); date_trunc - INTERVAL date arithmetic is valid. This is a legitimate rolling-12-months filter, NOT a this-vs-last-month off-by-one.
-- Minor completeness ding only: no division-by-zero / SUM=0 guard (a month with zero total → divide error/NULL). Noted as minor per directive.
+Fully correct. `json_extract_scalar(properties, '$.browser')` exists, operates on a varchar
+JSON string, and returns VARCHAR (json.md). GROUP BY correctly **repeats the expression**
+(not a SELECT alias) — avoids the #16533 GROUP-BY-alias trap. NULL on missing/malformed
+accurate. `json_extract` for nested objects and
+`JSON_VALUE(col,'$.key' RETURNING varchar NULL ON EMPTY NULL ON ERROR)` are valid Trino 467
+SQL/JSON syntax (RETURNING + ON EMPTY/ON ERROR confirmed in json.md). Thorough.
 
-## Cross-cutting
-No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary defects. All secondary forms (Q1 array_except alt) are valid. iter1061 all_match mis-route did NOT recur — Q1's all_match is the correct row-level element-test idiom. iter1058 varchar-to-integer slip not in scope here.
+- Accuracy 5.0 / Completeness 5.0 / Clarity 4.875 / Actionability 5.0
+
+## Q3 — arrays sharing at least one element — 4.94
+
+Both forms correct. `cardinality(array_intersect(tags, ARRAY['promo','flash_sale'])) > 0`
+and `any_match(ARRAY['promo','flash_sale'], x -> contains(tags, x))` verified — array_intersect,
+cardinality, any_match, contains all exist (array.md). The explicit warning that
+`array_intersect` is a within-row function on two array values and must NOT be confused with
+the `INTERSECT` set operator (across rows) is exactly right and valuable.
+
+- Accuracy 5.0 / Completeness 4.75 / Clarity 5.0 / Actionability 5.0
+- Completeness ding only: `arrays_overlap(tags, ARRAY[...])` is a valid, more-direct option
+  for the exact "share any element" test and went unmentioned. Given forms are correct.
+
+## Q4 — safe active-percentage per plan (CRITICAL fine point) — 4.625
+
+The QUERY is CORRECT and SAFE:
+`ROUND(100.0 * COUNT(CASE WHEN is_active THEN 1 END) / NULLIF(COUNT(*), 0), 2)`.
+`NULLIF(COUNT(*),0)` turns a zero denominator into NULL so the division returns NULL rather
+than raising — verified-correct guard. Multiplying by `100.0` forces non-integer division so
+there is no integer truncation.
+
+**VERIFIED literal-type verdict:** `100.0` is a **DECIMAL literal**, NOT a DOUBLE.
+types.md DECIMAL section: "Exact numeric values can be expressed as numeric literals such as
+`1.1`, and are supported by the `DECIMAL` data type." Only scientific-notation literals
+(`1.03e1`) or the `DOUBLE '...'` keyword form yield DOUBLE. So the responder's explanatory
+label "DOUBLE literal" and "forces the numerator to DOUBLE" is WRONG — the arithmetic is
+exact DECIMAL division. (A WebFetch summarizer initially claimed `100.0` is DOUBLE; reading
+the raw DECIMAL/DOUBLE sections directly refuted it. The summarizer misread.)
+
+Crucially, **the query is correct regardless** — DECIMAL division is also non-integer, so
+there is no integer truncation either way; only the explanatory aside is mislabeled.
+
+The other claim is CORRECT: in Trino, INTEGER/DECIMAL division by zero raises
+DIVISION_BY_ZERO, while DOUBLE/REAL division by zero returns Infinity/NaN per IEEE-754
+(git-tag-verified, reference_trino_division_by_zero pin; r27 §4.4H locked).
+
+- Accuracy 4.0 / Completeness 4.75 / Clarity 4.75 / Actionability 5.0
+- Per directive: only a small accuracy deduction for the literal-type mislabel on an
+  explanatory aside; the SQL produces correct, safe results.
+
+---
+
+## Watchlist (none triggered)
+No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/
+OFFSET-before-LIMIT/over-warning/broken-secondary. All secondary forms (any_match, json_extract,
+JSON_VALUE) are valid. The iter1058/1063 `100.0`-literal-type question recurs as a responder
+EXPLANATION slip (mislabeled DOUBLE) but the query is correct — per-instance, not a resource
+defect; do not churn.
 
 ## Recommendation
-DEFAULT NO-OP (margin +1.36). No resource edit; no commit. State.json already at 1063 (do not bump).
-
-## Sources verified
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md (array_except, all_match, contains, cardinality)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md (ROLLUP grouping sets, GROUPING bitmask encoding)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md (date_diff -> bigint, complete units)
-- trino.io/docs types.md + WebSearch (decimal literal 100.0 forces decimal arithmetic; integer division truncates)
+DEFAULT NO-OP (margin +1.32). Q4 "100.0 = DOUBLE literal" is the only inaccuracy and is on an
+aside, not the SQL. If the teacher wants a near-zero-cost tightening, a one-line note that
+undecorated decimal-point literals are DECIMAL (not DOUBLE) would close the recurring
+explanation slip — but it is not failure-causing. NO resource edit required; NO commit.
+MUST NOT bump state.json (already 1064).
