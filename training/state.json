@@ -1,7 +1,7 @@
 {
-  "iteration": 1068,
+  "iteration": 1069,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1068 NO-OP durability-breadth sweep: zero resource edits; content-verified full lock inventory intact incl. all four FIX-A caveats (r23 LIKE literal-_/% prefix + r07 filter-lambda literal-prefix; r07 running-total ROWS/RANGE guard + Pattern A2 nested-agg recipe; r13 GROUP-BY-alias #16533; r23 histogram(map_column)-WRONG defang + map_keys+UNNEST per-key-frequency canonical), plus r23 LIKE-ESCAPE/::-cast/ILIKE-disambiguator/OFFSET-before-LIMIT/EXCEPT-anti-join/NOT-IN-NULL/bool_and-bool_or, r05 percentile footgun, r09 ROW dot-access + bucket column-first + map_keys, r27 %M/%B defang + ::-guardrail + try() + regexp_replace $1, r28 decorrelation + ROLLUP/GROUPING SETS, r22 federation untouched — none missing or corrupted."
+  "note": "iter1069 NO-OP durability-breadth sweep: zero resource edits; content-verified full lock inventory intact incl. all four FIX-A caveats (r23 LIKE literal-_/% prefix + r07 filter-lambda literal-prefix; r07 running-total ROWS/RANGE guard + Pattern A2 nested-agg recipe; r13 GROUP-BY-alias #16533; r23 histogram(map_column)-WRONG defang + map_keys+UNNEST per-key-frequency canonical), plus r23 LIKE-ESCAPE/::-cast/ILIKE-disambiguator/OFFSET-before-LIMIT/EXCEPT-anti-join/NOT-IN-NULL/bool_and-bool_or/split_part, r05 percentile footgun, r09 ROW dot-access + bucket column-first + map_keys, r27 %M/%B defang + ::-guardrail + try() + regexp_replace $1, r28 decorrelation + ROLLUP/GROUPING SETS, r22 federation untouched — none missing or corrupted."
 }
