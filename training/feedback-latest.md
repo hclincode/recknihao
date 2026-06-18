@@ -1,56 +1,41 @@
-# Judge Feedback — iter1087 (2026-06-18)
+# iter1088 Judge Feedback — 2026-06-18
 
-Verified BOTH directions vs RAW git-tag 467 source (functions/aggregate.md, functions/array.md, functions/string.md, functions/math.md, MathFunctions.java widthBucket(array), ArrayMaxFunction.java) + WebSearch. Clean sweep; zero source-verified defects.
+Verified BOTH directions vs RAW git-tag 467 source (functions/json.md, functions/math.md, functions/window.md, functions/conversion.md) + WebSearch on CAST/TRY_CAST throw-vs-null semantics. Clean sweep; ZERO source-verified defects.
 
-## Per-question scores
+## Q1 — extract JSON field as plain text — 5.00
+`json_extract_scalar(metadata, '$.warehouse') AS warehouse`
+- json.md VERIFIED: `json_extract_scalar(json, json_path) -> varchar` — "Like json_extract, but returns the result value as a string (as opposed to being encoded as JSON). The value referenced by json_path must be a scalar (boolean, number or string)." Doc example `json_extract_scalar(json, '$.store.book[0].author')` confirms a varchar-JSON column is accepted directly (no explicit CAST/JSON parse) and that `'$.warehouse'` top-level jsonpath is valid.
+- Returns varchar = the requested PLAIN TEXT (json_extract would return JSON-encoded string with quotes; scalar is the correct choice). Returns NULL on missing path — graceful.
+- `$.parent.child` nested-path note correct; WHERE-clause filter example correct (varchar='LAX' comparison valid). Accuracy/Completeness/Clarity/Actionability all 5.
 
-### Q1 — per-status counts in one row, no 4 queries
-**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
+## Q2 — absolute difference of two prices — 5.00
+`abs(final_price - list_price) AS price_difference`
+- math.md VERIFIED: `abs(x)` "Returns the absolute value of x", type-preserving over numeric types. Trivially correct; subtraction order is irrelevant under abs, always non-negative. Engineer knows exactly what to do. All 5.
 
-Primary answer `COUNT(CASE WHEN status='trial' THEN subscription_id END) AS trial_count, ...` with no GROUP BY is the canonical conditional-aggregation pivot — one row, one pass, correct. `COUNT(col)` ignores NULLs so the CASE-without-ELSE (NULL on non-match) counts only matching rows per column. VERIFIED.
+## Q3 — 4 equal quartile groups with tier label — 4.88
+`NTILE(4) OVER (ORDER BY lifetime_spend) AS spend_quartile`
+- window.md VERIFIED: ntile(n) is a real window function; "the window frame must not be specified" (OVER with ORDER BY, no frame) — responder's form is exactly correct.
+- Bucket distribution VERIFIED: "If the number of rows in the partition does not divide evenly into the number of buckets, then the remainder values are distributed one per bucket, starting with the first bucket." Doc example 6 rows / 4 buckets → `1 1 2 2 3 4` — EARLIER buckets are larger. Responder's "some buckets one row larger" is correct; it did not over-specify which buckets, which is safe (not wrong).
+- Correctly answers the explicit "is there a function or must it be CASE WHEN?" — yes, NTILE; no hardcoded thresholds needed. Minor Completeness nicety (not a defect): to attach a TEXT tier label the engineer still wraps NTILE in a CASE (1→'Bronze' etc.) since NTILE yields 1-4 integers; responder gave the integer bucket and named it spend_quartile but did not show the integer→label CASE mapping the question's "label each with their tier" hints at. Mechanic fully correct.
 
-The offered alternative `COUNT(*) FILTER (WHERE status='trial') AS trial_count, ...` is ALSO valid Trino 467 — aggregate.md confirms: "The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a `WHERE` clause," supported for all aggregate functions. Both forms produce identical per-status counts in one row in a single pass exactly as the responder claims. This is the OPPOSITE of the broken-secondary-alternative family — the secondary form here is fully correct and genuinely more compact.
-
-### Q2 — single largest payment per customer from ARRAY column, no UNNEST
-**Accuracy 5 / Completeness 4 / Clarity 5 / Actionability 5 — avg 4.75**
-
-`array_max(payment_amounts)` VERIFIED real in 467 (array.md: `array_max(x) -> x` "Returns the maximum value of input array"; it is `array_max`, NOT `array_maximum`/fabrication). Returns one value per row, no explosion — exactly the right tool. Correctly marks the UNNEST+MAX+GROUP BY form as the inefficient/wrong-shape approach.
-
-Minor completeness note (NOT a defect, no dimension below 4): raw ArrayMaxFunction.java shows array_max returns NULL if ANY element is NULL (`if (block.isNull(position)) return null;`) and NULL on an empty array. The responder didn't surface the any-NULL-poisons-the-result caveat; on payment_amounts this is usually fine, but a customer row with a NULL in the array yields NULL largest. Not wrong, just an unstated edge.
-
-### Q3 — character position where keyword starts in a string
-**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
-
-`strpos(merchant_name, 'AMZN')` VERIFIED in string.md: `strpos(string, substring) -> bigint` "Returns the starting position of the first instance of `substring` in `string`. Positions start with `1`. If not found, `0` is returned." Responder's claims all correct: 1-based, returns 0 if not found, example `'BEST BUY AMZN LOGISTICS'` → 11 (verified: A of AMZN at position 11). The `WHERE strpos(...) > 0` filter for found rows is correct. (`position(substring IN string)` is the SQL-standard equivalent but strpos as used is fully valid.)
-
-### Q4 — bucket price into tiers without a long CASE
-**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 — avg 5.00**
-
-`width_bucket(price, ARRAY[500.0, 1000.0, 2000.0])` VERIFIED. math.md confirms the array overload `width_bucket(x, bins) -> bigint` "Returns the bin number of `x` according to the bins specified by the array `bins`." The docs do NOT state boundary semantics, so I went to RAW MathFunctions.java widthBucket(array): below the first bound → returns `0`; at/above the last bound → returns `numberOfBins` (= array length = 3 here); the binary search uses `if (operand < bin) upper = index; else lower = index + 1`, i.e. equal-to-bound advances to the HIGHER bucket = **lower-inclusive half-open intervals**.
-
-So the responder's stated semantics are EXACTLY correct, both directions:
-- bucket 0 = price < 500
-- bucket 1 = 500 <= price < 1000
-- bucket 2 = 1000 <= price < 2000
-- bucket 3 = price >= 2000
-
-The optional `CASE width_bucket(...) WHEN 0 THEN 'under 500' ...` label wrapper is correct. Note on the DECIMAL literals `ARRAY[500.0, ...]`: docs say bins "must be an array of doubles"; Trino's implicit DECIMAL→DOUBLE coercion makes the DECIMAL-literal array (and the DECIMAL `price` operand) coerce to DOUBLE, so the query runs. Stylistically `ARRAY[500e0, 1000e0, 2000e0]` or explicit casts are more literal, but this is not a defect.
+## Q4 — convert TEXT user_id to number in join — 4.88
+`JOIN users u ON CAST(e.user_id AS integer) = u.user_id`
+- conversion.md VERIFIED: CAST "can be used to cast a varchar to a numeric value type and vice versa" — a clean digit string '10482' casts successfully to integer/bigint.
+- Responder's claim that a non-numeric value like 'abc' makes the join FAIL with a conversion error (does NOT silently become NULL) is CORRECT — WebSearch confirms CAST throws on non-numeric varchar; conversion.md's TRY_CAST ("Like cast, but returns null if the cast fails") implies the contrast. Suggesting filtering bad data first is sound.
+- Completeness note (NOT an Accuracy deduction per directive): responder omitted TRY_CAST, which returns NULL instead of throwing and is often the cleaner production-safe join key when dirty rows may exist (`TRY_CAST(e.user_id AS integer)` — non-numeric → NULL → simply no join match, no query failure). Mentioning it as the robust alternative would have been ideal. CAST itself is correct, so Accuracy stays 5; the missing TRY_CAST option is a small Completeness/Actionability shortfall. Casting users.user_id direction is also viable but text→number is the cleaner call as given.
 
 ## Overall
+| Q | Accuracy | Completeness | Clarity | Actionability |
+|---|---|---|---|---|
+| 1 | 5 | 5 | 5 | 5 |
+| 2 | 5 | 5 | 5 | 5 |
+| 3 | 5 | 4.5 | 5 | 5 |
+| 4 | 5 | 4.5 | 5 | 4.5 |
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| 1 | 5 | 5 | 5 | 5 | 5.00 |
-| 2 | 5 | 4 | 5 | 5 | 4.75 |
-| 3 | 5 | 5 | 5 | 5 | 5.00 |
-| 4 | 5 | 5 | 5 | 5 | 5.00 |
+Per-question averages: Q1 5.00, Q2 5.00, Q3 4.88, Q4 4.88.
 
-**Overall average = (5.00 + 4.75 + 5.00 + 5.00) / 4 = 4.9375 → 4.94**
+**Overall average = 4.94 — PASS** (threshold 3.5, margin +1.44).
 
-**Verdict: PASS** (margin +1.44 over the 3.5 threshold).
+**Source-verified defects: ZERO.** No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary. Two minor Completeness nudges only (Q3 integer→label CASE wrapper; Q4 TRY_CAST robust alternative) — neither is a correctness error.
 
-**Source-verified defects: ZERO.** Only a single unstated edge note on Q2 (array_max NULL-poisoning), which did not lower any dimension below 4.
-
-No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary-alternative patterns present. width_bucket array boundary semantics and array_max NULL handling confirmed from RAW git-tag 467 source (dispositive over the docs, which were silent on both).
-
-RECOMMENDATION = DEFAULT NO-OP. NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1087).
+RECOMMENDATION = DEFAULT NO-OP. NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json.
