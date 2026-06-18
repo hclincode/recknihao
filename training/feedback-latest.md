@@ -1,67 +1,55 @@
-# Judge Feedback — iter1084 (2026-06-18)
+# Judge Feedback — iter1085 (2026-06-18)
 
-**Overall: 3.44 — FAIL** (threshold 3.5; overall average governs, no per-question veto — but two CRITICAL accuracy defects sank the average).
+**Overall: 4.83 / 5 — PASS** (threshold 3.5; overall average governs, no per-question veto)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions vs RAW git-tag 467 source + WebSearch. Two source-verified defects (Q2 wrong-shape + factually-wrong dismissal; Q4 invalid GROUP-BY+window). Q1/Q3 clean.
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 | 4.9 | 4.8 | 4.8 | 4.9 | 4.85 |
-| Q2 | 1.5 | 2.0 | 3.0 | 2.0 | 2.13 |
-| Q3 | 4.7 | 4.2 | 4.7 | 4.7 | 4.58 |
-| Q4 | 1.5 | 2.5 | 3.0 | 1.8 | 2.20 |
-| **Overall** | | | | | **3.44** |
+Verified BOTH directions against RAW git-tag 467 source:
+- functions/array.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
+- functions/aggregate.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
+- functions/window.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
+
+Clean sweep this iteration. The two CRITICAL iter1084 defects did NOT recur. No dialect defects found.
 
 ---
 
-## Q1 — average resolution days PER ASSIGNEE (4.85, CLEAN — aggregate-intent handled correctly)
-`SELECT assignee_id, AVG(date_diff('day', created_at, resolved_at)) AS avg_days_to_resolve FROM support_tickets WHERE resolved_at IS NOT NULL GROUP BY assignee_id;`
+## Q1 — position of 'shipped' in status_history array — **5.00**
 
-CORRECT. This time the responder WRAPPED in `AVG()` AND added `GROUP BY assignee_id`, returning exactly one average per assignee — directly closing the iter1083 Q1 missing-AVG completeness gap from a fresh angle. Verified vs RAW `functions/datetime.md`: `date_diff(unit, ts1, ts2)` returns "timestamp2 - timestamp1 expressed in terms of unit" as a whole-unit integer; 'day' is the right unit, the example `date_diff('day', DATE '2020-03-01', DATE '2020-03-02')` = 1 confirms day-count semantics. `WHERE resolved_at IS NOT NULL` correctly excludes open tickets. Aggregate-per-group intent fully handled. The aggregate-wrapping re-probe from iter1083 is CONFIRMED resolved.
+`SELECT order_id, array_position(status_history, 'shipped') AS position_of_shipped FROM orders`
 
-## Q2 — position of 'onboarding' within each row's tags array (2.13, CRITICAL DEFECT — wrong shape + factually-wrong dismissal)
-Responder: `... CROSS JOIN UNNEST(tags) WITH ORDINALITY AS t(tag, position) WHERE tag='onboarding'`, dismissing `array_position` as "NOT right here — returns only first match, duplicates collapse."
+**FIX-A REACHED / iter1084-Q2 RE-PROBE CONFIRMED RESOLVED.** array.md VERIFIED `array_position(x, element) -> bigint` "Returns the position of the first occurrence of the `element` in array `x` (or 0 if not found)" — 1-based, ONE value per input row, no explosion. Exactly the right tool for "what position does 'shipped' show up at, one number per order."
 
-**The dismissal is FACTUALLY WRONG and the recommended query is the wrong shape.** Verified vs RAW `functions/array.md`: `array_position(x, element)` "Returns the position of the first occurrence of the `element` in array `x` (or 0 if not found)" — 1-based, ONE value per input row. For the question "for each row, what position does 'onboarding' appear at (3rd element → 3)," **`array_position(tags, 'onboarding')` IS the correct per-row answer.** First-occurrence position is precisely what "what position does it appear at" means.
+Contrast iter1084 Q2, which WRONGLY dismissed `array_position` ("returns only first match, duplicates collapse") and reached for `CROSS JOIN UNNEST(...) WITH ORDINALITY ... WHERE`. This iteration the responder used `array_position` directly AND correctly stated the 1-based / 0-if-absent / one-row-per-row semantics, AND did NOT reach for UNNEST WITH ORDINALITY. The r07 L156/L158/L176/L186 array_position-vs-WITH-ORDINALITY disambiguator added in iter1084 is doing its job. Accuracy 5, Completeness 5, Clarity 5, Actionability 5.
 
-The UNNEST WITH ORDINALITY + WHERE approach is valid SQL but answers a DIFFERENT question and produces a different result shape:
-- It explodes each row's array into per-element rows, then `WHERE tag='onboarding'` DROPS every input row that does not contain 'onboarding' (the question asks for a value per row, including absent → 0).
-- A row whose tags contain 'onboarding' twice yields TWO output rows instead of one.
+## Q2 — first AND most recent login per user, one row — **4.50**
 
-CORRECT answer: `SELECT row_id, array_position(tags, 'onboarding') AS onboarding_position FROM events;` (0 when absent, first-occurrence position otherwise). The "duplicates collapse" objection is irrelevant — the question asks for the position it appears AT, which is the first occurrence. Over-engineered wrong-shape recommendation; accuracy scored LOW.
-
-## Q3 — replace 'N/A' with 'No notes provided' (4.58, CLEAN, minor completeness note)
-`SELECT replace(notes, 'N/A', 'No notes provided') AS cleaned_notes FROM customers;`
-
-CORRECT. Verified vs RAW `functions/string.md`: `replace(string, search, replace) -> varchar` "Replaces all instances of `search` with `replace` in `string`." The responder's "replaces all occurrences" note is exact. The user explicitly asked for a "simple text substitution" function, so `replace` is the right literal answer.
-
-Minor completeness note (NOT a defect): `replace` substitutes the substring ANYWHERE, so a notes value like "N/A items pending" becomes "No notes provided items pending." If the intent is to replace only the WHOLE-VALUE placeholder, `CASE WHEN notes = 'N/A' THEN 'No notes provided' ELSE notes END` or `COALESCE(NULLIF(notes,'N/A'),'No notes provided')` is more precise. Worth a one-line mention; does not invalidate the answer.
-
-## Q4 — first AND most recent timestamp PER PAGE in one query (2.20, CRITICAL DEFECT — invalid GROUP-BY + window)
-Responder: `SELECT page, first_value(timestamp) OVER (PARTITION BY page ORDER BY timestamp) AS first_timestamp, last_value(timestamp) OVER (PARTITION BY page ORDER BY timestamp ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_timestamp FROM page_views GROUP BY page;`
-
-**INVALID — does not run.** With `GROUP BY page`, every SELECT expression must be either a grouping key or wrapped in an aggregate. The window functions reference the RAW `timestamp` column, which after GROUP BY is neither a grouping key nor aggregated. Window functions are evaluated AFTER GROUP BY/HAVING over the grouped relation, so `first_value(timestamp)`/`last_value(timestamp)` over the ungrouped raw column raises `'timestamp' must be an aggregate expression or appear in GROUP BY clause` (verified vs SELECT semantics — under GROUP BY, output expressions must be aggregates or grouping columns; window funcs run post-aggregation).
-
-CORRECT and simplest answer — the pure aggregate, NO window functions, NO GROUP BY conflict:
 ```sql
-SELECT page, MIN(timestamp) AS first_timestamp, MAX(timestamp) AS last_timestamp
-FROM page_views
-GROUP BY page;
+SELECT DISTINCT user_id,
+  FIRST_VALUE(login_at) OVER (PARTITION BY user_id ORDER BY login_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS first_login,
+  LAST_VALUE(login_at) OVER (PARTITION BY user_id ORDER BY login_at
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS most_recent_login
+FROM logins
 ```
-The user even offered the right fork ("a window function ... or two aggregations?") — two aggregations (MIN/MAX) is the answer. The responder's standalone note that `last_value` needs the `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` full frame is correct in ISOLATION (default frame is RANGE ... CURRENT ROW, which would only reach the current row), but it is moot because the GROUP BY + window-over-raw-column combination is invalid. Accuracy scored LOW.
+
+**VALID — iter1084-Q4 INVALID PATTERN DID NOT RECUR.** The iter1084 Q4 failure was window functions MIXED WITH a `GROUP BY` (analyzer error: raw column "must be an aggregate or appear in GROUP BY"). This query has NO GROUP BY — window functions evaluate per row over the full partition, then `SELECT DISTINCT` collapses the identical per-user rows. No analyzer error; returns the correct earliest/latest login per user. window.md VERIFIED first_value/last_value exist; the explicit full frame `UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` correctly forces first_value=earliest and (critically) last_value=latest — the explicit full frame is exactly what defeats last_value's default-frame trap.
+
+NOT a defect. Minor Completeness/optimality note only: the cleaner canonical is `SELECT user_id, MIN(login_at) AS first_login, MAX(login_at) AS most_recent_login FROM logins GROUP BY user_id` — one pass, no window, no DISTINCT. The window+DISTINCT form is correct but more verbose and does two window sorts + a distinct. Accuracy 5, Completeness 4 (didn't surface the simpler MIN/MAX GROUP BY fork), Clarity 4.5, Actionability 4.5.
+
+## Q3 — running cumulative revenue total — **4.94**
+
+`SUM(total_revenue) OVER (ORDER BY report_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_revenue`
+
+Textbook-correct running total. window.md VERIFIED SUM is usable as a window function; the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` frame produces a cumulative total up to and including each row (and correctly avoids the RANGE-frame tie-lumping trap, matching the r07 L1796 ROWS-vs-RANGE guard). Outer ORDER BY report_date for stable display. Clean. Accuracy 5, Completeness 5, Clarity 5, Actionability 4.75.
+
+## Q4 — comma-separated assignee names per team — **4.88**
+
+`listagg(assignee_name, ', ') WITHIN GROUP (ORDER BY assignee_name) AS assignees ... GROUP BY team_id`
+
+aggregate.md VERIFIED `LISTAGG(expression [, separator]) WITHIN GROUP (ORDER BY ...)` exists in 467, "returns the concatenated input values, separated by the separator string." WITHIN GROUP (ORDER BY) is the required/correct syntax. The responder did NOT use DISTINCT — correct, since listagg has NO DISTINCT support (a `DISTINCT` would parse-error; dedup would require `array_join(array_agg(DISTINCT ...), ', ')`). Clean. Accuracy 5, Completeness 4.75 (could have noted the dedup fork if duplicates per team are expected), Clarity 5, Actionability 5.
 
 ---
 
-## Source-verified dialect notes
-- `array_position(x, element)` — first occurrence, 1-based, 0 if absent, ONE value per row. RAW: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md  → **Q2: array_position(tags,'onboarding') is the correct per-row answer; the responder's dismissal was wrong; UNNEST WITH ORDINALITY + WHERE is a wrong-shape different-question answer.**
-- `replace(string, search, replace)` replaces ALL instances of the substring. RAW: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/string.md
-- `date_diff('day', ts1, ts2)` = whole-day count, ts2 - ts1. RAW: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
-- **Q4: GROUP BY + window-over-raw-ungrouped-column is INVALID; the correct form is `MIN(timestamp)`/`MAX(timestamp)` with `GROUP BY page` (no window functions).** Verified vs SELECT/GROUP BY semantics (window funcs evaluate after GROUP BY over the grouped relation): https://trino.io/docs/current/sql/select.html
+## Verdict
 
-## Recommendation
-FAIL at 3.44 (−0.06). Two distinct CRITICAL defects, both in the over-engineering/wrong-fork family but here they are the PRIMARY recommended answers, not asides:
-- **Q2** is the more concerning: responder ACTIVELY DISMISSED the correct simple built-in (`array_position`) with a false rationale and substituted a wrong-shape UNNEST. This is the OPPOSITE of the usual "nails the lead, appends a broken alt" pattern — here the lead itself is wrong. Re-probe "position of an element within an array" from a 2nd angle (e.g. integer array, or explicitly "return 0 if not present") to check whether the responder reaches for `array_position`. If it recurs, have the teacher grep resources for any content that steers element-position questions toward UNNEST WITH ORDINALITY over array_position — this may be a findability/resource root cause, not a pure responder slip.
-- **Q4** GROUP-BY + window-over-raw-column is a recurring confusion family (cf. iter1013 ORDER-BY-ungrouped). The MIN/MAX-vs-window fork was handed to the responder and it picked the wrong, non-running fork. Re-probe a "first AND last value per group" Q to confirm the responder reaches for MIN/MAX (or a clean window form in a subquery WITHOUT a conflicting GROUP BY).
-
-MUST NOT bump state.json (teacher already did).
+Overall 4.83 PASS, margin +1.33. Both critical iter1084 re-probes confirmed clean: Q1 array_position FIX-A reached, Q2 window+DISTINCT confirmed VALID (no GROUP-BY-mixing analyzer error). No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary patterns. RECOMMENDATION = DEFAULT NO-OP; no resource edit; no commit beyond the score line. MUST NOT bump state.json (already 1085).
