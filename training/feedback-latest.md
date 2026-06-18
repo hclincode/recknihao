@@ -1,67 +1,72 @@
-# Judge Feedback — iter1061 (2026-06-18)
+# Judge Feedback — iter1062 (2026-06-18)
 
-Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-All facts verified BOTH directions against RAW git-tag 467 source + trino.io/docs.
+**Stack:** Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
+**Verification:** BOTH directions vs RAW git-tag 467 source + trino.io/docs + WebSearch. Scored against real Trino 467 behavior, NOT resources/.
 
-## Overall: 4.13 PASS (overall avg governs; no per-question veto)
+## Per-question scores
 
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 element_at vs subscript | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 RANK gaps vs DENSE_RANK | 5 | 4.875 | 5 | 5 | 4.969 |
-| Q3 "every row in group" check | 1 | 1.5 | 3 | 1 | 1.625 |
-| Q4 width_bucket bucketing | 5 | 4.75 | 5 | 5 | 4.938 |
+| Q1 bool_and "every row in group satisfies X" | 5.0 | 4.875 | 4.875 | 5.0 | 4.9375 |
+| Q2 integer / and % split dollars/cents | 4.9375 | 4.875 | 4.9375 | 4.9375 | 4.921875 |
+| Q3 element_at vs [] subscript safe map read | 5.0 | 4.9375 | 4.9375 | 5.0 | 4.96875 |
+| Q4 running total over ORDER BY order_date | 4.9375 | 4.9375 | 4.875 | 4.9375 | 4.921875 |
 
-Overall = (5.00 + 4.969 + 1.625 + 4.938) / 4 = **4.133 PASS**
+**Overall average = (4.9375 + 4.921875 + 4.96875 + 4.921875) / 4 = 4.9375**
 
----
+**VERDICT: PASS (4.9375 >> 3.5). Margin +1.4375.**
 
-## Q1 — Safe map key lookup (5.00)
-CORRECT and verified. `element_at(map, key)` "Returns value for given key, or NULL if the key is not contained in the map" — the `[]` subscript operator "throws an error if the key is not contained in the map" (both quoted from map.md). COALESCE fallback is the idiomatic next step. Textbook.
-Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+## Q1 — bool_and routing CONFIRMED CORRECT (iter1061 all_match mis-route is FIXED)
 
-## Q2 — RANK with gaps after ties (4.969)
-CORRECT and verified. `rank()`: "tie values in the ordering will produce gaps in the sequence" (matches the user's "two tie for 2nd → next is 4th"). `dense_rank()`: "tie values do not produce gaps." `row_number()`: unique sequential. The pre-aggregated `SUM(amount) ... GROUP BY region, customer_id` subquery feeding `RANK() OVER (PARTITION BY region ORDER BY total_revenue DESC)` is the correct structure. Minor completeness ding only (no NULLS-ordering aside, not required).
-Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
+`SELECT pricing_plan, bool_and(payment_verified) AS all_verified FROM subscriptions GROUP BY pricing_plan` is the textbook-correct routing for "did EVERY ROW in a group satisfy X."
 
-## Q3 — "Does EVERY user on the plan have 'audit_log'?" (1.625) — CRITICAL DEFECT
-**VERDICT: BOTH responder HAVING forms are INVALID Trino 467.**
+Verified against RAW aggregate.md:
+- `bool_and(boolean) -> boolean` EXISTS and "Returns TRUE if every input value is TRUE, otherwise FALSE."
+- bool_and is NOT in the documented NULL-non-ignoring exception list (count, count_if, max_by, min_by, approx_distinct) → it IGNORES NULLs.
+- All-NULL group / empty group → returns NULL (not FALSE). The responder explicitly called this out and prescribed `COALESCE(bool_and(...), false)` to force FALSE — accurate and a genuinely useful nuance for a SaaS billing query.
 
-The query is `... GROUP BY plan_type HAVING all_match(ARRAY['audit_log'], x -> contains(feature_flags, x))` (and the `array_except` alternative). Both reference `feature_flags` — a per-ROW column that is NEITHER a grouping key (only `plan_type` is grouped) NOR wrapped in an aggregate. In a GROUP BY query, every column in HAVING must be a grouping column or inside an aggregate; a raw non-grouped column raises:
+This is exactly the boolean-aggregate the prior iteration MISSED. iter1061 Q3 (1.625) wrongly reached for `all_match(ARRAY[...], x->contains(feature_flags,x))` inside a GROUP BY HAVING, referencing an ungrouped per-row column — a planner error and a category confusion (all_match tests all ELEMENTS of ONE array; bool_and tests all ROWS in a group). The responder has now correctly routed a "did all rows satisfy X" question to bool_and. The bool_and/bool_or gap from iter1061 is closed for this angle.
 
-> 'feature_flags' must be an aggregate expression or appear in GROUP BY clause
+Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
 
-Confirmed against Trino HAVING semantics (issue #26915 + the standard GROUP-BY scope rule, which extends the SELECT-list rule to HAVING). The array helper functions themselves (`all_match`, `contains`, `array_except`, `cardinality`) DO exist in 467 — but the construct as written never typechecks. The responder confused a row-level array predicate with a group-level "all rows satisfy X" aggregation.
+## Q2 — integer division + modulus CONFIRMED CORRECT
 
-**The CORRECT construct** for "did every row in the group satisfy a predicate" is the boolean aggregate **`bool_and`** (verified present in 467 aggregate.md: "Returns TRUE if every input value is TRUE, otherwise FALSE"):
+`amount_cents / 100 AS dollars, amount_cents % 100 AS cents` (1999 → 19, 99) is correct.
+- Trino 467 integer `/` performs truncation TOWARD ZERO (Java/C semantics), so 1999/100 = 19 (verified math.md "Division (integer division performs truncation)" + WebSearch confirming toward-zero, e.g. -1999/100 = -19 not -20).
+- `%` modulus works on integers: 1999 % 100 = 99 (math.md operator table; equivalent `mod(n,m)`).
+- "No casting needed" is correct since amount_cents is already an integer column.
+- NOTE (not a defect): this is distinct from CAST(double/decimal AS integer) which ROUNDS half-up — the responder correctly used the `/` and `%` operators (truncate), not a cast, so no rounding trap here.
 
-```
-SELECT plan_type
-FROM users
-GROUP BY plan_type
-HAVING bool_and(contains(feature_flags, 'audit_log'))
-```
-
-(`bool_and(all_match(ARRAY['audit_log'], x -> contains(feature_flags, x)))` is an equivalent over-engineered variant for a multi-flag requirement.) `bool_and` is the canonical SQL tool for the universal-quantifier-over-group pattern; `bool_or` is its existential counterpart.
-
-Scoring: Accuracy 1 (does not run), Completeness 1.5 (the actual answer — bool_and — is absent), Clarity 3 (prose is clear, code is wrong), Actionability 1 (engineer who copies either form hits a planner error).
-
-Sources:
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md (bool_and / bool_or)
-- https://github.com/trinodb/trino/issues/26915 (HAVING scope / must-be-grouped-or-aggregate)
-
-## Q4 — Bucket subscriptions by days-lasted (4.938)
-CORRECT and verified. `width_bucket(x, bins_array)` exists in 467 math.md ("Returns the bin number of x according to the bins specified by the array bins ... sorted ascending"). With `ARRAY[30.0, 90.0, 180.0]` (3 boundaries) the result is buckets 0..3: 0=<30, 1=[30,90), 2=[90,180), 3=>=180 — matches the requested 0-30 / 31-90 / 91-180 / over-180 bands (half-open semantics fine). `COALESCE(cancelled_at, current_date)` correctly substitutes today's date for still-active subscriptions so they keep accruing duration. Wrapping labels in a CASE/CTE is the right readability step. Minor completeness ding only (didn't note bins must be doubles — but the literals are already `30.0` doubles, so handled implicitly).
 Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/math.md
 
----
+## Q3 — element_at vs [] subscript CONFIRMED CORRECT (both directions)
 
-## Source-verified dialect notes this iteration
-- `element_at(map,key)` → NULL on miss; `map[key]` subscript → throws on miss. (map.md, both directions confirmed)
-- `rank()` produces gaps after ties; `dense_rank()` does not; `row_number()` always unique. (window.md)
-- `bool_and(boolean)` / `bool_or(boolean)` exist in 467 — the correct group-level universal/existential quantifier tools. (aggregate.md)
-- `width_bucket(x, array)` exists; n boundaries → buckets 0..n, lower-inclusive half-open. (math.md)
-- **HAVING rule (Q3 root):** a raw non-grouped column in HAVING is a planner error in 467. This is the recurring "row-predicate masquerading as a group-predicate" trap — the boolean-aggregate (`bool_and`) is the fix, not an array helper inside HAVING.
+Verified RAW map.md:
+- `element_at(map, key)`: "Returns value for given key, or NULL if the key is not contained in the map."
+- `[]` subscript: "This operator throws an error if the key is not contained in the map."
 
-## Recommendation for teacher
-Q3 is a genuine ACCURACY defect, not responder padding: the LEAD answer itself is invalid. Check whether resources teach the **`bool_and`/`bool_or` "every/any row in the group satisfies X" pattern** with a findable keyword anchor (e.g. "for each group, did ALL rows..."). If `all_match`/`array_except` are documented for ALL-of-set membership but `bool_and` is NOT cross-referenced for the across-rows-in-a-group case, the responder will keep reaching for the array helper inside HAVING. Recommend a LIGHT additive card: route "every/all USERS/ROWS in a group satisfy X" → `bool_and(predicate)`; explicitly contrast with the row-level array `all_match` (all ELEMENTS of one array). Re-probe Q3 from a second angle (e.g. "every order in each region was paid") next sweep before considering it closed.
+The responder's `element_at(properties,'some_key')` + `COALESCE(element_at(...),'unknown')` default is the canonical safe-read idiom for sparse maps. Both directions match the documented behavior exactly. Mirrors iter1060 Q4 / iter1061 Q1 — element_at safety is a durable strength.
+
+Source: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+
+## Q4 — running total + DEFAULT RANGE frame CONFIRMED CORRECT
+
+Both forms are valid Trino 467 and the responder's framing of the difference is accurate.
+
+(a) `SUM(revenue) OVER (ORDER BY order_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` — valid explicit ROWS frame, gives a true ROW-LEVEL running total (each physical row gets the cumulative sum up to and including itself).
+
+(b) DEFAULT-frame claim VERIFIED: select.md states the default when ORDER BY is present without an explicit frame is "RANGE UNBOUNDED PRECEDING, which is the same as RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW." A RANGE frame includes "all rows from the start of the partition up to the last peer of the current row" — so rows sharing the same order_date (peers) ALL receive the same cumulative value. The responder's description ("omit the frame and let Trino use its default RANGE frame ... all show the same cumulative value") is exactly right.
+
+(c) No GROUP BY conflict — the query does not aggregate, it is a pure window function over base rows. This is the LEGITIMATE row-level/peer-level running-total reading, NOT the invalid "SUM(x) OVER beside GROUP BY day" anti-pattern. PARTITION BY tenant_id for the multi-tenant case is a correct and on-stack bonus.
+
+Sources:
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
+
+## Anti-pattern scan (all clean)
+
+No `::` cast, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash trap, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no over-warning folklore, no broken-secondary alternative. Every secondary form offered (COALESCE wrap, default-frame variant, PARTITION BY) is valid.
+
+## Recommendation
+
+DEFAULT NO-OP (margin +1.4375). The iter1061 bool_and/bool_or gap is now closed from a second angle (this Q1 is the "every row satisfies X" boolean-aggregate routing the prior iter missed). No resource edit; no commit needed. MUST NOT bump state.json (teacher already at 1062).

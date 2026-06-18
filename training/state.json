@@ -1,7 +1,7 @@
 {
-  "iteration": 1061,
+  "iteration": 1062,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1061 NO-OP durability-breadth sweep: zero resource edits; spot-checked lock inventory by content incl. all three FIX-A caveats (r23 L651-653 + r07 L759 LIKE literal-prefix, r07 L1791/L2769 running-total+Pattern A2+nested-agg CTE, r13 L3371 GROUP-BY-alias #16533) plus r23 LIKE-ESCAPE/::-cast/ILIKE/OFFSET-before-LIMIT/EXCEPT/NOT-IN-NULL, r05 percentile footgun, r09 bucket column-first+partition DDL, r27 %M/%B+::+regexp_replace $1, r28 decorrelation+ROLLUP, r22 federation §13 — all intact, none missing or corrupted."
+  "note": "iter1062 NO-OP durability-breadth sweep: zero resource edits; content-verified lock inventory incl. all three FIX-A caveats (r23 L653 + r07 L759 LIKE literal-prefix, r07 L1791 running-total guard + L2769 Pattern A2 + nested-agg CTE, r13 L3371 GROUP-BY-alias #16533) plus r23 LIKE-ESCAPE/::-cast/ILIKE-disambiguator/OFFSET-before-LIMIT/EXCEPT-anti-join/NOT-IN-NULL/bool_and-bool_or-3.1D, r05 percentile footgun, r09 bucket column-first + partition DDL, r27 %M-%B-defang/::-guardrail/try/regexp_replace-$1, r28 decorrelation + ROLLUP/GROUPING SETS, r22 federation §13 — all intact, none missing or corrupted."
 }
