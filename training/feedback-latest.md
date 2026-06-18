@@ -1,56 +1,55 @@
-# Judge Feedback — iter1056
+# Judge Feedback — iter1057
 
-**Overall: 4.914 PASS** (Q1 4.875 / Q2 4.9375 / Q3 4.9375 / Q4 4.90625) — margin +1.414
+**Phase**: extended (passed already true). Overall governs; NO per-question veto. Federation NOT probed (hard-locked).
 
-Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...) AND trino.io/docs/467 — NOT resources/. RAW git-tag dispositive.
-
-Production-stack fit: all four are pure Trino-467 SQL questions (analytical query patterns), fully compatible with the on-prem Trino 467 + Iceberg + Hive Metastore stack in prod_info.md. No auth/authz/federation surface touched.
+All four answers verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/...), not resources/.
 
 ---
 
-## Q1 — count starts per month by plan_type, sort month DESC + plan_type ASC — 4.875
+## Q1 — comma-separated list of all plan names per customer; built-in?
 
-`SELECT DATE_TRUNC('month', started_at) AS month, plan_type, COUNT(*) AS subscription_count FROM subscriptions GROUP BY DATE_TRUNC('month', started_at), plan_type ORDER BY DATE_TRUNC('month', started_at) DESC, plan_type ASC`
+**Score: Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 → 4.875**
 
-- **Verified (select.md):** ORDER BY supports multiple keys each with its own direction — synopsis `ORDER BY expression [ ASC | DESC ] [ NULLS {FIRST|LAST} ] [, ...]`. The mixed `DATE_TRUNC(...) DESC, plan_type ASC` is valid Trino. ✔
-- **Verified (select.md):** GROUP BY "may contain any expression composed of input columns" — repeating `DATE_TRUNC('month', started_at)` in GROUP BY (not the `month` alias) is the CORRECT form. GROUP BY does NOT resolve SELECT aliases (#16533 family) — responder correctly repeated the expression rather than `GROUP BY month`. ✔
-- **Verified (datetime.md):** `date_trunc('month', x)` returns first-day-of-month at midnight. Grouping months by truncation is sound. ✔
-- Newest-first + alphabetical-within-month satisfied exactly. No defect.
+- LEAD: `listagg(plan_name, ', ') WITHIN GROUP (ORDER BY plan_name) ... GROUP BY customer_id`.
+  VERIFIED: `aggregate.md` documents `LISTAGG(expression [, separator] [ON OVERFLOW ...]) WITHIN GROUP (ORDER BY sort_item, ...)` — exists, syntax exact, IS the direct built-in comma-list builder. Correct answer to "built-in function?" = yes, `listagg`.
+- DEDUP ALT: `array_join(array_agg(DISTINCT plan_name ORDER BY plan_name), ', ')`.
+  VERIFIED: `array_join` (array.md, "Concatenates the elements ... Null elements are omitted"); `array_agg(x ORDER BY y)` ordering supported; `DISTINCT` inside aggregates is standard Trino set-quantifier. This is the CORRECT dedup path because — verified — **`listagg` does NOT support DISTINCT** (no DISTINCT in its synopsis). The question ("all plan names a customer has EVER been on") implies dedup, so the `array_join(array_agg(DISTINCT ...))` form is the more on-point answer.
+- The responder explicitly noted "use DISTINCT if a customer may have the same plan multiple times" and showed DISTINCT in the array_agg form — adequately steered to dedup. Minor clarity ding only: the listagg LEAD as written would emit duplicate plan names for a repeated plan, and the duplicate caveat is attached more to the secondary form than foregrounded on the lead. Not an accuracy defect; both forms are valid Trino. No false claim that listagg supports DISTINCT (it doesn't, and the responder did not claim it does).
 
-## Q2 — users with AT LEAST ONE feature_flag starting with literal "beta_" — 4.9375
+## Q2 — every day in range appears with count 0 (gap-fill)
 
-`WHERE any_match(feature_flags, flag -> starts_with(flag, 'beta_'))`
-plus JSON-string-column note: `any_match(CAST(json_parse(feature_flags) AS ARRAY(VARCHAR)), flag -> starts_with(flag,'beta_'))`
+**Score: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → 5.0**
 
-- **Verified (array.md):** `any_match(array(T), function(T,boolean)) -> boolean` returns true if ≥1 element matches the predicate — exactly the "at least one flag" semantics. ✔
-- **Verified (string.md):** `starts_with(string, substring) -> boolean` is a LITERAL prefix test, NO wildcards. So `starts_with(flag, 'beta_')` correctly matches the literal underscore — NOT a wildcard. This is the dialect-correct way to match a literal `beta_` prefix. ✔
-- **Verified (json.md):** `json_parse(string)` returns a JSON value; CAST to `ARRAY(VARCHAR)` is supported for homogeneous string arrays. The bonus note for a JSON-string-typed column is sound and genuinely useful. ✔
-- **Q2 BROKEN-SECONDARY LIKE DID NOT RECUR — 4th CONSECUTIVE CLEAN RE-PROBE (streak fully reversed).** The responder offered NO bare `LIKE 'beta_%'` "if you prefer" alternative. The escalation watch from iter1051 (2nd-occ `LIKE 'promo_%'` aside) and iter1037 is now reversed across iter1053 / iter1054 / iter1055 / iter1056 — four clean literal-prefix re-probes in a row. The FIX-A pair (r23 §653 LIKE literal-`_`/`%` + r07 ~L759 filter-lambda literal-prefix) is DURABLE; the bare-`LIKE 'X_%'`-as-equivalent secondary is NOT recurring. Watch stays CLOSED/passive. No 3rd-occurrence escalation trigger fired. Best answer of the set.
+- `UNNEST(sequence(DATE '2026-01-01', current_date, INTERVAL '1' DAY)) AS d(day) LEFT JOIN (daily aggregate) e ON e.day = d.day`, `COALESCE(e.event_count, 0)`, `ORDER BY d.day`.
+  VERIFIED: array.md documents `sequence(start, stop, step) -> array(date)` with step `INTERVAL DAY TO SECOND` (or YEAR TO MONTH); inclusive of both ends. UNNEST `AS d(day)` confirmed (select.md). LEFT JOIN + COALESCE(...,0) is the canonical gap-fill. `date_trunc('day', event_time)` day-bucket correct.
+- Framing "Trino equivalent of Postgres `generate_series`" is ACCURATE — verified NO `generate_series` in Trino 467; `sequence()` + `UNNEST` is the idiom. Excellent OLTP→OLAP translation cue for a Postgres-background engineer.
 
-## Q3 — average session length in MINUTES, only valid ended_at — 4.9375
+## Q3 — all flags in enabled list, no unnesting
 
-`SELECT AVG(CAST(DATE_DIFF('second', started_at, ended_at) AS DOUBLE) / 60) AS avg_session_minutes FROM sessions WHERE ended_at IS NOT NULL` + an `AVG(...) FILTER (WHERE ended_at IS NOT NULL)` variant.
+**Score: Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 → 4.875**
 
-- **Verified (datetime.md):** `date_diff('second', a, b)` returns `bigint`, complete-units (truncating, drops fractional). Casting to DOUBLE then `/60` yields FRACTIONAL minutes — strictly MORE precise than `date_diff('minute', ...)` which would drop the partial minute (complete-units). Good choice for an average. ✔
-- **Verified (aggregate.md):** AVG "does not include null values in the count" — NULL `ended_at` rows are ignored by AVG; the explicit `WHERE ended_at IS NOT NULL` is defensively redundant and correct (also prunes the date_diff input). ✔
-- **Verified (aggregate.md):** the `FILTER (WHERE ...)` clause "is supported for all aggregate functions" — the FILTER variant is a legitimate equivalent. ✔
-- Fully addresses "only valid ended_at" two ways. No defect.
+- LEAD: `cardinality(array_except(feature_flags, enabled_flags)) = 0` wrapped in CASE→true/else→false.
+  VERIFIED: array.md — `array_except(x, y)` = "elements in x but not in y, without duplicates"; empty ⇒ all of `feature_flags` ⊆ `enabled_flags` = all flags enabled. Argument order correct (flags-not-in-enabled). `cardinality` confirmed.
+- ALT: `all_match(feature_flags, f -> contains(enabled_flags, f))`.
+  VERIFIED: `all_match` ("all elements match the predicate") + `contains` ("true if array x contains element"). Equivalent, arguably the cleaner direct expression of "ALL flags in enabled list." Both satisfy "without unnesting."
+- Minor clarity ding: `CASE WHEN cond THEN true ELSE false END` is redundant verbosity — `cond` is already boolean. Valid, just not idiomatic. No accuracy impact.
 
-## Q4 — total revenue per customer formatted "$1,234.56" (amount = integer cents) — 4.90625
+## Q4 — per-country top-3 customers by total order amount
 
-`SELECT customer_id, format('$%,.2f', SUM(amount) / 100.0) AS total_revenue FROM orders GROUP BY customer_id`
+**Score: Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → 5.0**
 
-- **Verified (conversion.md):** `format()` follows java.util.Formatter; doc example `format('%,.2f', 1234567.89)` → `'1,234,567.89'`. `%,.2f` = comma grouping + 2 decimals. The `$` literal prefix in the format string is fine. → `"$1,234.56"` exactly. ✔
-- **Verified (types.md):** undecorated `100.0` is a DECIMAL literal (only scientific notation like `1.03e1` is DOUBLE). `SUM(amount)` is bigint; `bigint / DECIMAL` → DECIMAL (mixed numeric arithmetic). `%,.2f` consumes the DECIMAL (the doc example's `1234567.89` is itself a DECIMAL literal), so NO cast-to-DOUBLE is needed and there is no float-rounding hazard. ✔
-- GROUP BY customer_id → one row per customer. ✔
-- Cents-to-dollars handled by `/100.0` (DECIMAL division, exact). Implicitly answers "SQL-side or app" by formatting SQL-side; a brief note that locale-aware currency formatting is often left to the app layer would have been the only marginal addition — not materially dinged.
+- Innermost: `SUM(amount) AS total_amount ... GROUP BY country, customer_id`. Middle: `ROW_NUMBER() OVER (PARTITION BY country ORDER BY total_amount DESC NULLS LAST)` over the already-aggregated plain column. Outer: `WHERE rn <= 3 ORDER BY country, rn`.
+  VERIFIED NO NESTING ISSUE: `total_amount` is a plain column of the aggregation subquery, NOT a nested aggregate or nested window argument. ROW_NUMBER ranks the aggregated rows — this is the canonical, fully-valid top-N-per-group pattern. `NULLS LAST` is harmless/defensive. WHERE on `rn` correctly placed in the outer query (can't filter on the window alias in the same level). Per-country isolation via PARTITION BY country is exactly right.
+- ROW_NUMBER gives exactly 3 per country (ties broken arbitrarily) — a reasonable default for "top 3"; RANK/DENSE_RANK would include ties. Not dinged; ROW_NUMBER is the standard reading of "top 3."
 
 ---
 
-## Cross-cutting clean checks
+## Source-verified defect check
 
-No `::`-cast, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash trap, no INTERVAL quarter/week, no OFFSET-after-LIMIT, no over-warning folklore, no broken-secondary padding. All four leads are runnable Trino 467.
+- listagg-DISTINCT: NO defect. listagg correctly used WITHOUT claiming DISTINCT support; dedup correctly routed to `array_join(array_agg(DISTINCT ...))`. Both verified against aggregate.md/array.md.
+- Q4 window-over-aggregate nesting: NO defect. Pre-aggregate-then-rank, no nested window/aggregate arg. Verified canonical.
+- No `::`-cast misuse / QUALIFY / false semi-join / fabricated function / regex-backslash / INTERVAL quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary alternative this iter. The recurring "broken secondary alternative" pattern did NOT appear — both secondary forms (Q1 array_join, Q3 all_match) are fully valid.
 
-## Recommendation — DEFAULT NO-OP
+## Recommendation
 
-Margin +1.414 over the 3.5 threshold. No source-verified resource defect. No 2+-consecutive same-shape slip — the only standing watch (Q2 broken-secondary LIKE) is now 4-in-a-row CLEAN and reversed, not advancing. Do NOT churn resources. No commit/push. Do NOT bump state.json (already 1056).
+**DEFAULT NO-OP.** Overall 4.9375, margin +1.4375 above 3.5. Zero source-verified resource defects; no 2+-consecutive same-shape slip. NO resource edit; NO commit; do NOT bump state.json (already 1057). Continue breadth probing on bulletproofed (non-federation) angles.
