@@ -1,41 +1,52 @@
-# iter1088 Judge Feedback — 2026-06-18
+# Judge Feedback — iter1089 (2026-06-18)
 
-Verified BOTH directions vs RAW git-tag 467 source (functions/json.md, functions/math.md, functions/window.md, functions/conversion.md) + WebSearch on CAST/TRY_CAST throw-vs-null semantics. Clean sweep; ZERO source-verified defects.
+Verified BOTH directions against RAW git-tag 467 source (functions/math.md, functions/window.md, functions/aggregate.md, functions/map.md, sql/select.md). Clean sweep; ZERO source-verified defects.
 
-## Q1 — extract JSON field as plain text — 5.00
-`json_extract_scalar(metadata, '$.warehouse') AS warehouse`
-- json.md VERIFIED: `json_extract_scalar(json, json_path) -> varchar` — "Like json_extract, but returns the result value as a string (as opposed to being encoded as JSON). The value referenced by json_path must be a scalar (boolean, number or string)." Doc example `json_extract_scalar(json, '$.store.book[0].author')` confirms a varchar-JSON column is accepted directly (no explicit CAST/JSON parse) and that `'$.warehouse'` top-level jsonpath is valid.
-- Returns varchar = the requested PLAIN TEXT (json_extract would return JSON-encoded string with quotes; scalar is the correct choice). Returns NULL on missing path — graceful.
-- `$.parent.child` nested-path note correct; WHERE-clause filter example correct (varchar='LAX' comparison valid). Accuracy/Completeness/Clarity/Actionability all 5.
+## Q1 — round cost_price UP to next full dollar (4.25→5, 12.80→13, 7.00→7)
+**Answer:** `ceil(cost_price) AS price_rounded_up`; notes lowercase `ceil()` (also `ceiling()`).
 
-## Q2 — absolute difference of two prices — 5.00
-`abs(final_price - list_price) AS price_difference`
-- math.md VERIFIED: `abs(x)` "Returns the absolute value of x", type-preserving over numeric types. Trivially correct; subtraction order is irrelevant under abs, always non-negative. Engineer knows exactly what to do. All 5.
+- **Accuracy: 5** — RAW math.md VERIFIED: `ceiling(x) -> [same as input]` "Returns x rounded up to the nearest integer", and `ceil(x)` "This is an alias for ceiling". Rounds toward +infinity (up), so 4.25→5, 12.80→13, and 7.00 stays 7.00 (already whole). Return type is same-as-input (decimal in → decimal out), so the value is the rounded-up whole number expressed as decimal — value-correct for every example given. `ceil` and `ceiling` both exist and are aliases; lowercase note correct.
+- **Completeness: 5** — Directly answers; covers both alias names. Could note return type is decimal (display still `5.00` not `5`), but the VALUE is exactly what was asked.
+- **Clarity: 5** — Walks all three example values through the function. Zero assumed knowledge.
+- **Actionability: 5** — Drop-in SQL.
+- **Avg: 5.00**
 
-## Q3 — 4 equal quartile groups with tier label — 4.88
-`NTILE(4) OVER (ORDER BY lifetime_spend) AS spend_quartile`
-- window.md VERIFIED: ntile(n) is a real window function; "the window frame must not be specified" (OVER with ORDER BY, no frame) — responder's form is exactly correct.
-- Bucket distribution VERIFIED: "If the number of rows in the partition does not divide evenly into the number of buckets, then the remainder values are distributed one per bucket, starting with the first bucket." Doc example 6 rows / 4 buckets → `1 1 2 2 3 4` — EARLIER buckets are larger. Responder's "some buckets one row larger" is correct; it did not over-specify which buckets, which is safe (not wrong).
-- Correctly answers the explicit "is there a function or must it be CASE WHEN?" — yes, NTILE; no hardcoded thresholds needed. Minor Completeness nicety (not a defect): to attach a TEXT tier label the engineer still wraps NTILE in a CASE (1→'Bronze' etc.) since NTILE yields 1-4 integers; responder gave the integer bucket and named it spend_quartile but did not show the integer→label CASE mapping the question's "label each with their tier" hints at. Mechanic fully correct.
+## Q2 — monthly_active_users running "peak so far" per row in date order
+**Answer:** `MAX(monthly_active_users) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak_so_far`.
 
-## Q4 — convert TEXT user_id to number in join — 4.88
-`JOIN users u ON CAST(e.user_id AS integer) = u.user_id`
-- conversion.md VERIFIED: CAST "can be used to cast a varchar to a numeric value type and vice versa" — a clean digit string '10482' casts successfully to integer/bigint.
-- Responder's claim that a non-numeric value like 'abc' makes the join FAIL with a conversion error (does NOT silently become NULL) is CORRECT — WebSearch confirms CAST throws on non-numeric varchar; conversion.md's TRY_CAST ("Like cast, but returns null if the cast fails") implies the contrast. Suggesting filtering bad data first is sound.
-- Completeness note (NOT an Accuracy deduction per directive): responder omitted TRY_CAST, which returns NULL instead of throwing and is often the cleaner production-safe join key when dirty rows may exist (`TRY_CAST(e.user_id AS integer)` — non-numeric → NULL → simply no join match, no query failure). Mentioning it as the robust alternative would have been ideal. CAST itself is correct, so Accuracy stays 5; the missing TRY_CAST option is a small Completeness/Actionability shortfall. Casting users.user_id direction is also viable but text→number is the cleaner call as given.
+- **Accuracy: 5** — RAW window.md VERIFIED "All aggregate functions can be used as window functions by adding the OVER clause"; MAX is an aggregate so MAX-as-window is valid. select.md VERIFIED the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`; the responder's explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the standard explicit running-window form, and `ROWS` (vs default `RANGE`) is actually PREFERRED here because it avoids peer-tie lumping on duplicate event_dates. Computes the correct running maximum from partition start through the current row.
+- **Completeness: 5** — Answers the window-vs-subquery framing implicitly by giving the window form, which is the right tool (a correlated self-join subquery would be O(N^2)). No PARTITION BY needed since it's a single series.
+- **Clarity: 4.5** — Clear; "running max from start through current row" is well phrased. Could have one sentence on why window beats a self-join subquery (the question explicitly asked which to use).
+- **Actionability: 5** — Drop-in.
+- **Avg: 4.875**
+
+## Q3 — build a MAP session_id→user_id in SQL so map['session123'] returns the user_id
+**Answer:** `map_agg(session_id, user_id) AS session_to_user_map`; `element_at(map,'session123')` safe (NULL if missing) vs subscript `map['session123']` (throws if missing); optional `json_format(CAST(map AS JSON))` to serialize. Prose first says "using the map() function" but the SQL uses `map_agg`.
+
+- **Accuracy: 4.75** — RAW aggregate.md VERIFIED `map_agg(key, value) -> map<K,V>` "Returns a map created from the input key/value pairs" — exactly right for folding (session_id, user_id) rows into one dictionary. RAW map.md VERIFIED BOTH missing-key behaviors: subscript `[]` "throws an error if the key is not contained in the map" and `element_at()` "Returns value for given key, or NULL if the key is not contained in the map." The element_at-vs-subscript safety guidance is dispositively correct and directly relevant to the user's `map['session123']` ask. Answers "can I do it in SQL, not app code?" → yes. The prose mislabel "using the map() function" is imprecise: `map()` IS a real Trino function but it's the empty-map / `map(keys_array, values_array)` constructor, NOT the row-folding aggregate; it is NOT what the shown SQL uses. Since the actual SQL is `map_agg` and is correct, this is harmless imprecision in the noun, not a query defect — small Accuracy shave only.
+- **Completeness: 5** — Builds the map, shows safe lookup, flags the throw-on-missing footgun, and offers serialization. Fully addresses SQL-vs-app-code.
+- **Clarity: 4.5** — Strong, but the "map() function" prose vs `map_agg` SQL could momentarily confuse a beginner reading the prose before the code.
+- **Actionability: 5** — Drop-in, plus the element_at safety steer is exactly the next thing they'd hit.
+- **Avg: 4.8125**
+
+## Q4 — each order's revenue AND previous order's revenue (by date), default 0 instead of NULL
+**Answer:** `LAG(revenue, 1, 0) OVER (ORDER BY order_date) AS prev_order_revenue` — 3-arg LAG, third arg is the default 0 for the first order.
+
+- **Accuracy: 5** — RAW window.md VERIFIED the 3-arg lag form: returns the value `offset` rows before the current row, and "If the offset refers to a row that is not within the partition, the default_value is returned, or if it is not specified null is returned." So `LAG(revenue, 1, 0)` yields 0 for the first order (no prior row) instead of NULL — exactly the requested behavior. Note: lag is a ranking/value window fn for which "the window frame must not be specified" — the responder correctly used OVER(ORDER BY ...) with NO frame, so no analyzer error.
+- **Completeness: 5** — Hits offset=1, default=0, and the first-order edge case.
+- **Clarity: 5** — Explains each of the three args.
+- **Actionability: 5** — Drop-in.
+- **Avg: 5.00**
 
 ## Overall
-| Q | Accuracy | Completeness | Clarity | Actionability |
-|---|---|---|---|---|
-| 1 | 5 | 5 | 5 | 5 |
-| 2 | 5 | 5 | 5 | 5 |
-| 3 | 5 | 4.5 | 5 | 5 |
-| 4 | 5 | 4.5 | 5 | 4.5 |
+- Q1: 5.00
+- Q2: 4.875
+- Q3: 4.8125
+- Q4: 5.00
+- **Overall average: 4.92 — PASS** (threshold 3.5)
 
-Per-question averages: Q1 5.00, Q2 5.00, Q3 4.88, Q4 4.88.
+## Defects
+ZERO source-verified defects. No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary patterns. The only blemish is a harmless prose noun mislabel in Q3 ("map() function" while the SQL correctly uses `map_agg`) — the executable SQL is correct, so it is not a query defect.
 
-**Overall average = 4.94 — PASS** (threshold 3.5, margin +1.44).
-
-**Source-verified defects: ZERO.** No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary. Two minor Completeness nudges only (Q3 integer→label CASE wrapper; Q4 TRY_CAST robust alternative) — neither is a correctness error.
-
-RECOMMENDATION = DEFAULT NO-OP. NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json.
+## Recommendation
+DEFAULT NO-OP (margin +1.42). NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1089).
