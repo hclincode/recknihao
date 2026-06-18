@@ -1,68 +1,48 @@
-# Judge Feedback — iter1059
+# Judge Feedback — iter1060 (2026-06-18)
 
-**Phase:** extended (state.json already at 1059; do NOT bump). Verified BOTH directions vs RAW git-tag 467 source + trino.io/docs/467. NO federation probe (hard-locked). prod_info.md: on-prem Trino 467 + Iceberg/MinIO/HMS; none of the 4 Qs are auth/federation, so prod-fit is neutral here.
+**Overall: 4.921875 — PASS** (threshold 3.5; margin +1.42)
 
-RAW 467 sources checked this sweep:
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/conversion.md
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/string.md
+Verified BOTH directions against RAW git-tag 467 source:
+- datetime.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
+- array.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
+- map.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+- select.md: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
 
-## Per-question scores
+prod_info.md: on-prem Trino 467 + Iceberg/MinIO/HMS; none of the 4 Qs are auth/federation, so prod-fit is neutral. NO federation probe (hard-locked).
 
-### Q1 — CSV text revenue → number for SUM/AVG
-**Accuracy 5 / Clarity 4.875 / Applicability 5 / Completeness 4.75 → 4.90625**
+---
 
-- `CAST(revenue AS DECIMAL(10,2))` / `CAST(revenue AS DOUBLE)` is the CORRECT path. conversion.md: cast "can be used to cast a varchar to a numeric value type and vice versa." Verified.
-- "Trino has no implicit text→number conversion" is CORRECT — conversion.md: "Trino will not convert between character and numeric types." Explicit CAST required.
-- DECIMAL-for-money vs DOUBLE-for-float-tolerant framing is sound and correct for the SaaS revenue use case.
-- `TRY_CAST(revenue AS DECIMAL)` returns NULL on bad rows (conversion.md: "Like cast, but returns null if the cast fails"), and SUM/AVG skip NULLs (aggregate semantics) — correct dirty-CSV guard.
-- KEY POSITIVE: responder cast to DECIMAL/DOUBLE (the correct money path) and did NOT make the wrong "varchar-with-decimal-point CAST AS integer rounds half-up" claim that dinged iter1058 Q4. The iter1058 broken-secondary varchar→integer slip did NOT recur on this directly-adjacent topic. Clean.
-- Minor completeness nit: `DECIMAL(10,2)` caps the integer part at 8 digits (max ~99,999,999.99); for very large revenue totals a wider scale could overflow, unmentioned. Illustrative-only, no ding to accuracy.
+## Q1 — Unix epoch (bigint sec) → readable timestamp, filter/group by day
+**Accuracy 4.5 / Completeness 4.5 / Clarity 5 / Actionability 5 → 4.75**
 
-### Q2 — week number from timestamp
-**Accuracy 5 / Clarity 4.875 / Applicability 4.875 / Completeness 4.875 → 4.90625**
+- `from_unixtime(occurred_at)` VERIFIED: datetime.md states from_unixtime(unixtime) returns `timestamp(3) WITH TIME ZONE`. Single-bigint overload exists and yields a readable timestamp. Correct.
+- `date_trunc('day', from_unixtime(...))` VERIFIED: date_trunc returns same-as-input type; truncating the timestamp to day is the canonical group-by-day construct. Correct.
+- Half-open month window `>= date_trunc('month', current_date) AND < date_trunc('month', current_date) + INTERVAL '1' MONTH` VERIFIED valid: date_trunc('month', current_date) returns a date (first-of-month); date + INTERVAL '1' MONTH valid; timestamp-left vs date-right runs via implicit coercion. This is a FULL current-month window (not month-to-date) — reasonable illustrative range for the generic "filter by date ranges" ask; no off-by-one (THIS month, no `- INTERVAL '1' MONTH`).
+- Minor ding (Accuracy/Completeness one notch): did not flag that from_unixtime returns WITH TIME ZONE in the session zone, which can shift day boundaries for cross-tz grouping. Illustrative incompleteness only; not a defect.
 
-- `week(started_at)` and `EXTRACT(WEEK FROM started_at)` both verified in datetime.md: returns the ISO week of the year, value ranges 1 to 53; EXTRACT WEEK field maps to the `week` function. Correct.
-- ISO-week definition ("week 1 = first week with a Thursday, weeks start Monday") is the accurate ISO-8601 rule. Correct.
-- `date_trunc('week', started_at)` → Monday of that week is a useful, correct add for labeling/sorting (date_trunc week = Monday-start in Trino).
-- GROUP BY repeats the expression `week(started_at)` (not a SELECT alias) → #16533-compliant. Correct.
-- Minor: did not flag the year-boundary caveat (ISO week 1 can belong to the prior calendar year, week 52/53 to the next) — for cross-year aggregation you'd group by ISO year+week. Nuance only, not asked.
+## Q2 — array active_flags: does ANY flag match a premium list?
+**Accuracy 5 / Completeness 4.75 / Clarity 5 / Actionability 5 → 4.9375**
 
-### Q3 — orders where ≥1 tag starts with literal 'promo_'
-**Accuracy 5 / Clarity 4.875 / Applicability 5 / Completeness 4.875 → 4.9375**
+- `any_match(ARRAY[...premium...], x -> contains(active_flags, x))` VERIFIED: array.md confirms any_match(array, lambda)->boolean (true if ≥1 element matches predicate) and contains(array, element)->boolean. Composition correctly implements "intersection non-empty" membership. Correct.
+- `= TRUE` redundant but harmless. Single-flag `contains(active_flags, 'billing_v2')` shortcut correctly offered.
+- Could mention `arrays_overlap(active_flags, ARRAY[...premium...])` as a one-call equivalent (also valid 467) — not required; the any_match form is fully correct.
 
-- `filter(tags, t -> starts_with(t,'promo_'))` + `cardinality(...) > 0` verified: filter(array(T), function(T,boolean))->array(T); cardinality(x)->bigint; starts_with(string,substring)->boolean LITERAL prefix (string.md "Tests whether substring is a prefix of string"). All correct.
-- `any_match(tags, t -> starts_with(t,'promo_'))` verified: any_match(array(T), function(T,boolean))->boolean, true if ≥1 element matches (array.md). This is the cleanest form for the boolean test and correctly offered.
-- KEY POSITIVE: `starts_with` correctly matches the LITERAL underscore. The responder did NOT offer the buggy bare `LIKE 'promo_%'` aside (where `_` is a single-char wildcard that over-matches `promoX...`). The broken-secondary LIKE pattern (iter1037/1051 family) did NOT recur — continues the long clean streak; r23 §653 + r07 ~L759 FIX-A durable, watch stays CLOSED.
-- Subtle unmentioned edge: `any_match` returns NULL (not false) if no element matches AND some element is NULL; for a clean array of non-null tag strings this is a non-issue. Nuance only.
+## Q3 — month-to-date revenue per customer (order_date is DATE)
+**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → 5.0**
 
-### Q4 — days since last_active_at, NULL for never-active, no crash
-**Accuracy 5 / Clarity 4.75 / Applicability 4.875 / Completeness 4.75 → 4.84375**
+- `WHERE order_date >= date_trunc('month', current_date) AND order_date < current_date + INTERVAL '1' DAY` VERIFIED correct half-open current-month-to-date: lower bound = first-of-this-month (NO `- INTERVAL '1' MONTH` off-by-one), upper bound = start-of-tomorrow (includes today, excludes future). date + INTERVAL '1' DAY valid; date_trunc('month', current_date) returns a DATE comparable to the DATE column. GROUP BY customer_id correct. Bare-column-left, pruning-friendly. Textbook.
 
-- `date_diff('day', last_active_at, current_date)` — signature verified: date_diff(unit, timestamp1, timestamp2) -> bigint, returns timestamp2 - timestamp1 in the unit (datetime.md). Argument order (unit, earlier, later) is correct → produces a non-negative day count for past activity.
-- NULL propagation: Trino built-in scalar functions return NULL on NULL input (standard engine-wide NULL propagation); date_diff with a NULL `last_active_at` yields NULL, no crash, no NULLIF/CASE needed. Correct — this is the safest, simplest form and exactly answers "show NULL, not crash."
-- Mixed type note: `last_active_at` is a timestamp and `current_date` is a date; Trino 467 has implicit timestamp↔date coercion in date_diff, so this runs (consistent with the TIMESTAMP→TZ-coercion verification family). No type error. The day count is calendar-day-aware. Correct.
-- Minor completeness: did not mention that if `last_active_at` could be in the future the result would be negative (not relevant for last-active), nor an explicit "either input NULL → NULL" being engine NULL-propagation rather than a documented date_diff clause. Nuance only.
+## Q4 — GROUP BY a map value properties['country'], count per country
+**Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 5 → 5.0**
 
-## Overall
+- `element_at(properties, 'country')` VERIFIED: map.md states element_at(map, key) returns the value or NULL if the key is absent — does NOT throw, unlike the `[]` subscript operator which throws on a missing key. Correctly chosen for missing-key safety.
+- Repeats the full expression in both SELECT and GROUP BY (does NOT reference the `country` alias) — VERIFIED #16533-compliant: select.md confirms GROUP BY accepts input columns/expressions or ordinals, NOT output aliases. Correct.
+- "Returns NULL if the key is missing, and NULL groups together" — accurate.
 
-| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5 | 4.875 | 5 | 4.75 | 4.90625 |
-| Q2 | 5 | 4.875 | 4.875 | 4.875 | 4.90625 |
-| Q3 | 5 | 4.875 | 5 | 4.875 | 4.9375 |
-| Q4 | 5 | 4.75 | 4.875 | 4.75 | 4.84375 |
+---
 
-**Overall average = 4.8984375 → PASS** (threshold 3.5; margin +1.40).
-
-## Source-verified dialect notes / defects
-
-- NO defects found. All four answers are technically accurate against RAW 467 source.
-- Q1: iter1058's wrong "varchar→integer CAST rounds" slip did NOT recur — responder correctly used the DECIMAL/DOUBLE money path. Per-instance slip from iter1058 confirmed one-off, NOT a resource defect.
-- Q3: broken-secondary `LIKE 'promo_%'` literal-underscore aside did NOT recur; starts_with literal-prefix used cleanly. FIX-A durable.
-- No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary issues.
+## Watch flags — all clean this iter
+No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary-alternative. The off-by-one month watch (iter1054) did NOT recur (Q1 and Q3 both correct). GROUP-BY-alias #16533 watch stays CLOSED (Q4 repeats expression). element_at-vs-[] missing-key safety handled correctly.
 
 ## Recommendation
-
-DEFAULT NO-OP (margin +1.40). NO resource edit; NO commit. MUST NOT bump state.json (already 1059).
+DEFAULT NO-OP. Margin +1.42, all four answers PASS, all focal claims source-verified. NO resource edit; NO commit. MUST NOT bump state.json (already 1060).

@@ -1,7 +1,7 @@
 {
-  "iteration": 1059,
+  "iteration": 1060,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1059 NO-OP durability-breadth sweep: zero resource edits, no commit/push. All locks confirmed intact by content. Three FIX-A caveats re-verified: (a) r23 L653 LIKE literal-_/% prefix + r07 L759 filter-lambda literal-prefix; (b) r07 L2576 running-total guard + Pattern A2 (L2769) + CTE recipe (L2685) + LOCF LAST_VALUE IGNORE NULLS; (c) r13 L3371 GROUP-BY-alias #16533. Also confirmed r23 L3389 literal-%/_-LIKE-ESCAPE canonical + ::-cast lock + ILIKE disambiguator + OFFSET-before-LIMIT (L3242) + #16533 GROUP-BY-no-alias + EXCEPT/anti-join + §10 NOT-IN-NULL; r05 percentile footgun (no PERCENTILE_CONT); r09 bucket column-first + partition DDL; r27 %M/%B date_format + ::-cast guardrail + try() + regexp_replace $1; r28 §2 decorrelation/CorrelatedJoin + ROLLUP/GROUPING SETS; r22 federation §13 untouched. Tree clean."
+  "note": "iter1060 NO-OP durability-breadth sweep: zero resource edits, no commit/push. All locks confirmed intact by content (line numbers drifted, verified by grep). Three FIX-A caveats re-verified: (a) r23 L653 LIKE literal-_/% prefix + r07 L759 filter-lambda literal-prefix; (b) r07 L1791 running-total guard + Pattern A2 (L2769) + nested-aggregate CTE recipe; (c) r13 L3371 GROUP-BY-alias #16533. Also confirmed r23 L3399 literal-%/_-LIKE-ESCAPE canonical + ::-cast lock (L873) + ILIKE disambiguator (L3259) + OFFSET-before-LIMIT (L3242) + EXCEPT/anti-join + §10 NOT-IN-NULL/bool_and; r05 percentile footgun (no PERCENTILE_CONT); r09 bucket column-first + partition DDL; r27 %M/%B defang + ::-cast guardrail + try() + regexp_replace; r28 decorrelation/CorrelatedJoin + ROLLUP/GROUPING SETS; r22 federation §13 untouched (last edit 2026-06-04). Tree clean."
 }
