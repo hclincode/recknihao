@@ -1,69 +1,57 @@
-# Judge Feedback — iter1072 (2026-06-18)
+# Judge Feedback — iter1073 (2026-06-18)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions against RAW git-tag 467 source (dispositive over rendered HTML).
 
-Sources checked:
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/comparison.md (GREATEST/LEAST NULL semantics)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md (sequence with DATE/INTERVAL)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md (INTERSECT DISTINCT default, UNNEST)
+**Overall: 4.69 / 5.00 — PASS** (threshold 3.5; margin +1.19)
 
-## Overall: 4.66 PASS (threshold 3.5; margin +1.16)
+Verified BOTH directions against RAW git-tag 467 source:
+- datetime.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
+- map.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+- select.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
+- aggregate.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
+- connector/iceberg.md — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/connector/iceberg.md
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|
-| Q1 floor-bucketing | 4.75 | 4.5 | 4.75 | 4.75 | 4.69 |
-| Q2 GREATEST/COALESCE | 4.75 | 4.25 | 4.75 | 4.75 | 4.625 |
-| Q3 date spine | 5.0 | 4.75 | 4.75 | 5.0 | 4.875 |
-| Q4 INTERSECT | 4.5 | 4.25 | 4.75 | 4.75 | 4.5625 |
-| **Overall** | | | | | **4.66** |
+Zero source-verified dialect defects. Clean sweep.
 
 ---
 
-### Q1 — $50 buckets via floor(amount/5000)*5000 (4.69)
-`SELECT amount, floor(amount / 5000) * 5000 AS bucket_lower_bound FROM events`.
-VERIFIED arithmetic: `amount` is INTEGER, so `amount / 5000` is INTEGER division (truncates toward
-zero) — `floor()` is redundant-but-harmless on a value already integral. For non-negative cents the
-bucketing is exactly right: $0–$49.99 = 0–4999 cents → bucket 0; $50–$99.99 = 5000–9999 → 5000.
-Avoids the giant CASE as asked. `width_bucket` is a valid alternative (not required). Minor
-completeness: negative amounts (refunds) would truncate toward zero rather than floor toward -inf, so
-`floor()` becomes load-bearing only if `amount` were non-integer or negative — worth a one-line note.
-Solid.
+## Q1 — safe read of maybe-missing map key (epoch-ms) + last-30-days compare — 4.75
+**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5**
 
-### Q2 — most-recent non-null via GREATEST + sentinel COALESCE (4.625) — CRITICAL, CONFIRMED CORRECT
-`GREATEST(COALESCE(cancelled_at, CAST('1900-01-01' AS timestamp)), COALESCE(paused_at, CAST('1900-01-01' AS timestamp)))`.
-- (a) CONFIRMED vs comparison.md: Trino 467 GREATEST/LEAST "return null if any argument is null,"
-  EXPLICITLY differing from PostgreSQL ("only return null if all arguments are null"). The
-  responder's NULL caveat is exactly correct and documented.
-- (b) CONFIRMED: COALESCE-to-sentinel('1900-01-01') makes each NULL "infinitely old" so GREATEST
-  yields the most-recent real timestamp — correct.
-- (c) CONFIRMED: `CAST('1900-01-01' AS timestamp)` is valid.
-- (d) Edge note (minor completeness, not a correctness failure): if BOTH columns are NULL the sentinel
-  approach returns 1900-01-01 rather than NULL. A `NULLIF(..., TIMESTAMP '1900-01-01')` wrap or a
-  CASE-guard would surface NULL for "no status change yet." Small gap only.
-- GREATEST is the RIGHT tool for "last/most-recent status change." The user's literal phrase "first
-  non-null from a list" is COALESCE (priority order) — the responder correctly distinguished and chose
-  GREATEST for "most recent." CASE alternative also valid.
+CONFIRMED both directions vs map.md + datetime.md:
+- `element_at(properties,'trial_end_ms')` returns NULL on a missing key ("Returns value for given `key`, or `NULL` if the key is not contained in the map"); the `properties['trial_end_ms']` subscript THROWS ("This operator throws an error if the key is not contained in the map"). Responder's diagnosis (subscript = the error the user saw; element_at = safe) is exactly correct — the RIGHT direction (contrast iter1071 Q2, which mislabeled subscript as NULL-returning).
+- `CAST(... AS BIGINT) / 1e3` — `1e3` is a DOUBLE literal so the division is double; fine for `from_unixtime`.
+- `from_unixtime` expects SECONDS ("unixtime is the number of seconds since 1970-01-01 00:00:00 UTC"), so dividing epoch-ms by 1e3 is correct; it returns `timestamp(3) with time zone` (all overloads confirmed). The tz-timestamp vs `current_timestamp - INTERVAL '30' DAY` comparison is valid (current_timestamp is also tz-aware).
 
-### Q3 — date spine sequence+UNNEST+LEFT JOIN+COALESCE (4.875)
-`FROM UNNEST(sequence(DATE '2026-06-01', DATE '2026-06-30', INTERVAL '1' DAY)) AS d(day) LEFT JOIN (...) pv ON pv.day = d.day` with `COALESCE(pv.pageview_count, 0)`.
-VERIFIED vs array.md: `sequence(date, date, INTERVAL ...)` returns `array(date)` (step may be
-INTERVAL DAY TO SECOND or YEAR TO MONTH); UNNEST expands the array to rows; LEFT JOIN keeps every
-spine day; COALESCE(...,0) fills the gap days. Canonical 467 date-spine pattern. Clean.
+Minor completeness: `from_unixtime(...)` in WHERE is not partition-prunable on the raw value, but the source is a map value not a partition column, so negligible here.
 
-### Q4 — set intersection via INTERSECT (4.5625)
-`SELECT customer_id FROM orders INTERSECT SELECT customer_id FROM refunds`.
-VERIFIED vs select.md: INTERSECT exists; defaults to DISTINCT semantics ("If neither is specified, the
-behavior defaults to DISTINCT") so the result is the deduplicated set of customer_ids present in both —
-the responder's "INTERSECT dedups automatically" is correct. Far cleaner than JOIN + manual dedup as
-asked. Minor completeness: a one-line note that INTERSECT ALL exists (and that NULLs match each other
-in set ops) would round it out, but not needed for the stated goal.
+## Q2 — COUNT DISTINCT users per array tag, all tags at once — 4.875
+**Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5**
+
+CONFIRMED vs select.md: `UNNEST(device_tags) AS t(tag)` yields one row per element; `CROSS JOIN UNNEST` drops rows whose array is empty/NULL ("UNNEST returns zero entries when the array/map is empty/null"); `LEFT JOIN UNNEST(...) AS t(tag) ON TRUE` preserves them ("LEFT JOIN is preferable in order to avoid losing the row..."). `GROUP BY tag` + `COUNT(DISTINCT user_id)` valid. Single alias for an array unnest is correct. Clean.
+
+## Q3 — pivot plan_name rows into per-plan revenue columns — 4.625
+**Accuracy 5 / Completeness 4.5 / Clarity 4.5 / Actionability 5**
+
+CONFIRMED: Trino 467 has NO `PIVOT` keyword (correctly stated). Both conditional-aggregation forms valid:
+- `SUM(CASE WHEN plan_name='starter' THEN monthly_revenue ELSE 0 END)` — standard.
+- `SUM(monthly_revenue) FILTER (WHERE plan_name='starter')` — VERIFIED in aggregate.md: "The `FILTER` keyword can be used to remove rows from aggregation processing ... supported for all aggregate functions."
+
+Both compute per-plan revenue per customer with `GROUP BY customer_id`. Note one informal semantic difference (not penalized as egregious): the CASE form emits `0` for a customer with no rows of a plan, while FILTER emits `NULL` (SUM over empty = NULL). The "both forms equivalent / identical plans" claim is loose on this NULL-vs-0 edge but harmless for the asked use case. Minor clarity ding only.
+
+## Q4 — inspect/restore Iceberg invoices after accidental delete — 4.50
+**Accuracy 5 / Completeness 4 / Clarity 4.5 / Actionability 4.5**
+
+ROLLBACK FORM VERDICT — CORRECT for 467. CONFIRMED vs connector/iceberg.md:
+- `iceberg.analytics."invoices$snapshots"` metadata table exists; columns include `committed_at` (timestamp(3) with tz), `snapshot_id` (bigint), `parent_id`, `operation` (varchar), `summary` (map(varchar,varchar)). The four selected columns are all real.
+- `CALL iceberg.system.rollback_to_snapshot('analytics', 'invoices', <snapshot_id>)` — POSITIONAL 3-arg form is correct for 467 (docs example: `CALL example.system.rollback_to_snapshot('testdb','customer_orders', 8954597067493422955)`). Responder's warning that the Spark named-arg form (`table=>..., snapshot_id=>...`) is wrong in Trino is accurate. There is NO `ALTER TABLE ... EXECUTE rollback_to_snapshot` form in 467 (that is a later 469+ form) — responder correctly avoided it.
+- Notes sound: metadata-only pointer move; expire_snapshots window; rollback loses writes landed after the bad delete → surgical DELETE/restore-by-insert instead.
+
+COMPLETENESS GAP (minor): the user also asked to "look at what the table contained before" — read-only inspection. The canonical is `SELECT * FROM iceberg.analytics.invoices FOR VERSION AS OF <snapshot_id>` (or `FOR TIMESTAMP AS OF TIMESTAMP '...'`), both confirmed present in 467. The responder found the snapshot and jumped straight to rollback without showing the non-destructive time-travel SELECT to inspect/verify first. Rolling back before inspecting is riskier than the asked "look at prior contents" implies. Completeness 4.0.
 
 ---
 
-## Verdict
-No source-verified defects. All four imported-prior risk surfaces handled correctly, most notably the
-Q2 GREATEST-returns-NULL-if-any-arg-NULL semantics (confirmed differs from Postgres) and the
-sentinel-COALESCE wrapping. Clean sweep; only minor completeness asides (both-NULL sentinel edge on Q2;
-negative-amount floor note on Q1; INTERSECT ALL aside on Q4). DEFAULT NO-OP — no resource edit, no
-commit. MUST NOT bump state.json (already 1072).
+## Cross-cutting
+No `::`-cast misuse / QUALIFY / false-semi-join / fabricated function / regex-backslash / INTERVAL quarter-week / OFFSET-before-LIMIT / over-warning folklore / broken-secondary-alternative. Imported-prior risk families answered correctly (element_at-vs-subscript direction, from_unixtime-tz seconds, rollback_to_snapshot positional CALL form).
+
+RECOMMENDATION = DEFAULT NO-OP (margin +1.19). The Q4 missing FOR VERSION AS OF read-only inspection is the single actionable item; it is a per-instance completeness gap, not a missing canonical (time-travel SELECT is well-covered). No resource edit, no commit. MUST NOT bump state.json (already 1073).
