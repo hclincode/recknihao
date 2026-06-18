@@ -2909,6 +2909,34 @@ This works, but it's fragile — every future `NOT IN` against this column needs
 
 ---
 
+### Null-safe equality / null-safe join — `IS NOT DISTINCT FROM` (treat NULL as equal to NULL)
+
+*Keywords: null-safe equality, null-safe join, treat NULL as equal to NULL, NULL = NULL match, join on a nullable key, match NULL to NULL, compare nullable columns treating null as equal, equality that handles NULL, IS NOT DISTINCT FROM, null-safe comparison, why does my join skip NULL rows.*
+
+**The one fact**: regular `=` returns **UNKNOWN** when either side is NULL — so `NULL = NULL` does **not** match, and a JOIN or WHERE on `=` silently **drops** every row where the key is NULL (no error, no warning). The purpose-built null-safe operator is **`a IS NOT DISTINCT FROM b`**: it returns TRUE when both sides are NULL, FALSE when exactly one side is NULL, never returns UNKNOWN. So `NULL IS NOT DISTINCT FROM NULL` → TRUE, `NULL IS NOT DISTINCT FROM 'x'` → FALSE. Usable directly in a JOIN `ON` clause and in a WHERE filter. (Verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html).)
+
+**Null-safe JOIN** — match orders to promotions on a nullable `promo_code` where NULL should match NULL:
+
+```sql
+SELECT o.order_id, p.promo_name
+FROM orders o
+LEFT JOIN promotions p
+  ON o.promo_code IS NOT DISTINCT FROM p.promo_code;
+```
+
+**Null-safe filter / comparison** (and its negation for "different, treating NULL as a real value"):
+
+```sql
+WHERE col_a IS NOT DISTINCT FROM col_b   -- TRUE when both NULL, or both equal non-NULL
+WHERE col_a IS DISTINCT FROM col_b       -- TRUE when they differ, counting NULL-vs-value as different
+```
+
+**Why not the workarounds?** The COALESCE-to-sentinel form (`COALESCE(a,'__NULL__') = COALESCE(b,'__NULL__')`) is fragile — it silently breaks if the sentinel value can ever collide with real data, and it can defeat index/partition pushdown. The OR-form `(a = b) OR (a IS NULL AND b IS NULL)` is correct but verbose and easy to get wrong. `IS NOT DISTINCT FROM` is the clean, purpose-built form — **prefer it**.
+
+**Cross-references**: the sibling operator `IS DISTINCT FROM` is used for null-safe keyed-diff / UPDATE classification ("did this column actually change, counting NULL→value as a change") — see [resource 17 §keyed-diff](17-iceberg-table-maintenance.md). Dynamic filtering supports `IS NOT DISTINCT FROM` as a join predicate, so a null-safe equi-join still gets runtime split pruning — see [resource 22 §5](22-trino-federation-postgresql.md).
+
+---
+
 ### When EXPLAIN shows `CorrelatedJoin` instead of `SemiJoin` — failed decorrelation remediation
 
 **Symptom**: EXPLAIN shows a `CorrelatedJoin[...]` node where you expected `SemiJoin[...]`. This means **Trino's `Decorrelate Subqueries` optimizer rule could not transform your subquery into a flat join** — and the subquery will execute once per outer row at runtime. On a 100M-row outer table, that's 100M subquery executions.

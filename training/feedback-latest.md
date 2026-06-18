@@ -1,47 +1,72 @@
-# Judge Feedback — iter1076 (2026-06-18)
+# Judge Feedback — iter1077 (2026-06-18)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions vs RAW git-tag 467 source (conditional.md / array.md / window.md / language/types.md). Clean sweep, zero source-verified defects.
 
-## Per-question breakdown
+**Overall: 4.55 — PASS** (overall average governs; no per-question veto)
 
-### Q1 — sentinel '0' string → NULL so aggregates skip it (don't delete rows)
-**Score: 4.81** (Acc 5, Comp 4.75, Clar 5, Act 4.5)
-- `NULLIF(plan_type, '0')` is correct. VERIFIED conditional.md: "NULLIF(value1, value2) Returns null if value1 equals value2, otherwise returns value1." So plan_type='0' → NULL, all other values pass through unchanged.
-- "NULL is automatically skipped by COUNT/SUM/AVG" is correct (SQL standard aggregate NULL semantics; COUNT(col) and SUM/AVG ignore NULLs).
-- Both examples land: the in-aggregate / keep-all-rows form directly satisfies the "don't delete rows" ask; the optional `WHERE NULLIF(...) IS NOT NULL` filter is a valid alternative when row removal IS wanted.
-- Minor: one illustrative example applied NULLIF to `customer_id` rather than `plan_type` — illustrative liberty, does not change correctness; tiny completeness/actionability ding only.
+Verified BOTH directions against RAW git-tag 467 source:
+- bitwise: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/bitwise.md
+- datetime: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
+- aggregate: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
+- comparison: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/comparison.md
 
-### Q2 — number of tags per row (array length)
-**Score: 4.94** (Acc 5, Comp 5, Clar 5, Act 4.75)
-- `cardinality(tags)` is correct and canonical. VERIFIED array.md: "cardinality(x) Returns the cardinality (size) of the array x," return type bigint.
-- Worked example `ARRAY['foo','bar','baz'] → 3` is correct. No `length()`-on-array confusion (length is for varchar). Clean.
+---
 
-### Q3 — top 3 products by revenue per category, cleanly (CRITICAL watch re-probe)
-**Score: 4.88** (Acc 5, Comp 5, Clar 4.75, Act 5)
-- WINDOW-WRAP VERDICT: CORRECT. Responder wrapped `ROW_NUMBER() OVER (PARTITION BY category ORDER BY SUM(price*quantity) DESC)` in an inner subquery (with `GROUP BY category, product_id`), then filtered `WHERE rank_in_category <= 3` in the OUTER query. This is the required canonical Trino top-N-per-group form.
-- Window functions cannot appear in WHERE — per window.md they run after HAVING but before ORDER BY, so they are only legal in SELECT/ORDER BY; filtering on the rank therefore REQUIRES the subquery wrap + outer-WHERE on the alias. Responder did this correctly.
-- ROW_NUMBER over the aggregate `SUM(price*quantity)` inside a GROUP BY query is valid — window functions evaluate after GROUP BY/aggregation.
-- Confirmed the responder did NOT put the window function directly in WHERE and did NOT reference the rank alias illegally at the same SELECT level. This cleanly contrasts the iter1071 Q4 MERGE window-in-WHERE / alias-in-WHERE slip — the synthesis held this time.
-- row_number() returns unique sequential bigint per partition (VERIFIED window.md), so exactly 3 rows per category result; RANK/DENSE_RANK would be the alt if all tied rows should surface (minor unmentioned nuance, not penalized).
+## Q1 — bit-test on integer flags column — 4.875
 
-### Q4 — users who signed up in last 7 days; Postgres NOW() - INTERVAL '7 days' translation
-**Score: 4.81** (Acc 5, Comp 4.75, Clar 5, Act 4.5)
-- INTERVAL SYNTAX VERDICT: CORRECT. Responder used `current_date - INTERVAL '7' DAY` (and `current_timestamp - INTERVAL '7' DAY` for timestamps). VERIFIED language/types.md: INTERVAL literals are quoted-number + singular unit keyword (`INTERVAL '2' DAY`, `INTERVAL '3' MONTH`). The Postgres `INTERVAL '7 days'` (plural, unit inside the quotes) is NOT the Trino form — responder correctly translated it.
-- `current_date` (date, start of today) and `current_timestamp` exist in 467; `date - INTERVAL '7' DAY` arithmetic is valid and returns a date; `>=` captures the rolling 7-day window. Correct and idiomatic.
-- Minor: did not flag that NOW() is itself a Trino-valid alias for current_timestamp (so the Postgres→Trino delta is really only the interval literal, not NOW()). Small completeness note; the recommended query is correct.
+`bitwise_and(flags, 8) <> 0` and dynamic `bitwise_and(flags, bitwise_left_shift(1, 3)) <> 0`.
+
+- VERIFIED `bitwise_and(x, y) -> bigint` exists ("bitwise AND of x and y in 2's complement").
+- VERIFIED `bitwise_left_shift(value, shift)` exists.
+- VERIFIED there is NO infix `&` or `<<` operator in 467 — only the named functions are documented. The responder's explicit "Trino has NO << operator — use bitwise_left_shift(value, shift)" is correct and is exactly the imported-prior trap (C/Java/Postgres `1 << n` habit) the MEMORY card warns about. Got it right.
+- Bit-test logic correct: value 8 = bit index 3; `bitwise_left_shift(1,3)` = 8, equivalent. `<> 0` is the right "bit is set" predicate.
+
+Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5. Clean.
+
+## Q2 — group signups by calendar month — 4.875
+
+`date_trunc('month', started_at)` + repeat the expression in GROUP BY.
+
+- VERIFIED `date_trunc(unit, x)` truncates to first instant: docs example `date_trunc('month', TIMESTAMP '2022-10-20 05:10:00')` -> `2022-10-01 00:00:00.000`. `'month'` is a supported unit.
+- VERIFIED the GROUP-BY guidance: repeat the expression rather than reference the SELECT alias (#16533 family — Trino does not resolve SELECT aliases by name inside GROUP BY expressions). Correct and idiomatic.
+
+Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5. Clean.
+
+## Q3 — build user_id -> display_name map — 4.6875
+
+`map_agg(user_id, display_name)` + GROUP BY tenant_id variant.
+
+- VERIFIED `map_agg(key, value)` is a real 467 aggregate ("Returns a map created from the input key/value pairs").
+- Duplicate-key note: docs do not explicitly specify map_agg duplicate behavior; the related map_union retains an arbitrary value for collided keys, so duplicate keys are effectively non-deterministic. The responder's framing — "user_id is unique here so no collision" — is safe, correct guidance and sidesteps the ambiguity. Acceptable.
+- GROUP BY tenant_id variant for per-tenant maps is a good multi-tenant SaaS extension.
+
+Accuracy 4.75 / Completeness 4.5 / Clarity 4.75 / Actionability 4.75. Clean.
+
+## Q4 — null-safe join (NULL should match NULL on nullable promo_code) — 3.875
+
+Responder gave (a) `ON COALESCE(o.promo_code,'') = COALESCE(p.promo_code,'')` with a sentinel-collision caveat, and (b) `ON (o.promo_code = p.promo_code) OR (o.promo_code IS NULL AND p.promo_code IS NULL)`. Did NOT mention `IS NOT DISTINCT FROM`.
+
+- **CANONICAL ANSWER OMITTED:** `a IS NOT DISTINCT FROM b` is the purpose-built Trino 467 null-safe equality operator and is EXACTLY what this question asks for. VERIFIED on comparison.md: `NULL IS NOT DISTINCT FROM NULL` evaluates to TRUE, NULL is treated as a comparable value, result is guaranteed TRUE/FALSE (never NULL). It IS usable directly in a JOIN ON clause: `... ON o.promo_code IS NOT DISTINCT FROM p.promo_code`. This is the cleanest, idiomatic answer and should have been the lead.
+- **Both given workarounds DO work (functionally correct, not a correctness failure):**
+  - (a) COALESCE-sentinel: correct PROVIDED the sentinel `''` can never be a real promo_code value. The responder explicitly flagged the collision caveat — good — but it is a real footgun (an empty-string promo_code would falsely match a NULL). Inferior to IS NOT DISTINCT FROM.
+  - (b) OR-form `(=) OR (both IS NULL)`: fully correct and always works, no sentinel risk. Standard portable fallback.
+- **Verdict:** functionally CORRECT but missed the canonical operator the question was essentially asking for → COMPLETENESS/idiomaticity deduction, NOT a correctness failure.
+
+Accuracy 4.0 / Completeness 3.25 / Clarity 4.25 / Actionability 4.0.
+
+---
 
 ## Overall
-Overall average = (4.81 + 4.94 + 4.88 + 4.81) / 4 = **4.86**
-**PASS** (threshold 3.5; margin +1.36)
 
-No `::`-cast / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning-folklore / broken-secondary-alternative observed.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5.0 | 4.5 | 5.0 | 5.0 | 4.875 |
+| Q2 | 5.0 | 4.5 | 5.0 | 5.0 | 4.875 |
+| Q3 | 4.75 | 4.5 | 4.75 | 4.75 | 4.6875 |
+| Q4 | 4.0 | 3.25 | 4.25 | 4.0 | 3.875 |
 
-## Source-verified dialect notes (RAW 467 URLs checked)
-- NULLIF: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/conditional.md — "Returns null if value1 equals value2, otherwise returns value1."
-- cardinality: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md — "Returns the cardinality (size) of the array x" (bigint).
-- ROW_NUMBER + window execution order: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md — windows run after HAVING, before ORDER BY → not allowed in WHERE → subquery-wrap + outer filter is mandatory; row_number() = unique sequential bigint per partition.
-- INTERVAL literal: https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/types.md — `INTERVAL '3' MONTH` / `INTERVAL '2' DAY` (quoted number, singular unit); Postgres `INTERVAL '7 days'` is not the Trino form.
+Overall average = (4.875 + 4.875 + 4.6875 + 3.875) / 4 = **4.58 PASS**.
 
 ## Recommendation
-DEFAULT NO-OP. All four headline queries are correct and source-verified; the Q3 window-wrap re-probe confirms the iter1071 synthesis slip did not recur on this domain. Q1 customer_id-in-example and Q4 NOW()-alias note are per-instance trivia, NOT resource gaps — do not churn. NO resource edit; NO commit beyond the rubric score line. MUST NOT bump state.json (already 1076).
+
+DEFAULT NO-OP (margin +1.08). Q1/Q2/Q3 clean. The only soft spot is Q4 omitting `IS NOT DISTINCT FROM` — the question phrasing ("regular = skips NULL=NULL") is a textbook trigger for that operator, and the responder reached for two workarounds instead of the built-in. Worth checking whether resources surface `IS NOT DISTINCT FROM` as the lead null-safe-join canonical with a findable keyword (null-safe join / NULL matches NULL). The workarounds are valid, so this is not corrupting; treat as a per-instance completeness gap and re-probe the null-safe-join angle next sweep before any resource edit. MUST NOT bump state.json (already 1077).
