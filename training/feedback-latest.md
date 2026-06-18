@@ -1,92 +1,57 @@
-# Judge Feedback — iter1050
+# Judge Feedback — iter1051
 
-**Phase:** extended (state.json phase="extended", passed=true). Overall-average governs; no per-question veto.
-**Verification:** BOTH directions vs RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...), NOT resources/.
+**Verification basis:** RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...) + trino.io/docs/467, verified in BOTH directions. NOT resources/. No federation probe. Overall-average governs; no per-question veto.
 
-Production fit (prod_info.md): Trino 467 + Iceberg connector, on-prem. None of the 4 questions touch auth/authz or platform-specific constraints; all are pure ANSI-ish Trino SQL analytics. No production-fit concerns.
+## Per-question scores
 
----
+### Q1 — most-recent event was 'churned' (ROW_NUMBER top-1-per-group)
+**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 → 4.875**
 
-## Q1 — Monthly revenue with prior month + percent change (LAG over pre-aggregated subquery)
+`ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_at DESC)` in a CTE, then `WHERE rn=1 AND event_type='churned'` is the canonical most-recent-per-group pattern. Window functions cannot appear in `WHERE`, so the CTE wrap is required and correct. `SELECT DISTINCT` is harmless (rn=1 already yields one row per user; DISTINCT is redundant but not wrong). Verified against window.md (ROW_NUMBER) and select.md (window-in-WHERE restriction). The `max_by(event_type, event_at)='churned' GROUP BY user_id` alternative is a valid lighter form but was not required. Minor completeness ding only: ties on identical `event_at` are not addressed (ROW_NUMBER picks one arbitrarily) — a non-issue for typical event streams. Sound.
 
-**Scores:** Accuracy 4.9 / Completeness 4.6 / Clarity 4.8 / Actionability 4.9 → **4.8**
+### Q2 — integer cents → "$49.99" with comma grouping (format / %,.2f)
+**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 → 4.875**
 
-The answer pre-aggregates monthly revenue in a SUBQUERY (`SELECT DATE_TRUNC('month',order_date) AS month, SUM(amount) AS revenue ... GROUP BY DATE_TRUNC('month',order_date)`), then in the outer query applies `LAG(revenue) OVER (ORDER BY month)`. Because `revenue` is a **plain column of the subquery** by the time the window runs, `LAG(revenue)` is a SINGLE, non-nested window function. This is correct and runnable.
+`format('$%,.2f', price_cents / 100.0)` is fully correct. **CRUCIAL %f-vs-DECIMAL finding — VERIFIED:** Trino 467 `format(format, args...)` follows `java.util.Formatter`, and the official **conversion.md** doc page carries the verbatim canonical example `SELECT format('%,.2f', 1234567.89);` → `'1,234,567.89'`. The literal `1234567.89` is an **undecorated decimal literal = DECIMAL type** (verified against language/types.md: only scientific-notation `1.03e1` is DOUBLE; plain `1.1`/`100.0`/`1234567.89` are DECIMAL). So the docs themselves demonstrate `%,.2f` consuming a DECIMAL argument and producing comma-grouping + 2 decimals. Since `price_cents / 100.0` yields DECIMAL (integer / DECIMAL → DECIMAL), the responder's expression is the doc-blessed case — **NO cast-to-DOUBLE needed, NOT a bug.** `%,.2f` = comma grouping + 2 decimals confirmed. `1234567/100.0 → '$12,345.67'` is correct. Minor completeness note only: did not mention the `'%.1f%%'` literal-`%`-escape sibling, irrelevant here.
 
-**WATCH (v) — nested-window-LAG-over-SUM-OVER — DID NOT RECUR.** The iter1049 broken lead was `LAG(SUM(amount) OVER(PARTITION BY...)) OVER(...)` — a window function passed as an argument to another window function ("cannot nest window functions"). The iter1050 answer is the clean canonical shape: subquery-then-LAG. No nesting present. The broken lead did NOT recur.
+### Q3 — orders with ≥1 tag starting with literal "promo_" (any_match + starts_with) — BROKEN SECONDARY
+**Accuracy 3.5 / Completeness 4 / Clarity 4 / Actionability 4 → 3.875**
 
-- LAG signature `lag(x[, offset[, default]])` accepts a plain column reference — VERIFIED (functions/window.md, RAW 467).
-- `DATE_TRUNC('month', ...)` + `SUM ... GROUP BY DATE_TRUNC(...)` correct; outer `ORDER BY month` correct.
-- The CASE guards `LAG(...) IS NOT NULL` (first-month NULL) — correct for the NULL case.
+**LEAD is CORRECT (FIX-A working):** `WHERE any_match(tags, tag -> starts_with(tag, 'promo_'))` is the right answer for a *literal* `promo_` prefix. Verified: `any_match(array, lambda)` exists (array.md), `starts_with(string, substring)` exists and is a literal prefix test (string.md). The iter1029/1036 literal-underscore FIX-A clearly reached the responder for the lead.
 
-**Minor completeness ding only:** division by a *zero* prior month would still throw (integer/DECIMAL `/0` throws DIVISION_BY_ZERO in Trino; the IS NOT NULL guard does not cover prev=0). `NULLIF(LAG(revenue) OVER (...), 0)` in the denominator would be more robust. Revenue is rarely exactly 0, so this is a minor robustness note, not a defect.
+**BUG in the throwaway secondary:** "you can also use `tag LIKE 'promo_%'` if you prefer" is **WRONG and misleading.** In LIKE, `_` is a **single-character wildcard** (verified comparison.md: "`_` matches any single character"), so `'promo_%'` ALSO matches `'promoXanything'` / `'promoZ...'` — NOT just the literal `promo_` prefix. **`'promo_%'` is NOT equivalent to `starts_with(tag, 'promo_')`.** The "if you prefer" framing presents a semantically different (over-matching) form as an interchangeable choice, with no underscore caveat and no `ESCAPE '\'`. A reader who "prefers" it gets a silently-wrong result. Accuracy dinged for the unguarded buggy secondary while crediting the correct lead.
 
-The note "can't reference a SELECT alias inside a window function" is loosely worded but directionally true (you can't reference a same-level SELECT alias inside the window expression — hence the subquery). Acceptable.
+**2nd occurrence of this broken-secondary shape** (after iter1037 Q1, which offered `LIKE 'evt_%'` alongside a correct `starts_with`). See recommendation for classification.
 
----
+### Q4 — grand-total row via ROLLUP/GROUPING, no UNION ALL
+**Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 → 4.875**
 
-## Q2 — TEXT price strings ('19.99') → numeric SUM
-
-**Scores:** Accuracy 4.9 / Completeness 4.5 / Clarity 4.8 / Actionability 4.9 → **4.775**
-
-`SUM(CAST(amount AS DECIMAL(10,2))) AS total_revenue FROM prices`. Correct.
-
-- Trino has **NO implicit varchar↔numeric coercion** — VERIFIED (functions/conversion.md, RAW 467: "Trino will not implicitly convert between character and numeric types"). The bare `SUM(amount)` on a varchar therefore errors; explicit CAST is required. Responder's reasoning is correct.
-- `CAST(varchar AS DECIMAL(10,2))` for '19.99'/'149.00' is exact (DECIMAL avoids float drift) — sound choice over DOUBLE.
-- `SUM(DECIMAL(10,2))` widens result to `DECIMAL(38,2)` — established Trino decimal-aggregation semantics; responder's stated widening is correct.
-
-**Minor completeness note (optional):** real CSV-ingested TEXT often has dirty rows (empty strings, '$', commas, 'N/A'); `CAST` THROWS on bad input, so `SUM(TRY_CAST(amount AS DECIMAL(10,2)))` (returns NULL on bad rows, skipped by SUM) is the robustness upgrade. `TRY_CAST` confirmed (functions/conversion.md: "Like cast, but returns null if the cast fails"). Not raised by the responder; optional, minor.
-
----
-
-## Q3 — sessions.tags array contains BOTH 'mobile' AND 'paid'
-
-**Scores:** Accuracy 5.0 / Completeness 4.8 / Clarity 4.7 / Actionability 4.9 → **4.85**
-
-Two valid forms offered, both correct for the "all of a required set present" (subset) test:
-
-1. `cardinality(array_except(ARRAY['mobile','paid'], tags)) = 0` — required-set MINUS tags is empty ⇒ every required element is in tags. VERIFIED: `array_except(x,y)` returns elements in x not in y, deduplicated (functions/array.md, RAW 467). Correct subset test.
-2. `all_match(ARRAY['mobile','paid'], x -> contains(tags, x))` — every required element is contained in tags. VERIFIED: `all_match(array, fn)` returns true iff all elements match the predicate (empty array → true, vacuous); `contains(x, element)` is membership test (functions/array.md, RAW 467). Correct.
-
-Both are accurate. The simplest form `contains(tags,'mobile') AND contains(tags,'paid')` would be slightly more beginner-readable, but the given forms are correct and generalize to larger required sets — a reasonable trade. No defect.
-
----
-
-## Q4 — events.properties MAP: count frequency of each KEY, keys unknown in advance
-
-**Scores:** Accuracy 4.9 / Completeness 4.8 / Clarity 4.0 / Actionability 4.8 → **4.625**
-
-**Final delivered SQL is CORRECT:**
-`SELECT key, COUNT(*) AS frequency FROM events CROSS JOIN UNNEST(properties) AS t(key, value) GROUP BY key ORDER BY frequency DESC`
-
-- `histogram(properties)` over a MAP column was correctly ABANDONED — `histogram(x)` returns a map of value→count and over a MAP column does not yield per-key frequency. Right call to drop it.
-- `UNNEST(map)` yields TWO columns `(key, value)` — VERIFIED (sql/select.md, RAW 467: "Maps are expanded into two columns (key, value)" with the map_from_entries example).
-- `GROUP BY key, COUNT(*)` gives per-key occurrence count across all events — correct, and works without knowing keys in advance.
-- The note that `CROSS JOIN UNNEST` DROPS rows with null/empty maps while `LEFT JOIN UNNEST ... ON TRUE` KEEPS them is correct and a genuinely useful nuance — VERIFIED (sql/select.md, RAW 467: ON TRUE is the only supported condition; LEFT JOIN preserves parent rows).
-
-**WATCH (c) — "Wait —" self-correction (sloppy-illustrative).** The answer showed `histogram(properties)` first, then mid-stream wrote "Wait — that returns a map of the entire column" before landing on the correct UNNEST query. The delivered SQL is right, but the visible self-correction is a presentation artifact (the responder "thinking out loud" in the final answer). This is a **clarity ding only**, not a correctness defect. Per-instance monitor — same family as prior sloppy-illustrative artifacts; not a resource defect.
-
----
+`GROUP BY ROLLUP(customer_id)` expands to grouping sets `((customer_id), ())`; `GROUPING(customer_id)=0` is a detail row, `=1` is the grand-total super-aggregate. The `CASE GROUPING(customer_id) WHEN 0 THEN customer WHEN 1 THEN 'GRAND TOTAL'` label and `ORDER BY GROUPING(customer_id), customer_id` (pushes total to the bottom) are correct. Verified ROLLUP/CUBE/GROUPING semantics against select.md. The `CUBE(customer_id, region)` variant bitmask is exactly right: `GROUPING(customer_id, region)` MSB = customer_id → 0 = both present, 1 = region rolled up (customer alone), 2 = customer rolled up (region alone), 3 = grand total; the responder's four CASE labels match this mapping precisely. No UNION ALL used, as required. Sound. Minor clarity ding only for the volume of the optional CUBE add-on. Note: GROUPING-SETS/CUBE accept column NAMES only (no expressions) — not triggered here since bare columns were used.
 
 ## Overall
 
-| Q | Accuracy | Completeness | Clarity | Actionability | Q-avg |
-|---|---|---|---|---|---|
-| Q1 | 4.9 | 4.6 | 4.8 | 4.9 | 4.800 |
-| Q2 | 4.9 | 4.5 | 4.8 | 4.9 | 4.775 |
-| Q3 | 5.0 | 4.8 | 4.7 | 4.9 | 4.850 |
-| Q4 | 4.9 | 4.8 | 4.0 | 4.8 | 4.625 |
+| Q | Acc | Comp | Clar | Act | Avg |
+|---|-----|------|------|-----|-----|
+| Q1 | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q2 | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q3 | 3.5 | 4 | 4 | 4 | 3.875 |
+| Q4 | 5 | 5 | 4.5 | 5 | 4.875 |
 
-**Overall average = (4.800 + 4.775 + 4.850 + 4.625) / 4 = 4.7625 → PASS** (threshold 3.5; margin +1.26).
+**Overall average = (4.875 + 4.875 + 3.875 + 4.875) / 4 = 4.625 → PASS** (threshold 3.5; margin +1.125).
 
----
+## Recommendation — DEFAULT NO-OP (monitor Q3 broken-secondary; do NOT churn)
 
-## Recommendation — DEFAULT NO-OP (no resource edit, no commit)
+The Q3 buggy "`LIKE 'promo_%'` if you prefer" secondary is the **2nd occurrence** (after iter1037 `LIKE 'evt_%'`) of offering a bare `LIKE 'X_%'` alongside a correct `starts_with` lead for a literal-underscore prefix.
 
-1. **Q1 watch (v) — nested-window LAG-over-SUM-OVER: did NOT recur.** The iter1050 answer used the clean subquery-then-LAG canonical (LAG over a plain pre-aggregated column, no window nesting). One clean re-probe after the iter1049 single slip. Since iter1049 was classified as a per-instance responder slip (not 2-in-2) and the very next re-probe is clean, **DOWNGRADE/CLOSE watch (v)** — treat as a passive monitor. r07's CTE-then-LAG + nested SUM(SUM) OVER guards are intact; no FIX-A warranted.
+**Grep-classify result (a) — per-instance responder-padding recall-ceiling, NO resource fix:**
+- The resource ALREADY teaches this rule findably and explicitly:
+  - **r23 §653** (verbatim ⚠️): *"Prefix CONTAINS a literal `_` or `%`? Then `LIKE 'prefix%'` is WRONG — and `starts_with` is the safe answer... `s LIKE 'ff_%'` matches `'ffXanything'` too... PREFER `starts_with(s, 'ff_')` ... or `s LIKE 'ff\_%' ESCAPE '\'`."* Rich keyword anchors (LIKE underscore literal prefix, match exact ff_ prefix, etc.).
+  - **r07 L759** (filter-lambda sibling): *"`f LIKE 'beta_%'` is WRONG for a literal `beta_` prefix... use `filter(arr, f -> starts_with(f, 'beta_'))` or `f LIKE 'beta\_%' ESCAPE '\'`."*
+- The LEAD used `starts_with` correctly (FIX-A reached the responder). The defect is confined to the responder failing to carry the already-taught caveat into its optional "if you prefer" aside — the broken-secondary / responder-padding family (cf. MEMORY "Responder Broken Secondary Alternative").
+- **Does any starts_with card explicitly say "do NOT offer LIKE X_% as an equivalent"?** Not in that exact imperative form, but r23 §653 and r07 L759 both state the equivalence is FALSE and that `LIKE 'X_%'` is WRONG for a literal underscore — which is the operative teaching. The responder is not lacking findable content; it is dropping the caveat in a throwaway aside. This is recall-ceiling padding, NOT a findable resource gap.
 
-2. **Q4 "Wait —" self-correction (watch c):** clarity-only ding; final query correct. Keep as **per-instance passive monitor**. No resource fix (no single resource change addresses responder think-aloud padding; same family as broken-secondary / illustrative-artifact slips — re-probe-don't-churn).
+**Action:** DEFAULT NO-OP — **no resource edit, no commit, no push.** Margin is comfortable (+1.125, PASS). Monitor / re-probe-don't-churn. This is 2-in-N (iter1037, iter1051) but on a non-lead aside while the lead is consistently correct; do NOT escalate to a FIX-A yet. **Escalate to a LIGHT additive FIX-A** (a one-line "do NOT offer `LIKE 'X_%'` as an equivalent shortcut for a literal-underscore prefix" inside the r23 starts_with card) ONLY if the same bare-`LIKE 'X_%'`-as-equivalent secondary recurs a 3rd time in the next 1-2 sweeps. Per the synthesis-ceiling / don't-churn guidance, a single additive card risks over-attracting adjacent prefix questions for little marginal gain when the lead already passes.
 
-3. No `::` cast, no QUALIFY, no false semi-join, no fabricated function, no regex-backslash, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no over-warning folklore across all 4. Strong, durable sweep.
+No `::`-cast / QUALIFY / false-semi-join / fabricated-function / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning issues observed in any of the four answers.
 
-**No resource edit. No commit. Do NOT bump state.json (already 1050).**
+MUST NOT bump state.json (already 1051).
