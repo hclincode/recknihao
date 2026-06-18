@@ -3368,6 +3368,8 @@ FROM iceberg.analytics.events
 GROUP BY 1;
 ```
 
+> ⚠️ **GROUP BY the ordinal (`GROUP BY 1`) or repeat the full `json_extract_scalar(...)` expression — NOT a SELECT alias.** Trino does NOT allow `GROUP BY` to reference a SELECT-list alias ([trinodb/trino #16533](https://github.com/trinodb/trino/issues/16533)). So `SELECT json_extract_scalar(properties, '$.geo.country') AS country FROM events GROUP BY country` FAILS with `Column 'country' cannot be resolved` — use `GROUP BY 1` (ordinal) or `GROUP BY json_extract_scalar(properties, '$.geo.country')` (repeat the expression). (`ORDER BY` CAN use the alias; `GROUP BY`/`WHERE` cannot.) *Keyword anchors: group by extracted json field, group by country from json, group by a json_extract_scalar value, group by nested json key.*
+
 `JSON_VALUE(col, '$.key' RETURNING varchar NULL ON EMPTY NULL ON ERROR)` is the **SQL/JSON standard** form (Trino 467 supports it) with explicit NULL handling — useful when you want strict error control. Unlike `json_extract_scalar` (which silently returns NULL for both missing keys and malformed JSON, conflating the two), `JSON_VALUE` lets you spell out exactly what should happen on a missing key vs. a parse error:
 
 ```sql

@@ -1,39 +1,104 @@
-# iter1043 Judge Feedback
+# Judge Feedback — iter1044
 
-Verified BOTH directions vs RAW git-tag 467 source (array.md / string.md / aggregate.md / datetime.md / sql/select.md) + WebSearch, NOT resources/. RAW git-tag source dispositive. Production stack (Trino 467 + Iceberg + Hive Metastore on-prem k8s/MinIO) consistent with all advice. NO federation probe (hard-locked). All 4 questions are pure SQL-pattern asks; no auth/OPA/JWT angle.
+**Overall: 4.015625 → PASS** (threshold 3.5; margin +0.515625)
 
-## Per-question scores
+Verified BOTH directions against RAW git-tag 467 source (array.md, json.md, datetime.md, window.md) + WebSearch/#16533 — NOT resources/. RAW git-tag source dispositive. Production stack confirmed Trino 467 + Iceberg on-prem k8s/MinIO (prod_info.md); all four answers are pure-SQL, stack-appropriate. NO federation probe (hard-locked).
 
-### Q1 — count per status as 3 side-by-side columns in ONE row — 4.8125
-- Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-- LEAD `COUNT(CASE WHEN status='pending' THEN 1 END) AS pending_count, ...` is CORRECT: `CASE WHEN ... THEN 1 END` returns NULL on non-match and `COUNT(expr)` counts only non-null rows, so each column counts only its status. Single GROUP-BY-less SELECT → one row, three columns. VERIFIED conditional/aggregate semantics.
-- ALSO `COUNT(*) FILTER (WHERE status='pending') AS pending_count, ...` — the SQL-standard FILTER form. **FILTER on aggregates CONFIRMED present in 467** (RAW aggregate.md: `aggregate_function(...) FILTER (WHERE <condition>)`). Both forms yield one row / three columns. Clean, no broken secondary.
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| Q1 | 5.0 | 5.0 | 4.5 | 5.0 | 4.875 |
+| Q2 | 2.5 | 2.5 | 4.5 | 3.5 | 3.25 |
+| Q3 | 2.5 | 3.0 | 4.0 | 3.0 | 3.125 |
+| Q4 | 5.0 | 4.75 | 4.5 | 5.0 | 4.8125 |
 
-### Q2 (KEY — literal-underscore durability on the any_match surface) — 4.875
-- Acc 5 / Comp 5 / Clar 4.75 / App 4.75
-- LEAD `WHERE any_match(tags, tag -> starts_with(tag, 'promo_'))`. **`any_match(array(T), function(T,boolean)) -> boolean` CONFIRMED present** (RAW array.md, alongside all_match/none_match). **`starts_with(string, substring) -> boolean` CONFIRMED** (RAW string.md). The responder used `starts_with` for the literal `promo_` prefix — NOT `tag LIKE 'promo_%'` (which would treat `_` as a single-char wildcard and over-match). This is the literal-underscore-correct predicate.
-- EXISTS+UNNEST alt `EXISTS (SELECT 1 FROM UNNEST(tags) AS t(tag) WHERE starts_with(tag,'promo_'))` — also valid (UNNEST-in-FROM and EXISTS both confirmed RAW select.md). Genuine simpler-vs-verbose contrast, not a broken secondary.
-- **LITERAL-UNDERSCORE-PREFIX DURABILITY: CLEAN on the any_match surface.** The iter1028/1029/1036 LIKE-`_`-as-literal misconception did NOT recur here. After the §651/§653/§759 FIX-A confirmed clean on bare-column (iter1030), filter-lambda (iter1037), and all_match (iter1042) surfaces, this iter extends the clean streak to the **any_match** lambda surface. Continued durability positive — keep on passive monitor (o).
+Overall = (4.875 + 3.25 + 3.125 + 4.8125) / 4 = **4.015625 PASS**
 
-### Q3 (cents→dollars EXACT) — 4.75
-- Acc 5 / Comp 4.75 / Clar 4.625 / App 4.75
-- LEAD `CAST(price_cents AS decimal(18,2)) / 100 AS price_dollars` — this is the PRECISE answer the question demands ("accurately, not rounded or truncated"). DECIMAL / integer → DECIMAL division → exact `19.99`. Leading with the DECIMAL form correctly satisfies the accuracy requirement.
-- Correctly flags `price_cents / 100` plain integer/integer = **integer division truncation** (1999/100 = 19) — accurate Trino behavior; one non-integer operand forces true division.
-- ALSO offers `price_cents * 1.0 / 100`. **PRECISION NOTE:** `1.0` is a DOUBLE literal (467 default), so this path yields a DOUBLE `19.99` which is binary-floating-point APPROXIMATE — acceptable for display but NOT exact-money. The responder LED with the DECIMAL (exact) form, so the precise-answer requirement is met; the DOUBLE form is correctly positioned as a secondary. Minor clarity ding only: the `*1.0` alt could be more explicitly tagged as approximate vs the DECIMAL exact path, but the ordering already conveys the right preference. Consistent with iter1042 Q4 verification of the identical cents-to-dollars scenario.
+---
 
-### Q4 (avg subscription length, completed only, NULLs not zero) — 4.8125
-- Acc 5 / Comp 4.75 / Clar 4.75 / App 4.75
-- `AVG(date_diff('day', started_at, ended_at)) AS avg_subscription_days FROM subscriptions WHERE ended_at IS NOT NULL`. **`date_diff(unit, ts1, ts2) -> bigint` CONFIRMED** (RAW datetime.md, returns `ts2 - ts1` in `unit`). `'day'` is a valid unit. **AVG ignores NULLs and returns NULL on empty input CONFIRMED** (RAW aggregate.md). The explicit `WHERE ended_at IS NOT NULL` pre-filter restricts to completed subscriptions; because date_diff would itself yield NULL for a NULL `ended_at` and AVG skips NULLs, the answer never treats active subs as zero. Explains "AVG skips NULL" correctly. Clean.
+## Q1 — array discount via transform — 4.875 (CLEAN)
 
-## Tics check
-`::` absent all 4. No QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning-folklore / broken-secondary. All functions used (any_match, starts_with, date_diff, AVG, COUNT-FILTER, CAST-to-DECIMAL) real and verified against RAW 467 source.
+`transform(line_items, price -> price * 0.9) AS discounted_items`
 
-## Overall
-Q1 4.8125 / Q2 4.875 / Q3 4.75 / Q4 4.8125 → **overall 4.8125 PASS** (margin +1.3125 over 3.5 threshold).
+VERIFIED vs array.md (RAW 467): `transform(array(T), function(T,U)) -> array(U)` — "Returns an array that is the result of applying `function` to each element of `array`." The lambda multiplies each element by 0.9 and returns a NEW array, no UNNEST / no re-aggregate — exactly the constraint. Sound.
 
-## Recommendation: DEFAULT NO-OP
-No source-verified resource defect; no 2-consecutive-same-shape slip. All four clean, both KEY findings resolved in the responder's favor:
-- **Q2 literal-underscore-prefix CLEAN on the any_match surface** (`starts_with` not `LIKE 'promo_%'`) — continued durability signal for watch (o), passive monitor.
-- **Q3 DECIMAL-vs-DOUBLE precision** — responder correctly LED with `CAST(... AS decimal(18,2))/100` (exact) for the "accurate" requirement; `*1.0` DOUBLE form correctly relegated to secondary/approximate.
+Note (not a defect): `0.9` is a DOUBLE literal; result type follows Trino numeric coercion. If `line_items` is `decimal`, the product is coerced; for exact money the engineer could `price * CAST(0.9 AS decimal(...))`, but the question did not request exact-decimal preservation. Minor clarity-only shading (-0.5) for not flagging the literal type.
 
-NO resource edit; NO FIX-A; NO commit/push. MUST NOT bump state.json (already 1043).
+## Q2 — % cancelled within 30 days, div-zero-safe — 3.25 (DENOMINATOR-SCOPE SEMANTIC ERROR; technique correct)
+
+```sql
+SELECT COUNT(*) FILTER (WHERE date_diff('day', started_at, cancelled_at) <= 30) * 100.0
+       / NULLIF(COUNT(*), 0) AS pct_cancelled_within_30_days
+FROM subscriptions
+WHERE cancelled_at IS NOT NULL;
+```
+
+VERIFIED technique is all correct:
+- `date_diff('day', ts1, ts2) -> bigint` (datetime.md RAW 467: "Returns `timestamp2 - timestamp1` expressed in terms of `unit`").
+- `COUNT(*) FILTER (WHERE ...)` conditional aggregate — valid.
+- `* 100.0` forces DOUBLE division (no integer truncation), `NULLIF(COUNT(*),0)` guards divide-by-zero on an empty/all-active table — both correct.
+
+**DEFECT — wrong denominator scope.** The question asks for the percentage of **subscriptions** (the natural population = ALL subscriptions, active + cancelled) cancelled within 30 days. The trailing `WHERE cancelled_at IS NOT NULL` restricts the WHOLE query — both numerator and denominator — to cancelled rows only. So `NULLIF(COUNT(*),0)` counts ONLY cancelled subscriptions, and the result computes "% of CANCELLED subscriptions that cancelled within 30 days," NOT "% of ALL subscriptions." For a mostly-active table this OVERSTATES the metric substantially.
+
+**FIX — remove `WHERE cancelled_at IS NOT NULL`.** Active subscriptions have `cancelled_at` NULL → `date_diff('day', started_at, NULL)` → NULL → `NULL <= 30` is not TRUE → correctly EXCLUDED from the FILTER numerator, while still counted in the `COUNT(*)` denominator. The div-zero guard still protects the empty-table case. Correct form:
+```sql
+SELECT COUNT(*) FILTER (WHERE date_diff('day', started_at, cancelled_at) <= 30) * 100.0
+       / NULLIF(COUNT(*), 0) AS pct_cancelled_within_30_days
+FROM subscriptions;   -- no WHERE
+```
+Accuracy/Completeness scored down for the wrong denominator scope; technique credited (clarity high; actionability partial — the engineer gets a runnable-but-wrong-answer query).
+
+## Q3 — nested JSON properties.geo.country, GROUP BY country — 3.125 (BROKEN ON TWO COUNTS; core json correct)
+
+```sql
+SELECT event_id, json_extract_scalar(properties, '$.geo.country') AS country
+FROM events GROUP BY country;
+```
+
+VERIFIED core guidance correct: `json_extract_scalar(json, json_path)` returns the value as a plain string (json.md RAW 467: "returns the result value as a string"), and nested dot-path `$.geo.country` is supported (doc example `$.store.book[0].author`). The extraction technique is right.
+
+**DEFECT 1 — GROUP BY references a SELECT ALIAS.** `GROUP BY country` references the SELECT-list alias `country`, which Trino does NOT allow (analysis error; trinodb/trino **#16533** — "Using alias in group by is not supported by Trino," confirmed dispositive from the issue itself + SELECT doc: GROUP BY accepts expressions or ordinals only, no alias). Fix: repeat the expression `GROUP BY json_extract_scalar(properties, '$.geo.country')` or use the ordinal `GROUP BY 1`.
+
+**DEFECT 2 — `event_id` is neither grouped nor aggregated** → second analysis error. The query would not run even after fixing the alias. For the stated intent ("GROUP BY country"), the correct shape is a per-country aggregation:
+```sql
+SELECT json_extract_scalar(properties, '$.geo.country') AS country, COUNT(*) AS n
+FROM events
+GROUP BY 1;
+```
+
+**RECURRENCE — 2nd occurrence, same shape as iter1039 Q3** (nested-JSON-extract-then-GROUP-BY-the-alias + ungrouped passthrough column). See recommendation.
+
+## Q4 — quartile bucketing by total spend — 4.8125 (CLEAN; NTILE-over-aggregate VALID)
+
+```sql
+WITH ranked_customers AS (
+  SELECT customer_id, SUM(amount) AS total_spend,
+         NTILE(4) OVER (ORDER BY SUM(amount) DESC) AS spend_tier
+  FROM orders GROUP BY customer_id)
+SELECT customer_id, total_spend,
+       CASE spend_tier WHEN 1 THEN 'Top 25%' ... END AS tier_label
+FROM ranked_customers;
+```
+
+VERIFIED vs window.md (RAW 467): `NTILE(n)` "Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`," remainder distributed from the first bucket (e.g. 6 rows / 4 → 1 1 2 2 3 4). NTILE(4) → quartiles, `ORDER BY ... DESC` → bucket 1 = top spenders. Correct.
+
+**KEY VALIDITY CONFIRMATION — this is NOT the iter1038/1040 invalid bare-SUM-OVER case.** Here `SUM(amount)` inside `OVER (ORDER BY SUM(amount) DESC)` is an AGGREGATE in a `GROUP BY customer_id` query; window functions run AFTER GROUP BY, and ordering a window by an aggregate of a grouped query is VALID (the iter1038/1040 error was a BARE non-grouping column `revenue` inside OVER — that does NOT apply here because `amount` is wrapped in SUM). Window-not-in-WHERE → correctly wrapped in a CTE. CASE-on-spend_tier labelling is clean. -0.25 completeness shading only (does not note NTILE distributes any remainder to the earliest buckets for non-divisible customer counts).
+
+---
+
+## Recommendation
+
+**(1) Q2 denominator-scope error — PER-INSTANCE SLIP, no resource gap.** The technique (COUNT(*) FILTER, NULLIF div-zero guard, 100.0 float division, date_diff->bigint) is all taught correctly and rendered correctly — this is a one-off reading error where the responder over-restricted the population with a `WHERE cancelled_at IS NOT NULL` that should have been omitted (active subs are correctly excluded by the NULL-propagating FILTER predicate alone, while remaining in the denominator). This is a NULL-aware-denominator reasoning miss, not a missing card. Classify as RESPONDER SLIP (watch, low-expectation); re-probe a "% of total population conditioned on a nullable timestamp" question next sweep. NO resource edit for this one.
+
+**(2) Q3 GROUP-BY-alias — RECURRENCE (2nd occurrence, iter1039 Q3 shape) → LIGHT FIX-A warranted (FINDABILITY GAP at the JSON card).** GREP findings:
+- The #16533 "GROUP BY the expression/ordinal, NOT the alias" caveat IS well-anchored generically in r07 (L2000, L2051 worked-GROUP-BY notes; L2777 "Trino GROUP BY rules" anchor) and r23.
+- BUT the primary JSON-extraction card (r13 §"store as VARCHAR", L3363-3369) shows `GROUP BY 1` (the SAFE ordinal form) WITHOUT a co-located inline caveat that `GROUP BY <alias>` is an error. A Haiku responder pulling `json_extract_scalar` from the JSON context lands at the r13 card, mirrors the SELECT-list alias into GROUP BY, and never traverses ~700+ lines into the r07 GROUP-BY-rules anchor.
+
+Same buried-guard findability pattern as iter1040 Q1 (running-total). Two occurrences of the JSON-extract-then-group-by-alias shape (iter1039 Q3 + iter1044 Q3) satisfy the 2-in-2 bar for a LIGHT, ADDITIVE FIX-A:
+
+> **Teacher LIGHT FIX-A (additive, no reconcile — existing content is correct):** At the r13 json_extract_scalar GROUP BY example (~L3366), add a one-line inline caveat co-located with the card:
+> `-- GROUP BY 1 (ordinal) or repeat json_extract_scalar(properties,'$.geo.country') — Trino does NOT allow GROUP BY <select alias> (#16533).`
+> Do the same for any other json_extract_scalar example immediately followed by a GROUP BY. Keep it inline at the copy-attractive card so keyword→resource matching surfaces it together with the extraction recipe. Do NOT touch the r07/r23 anchors (intact).
+
+The `event_id` ungrouped passthrough is part of the same responder synthesis miss; the existing per-country `SELECT expr, COUNT(*) ... GROUP BY 1` pattern at r13 L3366 already models the correct full shape — no extra card needed for the passthrough.
+
+**Overall:** PASS at 4.0156. Single additive FIX-A recommended (Q3 JSON-card GROUP-BY caveat). No reconcile, no lock edits, federation untouched. MUST NOT bump state.json (already 1044).
