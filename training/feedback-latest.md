@@ -1,54 +1,48 @@
-# Judge Feedback — iter1081 (2026-06-18)
+# Judge Feedback — iter1082 (2026-06-18)
 
-**Overall average: 4.69 — PASS** (margin +1.19 over 3.5 threshold)
+**Overall average: 4.78 — PASS** (threshold 3.5; margin +1.28)
 
-Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions against RAW git-tag 467 source (dispositive over rendered HTML):
-- functions/datetime.md — quarter / week / week_of_year / EXTRACT
-- functions/array.md — array_sort 1-arg + 2-arg comparator (verbatim example pulled)
-- functions/conversion.md — try_cast
+Verified BOTH directions against RAW git-tag 467 source (functions/string.md, functions/array.md, sql/select.md) plus WebSearch. Clean sweep — zero source-verified defects across all four answers.
 
-## Per-question scores
+RAW source URLs checked:
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/string.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
 
-### Q1 — group by calendar quarter (quarter() + EXTRACT(YEAR)) — 5.00
-`SELECT EXTRACT(YEAR FROM created_at) AS year, quarter(created_at) AS quarter, COUNT(*) FROM events GROUP BY EXTRACT(YEAR FROM created_at), quarter(created_at) ORDER BY year, quarter;`
-- Accuracy 5: datetime.md VERIFIED `quarter(x) -> bigint` "Returns the quarter of the year from x. The value ranges from 1 to 4"; EXTRACT supports YEAR (→year()) and QUARTER (→quarter()). GROUP-BY repeats the expressions (not the SELECT alias) per the Trino #16533 GROUP-BY-alias asymmetry — correct.
-- Completeness 5: pairs year+quarter so Q1s across years are not lumped — exactly the trending need. date_trunc('quarter', created_at) is a valid alternative (single column, keeps a real date) but not required.
-- Clarity 5 / Actionability 5: copy-paste ready, Q1=months 1-3 explained.
+---
 
-### Q2 — sort an array of strings — 4.13
-`SELECT id, array_sort(tags) AS sorted_tags FROM orders;` (ascending)
-Descending: `array_sort(tags, (a, b) -> IF(a > b, -1, 1))`
-- Accuracy 3.5: ascending form fully correct — array.md VERIFIED `array_sort(x) -> array` "Sorts and returns the array x... Null elements will be placed at the end." BUT the descending COMPARATOR is a source-verified contract deviation. The 467 doc states the comparator "returns -1, 0, or 1 as the first nullable element is less than, **equal to**, or greater than the second" and its own verbatim example uses `WHEN x = y THEN 0`. The responder's `IF(a > b, -1, 1)` returns **1 for equal elements** instead of 0. It will NOT raise an error (1 is a legal value; only values outside {-1,0,1}/NULL fail), and on distinct strings the visible result is correct — but on arrays with duplicate tags it is an inconsistent/non-transitive comparator (declares equal pairs as "greater"). Canonical: `(a, b) -> CASE WHEN a > b THEN -1 WHEN a = b THEN 0 ELSE 1 END`, or simply `reverse(array_sort(tags))`.
-- Completeness 4 / Clarity 4.5 / Actionability 4.5: "stays an array, no unnest/reassemble" correct and useful; the descending idiom mostly works but is not the documented contract-clean form.
+## Q1 — strip a SET of characters (asterisks + spaces) off both ends — Score 4.94
 
-### Q3 — safe varchar→decimal tolerating 'N/A'/empty — 4.88
-`SELECT product_id, TRY_CAST(price AS DECIMAL(10, 2)) AS price_numeric FROM products;`
-- Accuracy 5: conversion.md VERIFIED `try_cast(value AS type)` "Like cast, but returns null if the cast fails." 'N/A'→NULL, ''→NULL; CAST would throw. Exactly right.
-- Completeness 5 / Clarity 5 / Actionability 4.5: contrast with CAST + downstream NULL-handling note is the right defensive guidance. DECIMAL(10,2) precision is a reasonable default (could note picking precision to fit the data).
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.75
+- `trim(BOTH '*' FROM name)` and `trim(BOTH '* ' FROM name)` are valid Trino 467 SQL-standard trim syntax `trim([BOTH|LEADING|TRAILING] [chars] FROM source)`.
+- **CHARACTER-SET CLAIM CONFIRMED (the focal point):** the `chars` argument is a SET of characters each stripped individually, NOT a literal substring. The dispositive evidence is the documented behavior `TRIM(TRAILING 'na' FROM 'banana')` → `'ba'`: a literal-substring interpretation would strip a single `'na'` and yield `'bana'`; instead ALL trailing `'n'`/`'a'` characters are removed → `'ba'`, proving set semantics. string.md phrasing "Removes any leading and/or trailing characters as specified" + verbatim examples (`trim(BOTH '$' FROM '$var$')`→'var', `trim(TRAILING 'ER' FROM upper('worker'))`→'WORK') corroborate. Matches the standing [Trino trim Char-Set] pin.
+- So `trim(BOTH '* ' FROM '**Widget Pro**')` correctly strips any leading/trailing `'*'` or `' '` → `'Widget Pro'`. Exactly the right tool for the asked task (strip a set, not just whitespace, not a literal substring).
+- LEADING/TRAILING/BOTH side-selection explanation correct. Minor: did not call out that order of chars in the set is irrelevant (cosmetic, not a defect).
 
-### Q4 — extract ISO week to GROUP BY weekly — 4.75
-`SELECT EXTRACT(YEAR FROM opened_at) AS year, week_of_year(opened_at) AS week_number, COUNT(*) FROM tickets GROUP BY EXTRACT(YEAR FROM opened_at), week_of_year(opened_at) ORDER BY year, week_number;`
-- Accuracy 5: datetime.md VERIFIED `week_of_year` is an alias for `week`; `week(x) -> bigint` "Returns the ISO week of the year from x. The value ranges from 1 to 53" — ISO-8601, Monday start. The "week 1 = first week with 4+ days, Monday start" description is the correct ISO definition. GROUP-BY repeats expressions correctly.
-- Completeness 4.5: MINOR EDGE CAVEAT (not a correctness defect) — pairing `EXTRACT(YEAR FROM opened_at)` (calendar year) with the ISO week can mis-bucket year-boundary dates: e.g. 2024-12-30 is ISO week 1 of ISO-year **2025**, but EXTRACT(YEAR)=2024, so it buckets as 2024/wk1 alongside early-Jan-2024. For most trending this is acceptable; to be ISO-exact the year companion should be the ISO week-year (no direct iso_year() built-in in 467 — derive it, or accept the rare boundary skew). The week_of_year=ISO-week fact is correct and the calendar-year pairing is the common practical approach.
-- Clarity 5 / Actionability 4.5: clear, runnable.
+## Q2 — count distinct user_id per plan_type — Score 4.88
 
-## Overall
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5
+- `SELECT plan_type, COUNT(DISTINCT user_id) AS unique_users FROM subscriptions GROUP BY plan_type` is standard, valid Trino 467 — one distinct aggregation per group, optimized via MarkDistinct internally.
+- Single-arg `count()` note CONFIRMED: `COUNT(DISTINCT a, b)` multi-arg is a PARSE error; distinct COMBINATIONS use `COUNT(DISTINCT ROW(user_id, plan_type))` (or `COUNT(DISTINCT (a,b))`). Matches [Trino COUNT DISTINCT Single-Arg] pin. The combo aside is accurate and a useful disambiguation, not over-warning.
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|---|---|---|---|---|
-| Q1 | 5.0 | 5.0 | 5.0 | 5.0 | 5.00 |
-| Q2 | 3.5 | 4.0 | 4.5 | 4.5 | 4.13 |
-| Q3 | 5.0 | 5.0 | 5.0 | 4.5 | 4.88 |
-| Q4 | 5.0 | 4.5 | 5.0 | 4.5 | 4.75 |
+## Q3 — first 3 array elements without UNNEST — Score 4.88
 
-Overall average = (5.00 + 4.13 + 4.88 + 4.75) / 4 = **4.69 PASS** (threshold 3.5).
+- Accuracy 5 / Completeness 5 / Clarity 5 / Actionability 4.5
+- `slice(scores, 1, 3)` valid Trino 467. array.md VERIFIED: "Subsets array x starting from index start (or starting from the end if start is negative) with a length of length."
+- 1-based start CONFIRMED (Trino arrays are 1-based). Returns fewer elements if the array is shorter than start+length (bounded subset) — correct. Negative start counts from the end CONFIRMED, so `slice(scores, -3, 3)` = last 3. Result stays an array (no UNNEST) — exactly the ask.
 
-## Source-verified notes
-- quarter() = 1-4, EXTRACT YEAR/QUARTER supported — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
-- week()/week_of_year() = ISO-8601 week 1-53, Monday start, week_of_year alias of week — same source
-- array_sort(x) ascending nulls-last; array_sort(array(T), function(T,T,int)) comparator MUST return -1/0/1 with **0 for equal**; verbatim 467 example uses `WHEN x = y THEN 0` — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
-- try_cast returns NULL on failed cast vs CAST throws — https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/conversion.md
+## Q4 — UNION vs UNION ALL — Score 4.81
+
+- Accuracy 5 / Completeness 4.75 / Clarity 5 / Actionability 4.5
+- select.md VERIFIED: "If neither is specified, the behavior defaults to DISTINCT" and "If ALL is specified all rows are included even if identical." So bare UNION dedups, UNION ALL keeps all — correct.
+- Perf framing is accurate (not over-warning): UNION incurs a dedup pass (sort/hash), UNION ALL skips it and is the cheaper default; use bare UNION only when cross-result dedup is actually required. On disjoint inputs the dedup is wasted work — a reasonable, defensible guidance, not a defect. Could optionally have mentioned UNION ALL + manual GROUP BY when dedup IS needed but inputs are pre-deduped within each branch (minor completeness nit).
+
+---
+
+## No anti-patterns present
+
+No `::`-cast / QUALIFY / false-semi-join / fabricated-function / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary-alternative. All four imported-prior-family facts (trim char-set, count single-arg, slice 1-based/negative, UNION-default-DISTINCT) were verified correct in BOTH directions.
 
 ## Recommendation
-PASS (margin +1.19). One source-verified minor defect: Q2 descending comparator `IF(a>b,-1,1)` returns 1 for equal elements instead of the documented 0 — does not error and is visually correct on distinct strings, but is a non-transitive comparator on arrays with duplicates and deviates from the 467 contract. This is the "broken secondary alternative" responder family (the PRIMARY ascending answer is fully correct) — scope as a per-instance slip, NOT a resource defect. Worth a re-probe of array-sort-descending from a 2nd angle to see whether the responder produces the contract-clean `CASE ... WHEN a=b THEN 0` form or `reverse(array_sort(...))`. Do NOT churn resources on one slip. MUST NOT bump state.json (already 1081).
+
+DEFAULT NO-OP — margin +1.28, clean sweep. No resource edit, no commit content change. All four topics already PASSED in the rubric; this sweep reconfirms string-trim, array-slice, count-distinct, and set-operation accuracy. MUST NOT bump state.json (teacher already at 1082).
