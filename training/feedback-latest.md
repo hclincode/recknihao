@@ -1,57 +1,64 @@
-# Judge Feedback — iter1051
+# Judge Feedback — iter1052
 
-**Verification basis:** RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...) + trino.io/docs/467, verified in BOTH directions. NOT resources/. No federation probe. Overall-average governs; no per-question veto.
+**Overall: Q1 4.875 / Q2 4.875 / Q3 4.9375 / Q4 4.8125 → 4.875 PASS**
 
-## Per-question scores
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/...), NOT resources/. No federation probe (hard-locked).
 
-### Q1 — most-recent event was 'churned' (ROW_NUMBER top-1-per-group)
-**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 → 4.875**
+Production fit: prod stack is Trino 467 + Iceberg connector on-prem; all four are plain analytic SQL with no stack-incompatible advice. Good fit.
 
-`ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_at DESC)` in a CTE, then `WHERE rn=1 AND event_type='churned'` is the canonical most-recent-per-group pattern. Window functions cannot appear in `WHERE`, so the CTE wrap is required and correct. `SELECT DISTINCT` is harmless (rn=1 already yields one row per user; DISTINCT is redundant but not wrong). Verified against window.md (ROW_NUMBER) and select.md (window-in-WHERE restriction). The `max_by(event_type, event_at)='churned' GROUP BY user_id` alternative is a valid lighter form but was not required. Minor completeness ding only: ties on identical `event_at` are not addressed (ROW_NUMBER picks one arbitrarily) — a non-issue for typical event streams. Sound.
+---
 
-### Q2 — integer cents → "$49.99" with comma grouping (format / %,.2f)
-**Accuracy 5 / Completeness 4.5 / Clarity 5 / Actionability 5 → 4.875**
+## Q1 — integer cents → "$19.99" formatted string (SQL vs app-side) — 4.875
 
-`format('$%,.2f', price_cents / 100.0)` is fully correct. **CRUCIAL %f-vs-DECIMAL finding — VERIFIED:** Trino 467 `format(format, args...)` follows `java.util.Formatter`, and the official **conversion.md** doc page carries the verbatim canonical example `SELECT format('%,.2f', 1234567.89);` → `'1,234,567.89'`. The literal `1234567.89` is an **undecorated decimal literal = DECIMAL type** (verified against language/types.md: only scientific-notation `1.03e1` is DOUBLE; plain `1.1`/`100.0`/`1234567.89` are DECIMAL). So the docs themselves demonstrate `%,.2f` consuming a DECIMAL argument and producing comma-grouping + 2 decimals. Since `price_cents / 100.0` yields DECIMAL (integer / DECIMAL → DECIMAL), the responder's expression is the doc-blessed case — **NO cast-to-DOUBLE needed, NOT a bug.** `%,.2f` = comma grouping + 2 decimals confirmed. `1234567/100.0 → '$12,345.67'` is correct. Minor completeness note only: did not mention the `'%.1f%%'` literal-`%`-escape sibling, irrelevant here.
+Answer: `format('$%.2f', CAST(price_cents AS DECIMAL(18,2)) / 100) AS price_formatted` (+ shows the DECIMAL division); explains format() = printf-style (Java Formatter).
 
-### Q3 — orders with ≥1 tag starting with literal "promo_" (any_match + starts_with) — BROKEN SECONDARY
-**Accuracy 3.5 / Completeness 4 / Clarity 4 / Actionability 4 → 3.875**
+Verification (RAW conversion.md):
+- `format(format, args...) -> varchar` follows `java.util.Formatter` (printf-style). CONFIRMED.
+- Doc examples: `format('%.5f', pi())` → `'3.14159'`; `format('%,.2f', 1234567.89)` → `'1,234,567.89'`. The `%,.2f` example feeds an undecorated decimal-point literal `1234567.89`, which per language/types.md is a DECIMAL (only sci-notation is DOUBLE) — so `%.2f`/`%f` ACCEPTS DECIMAL. The cast-to-DECIMAL numerator is correctly consumed; no cast-to-DOUBLE needed.
+- `CAST(price_cents AS DECIMAL(18,2)) / 100`: numerator is DECIMAL, undecorated `100` is integer → DECIMAL/integer → DECIMAL, exact `19.99`. Output `"$19.99"` correct.
 
-**LEAD is CORRECT (FIX-A working):** `WHERE any_match(tags, tag -> starts_with(tag, 'promo_'))` is the right answer for a *literal* `promo_` prefix. Verified: `any_match(array, lambda)` exists (array.md), `starts_with(string, substring)` exists and is a literal prefix test (string.md). The iter1029/1036 literal-underscore FIX-A clearly reached the responder for the lead.
+No thousands separator requested; `%.2f` (no comma) is the right minimal choice. SaaS framing (format in SQL vs app-side) addressed. Fully sound. (-0.125 polish only: could note app-side formatting is often preferable for locale/currency-symbol flexibility, but not required.)
 
-**BUG in the throwaway secondary:** "you can also use `tag LIKE 'promo_%'` if you prefer" is **WRONG and misleading.** In LIKE, `_` is a **single-character wildcard** (verified comparison.md: "`_` matches any single character"), so `'promo_%'` ALSO matches `'promoXanything'` / `'promoZ...'` — NOT just the literal `promo_` prefix. **`'promo_%'` is NOT equivalent to `starts_with(tag, 'promo_')`.** The "if you prefer" framing presents a semantically different (over-matching) form as an interchangeable choice, with no underscore caveat and no `ESCAPE '\'`. A reader who "prefers" it gets a silently-wrong result. Accuracy dinged for the unguarded buggy secondary while crediting the correct lead.
+## Q2 — monthly cohort fraction still active after 90 days — 4.875
 
-**2nd occurrence of this broken-secondary shape** (after iter1037 Q1, which offered `LIKE 'evt_%'` alongside a correct `starts_with`). See recommendation for classification.
+Answer: `date_trunc('month', started_at)` cohort; `COUNT(*)` total; `COUNT(*) FILTER (WHERE cancelled_at IS NULL OR cancelled_at > started_at + INTERVAL '90' DAY)` numerator; `* 100.0 / COUNT(*)` percentage; GROUP BY repeats the date_trunc expression; ORDER BY cohort_month.
 
-### Q4 — grand-total row via ROLLUP/GROUPING, no UNION ALL
-**Accuracy 5 / Completeness 5 / Clarity 4.5 / Actionability 5 → 4.875**
+Verification (RAW datetime.md):
+- `date_trunc('month', timestamp)` CONFIRMED.
+- `started_at + INTERVAL '90' DAY` — `+` operator with day-interval on timestamp CONFIRMED; `INTERVAL '90' DAY` is a valid interval literal (DAY is a supported qualifier; not quarter/week).
+- `COUNT(*) FILTER (WHERE ...)` — standard FILTER-on-aggregate, valid in 467.
 
-`GROUP BY ROLLUP(customer_id)` expands to grouping sets `((customer_id), ())`; `GROUPING(customer_id)=0` is a detail row, `=1` is the grand-total super-aggregate. The `CASE GROUPING(customer_id) WHEN 0 THEN customer WHEN 1 THEN 'GRAND TOTAL'` label and `ORDER BY GROUPING(customer_id), customer_id` (pushes total to the bottom) are correct. Verified ROLLUP/CUBE/GROUPING semantics against select.md. The `CUBE(customer_id, region)` variant bitmask is exactly right: `GROUPING(customer_id, region)` MSB = customer_id → 0 = both present, 1 = region rolled up (customer alone), 2 = customer rolled up (region alone), 3 = grand total; the responder's four CASE labels match this mapping precisely. No UNION ALL used, as required. Sound. Minor clarity ding only for the volume of the optional CUBE add-on. Note: GROUPING-SETS/CUBE accept column NAMES only (no expressions) — not triggered here since bare columns were used.
+**WATCH (s) — denominator-scope: CLEAN, iter1044 mistake did NOT recur.** The denominator is `COUNT(*)` over ALL cohort members (GROUP BY month with NO WHERE restricting the table); only the numerator is FILTER-restricted to the still-active-at-90-day population. This is the correct cohort-retention denominator. The iter1044 error of restricting the denominator with a table-level WHERE did NOT recur.
+- Predicate `cancelled_at IS NULL OR cancelled_at > started_at + INTERVAL '90' DAY` correctly captures those active at the 90-day mark.
+- `* 100.0` forces decimal division (avoids integer truncation). Sound.
+- Minor cohort-maturity nuance (very recent cohorts <90 days old count not-yet-matured NULL-cancelled rows as "active") is acceptable and not required to flag. (-0.125 completeness only.)
 
-## Overall
+## Q3 — events with ≥1 tag starting with literal "promo_" — 4.9375
 
-| Q | Acc | Comp | Clar | Act | Avg |
-|---|-----|------|------|-----|-----|
-| Q1 | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q2 | 5 | 4.5 | 5 | 5 | 4.875 |
-| Q3 | 3.5 | 4 | 4 | 4 | 3.875 |
-| Q4 | 5 | 5 | 4.5 | 5 | 4.875 |
+Answer: PRIMARY `WHERE cardinality(filter(tags, t -> starts_with(t, 'promo_'))) > 0`; SIMPLER `WHERE any_match(tags, t -> starts_with(t, 'promo_'))`. States starts_with is literal prefix, NOT a wildcard. Offered NO bare `LIKE 'promo_%'` form.
 
-**Overall average = (4.875 + 4.875 + 3.875 + 4.875) / 4 = 4.625 → PASS** (threshold 3.5; margin +1.125).
+Verification (RAW array.md + string.md):
+- `any_match(array(T), function(T,boolean)) -> boolean` — true if ≥1 element matches; CONFIRMED ideal for "at least one matching tag".
+- `filter(array(T), function(T,boolean)) -> array(T)` + `cardinality(x) -> bigint` — CONFIRMED; `cardinality(filter(...)) > 0` is a valid (if more verbose) equivalent.
+- `starts_with(string, substring) -> boolean` — "Tests whether substring is a prefix of string." Literal prefix match, NOT a wildcard. CONFIRMED — `_` in `'promo_'` is a literal character here (no pattern engine), exactly the literal-underscore requirement.
 
-## Recommendation — DEFAULT NO-OP (monitor Q3 broken-secondary; do NOT churn)
+**WATCH (c)/(o) — broken-secondary LIKE aside: CLEAN at 3rd-occurrence test.** The buggy `LIKE 'promo_%'` "if you prefer" alternative (iter1037 / iter1051) did NOT recur. Both offered forms use `starts_with` (literal-prefix-correct); had a bare `LIKE 'promo_%'` been offered as equivalent it would over-match `'promoX...'` (underscore = single-char wildcard) — but it was not offered. Clean re-probe; the two-occurrence broken-secondary streak does NOT advance to 3. (-0.0625 polish only.)
 
-The Q3 buggy "`LIKE 'promo_%'` if you prefer" secondary is the **2nd occurrence** (after iter1037 `LIKE 'evt_%'`) of offering a bare `LIKE 'X_%'` alongside a correct `starts_with` lead for a literal-underscore prefix.
+## Q4 — single most recent order per customer (cleaner than MAX+self-join) — 4.8125
 
-**Grep-classify result (a) — per-instance responder-padding recall-ceiling, NO resource fix:**
-- The resource ALREADY teaches this rule findably and explicitly:
-  - **r23 §653** (verbatim ⚠️): *"Prefix CONTAINS a literal `_` or `%`? Then `LIKE 'prefix%'` is WRONG — and `starts_with` is the safe answer... `s LIKE 'ff_%'` matches `'ffXanything'` too... PREFER `starts_with(s, 'ff_')` ... or `s LIKE 'ff\_%' ESCAPE '\'`."* Rich keyword anchors (LIKE underscore literal prefix, match exact ff_ prefix, etc.).
-  - **r07 L759** (filter-lambda sibling): *"`f LIKE 'beta_%'` is WRONG for a literal `beta_` prefix... use `filter(arr, f -> starts_with(f, 'beta_'))` or `f LIKE 'beta\_%' ESCAPE '\'`."*
-- The LEAD used `starts_with` correctly (FIX-A reached the responder). The defect is confined to the responder failing to carry the already-taught caveat into its optional "if you prefer" aside — the broken-secondary / responder-padding family (cf. MEMORY "Responder Broken Secondary Alternative").
-- **Does any starts_with card explicitly say "do NOT offer LIKE X_% as an equivalent"?** Not in that exact imperative form, but r23 §653 and r07 L759 both state the equivalence is FALSE and that `LIKE 'X_%'` is WRONG for a literal underscore — which is the operative teaching. The responder is not lacking findable content; it is dropping the caveat in a throwaway aside. This is recall-ceiling padding, NOT a findable resource gap.
+Answer: `SELECT * FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at DESC) AS rn FROM orders) WHERE rn=1 ORDER BY customer_id`.
 
-**Action:** DEFAULT NO-OP — **no resource edit, no commit, no push.** Margin is comfortable (+1.125, PASS). Monitor / re-probe-don't-churn. This is 2-in-N (iter1037, iter1051) but on a non-lead aside while the lead is consistently correct; do NOT escalate to a FIX-A yet. **Escalate to a LIGHT additive FIX-A** (a one-line "do NOT offer `LIKE 'X_%'` as an equivalent shortcut for a literal-underscore prefix" inside the r23 starts_with card) ONLY if the same bare-`LIKE 'X_%'`-as-equivalent secondary recurs a 3rd time in the next 1-2 sweeps. Per the synthesis-ceiling / don't-churn guidance, a single additive card risks over-attracting adjacent prefix questions for little marginal gain when the lead already passes.
+Verification (RAW window.md):
+- `row_number() -> bigint` — "unique, sequential number for each row ... according to ordering within the window partition." CONFIRMED.
+- Window functions run after HAVING, before ORDER BY → cannot appear in WHERE; the subquery wrap (`WHERE rn=1` outside) is required and correctly applied. CONFIRMED.
+- PARTITION BY customer_id + ORDER BY created_at DESC + rn=1 = canonical most-recent-per-group; cleaner than MAX(created_at)+self-join as asked; generalizes to top-N via `rn <= N`. Sound. (-0.1875: `SELECT *` carries the helper `rn` column into output — a final projection listing the wanted columns would be marginally cleaner, minor.)
 
-No `::`-cast / QUALIFY / false-semi-join / fabricated-function / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning issues observed in any of the four answers.
+---
 
-MUST NOT bump state.json (already 1051).
+## Recommendation: DEFAULT NO-OP
+
+Margin +1.375 over threshold. All four source-verified clean. Both flagged watches came back CLEAN:
+- (s) Q2 denominator-scope: denominator = full cohort, iter1044 mistake did NOT recur.
+- (c)/(o) Q3 broken-secondary LIKE: did NOT recur at the 3rd-occurrence test (starts_with only).
+
+No `::`-cast / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / broken-secondary this iter. No source-verified resource defect and no 2-in-2 same-shape slip. NO resource edit; NO commit. MUST NOT bump state.json (already 1052).
