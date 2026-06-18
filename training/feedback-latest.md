@@ -1,132 +1,80 @@
-# Judge Feedback — iter1066 (2026-06-18)
+# Judge Feedback — iter1067 (2026-06-18)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions against RAW git-tag 467 source + WebSearch. Scored against real
-Trino 467 behavior, not resources/.
+Verified BOTH directions against RAW git-tag 467 source (raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/) + WebSearch on GitHub issues/PRs. Scored against real Trino 467 behavior, NOT resources/.
 
-## Overall: 4.13 PASS (threshold 3.5; overall average governs, no per-question veto)
+**Overall average: 4.47 — PASS** (threshold 3.5; overall average governs, no per-question veto).
 
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 NTILE(4) quartiles | 5.0 | 4.75 | 4.75 | 5.0 | 4.875 |
-| Q2 filter + starts_with | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
-| Q3 histogram on map column | 1.5 | 1.5 | 2.5 | 1.5 | 1.75 |
-| Q4 ROW_NUMBER first session | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
+| Q1 map-key frequency | 5 | 5 | 4.5 | 5 | 4.875 |
+| Q2 struct bundle/read | 2 | 4 | 3.5 | 2.5 | 3.00 |
+| Q3 complete months | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 set difference | 5 | 5 | 5 | 5 | 5.00 |
 
-Overall = (4.875 + 4.9375 + 1.75 + 4.9375) / 4 = **4.125** → **4.13 PASS**.
-
-(Per-dimension overall: Acc 4.125, Comp 3.9375, Clar 4.3125, Act 4.125 — all ≥3.5.)
+Overall = (4.875 + 3.00 + 5.00 + 5.00) / 4 = **4.47 PASS**
 
 ---
 
-## Q1 — split customers into 4 equal spend groups (NTILE) — 4.875 CORRECT
+## Q1 — map-key frequency (CRITICAL re-probe) — 4.875 — FIX-A REACHED, CORRECT
 
-`NTILE(4) OVER (ORDER BY SUM(amount) DESC)` inside a CTE that does
-`GROUP BY customer_id, plan_type, country`.
+The iter1066 histogram-on-map defect is now FIXED. Responder gave:
+`SELECT histogram(k) FROM api_logs CROSS JOIN UNNEST(map_keys(tags)) AS t(k);`
+and the sortable variant `... k, COUNT(*) ... GROUP BY k ORDER BY frequency DESC`.
 
-VERIFIED vs RAW window.md (467): ntile(n) "Divides the rows for each window partition into
-`n` buckets ranging from 1 to at most n. Bucket values will differ by at most 1." Remainder:
-"distributed one per bucket, starting with the first bucket" — responder's "remainders go to
-earliest buckets" claim is exactly right. With `ORDER BY total_spend DESC`, bucket 1 = top
-spenders (top 25%) — correct. GROUP BY including plan_type/country alongside customer_id is
-acceptable (one row per customer assuming stable plan/country). Minor completeness ding only:
-NTILE makes equal-COUNT not equal-SUM groups (quartiles by customer count) — fine for the asked
-"top 25% of customers" reading but worth a one-liner.
+VERIFIED correct against RAW 467 source:
+- `map_keys(x(K,V)) -> array(K)` — returns keys as an array (functions/map.md). For `map(varchar,varchar)` → `array(varchar)`.
+- `CROSS JOIN UNNEST(array)` explodes the array into scalar `varchar` rows — scalar varchar IS a legal histogram input / GROUP BY key (comparable), unlike a bare MAP (non-comparable).
+- `histogram(x) -> map<K,bigint>` "count of the number of times each input value occurs" (functions/aggregate.md) — applied to scalar keys this is exactly per-key frequency.
+- Responder did NOT pass a bare MAP to histogram (the iter1066 defect). It correctly extracted keys first.
 
-## Q2 — filter array to elements starting with literal 'premium_' — 4.9375 CORRECT (best answer)
+The GROUP BY + COUNT(*) + ORDER BY DESC variant is the more useful answer for "most often" (directly sortable); histogram() returns an unordered map. Both are valid; minor clarity ding only because histogram() output isn't sorted by frequency.
 
-`filter(feature_list, f -> starts_with(f, 'premium_'))`.
+## Q2 — bundle into struct, read fields back (CRITICAL) — 3.00 — ROW-FIELD-ACCESS DEFECT
 
-VERIFIED vs RAW array.md: `filter(array(T), function(T,boolean)) -> array(T)` exists.
-VERIFIED vs RAW string.md: `starts_with(string, substring)` exists, tests prefix, returns boolean.
-CRITICAL trap correctly avoided: responder did NOT use bare `LIKE 'premium_%'` (the literal `_`
-is a LIKE single-char wildcard, which would over-match `premiumX...`). starts_with treats
-`premium_` as a literal prefix — the right tool. One-row-in/one-row-out (no UNNEST) as asked.
-Clean, no broken secondary. The persistent broken-LIKE-secondary watch stays CLOSED here.
+**VERDICT: `ROW(first_name, last_name, tier)` yields ANONYMOUS (unnamed) fields. Dot-access `.first_name` does NOT work and requires a CAST to a named ROW type (or positional `[1]`/`[2]`/`[3]`).** Trino 467 does NOT propagate source column names into row constructor field names.
 
-## Q3 — per-key frequency map across all events — 1.75 WRONG (lead errors; accuracy defect)
+Source verification:
+- RAW language/types.md: "By default, row fields are not named, but names can be assigned." Named fields via `CAST(ROW(1, 2e0) AS ROW(x BIGINT, y DOUBLE))`, then accessed with `.x`. Unnamed fields accessed only by position `ROW(1, 2.0)[1]`.
+- WebSearch corroboration: trinodb/trino issue #4587 (anonymous ROW prints field0/field1), discussion #7758 ("very easy to construct an unnamed/anonymous Row using row(value1,...)"; "accessing an individual value in an anonymous row ... requires casting to a named row"), and PR #25261 (a PROPOSAL to add `row(1 as a)` naming — confirming it does NOT exist in 467). Dot-access-by-source-column-name is absent in 467.
 
-Responder gave: `SELECT histogram(properties) AS property_frequency FROM events`.
+Consequence for the responder's answer:
+- Parts (a)+(b) — the HEADLINE example: `SELECT profile_card.first_name FROM (SELECT ROW(first_name, last_name, tier) AS profile_card FROM customers)` — is a **DEFECT**. The inner anonymous ROW has fields `field0/field1/field2`; `profile_card.first_name` raises a "Field 'first_name' not found" type error. To make dot-access work the constructor must be CAST: `CAST(ROW(first_name, last_name, tier) AS ROW(first_name VARCHAR, last_name VARCHAR, tier VARCHAR))`, then `.first_name` works. Or use positional `profile_card[1]`.
+- Part (c) — CREATE TABLE with `profile_card ROW(first_name VARCHAR, last_name VARCHAR, tier VARCHAR)` — is CORRECT; a stored named ROW column IS dot-accessible as `.first_name`. (This is the named-ROW path the inline example skipped.)
+- Part (d) — `json_format(CAST(profile_card AS JSON))` — VERIFIED valid. CAST of a NAMED row to JSON yields a JSON OBJECT `{"first_name":...}` (json.md: `CAST(CAST(ROW(123,'abc',true) AS ROW(v1 BIGINT,v2 VARCHAR,v3 BOOLEAN)) AS JSON)` → `{"v1":123,...}`). The `{"first_name":...}` claim is only correct when applied to the NAMED `profile_card` column (the CREATE TABLE form). Applied to the anonymous inline `ROW(...)` constructor, CAST AS JSON yields a positional ARRAY `[...]`, not an object — so (d)'s correctness depends on using the named form from (c), which the responder's prose conflates.
 
-**VERDICT: histogram(map_column) does NOT produce per-key counts. The answer is WRONG.**
+Because the dot-access defect is in the LEAD/headline pattern (not a "for completeness" appendix), this is a genuine accuracy defect, not responder padding. Accuracy 2; Completeness 4 (the correct named-ROW path IS present in part c); Clarity 3.5; Actionability 2.5 (an engineer who copies the headline gets a parse/type error).
 
-1. SEMANTICS: VERIFIED vs RAW aggregate.md (467): `histogram(x) -> map<K,bigint>` "creates a
-   map containing the count of the number of times each input VALUE occurs." Passing the whole
-   `properties` MAP as `x` treats each entire map as a single value, so it would count distinct
-   ENTIRE maps — never the per-key frequency the question asks for ({'click':452,'view':1200}).
+ACTIONABLE for teacher: add/strengthen a findable canonical that the ROW CONSTRUCTOR is ANONYMOUS — to dot-access by name you must CAST to a named ROW type, e.g. `CAST(ROW(first_name,last_name,tier) AS ROW(first_name VARCHAR,last_name VARCHAR,tier VARCHAR)).first_name`, or use positional `[1]`. Defang the bare `ROW(a,b).a` form as WRONG. Pin: CAST-row-AS-JSON yields object ONLY for named rows, array for anonymous. Re-probe Q2 from a 2nd angle next sweep.
 
-2. TYPE ERROR: `histogram` builds `map<K,bigint>` keyed on the input values, so the input type
-   must be usable as a MAP KEY, i.e. comparable. MAP is NOT a comparable/orderable type in
-   Trino — it cannot be a GROUP BY key or a map key (confirmed via WebSearch of Trino docs/issue
-   history; the engine raises a type-not-comparable / cannot-use-map-as-key error). So
-   `histogram(properties)` should actually FAIL to plan, not silently return a wrong map.
+## Q3 — complete months active (CRITICAL) — 5.00 — CORRECT
 
-Either way the answer does not answer the question, and the "add GROUP BY user_id" suffix would
-make it worse (GROUP BY on a map column also fails on the same non-comparability).
+`date_diff('month', started_at, COALESCE(cancelled_at, current_timestamp))`.
+- VERIFIED date_diff is "timestamp2 - timestamp1 expressed in terms of unit" (datetime.md). For month, Trino 467 is DAY-AWARE / complete-units (confirmed via git-tag DateTimeFunctions.java per standing reference): drops fractional units.
+- Responder's worked examples are exactly right: 25 days → 0; 2024-01-15→2024-02-14 = 0; 2024-01-15→2024-02-15 = 1.
+- `COALESCE(cancelled_at, current_timestamp)` with a timestamp column is valid (current_timestamp is timestamp WITH TIME ZONE; implicit TIMESTAMP→TIMESTAMP WITH TIME ZONE coercion exists in 467).
+- date_diff('day',...) → 25 for the days follow-up is correct.
 
-**CORRECT approach — extract keys per row, then count:**
+## Q4 — set difference without big NOT IN/NOT EXISTS — 5.00 — CORRECT
 
-```sql
--- one row, key -> frequency across all events
-SELECT histogram(k) AS property_frequency
-FROM events
-CROSS JOIN UNNEST(map_keys(properties)) AS t(k);
-
--- equivalent via explicit group + map_agg
-SELECT map_agg(k, cnt) AS property_frequency
-FROM (
-  SELECT k, COUNT(*) AS cnt
-  FROM events
-  CROSS JOIN UNNEST(map_keys(properties)) AS t(k)
-  GROUP BY k
-);
-```
-
-VERIFIED building blocks (RAW map.md / array.md / aggregate.md, 467):
-- `map_keys(x(K,V)) -> array(K)` — returns the keys array.
-- `UNNEST(array)` expands the array to rows; the input to histogram/COUNT is the scalar key `k`
-  (a varchar), which IS comparable, so histogram/map_agg are legal.
-- `map_agg(key, value) -> map<K,V>` assembles the final {key: count} map.
-
-GAP TO ADDRESS: a findable canonical for "count occurrences of each KEY in a map(...) column"
-must route to map_keys + UNNEST + histogram/map_agg, and explicitly warn that
-`histogram(map_column)` / GROUP BY on a map column is a non-comparable type error, NOT a per-key
-counter. Re-probe Q3 from a 2nd angle (e.g. per-key DISTINCT-value counts, or top-N keys) next
-sweep before treating it closed.
-
-## Q4 — first session per user (earliest started_at) — 4.9375 CORRECT
-
-`ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY started_at ASC) = 1` in a subquery, with a
-`MIN(started_at) GROUP BY user_id` alternative for the timestamp-only case.
-
-VERIFIED: row_number() top-1-per-partition is the canonical first/last-per-group pattern, valid
-467 (window functions evaluate after WHERE/GROUP BY/HAVING, so the rn=1 filter must live in an
-outer query — responder wrapped correctly). The MIN alternative is correctly scoped: it returns
-only the earliest timestamp and LOSES session_id/platform — responder flagged exactly that.
-Note (not required): `min_by(session_id, started_at)` is another valid single-pass option that
-keeps the wanted columns without a window — could be mentioned but its absence is not a defect.
+`SELECT user_id FROM plan_a_users EXCEPT SELECT user_id FROM plan_b_users`.
+- VERIFIED EXCEPT exists in 467 (sql/select.md): "returns the rows that are in the result set of the first query, but not the second"; defaults to DISTINCT.
+- The clean set-difference / anti-join idiom is exactly right.
+- NULL-safety contrast vs NOT IN is accurate: `NOT IN (subquery with NULLs)` yields UNKNOWN→no/empty rows; EXCEPT is set-based and treats NULL as a distinct comparable value, so it is NULL-safe. Correct.
 
 ---
 
-## Source-verified dialect notes (RAW 467 URLs checked)
+## Clean checks (no defects)
+No `::`-cast misuse, no QUALIFY, no false semi-join, no fabricated functions, no regex-backslash issue, no INTERVAL quarter/week, no OFFSET-before-LIMIT, no over-warning folklore. Q1/Q3/Q4 have no broken-secondary padding. Q2's defect is in the LEAD, not an appendix.
 
-- window.md — ntile(n): buckets 1..n differ by ≤1, remainder one-per-bucket from the first.
-  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
-- array.md — filter(array(T), function(T,boolean)) -> array(T) exists.
-  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
-- string.md — starts_with(string, substring) exists, returns boolean, prefix test.
-  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/string.md
-- aggregate.md — histogram(x) -> map<K,bigint> counts occurrences of each input VALUE;
-  map_agg(key,value) -> map<K,V>.
-  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
-- map.md — map_keys(x(K,V)) -> array(K).
-  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
-- MAP non-comparability (cannot be GROUP BY key / map key) confirmed via Trino docs + issue
-  history (WebSearch): https://trino.io/docs/current/functions/aggregate.html
+## Source URLs checked
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/types.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/json.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md
+- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md
+- GitHub: trinodb/trino issues #4587, #860, discussion #7758, PR #25261
 
-## No other defects
-
-No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/
-OFFSET-before-LIMIT/over-warning/broken-secondary in Q1/Q2/Q4. Q3 is a genuine LEAD-answer
-accuracy defect (not responder padding), absorbed by the overall average (4.13 PASS), but the
-map-key-frequency routing gap is the actionable item for the teacher.
+## Recommendation
+PASS at 4.47 (margin +0.97). The one actionable item is the Q2 ROW-constructor anonymous-field defect — teacher should add a findable CAST-to-named-ROW canonical + defang `ROW(a,b).a`. MUST NOT bump state.json (already 1067; teacher owns it).
