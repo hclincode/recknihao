@@ -1,52 +1,50 @@
-# Judge Feedback — iter1089 (2026-06-18)
+# Judge Feedback — iter1090 (2026-06-18)
 
-Verified BOTH directions against RAW git-tag 467 source (functions/math.md, functions/window.md, functions/aggregate.md, functions/map.md, sql/select.md). Clean sweep; ZERO source-verified defects.
+Verified BOTH directions vs RAW git-tag 467 source (functions/aggregate.md, functions/array.md, functions/datetime.md, functions/math.md, core/trino-main MathFunctions.java) + WebSearch (date+integer rejection, no-native-PIVOT). Clean sweep; ZERO source-verified defects.
 
-## Q1 — round cost_price UP to next full dollar (4.25→5, 12.80→13, 7.00→7)
-**Answer:** `ceil(cost_price) AS price_rounded_up`; notes lowercase `ceil()` (also `ceiling()`).
+## Q1 — comma-separated event history per user
+**Answer:** `array_join(array_agg(event_type ORDER BY occurred_at), ', ') AS event_history ... GROUP BY user_id`
 
-- **Accuracy: 5** — RAW math.md VERIFIED: `ceiling(x) -> [same as input]` "Returns x rounded up to the nearest integer", and `ceil(x)` "This is an alias for ceiling". Rounds toward +infinity (up), so 4.25→5, 12.80→13, and 7.00 stays 7.00 (already whole). Return type is same-as-input (decimal in → decimal out), so the value is the rounded-up whole number expressed as decimal — value-correct for every example given. `ceil` and `ceiling` both exist and are aliases; lowercase note correct.
-- **Completeness: 5** — Directly answers; covers both alias names. Could note return type is decimal (display still `5.00` not `5`), but the VALUE is exactly what was asked.
-- **Clarity: 5** — Walks all three example values through the function. Zero assumed knowledge.
-- **Actionability: 5** — Drop-in SQL.
-- **Avg: 5.00**
+- Accuracy: **5** — aggregate.md VERIFIED: "Some aggregate functions such as array_agg produce different results depending on the order of input values. This ordering can be specified by writing an order-by-clause within the aggregate function" with example `array_agg(x ORDER BY y DESC)`. array.md VERIFIED `array_join(x, delimiter)` "Concatenates the elements of the given array using the delimiter. Null elements are omitted." Both the ordered-aggregation path AND the join-with-separator path confirmed. The responder's note that ORDER BY inside array_agg is required for deterministic chronological order is correct.
+- Completeness: **5** — fully solves it; correctly flags non-determinism without the ORDER BY. listagg is a valid alternative (not required since the array_agg+array_join path used is fully correct).
+- Clarity: **4.75** — clear two-step explanation (collect into array, then concatenate).
+- Actionability: **5** — drop-in query.
 
-## Q2 — monthly_active_users running "peak so far" per row in date order
-**Answer:** `MAX(monthly_active_users) OVER (ORDER BY event_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak_so_far`.
+## Q2 — trial ends within next 30 days, no hardcoded date
+**Answer:** `WHERE trial_end_date >= current_date AND trial_end_date < current_date + INTERVAL '30' DAY`
 
-- **Accuracy: 5** — RAW window.md VERIFIED "All aggregate functions can be used as window functions by adding the OVER clause"; MAX is an aggregate so MAX-as-window is valid. select.md VERIFIED the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`; the responder's explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the standard explicit running-window form, and `ROWS` (vs default `RANGE`) is actually PREFERRED here because it avoids peer-tie lumping on duplicate event_dates. Computes the correct running maximum from partition start through the current row.
-- **Completeness: 5** — Answers the window-vs-subquery framing implicitly by giving the window form, which is the right tool (a correlated self-join subquery would be O(N^2)). No PARTITION BY needed since it's a single series.
-- **Clarity: 4.5** — Clear; "running max from start through current row" is well phrased. Could have one sentence on why window beats a self-join subquery (the question explicitly asked which to use).
-- **Actionability: 5** — Drop-in.
-- **Avg: 4.875**
+- Accuracy: **5** — datetime.md VERIFIED `current_date` is in the no-parenthesis SQL-standard function list; INTERVAL `+` date arithmetic VERIFIED (`date '2012-08-08' + interval '2' day` → `2012-08-10`). The responder's claim that you CANNOT add a raw integer to a DATE (i.e. `date + 30` is unsupported) is CONFIRMED via WebSearch: Trino's `+` operator does not accept integer-to-date; must use INTERVAL or `date_add('day', 30, ...)`. Both directions verified.
+- Completeness: **5** — half-open range `[today, today+30)` correctly avoids boundary double-counting and preserves partition pruning.
+- Clarity: **4.75** — explains current_date and why INTERVAL is needed.
+- Actionability: **5** — exact WHERE clause.
 
-## Q3 — build a MAP session_id→user_id in SQL so map['session123'] returns the user_id
-**Answer:** `map_agg(session_id, user_id) AS session_to_user_map`; `element_at(map,'session123')` safe (NULL if missing) vs subscript `map['session123']` (throws if missing); optional `json_format(CAST(map AS JSON))` to serialize. Prose first says "using the map() function" but the SQL uses `map_agg`.
+## Q3 — single summary row, count of each status (no manual pivot query)
+**Answer:** `COUNT(CASE WHEN status='open' THEN 1 END) AS open_count, ...` one per status, no GROUP BY
 
-- **Accuracy: 4.75** — RAW aggregate.md VERIFIED `map_agg(key, value) -> map<K,V>` "Returns a map created from the input key/value pairs" — exactly right for folding (session_id, user_id) rows into one dictionary. RAW map.md VERIFIED BOTH missing-key behaviors: subscript `[]` "throws an error if the key is not contained in the map" and `element_at()` "Returns value for given key, or NULL if the key is not contained in the map." The element_at-vs-subscript safety guidance is dispositively correct and directly relevant to the user's `map['session123']` ask. Answers "can I do it in SQL, not app code?" → yes. The prose mislabel "using the map() function" is imprecise: `map()` IS a real Trino function but it's the empty-map / `map(keys_array, values_array)` constructor, NOT the row-folding aggregate; it is NOT what the shown SQL uses. Since the actual SQL is `map_agg` and is correct, this is harmless imprecision in the noun, not a query defect — small Accuracy shave only.
-- **Completeness: 5** — Builds the map, shows safe lookup, flags the throw-on-missing footgun, and offers serialization. Fully addresses SQL-vs-app-code.
-- **Clarity: 4.5** — Strong, but the "map() function" prose vs `map_agg` SQL could momentarily confuse a beginner reading the prose before the code.
-- **Actionability: 5** — Drop-in, plus the element_at safety steer is exactly the next thing they'd hit.
-- **Avg: 4.8125**
+- Accuracy: **5** — WebSearch CONFIRMED Trino has no native PIVOT operator (not planned; PTFs are the future story). Conditional aggregation is the canonical approach. COUNT(CASE WHEN status='open' THEN 1 END) is valid: no ELSE → NULL on non-match → COUNT(col) ignores NULL → counts only matches. No GROUP BY → single summary row.
+- Completeness: **4.75** — fully solves it. FILTER (WHERE status='open') is an equally-valid more-compact alternative (not required; the shown form is correct).
+- Clarity: **4.75** — correctly names it conditional aggregation / manual pivot, explains the no-pivot situation.
+- Actionability: **5** — copy-paste ready.
 
-## Q4 — each order's revenue AND previous order's revenue (by date), default 0 instead of NULL
-**Answer:** `LAG(revenue, 1, 0) OVER (ORDER BY order_date) AS prev_order_revenue` — 3-arg LAG, third arg is the default 0 for the first order.
+## Q4 — round total_amount to EXACTLY 2 decimal places
+**Answer:** `round(total_amount, 2) AS total_amount_rounded`
 
-- **Accuracy: 5** — RAW window.md VERIFIED the 3-arg lag form: returns the value `offset` rows before the current row, and "If the offset refers to a row that is not within the partition, the default_value is returned, or if it is not specified null is returned." So `LAG(revenue, 1, 0)` yields 0 for the first order (no prior row) instead of NULL — exactly the requested behavior. Note: lag is a ranking/value window fn for which "the window frame must not be specified" — the responder correctly used OVER(ORDER BY ...) with NO frame, so no analyzer error.
-- **Completeness: 5** — Hits offset=1, default=0, and the first-order edge case.
-- **Clarity: 5** — Explains each of the three args.
-- **Actionability: 5** — Drop-in.
-- **Avg: 5.00**
+- Accuracy: **4.88** — math.md VERIFIED `round(x, d)` "Returns x rounded to d decimal places." Docs are SILENT on rounding mode, so verified against RAW MathFunctions.java: both the double path (`Math.round` / `DoubleMath.roundToBigInteger(rescaled, RoundingMode.HALF_UP)`) and the decimal RoundN path (`remainder >= rescaleFactor/2 ? 1 : 0`) use HALF_UP (round half away from zero). The responder's "half-up" characterization is CONFIRMED, and "decimal stays decimal(p,2)" / same-type return is correct. Minor shave only: the `47.895→47.90` example is exact for a DECIMAL column (likely, given "many decimal places") but for a DOUBLE the binary representation of 47.895 can round to 47.89 — the responder did not flag this DOUBLE edge. Not a query defect; round(x,2) is the correct answer for the stated goal.
+- Completeness: **4.75** — solves the display-rounding ask; could note CAST(... AS DECIMAL(p,2)) if a fixed scale type is needed, but round() matches "display rounded to exactly 2 decimals."
+- Clarity: **5** — clear.
+- Actionability: **5** — drop-in.
 
-## Overall
-- Q1: 5.00
-- Q2: 4.875
-- Q3: 4.8125
-- Q4: 5.00
-- **Overall average: 4.92 — PASS** (threshold 3.5)
+## Scores
+| Q | Accuracy | Completeness | Clarity | Actionability | Avg |
+|---|---|---|---|---|---|
+| 1 | 5.00 | 5.00 | 4.75 | 5.00 | 4.94 |
+| 2 | 5.00 | 5.00 | 4.75 | 5.00 | 4.94 |
+| 3 | 5.00 | 4.75 | 4.75 | 5.00 | 4.875 |
+| 4 | 4.88 | 4.75 | 5.00 | 5.00 | 4.91 |
+
+**Overall average: 4.91 — PASS**
 
 ## Defects
-ZERO source-verified defects. No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary patterns. The only blemish is a harmless prose noun mislabel in Q3 ("map() function" while the SQL correctly uses `map_agg`) — the executable SQL is correct, so it is not a query defect.
+ZERO source-verified defects. No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary. All four answers are clean, copy-paste-ready, and dialect-correct for Trino 467. Both the array_agg+ORDER BY+array_join path AND the "no integer+date arithmetic" negative claim were verified against authoritative sources (the latter is the kind of negative assertion that needed confirmation — confirmed correct).
 
-## Recommendation
-DEFAULT NO-OP (margin +1.42). NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1089).
+RECOMMENDATION = DEFAULT NO-OP (margin +1.41); NO resource edit; NO commit; NO federation probe. MUST NOT bump state.json (already 1090).
