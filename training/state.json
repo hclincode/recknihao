@@ -1,7 +1,7 @@
 {
-  "iteration": 1074,
+  "iteration": 1075,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1074 NO-OP durability-breadth sweep: zero resource edits; content-verified lock inventory intact incl. all four FIX-A caveats (r23 L653 LIKE literal-_/% prefix + r07 L759 filter-lambda literal-prefix; r07 L1791 running-total ROWS/RANGE guard + nested-aggregate CTE + Pattern A2; r13 L3371 GROUP-BY-alias #16533; r23 L1640/1661 histogram(map_column)-WRONG defang + map_keys+UNNEST per-key-frequency canonical), plus r23 LIKE-ESCAPE/::-cast/ILIKE-disambiguator/OFFSET-before-LIMIT/EXCEPT-anti-join/NOT-IN-NULL/bool_and-or/GROUP-BY-alias-asymmetry/window-in-WHERE-wrap, r09 native-ROW dot-access canonical + element_at + bucket column-first + partition DDL, r05 percentile footgun, r27 %M/%B defang + ::-cast + try() + regexp_replace, r28 decorrelation + ROLLUP + MERGE, r22 federation 9191L untouched — none missing or corrupted."
+  "note": "iter1075 NO-OP durability-breadth sweep: zero resource edits; content-verified lock inventory intact incl. all four FIX-A caveats (r23 L653 LIKE literal-_/% prefix + r07 L759 filter-lambda literal-prefix; r07 L1791 running-total ROWS/RANGE guard + nested-aggregate CTE + Pattern A2; r13 L3371 GROUP-BY-alias #16533; r23 L1640/1661 histogram(map_column)-WRONG defang + map_keys+UNNEST per-key-frequency canonical), plus r23 LIKE-ESCAPE/::-cast/ILIKE-disambiguator/OFFSET-before-LIMIT/EXCEPT-anti-join/NOT-IN-NULL/bool_and-or/GROUP-BY-alias-asymmetry/window-in-WHERE-wrap, r09 native-ROW dot-access canonical + element_at-vs-subscript + bucket column-first + partition DDL, r05 percentile footgun, r27 %M/%B defang + ::-cast guardrail + try() + regexp_replace $1, r28 decorrelation + ROLLUP/GROUPING SETS + MERGE, r22 federation untouched (clean working tree) — none missing or corrupted."
 }
