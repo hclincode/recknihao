@@ -1,89 +1,132 @@
-# Judge Feedback — iter1065 (2026-06-18)
+# Judge Feedback — iter1066 (2026-06-18)
 
 Stack: Trino 467 + Iceberg + Hive Metastore + MinIO + Spark + dbt-trino + OPA.
-Verified BOTH directions vs RAW git-tag 467 source (dispositive over rendered HTML) + WebFetch.
+Verified BOTH directions against RAW git-tag 467 source + WebSearch. Scored against real
+Trino 467 behavior, not resources/.
 
-## Verdict: PASS — overall average 4.73
+## Overall: 4.13 PASS (threshold 3.5; overall average governs, no per-question veto)
 
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 (JSON-string extract + GROUP BY) | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
-| Q2 (>=1 flag from a set, array column) | 5.0 | 5.0 | 5.0 | 5.0 | 5.0 |
-| Q3 (today/7/30/older bucketing) | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
-| Q4 (pct active per plan, zero/int-div safe) | 4.0 | 4.5 | 4.75 | 5.0 | 4.5625 |
-| **Overall** | | | | | **4.734375** |
+| Q1 NTILE(4) quartiles | 5.0 | 4.75 | 4.75 | 5.0 | 4.875 |
+| Q2 filter + starts_with | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
+| Q3 histogram on map column | 1.5 | 1.5 | 2.5 | 1.5 | 1.75 |
+| Q4 ROW_NUMBER first session | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
 
-## Per-question notes (source-verified)
+Overall = (4.875 + 4.9375 + 1.75 + 4.9375) / 4 = **4.125** → **4.13 PASS**.
 
-### Q1 — 4.9375
-`json_extract_scalar(json, json_path) -> varchar` VERIFIED in raw json.md
-("returns the result value as a string"). Accepts a varchar JSON string input
-("a string containing JSON") — works directly on a plain-text column, no json_parse
-needed. Nested path confirmed: doc example `$.store.book[0].author` proves
-`$.device.brand` resolves. GROUP BY guidance CORRECT and important: raw select.md says
-GROUP BY accepts "any expression composed of input columns or ... an ordinal number" —
-NO mention of SELECT output aliases (#16533). Responder correctly repeated the full
-expression AND offered `GROUP BY 1`, and explicitly warned against the alias. Minor
-completeness ding only: did not mention NULL behavior on a missing/malformed key
-(rows with no `browser` key group under a NULL bucket).
+(Per-dimension overall: Acc 4.125, Comp 3.9375, Clar 4.3125, Act 4.125 — all ≥3.5.)
 
-### Q2 — 5.0
-`any_match(array(T), function(T,boolean)) -> boolean`, `contains(x, element) -> boolean`,
-`array_intersect(x, y) -> array`, `cardinality(x) -> bigint`, `arrays_overlap(x, y) -> boolean`
-ALL VERIFIED present in raw array.md. Both forms are semantically correct for "the two
-arrays share at least one element":
-- `any_match(ARRAY['premium_export','advanced_reports'], x -> contains(feature_flags, x))`
-  — for any required flag x, is it present in the row's feature_flags. One row in, one
-  boolean out, no UNNEST, no OR chain. Correct.
-- `cardinality(array_intersect(feature_flags, ARRAY[...])) > 0` — equivalent. Correct.
-`arrays_overlap` (the most direct built-in) would be a third option but its absence is not
-a defect; both given forms are valid. Clean, no broken secondary.
+---
 
-### Q3 — 4.9375
-`date_diff('day', date, date) -> bigint` VERIFIED returns whole days as bigint. `current_date`
-VERIFIED (SQL-standard, no parens, returns date). Casting BOTH sides to date
-(`date_diff('day', CAST(created_at AS date), current_date)`) gives true CALENDAR-day
-bucketing — more precise than diffing raw timestamps against current_timestamp (which
-would count 24h windows, not calendar days). `CAST(timestamp AS date)` is valid. CASE
-ladder =0 / BETWEEN 1 AND 7 / BETWEEN 8 AND 30 / ELSE is a legitimate, non-overlapping,
-exhaustive bucketing. Minor completeness ding: rows with created_at in the future (clock
-skew / pre-dated) would yield a negative diff and fall into ELSE 'older_than_30' — an edge
-case not flagged, but not requested.
+## Q1 — split customers into 4 equal spend groups (NTILE) — 4.875 CORRECT
 
-### Q4 — 4.5625 (CRITICAL literal-type point)
-The QUERY IS CORRECT AND SAFE:
-`ROUND(100.0 * COUNT(DISTINCT CASE WHEN is_active THEN user_id END) / NULLIF(COUNT(DISTINCT user_id), 0), 2)`
-- `NULLIF(COUNT(DISTINCT user_id), 0)` returns NULL when the denominator is zero;
-  dividing by NULL yields NULL (not a DIVISION_BY_ZERO error). Correct guard.
-- The leading `100.0 *` forces non-integer division, so no integer truncation to 0.
-- `ROUND(..., 2)` for readability. The "drop 100.0* for a 0..1 decimal" note is correct.
+`NTILE(4) OVER (ORDER BY SUM(amount) DESC)` inside a CTE that does
+`GROUP BY customer_id, plan_type, country`.
 
-VERIFIED LITERAL TYPE (raw language/types.md, dispositive): an undecorated decimal-point
-literal like `100.0` (doc uses `1.1`) is a **DECIMAL** literal, NOT a DOUBLE. Raw text:
-"Exact numeric values can be expressed as numeric literals such as `1.1`, and are supported
-by the `DECIMAL` data type." A DOUBLE literal requires scientific notation (`1.03e1`) or the
-keyword form (`DOUBLE '10.3'`). Therefore `100.0 * COUNT(...)` is DECIMAL arithmetic and the
-division is exact DECIMAL division — STILL CORRECT (non-integer either way, no truncation).
+VERIFIED vs RAW window.md (467): ntile(n) "Divides the rows for each window partition into
+`n` buckets ranging from 1 to at most n. Bucket values will differ by at most 1." Remainder:
+"distributed one per bucket, starting with the first bucket" — responder's "remainders go to
+earliest buckets" claim is exactly right. With `ORDER BY total_spend DESC`, bucket 1 = top
+spenders (top 25%) — correct. GROUP BY including plan_type/country alongside customer_id is
+acceptable (one row per customer assuming stable plan/country). Minor completeness ding only:
+NTILE makes equal-COUNT not equal-SUM groups (quartiles by customer count) — fine for the asked
+"top 25% of customers" reading but worth a one-liner.
 
-The responder's prose calling this "non-integer (DOUBLE) arithmetic" / implying `100.0` makes
-it DOUBLE is a MINOR ACCURACY MISLABEL on an explanatory aside — it does NOT affect query
-correctness or output. Small accuracy deduction only (4.0). This is the SAME recurring
-100.0-DOUBLE explanatory slip seen iter1063/iter1064; it is per-instance prose, not a query
-defect and not a resource defect. Do NOT churn.
+## Q2 — filter array to elements starting with literal 'premium_' — 4.9375 CORRECT (best answer)
 
-(Note: a WebFetch summarizer may claim 100.0 is DOUBLE — I read the raw DECIMAL/DOUBLE
-sections of types.md directly; raw source is dispositive and says DECIMAL.)
+`filter(feature_list, f -> starts_with(f, 'premium_'))`.
 
-## Source URLs verified
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/types.md (100.0 = DECIMAL, not DOUBLE)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/json.md (json_extract_scalar -> varchar, nested path, varchar JSON input)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md (any_match/contains/array_intersect/cardinality/arrays_overlap all present)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/datetime.md (date_diff -> bigint whole units; current_date)
-- https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/sql/select.md (GROUP BY accepts expr/ordinal, NOT alias; #16533)
+VERIFIED vs RAW array.md: `filter(array(T), function(T,boolean)) -> array(T)` exists.
+VERIFIED vs RAW string.md: `starts_with(string, substring)` exists, tests prefix, returns boolean.
+CRITICAL trap correctly avoided: responder did NOT use bare `LIKE 'premium_%'` (the literal `_`
+is a LIKE single-char wildcard, which would over-match `premiumX...`). starts_with treats
+`premium_` as a literal prefix — the right tool. One-row-in/one-row-out (no UNNEST) as asked.
+Clean, no broken secondary. The persistent broken-LIKE-secondary watch stays CLOSED here.
 
-## Recommendation
-DEFAULT NO-OP. Overall 4.73, margin +1.23 over threshold. No ::/QUALIFY/false-semi-join/
-fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/
-broken-secondary. All four LEAD queries are correct Trino 467. The only blemish is the
-recurring 100.0-"DOUBLE" prose mislabel on Q4 (query still correct) — per-instance, not a
-resource fix. NO resource edit; NO commit. MUST NOT bump state.json (already 1065).
+## Q3 — per-key frequency map across all events — 1.75 WRONG (lead errors; accuracy defect)
+
+Responder gave: `SELECT histogram(properties) AS property_frequency FROM events`.
+
+**VERDICT: histogram(map_column) does NOT produce per-key counts. The answer is WRONG.**
+
+1. SEMANTICS: VERIFIED vs RAW aggregate.md (467): `histogram(x) -> map<K,bigint>` "creates a
+   map containing the count of the number of times each input VALUE occurs." Passing the whole
+   `properties` MAP as `x` treats each entire map as a single value, so it would count distinct
+   ENTIRE maps — never the per-key frequency the question asks for ({'click':452,'view':1200}).
+
+2. TYPE ERROR: `histogram` builds `map<K,bigint>` keyed on the input values, so the input type
+   must be usable as a MAP KEY, i.e. comparable. MAP is NOT a comparable/orderable type in
+   Trino — it cannot be a GROUP BY key or a map key (confirmed via WebSearch of Trino docs/issue
+   history; the engine raises a type-not-comparable / cannot-use-map-as-key error). So
+   `histogram(properties)` should actually FAIL to plan, not silently return a wrong map.
+
+Either way the answer does not answer the question, and the "add GROUP BY user_id" suffix would
+make it worse (GROUP BY on a map column also fails on the same non-comparability).
+
+**CORRECT approach — extract keys per row, then count:**
+
+```sql
+-- one row, key -> frequency across all events
+SELECT histogram(k) AS property_frequency
+FROM events
+CROSS JOIN UNNEST(map_keys(properties)) AS t(k);
+
+-- equivalent via explicit group + map_agg
+SELECT map_agg(k, cnt) AS property_frequency
+FROM (
+  SELECT k, COUNT(*) AS cnt
+  FROM events
+  CROSS JOIN UNNEST(map_keys(properties)) AS t(k)
+  GROUP BY k
+);
+```
+
+VERIFIED building blocks (RAW map.md / array.md / aggregate.md, 467):
+- `map_keys(x(K,V)) -> array(K)` — returns the keys array.
+- `UNNEST(array)` expands the array to rows; the input to histogram/COUNT is the scalar key `k`
+  (a varchar), which IS comparable, so histogram/map_agg are legal.
+- `map_agg(key, value) -> map<K,V>` assembles the final {key: count} map.
+
+GAP TO ADDRESS: a findable canonical for "count occurrences of each KEY in a map(...) column"
+must route to map_keys + UNNEST + histogram/map_agg, and explicitly warn that
+`histogram(map_column)` / GROUP BY on a map column is a non-comparable type error, NOT a per-key
+counter. Re-probe Q3 from a 2nd angle (e.g. per-key DISTINCT-value counts, or top-N keys) next
+sweep before treating it closed.
+
+## Q4 — first session per user (earliest started_at) — 4.9375 CORRECT
+
+`ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY started_at ASC) = 1` in a subquery, with a
+`MIN(started_at) GROUP BY user_id` alternative for the timestamp-only case.
+
+VERIFIED: row_number() top-1-per-partition is the canonical first/last-per-group pattern, valid
+467 (window functions evaluate after WHERE/GROUP BY/HAVING, so the rn=1 filter must live in an
+outer query — responder wrapped correctly). The MIN alternative is correctly scoped: it returns
+only the earliest timestamp and LOSES session_id/platform — responder flagged exactly that.
+Note (not required): `min_by(session_id, started_at)` is another valid single-pass option that
+keeps the wanted columns without a window — could be mentioned but its absence is not a defect.
+
+---
+
+## Source-verified dialect notes (RAW 467 URLs checked)
+
+- window.md — ntile(n): buckets 1..n differ by ≤1, remainder one-per-bucket from the first.
+  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/window.md
+- array.md — filter(array(T), function(T,boolean)) -> array(T) exists.
+  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/array.md
+- string.md — starts_with(string, substring) exists, returns boolean, prefix test.
+  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/string.md
+- aggregate.md — histogram(x) -> map<K,bigint> counts occurrences of each input VALUE;
+  map_agg(key,value) -> map<K,V>.
+  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/aggregate.md
+- map.md — map_keys(x(K,V)) -> array(K).
+  https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/map.md
+- MAP non-comparability (cannot be GROUP BY key / map key) confirmed via Trino docs + issue
+  history (WebSearch): https://trino.io/docs/current/functions/aggregate.html
+
+## No other defects
+
+No `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/
+OFFSET-before-LIMIT/over-warning/broken-secondary in Q1/Q2/Q4. Q3 is a genuine LEAD-answer
+accuracy defect (not responder padding), absorbed by the overall average (4.13 PASS), but the
+map-key-frequency routing gap is the actionable item for the teacher.

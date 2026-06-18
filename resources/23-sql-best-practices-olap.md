@@ -1637,6 +1637,32 @@ FROM orders;
 
 **Net rule.** For a **value-count summary in one row** (a `{value:count}` frequency map over LOW/MODERATE-cardinality values) → `histogram(x)` is the direct, docs-canonical idiom — no `GROUP BY`, no subquery. Use `GROUP BY x COUNT(*)` when you want the counts as ROWS or when the keys are HIGH-cardinality. `map_agg(k, COUNT(*))` over a `GROUP BY` is the manual map-building equivalent, but `histogram` does it in one shot.
 
+> **CAVEAT — counting the KEYS of a MAP column (not a plain scalar column). READ THIS if your question is: `count how many times each KEY appears in a map column`, `frequency of each map key across all rows`, `histogram of map keys`, `how many events have each property key`, `count per map key table-wide`, `map key occurrence count`, `{key: count} from a map column`, `tally each key in a map(varchar,varchar) column`.** Do NOT write `histogram(map_column)`. It is WRONG two ways: (1) `histogram(x)` counts each distinct **whole input VALUE**, so on a map column it would try to count entire maps, not per-key occurrences; (2) **MAP is a non-comparable type in Trino 467**, so `histogram(map_col)` raises a type error and will not even plan. Never pass a `MAP` (or any non-comparable type) to `histogram`.
+>
+> The correct idiom: extract THIS row's keys with `map_keys`, explode them to scalar `varchar` rows with `CROSS JOIN UNNEST`, then `histogram`/`map_agg` over the comparable key.
+>
+> ```sql
+> -- Trino 467 — {key: count} over all events: tally each KEY of a map(varchar,varchar) column.
+> -- map_keys(properties) -> array(varchar) is THIS row's keys; UNNEST explodes them to varchar rows.
+> SELECT histogram(k) AS key_frequency
+> FROM events
+> CROSS JOIN UNNEST(map_keys(properties)) AS t(k);
+> -- → key_frequency = {click=452, view=1200, ...}
+>
+> -- Equivalent via map_agg over a per-key COUNT(*):
+> SELECT map_agg(k, cnt) AS key_frequency
+> FROM (
+>   SELECT k, COUNT(*) AS cnt
+>   FROM events
+>   CROSS JOIN UNNEST(map_keys(properties)) AS t(k)
+>   GROUP BY k
+> );
+>
+> -- WRONG, do NOT copy: histogram(properties)  -- counts whole maps + MAP is non-comparable → type error, won't plan
+> ```
+>
+> For a **VALUE** frequency instead of keys, use the same shape with `UNNEST(map_values(properties))`. Cross-ref: resource 07 "every DISTINCT key across ALL rows" card (`CROSS JOIN UNNEST(map_keys(...))`, ~L754) for the table-wide map-key extraction pattern.
+
 ---
 
 ## 3.1F. Row-level set operators — `INTERSECT` (rows in BOTH) / `EXCEPT` (rows in A not B) / `UNION` vs `UNION ALL`

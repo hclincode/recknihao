@@ -1,7 +1,7 @@
 {
-  "iteration": 1065,
+  "iteration": 1066,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1065 NO-OP durability-breadth sweep: zero resource edits; content-verified lock inventory intact incl. all three FIX-A caveats (r23 LIKE literal-_/% prefix + r07 filter-lambda literal-prefix; r07 running-total ROWS/RANGE guard + Pattern A2 + nested-agg CTE; r13 GROUP-BY-alias #16533), plus r23 LIKE-ESCAPE canonical / ::-cast / ILIKE-disambiguator / OFFSET-before-LIMIT / EXCEPT-anti-join / NOT-IN-NULL / bool_and-bool_or §3.1D, r05 percentile footgun, r09 bucket column-first + partition DDL, r27 %M/%B defang + ::-guardrail + try() + regexp_replace $1, r28 decorrelation + ROLLUP/GROUPING SETS, r22 federation §13 — none missing or corrupted."
+  "note": "iter1066 LIGHT FIX-A: added histogram(map_column)-is-WRONG defang + map_keys+UNNEST->histogram/map_agg per-key-frequency canonical at r23 histogram 3.1F (iter1066 Q3 source-verified findability defect); content-verified lock inventory intact incl. all three FIX-A caveats (r23 L653 LIKE literal-_/% prefix + r07 L759 filter-lambda literal-prefix; r07 L1791 running-total ROWS/RANGE guard + Pattern A2 + nested-agg CTE; r13 L3371 GROUP-BY-alias #16533), plus r23 LIKE-ESCAPE canonical / ::-cast / ILIKE-disambiguator / OFFSET-before-LIMIT / EXCEPT-anti-join / NOT-IN-NULL / bool_and-bool_or §3.1D L1506+L1531 all-NULL caveat, r05 percentile footgun, r09 bucket column-first + partition DDL, r27 %M/%B defang + ::-guardrail + try() + regexp_replace $1, r28 decorrelation + ROLLUP/GROUPING SETS, r22 federation §13.1-13.8 — none missing or corrupted."
 }
