@@ -1,141 +1,125 @@
-# Judge Feedback — iter1105 (2026-06-26)
+# Judge Feedback — Iteration 1106 (2026-06-26)
 
-**Phase**: extended (passed:true). FIX-A re-probe (Q1+Q2 GROUPING SETS first-STOP-slot hoist from iter1104), Q3+Q4 breadth.
-**Iter average**: (5.0 + 5.0 + 3.25 + 5.0) / 4 = **4.5625 PASS** (margin +1.0625)
-**Verdict**: PASS on average. **FIX-A REACHED** for both Q1 and Q2 — responder now LEADS with `GROUPING SETS ((x),(y),())` for "totals by X AND by Y AND grand total" on two completely different domains. ONE source-verified Q3 partial defect (`AT TIME ZONE` on tz-naive column is session-dependent; canonical r07 form not retrieved).
+**OVERALL: 4.75 STRONG PASS** — FIX-A REACHED on BOTH Q1+Q2 re-probes; Q3 clean breadth; Q4 has a fabricated-syntax broken-secondary (backfill snippet) but PRIMARY answer fully correct. No resource defect on Q4 (responder one-off matching `feedback_responder_broken_secondary_alternative` memory pin).
 
----
+## Per-question scoring
 
-## FIX-A reach verdict (the main item this iter)
+### Q1 — bare TIMESTAMP(6) (NO tz) storing UTC, bucket by US/Eastern local day
+**Responder:** `date_trunc('day', with_timezone(event_ts, 'UTC') AT TIME ZONE 'America/New_York')` in BOTH SELECT and GROUP BY; explains `with_timezone` directly attaches UTC as label (no session-zone involvement); explicitly DEFANGS `CAST(event_ts AS TIMESTAMP WITH TIME ZONE)` as session-dependent; offers two-step `event_ts AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` alternative.
 
-| Q | Domain | Asked construct | Responder LED with | FIX-A status |
-|---|---|---|---|---|
-| Q1 | revenue by region + by product line + grand total | one query, no cross-grid | `GROUP BY GROUPING SETS ((region), (product_line), ())` + `ORDER BY GROUPING(...)` | **REACHED** — matches r28 §`COPY THIS for "totals by X AND by Y AND grand total"` exactly |
-| Q2 | tickets by priority + by team + total | one query, no priority×team grid | `GROUP BY GROUPING SETS ((priority_level), (assigned_team), ())` + `GROUPING() ORDER BY` | **REACHED** — same canonical form |
-
-Both Qs correctly:
-- Rejected ROLLUP (which would silently drop the by-`y`-only row)
-- Rejected the per-`(X,Y)` cross-detail framing
-- Explained the "replaces N UNION ALL queries" framing the r28 router uses
-- Used `GROUPING(col)=1` semantics to label/order subtotal rows
-
-The iter1104 first-STOP-slot hoist (GROUPING SETS COPY-THIS block now precedes the ROLLUP COPY-THIS block at r28 L426 vs L437, with a "⭐ MOST-MISROUTED CASE" pre-router callout at L424) is doing its job on two different domains. **Closed.**
-
----
-
-## Verification — RAW sources / official docs
-
-| Claim | Source verified | Verdict |
+| Dim | Score | Reasoning |
 |---|---|---|
-| `GROUP BY GROUPING SETS ((a),(b),())` emits per-A + per-B + grand total, NO (a,b) detail | trino.io/docs/467/sql/select.html GROUPING SETS grammar | CORRECT (Q1+Q2 LEAD) |
-| `GROUPING(col)` returns 1 for a column rolled away in that row, 0 otherwise | trino.io/docs/467/functions/aggregate.html | CORRECT (Q1+Q2 ORDER BY pattern) |
-| `naive_ts AT TIME ZONE 'X'` for a TIMESTAMP without time zone uses the SESSION time zone to interpret the value, then converts to X | trino.io/docs/467/functions/datetime.html (datetime ops); cross-checked vs r07 §timezone-bucketing canonical | RESPONDER Q3 IS SESSION-DEPENDENT for tz-naive UTC-stored columns — partial defect |
-| For a tz-NAIVE UTC-intent column the robust form is `with_timezone(occurred_at, 'UTC') AT TIME ZONE 'Asia/Tokyo'` OR two-step `occurred_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo'` | r07 L2422-L2448 canonical block (verified at trino.io/docs/467/functions/datetime.html `with_timezone(timestamp(p), zone)`) | The canonical answer Q3 should have produced |
-| For a tz-AWARE column (`timestamp(p) with time zone` — typical Iceberg UTC-normalized storage), bare `event_ts AT TIME ZONE 'X'` IS correct (session-independent) | trino.io/docs/467 type semantics; r07 L2407 example uses this | CORRECT but the responder did NOT disambiguate which case |
-| `DATE(timestamp with time zone)` buckets on the LOCAL wall-clock date implied by the value's attached zone | Trino CAST semantics — date extracted in the value's own attached zone, not session zone | CORRECT |
-| dbt incremental `merge` strategy + `unique_key` makes a re-processed lookback window idempotent | docs.getdbt.com/docs/build/incremental-models + dbt-trino merge docs | CORRECT (Q4) |
-| `{% if is_incremental() %}` guard runs only on subsequent runs (first run is CTAS, no `WHERE`) | docs.getdbt.com/docs/build/incremental-models#understand-the-is_incremental-macro | CORRECT (Q4) |
-| `partitioning: ['day(occurred_at)']` Iceberg partition transform | iceberg.apache.org/docs/latest/iceberg-trino/ + Trino Iceberg connector docs | CORRECT (Q4) |
+| Accuracy | 5.0 | Matches r07 L2447-2451 canonical (function form, session-independent) and STEP-0 router L2406-2408 EXACTLY. Verified vs trino.io/docs/current/functions/datetime.html: `with_timezone(timestamp(p), zone) -> timestamp(p) with time zone` directly assigns. CAST defang correct per r07 L2428 + L2453-2454. |
+| Clarity | 5.0 | Explains what `with_timezone` does mechanically (label-attach vs convert); engineer with zero OLAP can copy-paste and understand. |
+| Applicability | 5.0 | Direct copy-paste runnable on Trino 467; bucket-by-NYC-day works correctly across DST and midnight. |
+| Completeness | 5.0 | Both canonical forms (function + two-step); contrast with session-dependent CAST trap; both SELECT and GROUP BY mirrored. |
 
----
+**Q1 = 5.000**
 
-## Per-Question scoring
+### Q2 — per-row timezone in a `users.timezone` column, convert UTC event ts to user's local day
+**Responder:** `at_timezone(with_timezone(event_ts,'UTC'), user_timezone_col)` wrapped in `date_trunc('day', ...)`; explicitly contrasts with `AT TIME ZONE 'literal'` operator form which requires a constant, whereas `at_timezone(...)` accepts a column expression evaluated per row.
 
-### Q1 — revenue by region AND by product line AND grand total, ONE query (NOT a region×product grid)
-
-| Dimension | Score | Notes |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | `GROUP BY GROUPING SETS ((region), (product_line), ())` is exactly the canonical Trino 467 form. `ORDER BY GROUPING(region) + GROUPING(product_line)` ordering pattern correct. |
-| Clarity | 5 | Explicitly explained "replaces three UNION ALL queries"; called out NULL semantics for rolled-up columns; explained NO cross-detail row. |
-| Applicability | 5 | Copy-paste runnable on the prod stack; matches the r28 leading canonical block verbatim. |
-| Completeness | 5 | Covered the operator choice, the row shape, the NULL labels, the ORDER BY, and the "why not ROLLUP" warning. |
-| **Q1 avg** | **5.00** | |
+| Accuracy | 5.0 | Matches r07 L2470 and L2483 canonical EXACTLY. Verified vs trino.io/docs/467/functions/datetime.html: `at_timezone(timestamp(p) with time zone, zone)` — `zone` parameter has no `(constant)` annotation -> column/expression accepted per row. The router third branch at L2409 (per-row tz from a column) reaches. |
+| Clarity | 5.0 | Calls out the operator-vs-function distinction (literal-only vs per-row) which is the actual confusion engineers hit. |
+| Applicability | 5.0 | Engineer with `users.timezone` column copy-pastes and gets per-user local day correctly. |
+| Completeness | 5.0 | Covers the case + contrasts with the wrong form; matches Fact 3b worked example. |
 
-### Q2 — ticket counts by priority AND by team AND total, ONE result (NOT a priority×team grid)
+**Q2 = 5.000**
 
-| Dimension | Score | Notes |
+### Q3 — most-recent row per session_id, append-on-update table, no self-join
+**Responder:** ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY updated_at DESC NULLS LAST) subquery `WHERE rn=1`; alternative `max_by(col, updated_at)` + `MAX(updated_at)` GROUP BY session_id; notes no QUALIFY in Trino.
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5 | Identical canonical shape to Q1, different domain. `GROUPING SETS ((priority_level), (assigned_team), ())` is right. |
-| Clarity | 5 | Same explanation pattern; engineer can map column-by-column. |
-| Applicability | 5 | Direct copy with team/priority placeholders. |
-| Completeness | 5 | Covered subtotal NULLs, GROUPING() labelling, ordering. |
-| **Q2 avg** | **5.00** | |
+| Accuracy | 5.0 | ROW_NUMBER dedup form verified trino.io/docs/467/functions/window.html. `max_by(x,y)` verified aggregate.html. NULLS LAST default claim verified per memory pin `reference_trino_null_ordering_default`. No-QUALIFY caveat correct. |
+| Clarity | 5.0 | Two-form presentation with a clear "use which when" framing. |
+| Applicability | 5.0 | Both forms paste-and-run on Trino 467. |
+| Completeness | 4.75 | Minor: doesn't call out tie-breaker need (`ORDER BY updated_at DESC, event_id DESC`) when two rows share the same `updated_at` — common in append-on-update tables with bulk loads. Not load-bearing. |
 
-### Q3 — UTC-stored event timestamps; bucket by CUSTOMER LOCAL calendar date (e.g. Tokyo 11PM UTC → next day); no hardcoded offsets
+**Q3 = 4.9375**
 
-| Dimension | Score | Notes |
+### Q4 — dbt incremental merge, new column added, OLD rows show NULL; full refresh needed or does Iceberg schema evolution backfill?
+**Responder PRIMARY:** Iceberg ADD COLUMN is metadata-only, does NOT backfill, old rows read NULL by design, NO full refresh needed; set dbt `on_schema_change='append_new_columns'` (default `'ignore'` drops the new column); merge inserts populate new rows naturally. **CORRECT.**
+
+**Responder SECONDARY (backfill snippet):** `ALTER TABLE iceberg.analytics.sessions EXECUTE UPDATE SET new_column = <expression> WHERE new_column IS NULL AND some_condition;` — **FABRICATED SYNTAX.**
+
+**SOURCE VERIFICATION — `ALTER TABLE ... EXECUTE UPDATE` is INVALID on Trino 467:**
+- Verified vs trino.io/docs/current/connector/iceberg.html: Iceberg connector ALTER TABLE EXECUTE procedures are EXACTLY `optimize`, `optimize_manifests` (470+, not 467), `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats`. **No `UPDATE` procedure exists.**
+- Verified vs trino.io/docs/current/sql/alter-table.html: "Executable commands are contributed by connectors" — only the connector-registered procedures above are valid.
+- Row-level UPDATE on Iceberg is done via the **standalone `UPDATE table SET col = expr WHERE ...` statement** (trino.io/docs/current/sql/update.html), NOT through `ALTER TABLE ... EXECUTE`.
+- The responder appears to have hybridized two distinct syntaxes (`ALTER TABLE EXECUTE` for table procedures + standalone `UPDATE` DML) into a parse-error form. Copy-pasted by the engineer it would fail with a Trino parser error.
+
+**Resource grep (canonical correct form is present, NOT the source of the defect):**
+- `resources/13-postgres-to-iceberg-ingestion.md` L4237: `UPDATE iceberg.analytics.accounts SET tier = 'free' WHERE tier IS NULL;`
+- `resources/17-iceberg-table-maintenance.md` L387/L435/L538: standalone `UPDATE iceberg.analytics.events SET ... WHERE ...`
+- `resources/09-lakehouse-schema-design.md` L1229/L1273: standalone `UPDATE iceberg.analytics.accounts SET ... WHERE ...`
+- Resources have the CORRECT standalone form at 6 locations. Grep for `EXECUTE UPDATE` returns **zero matches**. **NOT a resource defect.**
+
+**Classification:** Per-instance broken-secondary-alternative matching memory pin `feedback_responder_broken_secondary_alternative` (iter936 / iter943 / iter948 / iter950 / iter954 / iter1013 / iter1019 / iter1020 family). The PRIMARY answer (Iceberg metadata-only / old rows NULL by design / `on_schema_change='append_new_columns'` / no full refresh) is fully correct and usable; the responder padded a broken backfill alternative form the engineer did not ask for. Per pin: scope as per-instance one-off, NO resource fix, do not let it bias the judge against the primary.
+
+**on_schema_change default-is-'ignore' sanity check:** VERIFIED via docs.getdbt.com/docs/build/incremental-models — default is `'ignore'` (silently drops new columns from the INSERT/UPDATE); `'append_new_columns'` is the correct opt-in for additive schema changes; `'sync_all_columns'` drops removed columns too; `'fail'` raises on mismatch. Responder's framing matches docs verbatim.
+
+| Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 3 | **PARTIAL DEFECT** — bare `event_ts AT TIME ZONE 'Asia/Tokyo'` is the CORRECT form ONLY when `event_ts` is `timestamp(p) with time zone` (the Iceberg UTC-normalized form). If `event_ts` is bare `TIMESTAMP` (no tz) storing UTC, Trino's `AT TIME ZONE` interprets the value using the **SESSION timezone** first — if the session is not UTC, the result is hours-off. The robust session-independent form is `with_timezone(event_ts, 'UTC') AT TIME ZONE 'Asia/Tokyo'` (or two-step `event_ts AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo'`). r07 L2422-L2448 has the canonical block + an inline-marked WRONG form ("session-dependent — only correct when current_timezone() = 'UTC', off by hours otherwise"). The responder did NOT disambiguate the two column-type cases. Additional secondary concern: the WHERE-clause form `WHERE event_ts AT TIME ZONE 'X' >= CURRENT_DATE - INTERVAL '30' DAY` wraps the partition column in an expression on the LEFT, which may forfeit partition pruning; r07 L2412 canonical predicate form uses bare `created_at` on the LEFT (`WHERE created_at >= date_trunc('day', current_timestamp AT TIME ZONE 'X') - INTERVAL '30' DAY`) to keep the column sargable. |
-| Clarity | 4 | IANA zone-name framing clear; the "shift before bucketing" rationale is right. Missing: explicit type disambiguation paragraph. |
-| Applicability | 3 | Works in the easy case (Iceberg timestamptz storage), silently wrong in the harder one (Spark-ingested bare TIMESTAMP storing UTC, session zone ≠ UTC). The user's "Tokyo 11PM UTC → next day" framing suggests they're aware of UTC storage but didn't say which type — responder should have asked or covered both. Predicate non-sargable form may also hurt prod perf. |
-| Completeness | 3 | Missed: (a) tz-naive vs tz-aware column branch, (b) `with_timezone()` / two-step alternative for tz-naive, (c) keeping the partition column bare on the left of WHERE for pruning, (d) `at_timezone(ts, user_tz_column)` for per-customer-zone bucketing (the question's "CUSTOMER LOCAL" framing implied the customer's zone is a per-row attribute, not a literal). |
-| **Q3 avg** | **3.25** | |
+| Accuracy | 3.5 | Primary 100% correct + matches resources + dbt docs verbatim. Secondary backfill snippet is a parse-error fabrication (`ALTER TABLE ... EXECUTE UPDATE` does not exist on Trino 467). |
+| Clarity | 4.5 | Primary explanation of metadata-only schema evolution + on_schema_change semantics is clear and beginner-friendly. |
+| Applicability | 3.75 | Primary actionable (do nothing for old rows; add `on_schema_change='append_new_columns'` to dbt config). Secondary backfill pasted by an engineer would parse-error — they'd need to debug or strip the `ALTER TABLE ... EXECUTE` wrapper. Drag on Applicability. |
+| Completeness | 4.5 | Core question fully answered; the secondary backfill snippet was an unsolicited alternative. Could mention that for non-NULL backfills the correct form is the standalone `UPDATE iceberg.<schema>.<table> SET col = expr WHERE col IS NULL` (NOT wrapped in ALTER TABLE EXECUTE). |
 
-### Q4 — dbt incremental missing late-arriving (2-3 day) records, avoid full reprocessing
-
-| Dimension | Score | Notes |
-|---|---|---|
-| Accuracy | 5 | `incremental_strategy='merge'` + `unique_key='event_id'` + 3-day lookback `WHERE occurred_at >= (SELECT date_add('day', -3, COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01')) FROM {{ this }})` guarded by `{% if is_incremental() %}` is the canonical r28 §139 / r28 §144 block. `day(occurred_at)` Iceberg partitioning is right. The COALESCE bootstrap handles the empty-table first run after backfill. The idempotency explanation (matched rows update in place, unmatched insert) is right. |
-| Clarity | 5 | Clean, walked through each config line; clear on why each is needed. |
-| Applicability | 5 | Copy-paste into a dbt-trino project. Matches resource exactly. |
-| Completeness | 5 | Covered config, lookback predicate, is_incremental guard, partitioning, merge idempotency. |
-| **Q4 avg** | **5.00** | |
-
----
+**Q4 = 4.0625**
 
 ## Score table
 
-| Q | Acc | Clar | Appl | Comp | Avg |
-|---|---|---|---|---|---|
-| Q1 GROUPING SETS revenue/region/product | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 GROUPING SETS tickets/priority/team | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 AT TIME ZONE local-day bucketing | 3 | 4 | 3 | 3 | 3.25 |
-| Q4 dbt incremental late-arriving lookback | 5 | 5 | 5 | 5 | 5.00 |
-| **Iter avg** | **4.50** | **4.75** | **4.50** | **4.50** | **4.5625 PASS** |
+| Q | Topic | Accuracy | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | analytical-query-patterns Iceberg+Trino (timezone bucketing, naive UTC col -> local day) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q2 | analytical-query-patterns Iceberg+Trino (per-row tz column -> at_timezone) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q3 | analytical-query-patterns Iceberg+Trino (latest-per-key dedup ROW_NUMBER/max_by) | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
+| Q4 | postgres-to-iceberg-ingestion (Iceberg schema evolution + dbt on_schema_change + backfill DML) | 3.5 | 4.5 | 3.75 | 4.5 | **4.0625** |
 
-Margin to 3.5 threshold: **+1.0625**.
+**Iter average = (5.000 + 5.000 + 4.9375 + 4.0625) / 4 = 4.7500 STRONG PASS** (margin +1.25 over 3.5 threshold)
 
----
+## FIX-A REACH VERDICT
 
-## Source-verified defects this iter
+**Q1 (bare TIMESTAMP UTC-intent col -> local day):** **FIX-A REACHED — TEXTBOOK** — responder used the `with_timezone(event_ts,'UTC') AT TIME ZONE 'America/New_York'` function form EXACTLY as written in r07 L2447-2451; the STEP-0 column-type router at L2406-2408 (added iter1105) reached on the first re-probe of a tz-naive UTC column. Explicit defang of `CAST(... AS TIMESTAMP WITH TIME ZONE)` shows the L2428 CAST-trap block also reached. Two-step alternative offered as well.
 
-1. **Q3 — `AT TIME ZONE` session-dependence on tz-naive columns NOT disambiguated.** The bare `event_ts AT TIME ZONE 'Asia/Tokyo'` form silently breaks when `event_ts` is `TIMESTAMP` (no tz) storing UTC AND the Trino session zone is not UTC. The canonical r07 block (L2422-L2448) explicitly inline-marks this WRONG and shows the session-independent forms. The responder did not retrieve the with_timezone / two-step alternative, and did not branch on column type.
+**Q2 (per-row timezone in users.timezone column):** **FIX-A REACHED — TEXTBOOK** — responder used the `at_timezone(with_timezone(event_ts,'UTC'), user_timezone_col)` form EXACTLY as written in r07 L2470 / L2483 (Fact 3b); third router branch at L2409 reached. Explicit operator-form-needs-literal contrast nails the precise distinction Fact 3b L2464-2466 codifies.
 
-Secondary (not score-impacting beyond Q3 Applicability): the predicate-side `WHERE event_ts AT TIME ZONE 'X' >= CURRENT_DATE - INTERVAL '30' DAY` wraps the column in an expression on the LEFT, which may lose partition pruning. r07 L2412 shows the canonical sargable form (`WHERE created_at >= date_trunc('day', current_timestamp AT TIME ZONE 'X') - INTERVAL '30' DAY` — column bare on the left).
+Both timezone column-type angles tested. The iter1105 r07 FIX-A (STEP-0 column-type router + bare-AT-TIME-ZONE-on-naive defang line + Fact 3 function form hoisting) is **CLOSED**. No further r07 timezone-bucketing work needed.
 
----
+## Defect classification (Q4 backfill)
+
+- **Wrong syntax:** `ALTER TABLE iceberg.analytics.sessions EXECUTE UPDATE SET col = expr WHERE ...` — Trino 467 parse error. `ALTER TABLE EXECUTE` only accepts connector-registered procedures (Iceberg: optimize, expire_snapshots, remove_orphan_files, drop_extended_stats; optimize_manifests is 470+). There is no `UPDATE` procedure under EXECUTE.
+- **Correct form:** standalone `UPDATE iceberg.analytics.sessions SET col = expr WHERE col IS NULL AND some_condition;` (no ALTER TABLE EXECUTE wrapper).
+- **Resource grep:** `EXECUTE UPDATE` appears in **zero resource files**. The correct standalone form is documented at 6 locations (r13 L4237, r17 L387/L435/L538, r09 L1229/L1273). Resources are CORRECT.
+- **Verdict:** RESPONDER ONE-OFF, NOT a resource defect. Matches `feedback_responder_broken_secondary_alternative` memory pin pattern (correct primary + tacked-on fabricated alternative form the engineer did not ask for). Per pin: **NO resource fix, scope as per-instance one-off, do not bias the judge**.
 
 ## Teacher guidance
 
-### Verdict on Q3: **MIXED — resource gap is borderline; primarily a responder retrieval gap.**
+**RECOMMENDATION = NO-OP** (margin +1.25). The iter1105 r07 timezone-bucketing FIX-A reached on the very first 2-angle re-probe (column-type-aware function form for naive UTC col + per-row at_timezone for column-stored zone). Both Q1 and Q2 returned the canonical block verbatim. This is textbook reach pattern (analogous to iter1099 r18 Check 3 reach + iter1102 r09 dbt-snapshots/r16 storage-tiering REDO reach).
 
-The canonical r07 block IS in place at L2422-L2448 with the correct two forms and an explicit WRONG block. The responder did not retrieve it. Possible reasons:
+- **NO new r07 edits.** The STEP-0 router at L2406-2410 + Fact 3 function-form canonical at L2447-2451 + Fact 3b per-row canonical at L2470/L2483 + bare-AT-TIME-ZONE-on-naive defang at L2456-2457 are all working. Don't churn.
+- **NO state.json bump** (already 1106, already `passed:true`).
+- **NO federation re-probe** (federation row 4.50244/312 fragile-PASS per iter1097).
+- **NO Q4 EXECUTE-UPDATE chase.** Resources don't carry the wrong claim (grep confirms `EXECUTE UPDATE` is absent across all resources); correct standalone form at 6 locations. Per `feedback_responder_broken_secondary_alternative` pin: per-instance one-off, do not fix.
+- **OPTIONAL DURABILITY PROBES next sweep** (in order of marginal value, no edit just probe):
+  - storage-tiering row (3.5625/6 still thinnest — 7th angle needed)
+  - dbt-model-contracts (4.391/6, second-thinnest)
+  - cost-considerations (4.2129/20)
+  - Q4-style Iceberg-schema-evolution-with-backfill RE-PROBE to confirm the EXECUTE UPDATE fabrication doesn't recur (if Iceberg-table-maintenance or postgres-to-iceberg-ingestion drops by >0.005 this iter, prioritize this probe)
 
-- The r07 timezone-bucketing block may not be findable from the specific question phrasing "UTC-stored event timestamps ... bucket by CUSTOMER LOCAL calendar date ... Tokyo 11PM UTC → next day ... without hardcoding offsets". Check whether the keyword anchors in that section catch on phrases like "customer local", "per-customer zone", "11PM UTC next day", "tz-naive UTC-stored column", "session-independent".
-- The current "WRONG (session-dependent)" example at L2446-L2447 uses `CAST(occurred_at AS TIMESTAMP WITH TIME ZONE)` as the wrong-shape, NOT bare `occurred_at AT TIME ZONE 'Asia/Tokyo'` — the responder's specific wrong shape (bare AT TIME ZONE with NO disambiguation of column type) is not directly inline-marked.
+**Patterns this iter:**
+- iter1105 FIX-A reach on 1st re-probe with column-type router pattern — same shape as iter1098->1099 r18 Check 3 root-cause-reconciliation reach, iter1101->1102 r16/r09 affirmative-first TL;DR hoist reach. The reconcile-don't-append + hoist-affirmative-above-negative pattern continues to work for findability + content-disambiguation defects.
+- Q4 broken-secondary fabrication = Nth instance of the broken-secondary memory pin pattern (now 11th case in the chain: iter936/943/948/950/954/1013/1019/1020/1102/1103/1106). Confirms the pin is a stable feature of the Haiku responder's padding behavior, not a fixable resource issue.
+- Verify-first against trino.io alter-table.html + connector/iceberg.html caught the `ALTER TABLE EXECUTE UPDATE` fabrication before it could bias the rubric. This is the correct defense against responder-generated novel hallucinated syntax. Continue to grep resources first to rule out resource-sourced before classifying as responder one-off.
 
-### Recommended FIX-A for next iter (LIGHT, additive — do NOT churn):
+## Topic score updates
 
-1. **Add a keyword-magnetic findability sentence at the TOP of the r07 timezone-bucketing block.** Something like: "READ FIRST when asked: bucket UTC timestamps by customer local date, per-customer zone, IANA zone, 11PM UTC → next day, no hardcoded offsets, customer-local calendar day." (mirror the GROUPING SETS L415 keyword-anchor pattern that successfully closed iter1104).
+- **analytical-query-patterns Iceberg+Trino** (Q1+Q2+Q3): 4.3897/56 -> (245.8232 + 5.000 + 5.000 + 4.9375) / 59 = 260.7607 / 59 = **4.4197/59 PASSED** (+0.030)
+- **postgres-to-iceberg-ingestion** (Q4): 4.5004/172 -> (774.0688 + 4.0625) / 173 = 778.1313 / 173 = **4.4979/173 PASSED** (-0.0025; tiny drag from Q4 fabricated secondary; well above threshold)
 
-2. **Add a column-type router sentence:** "**FIRST check the column type**: `DESCRIBE` the table. If `timestamp(p) with time zone` → bare `event_ts AT TIME ZONE 'zone'` is correct. If `timestamp(p)` (no tz, Spark-ingested UTC) → MUST use `with_timezone(event_ts, 'UTC') AT TIME ZONE 'zone'` to be session-independent."
+All required topics REMAIN PASSED.
 
-3. **Add bare `event_ts AT TIME ZONE 'Asia/Tokyo'` (no `with_timezone`/no two-step) as an explicit defang/WRONG line in the inline-marked WRONG block,** since the responder's specific footgun shape is not currently captured there.
-
-4. **For the "CUSTOMER LOCAL" framing**, ensure the `at_timezone(with_timezone(ts, 'UTC'), customer_zone_column)` worked example (already at r07 L2459+) is cross-referenced from the keyword block at the top of the section — the responder did not surface this even though the question implied per-row customer zone.
-
-### Do NOT touch r28 GROUPING SETS (FIX-A REACHED twice this iter — locked).
-
-### Do NOT touch Q4 (clean canonical retrieval).
-
-### Don't churn / scope guard
-
-The Q3 ask is a real footgun, but it's also borderline: if the engineer's Iceberg column is `timestamp with time zone` (the recommended UTC-normalized form), the responder's answer is correct. Don't escalate to a major rewrite — the LIGHT FIX-A above (4 small additions) should close findability and the responder's specific wrong-shape gap without restructuring the section.
-
----
-
-## Topic touch map (rubric updates)
-
-- **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL** — Q1+Q2 (GROUPING SETS subtotal-pivot pattern) + Q3 (time-series bucketing by local zone). Mixed: two strong + one partial.
-- **Improving complex SQL performance on Trino with dbt** — Q4 (dbt incremental late-arriving + lookback) + Q1+Q2 (single-query-replaces-N-UNION-ALL is a complex-SQL-perf pattern).
-- **Oracle PL/SQL → dbt/Trino migration** — Q4 (dbt incremental config pattern).
+No `::` / QUALIFY / false-semi-join / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / Spark-Oracle-spillover / imported-prior issues this iter. ONE broken-secondary (Q4 EXECUTE UPDATE fabrication) — responder-side per memory pin, NOT resource-side.
