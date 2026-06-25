@@ -1,7 +1,7 @@
 {
-  "iteration": 1106,
+  "iteration": 1107,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1106 timezone column-type FIX-A re-probe (iter1105). Q1 = events stored in a BARE timestamp (no tz) holding UTC, bucket by local day \u2014 confirm responder now checks column type + uses with_timezone(ts,UTC) AT TIME ZONE, NOT bare AT TIME ZONE. Q2 = per-row timezone held in a user column (at_timezone). Q3+Q4 breadth. Verify-first any slip."
+  "note": "iter1107 breadth durability sweep (both recent FIX-As closed: GROUPING SETS, r07 timezone). 4 varied less-recently-probed angles, weaving one thin-margin topic (cost/CBO/partitioning) + general analytical/dialect/Iceberg. Verify-first any slip; NO-OP expected. Federation untouched (fragile-PASS 4.50244/312)."
 }

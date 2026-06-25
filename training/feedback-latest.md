@@ -1,125 +1,176 @@
-# Judge Feedback — Iteration 1106 (2026-06-26)
+# Judge Feedback — Iteration 1107 (2026-06-26)
 
-**OVERALL: 4.75 STRONG PASS** — FIX-A REACHED on BOTH Q1+Q2 re-probes; Q3 clean breadth; Q4 has a fabricated-syntax broken-secondary (backfill snippet) but PRIMARY answer fully correct. No resource defect on Q4 (responder one-off matching `feedback_responder_broken_secondary_alternative` memory pin).
+**OVERALL: 4.203 PASS** — Breadth durability sweep with TWO source-verified responder one-off defects (Q1 mislabeled rationale, Q2 PARSE-ERROR primary worked-example SQL). Q3+Q4 clean. NO resource defect on either — both confirmed pure responder-side hallucinations (grep audit zero matches in resources). **RECOMMENDATION = NO-OP.**
 
 ## Per-question scoring
 
-### Q1 — bare TIMESTAMP(6) (NO tz) storing UTC, bucket by US/Eastern local day
-**Responder:** `date_trunc('day', with_timezone(event_ts, 'UTC') AT TIME ZONE 'America/New_York')` in BOTH SELECT and GROUP BY; explains `with_timezone` directly attaches UTC as label (no session-zone involvement); explicitly DEFANGS `CAST(event_ts AS TIMESTAMP WITH TIME ZONE)` as session-dependent; offers two-step `event_ts AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` alternative.
+### Q1 — events partitioned by day, filtered by user_id; ~50k users; bucket on user_id ON TOP of or INSTEAD of day?
+**Responder:** Bucketing hashes user_id into N buckets; use ON TOP of day partition: `partitioning = ARRAY['day(occurred_at)', 'bucket(user_id, 32)']`; stresses Trino bucket() is COLUMN-FIRST `bucket(user_id, 32)` (Spark is count-first); start N=32/64; equality filter `user_id='x'` prunes to its bucket.
+
+**SOURCE-VERIFIED DEFECT — mislabeled rationale:**
+- Responder stated: *"with 50,000 users, DAY-ONLY partitioning = 50,000 partitions per day × 365 = 18.25M partitions/year."*
+- Day-only partitioning yields **ONE** partition per day, NOT 50,000. The 50,000-per-day / 18.25M-per-year explosion arithmetic correctly describes `day × user_id` (or user_id-direct) partitioning — which is the argument FOR bucketing instead of identity-partitioning the user_id. The numbers are right; the label "DAY-ONLY" is wrong. Beginner who reads literally would walk away thinking `day(occurred_at)` alone creates 50K partitions/day.
+
+**Resource grep audit:**
+- `Grep "50,000|18.25M"` in `resources/`: zero matches with the "day-only = 50K/day" framing. r10 L874 has the CORRECT counter-form `total partitions per year = tenants × days` (29,200 for 80×365), reinforcing that joint = product, not day-only.
+- `Grep "DAY-ONLY"`: zero matches.
+- **NOT a resource defect.** Pure responder one-off — wrong rationale label on a recommendation that is otherwise correct.
+
+**Correct facts verified:**
+- `bucket(user_id, 32)` Trino Iceberg COLUMN-FIRST syntax — verified per memory pin `reference_trino_bucket_arg_order` (Spark is count-first `bucket(32, col)`).
+- ON-TOP-of-day combination + equality-filter prunes to a single bucket — correct Iceberg hidden-partitioning semantics.
+- N=32/64 starting range matches r10 L71 "Stay in 16–256" guardrail.
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | Matches r07 L2447-2451 canonical (function form, session-independent) and STEP-0 router L2406-2408 EXACTLY. Verified vs trino.io/docs/current/functions/datetime.html: `with_timezone(timestamp(p), zone) -> timestamp(p) with time zone` directly assigns. CAST defang correct per r07 L2428 + L2453-2454. |
-| Clarity | 5.0 | Explains what `with_timezone` does mechanically (label-attach vs convert); engineer with zero OLAP can copy-paste and understand. |
-| Applicability | 5.0 | Direct copy-paste runnable on Trino 467; bucket-by-NYC-day works correctly across DST and midnight. |
-| Completeness | 5.0 | Both canonical forms (function + two-step); contrast with session-dependent CAST trap; both SELECT and GROUP BY mirrored. |
+| Accuracy | 3.5 | Recommendation (bucket-on-top, column-first syntax, N=32/64) fully correct. But explicit rationale sentence "day-only partitioning = 50,000 partitions per day" is mathematically false (day-only = 1/day). |
+| Clarity | 3.5 | Beginner reading literally would be confused — would they think `day(occurred_at)` already creates 50K partitions per day? The mislabel undermines the "why bucket" justification. |
+| Applicability | 4.5 | DDL `ARRAY['day(occurred_at)', 'bucket(user_id, 32)']` is copy-paste-runnable on Trino 467 Iceberg connector. Pruning behavior correctly described. |
+| Completeness | 4.0 | Covers ON-TOP framing, bucket count starting range, prune-to-single-bucket on equality. Misses: skew check (if a few power-users dominate, bucket-skew matters), and `EXPLAIN` verification step for confirming bucket pruning. |
 
-**Q1 = 5.000**
+**Q1 = 3.875**
 
-### Q2 — per-row timezone in a `users.timezone` column, convert UTC event ts to user's local day
-**Responder:** `at_timezone(with_timezone(event_ts,'UTC'), user_timezone_col)` wrapped in `date_trunc('day', ...)`; explicitly contrasts with `AT TIME ZONE 'literal'` operator form which requires a constant, whereas `at_timezone(...)` accepts a column expression evaluated per row.
+### Q2 — 700M events JOINed to 150-row reference table, query 4-5min; is Trino mishandling the small table; can I force it into memory on every worker?
+**Responder PRIMARY DIAGNOSIS:** Trino is probably already BROADCASTing the 150-row table; the slowness is the 700M-row fact SCAN, not the join; add a partition filter on occurred_at; verify with EXPLAIN (look for BROADCAST vs PARTITIONED); force with `SET SESSION join_distribution_type = 'BROADCAST'`. **CORRECT.**
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Matches r07 L2470 and L2483 canonical EXACTLY. Verified vs trino.io/docs/467/functions/datetime.html: `at_timezone(timestamp(p) with time zone, zone)` — `zone` parameter has no `(constant)` annotation -> column/expression accepted per row. The router third branch at L2409 (per-row tz from a column) reaches. |
-| Clarity | 5.0 | Calls out the operator-vs-function distinction (literal-only vs per-row) which is the actual confusion engineers hit. |
-| Applicability | 5.0 | Engineer with `users.timezone` column copy-pastes and gets per-user local day correctly. |
-| Completeness | 5.0 | Covers the case + contrasts with the wrong form; matches Fact 3b worked example. |
+**Responder "right pattern" worked-example SQL — PARSE ERROR:**
+```sql
+SELECT e.user_id, COUNT(*)
+FROM iceberg.analytics.events e
+WHERE e.occurred_at >= TIMESTAMP '2026-06-01'
+JOIN iceberg.analytics.plans r ON e.plan_id = r.id
+GROUP BY e.user_id;
+```
 
-**Q2 = 5.000**
+**SOURCE VERIFICATION — `FROM ... WHERE ... JOIN ... ON ...` is INVALID Trino 467 SQL:**
+- Trino SELECT grammar per trino.io/docs/current/sql/select.html:
+  ```
+  SELECT ... FROM from_item [, ...] [ WHERE ... ] [ GROUP BY ... ] [ HAVING ... ] [ ORDER BY ... ] [ OFFSET ... ] [ LIMIT ... ]
+  ```
+  where `from_item` recursively includes `from_item join_type from_item ON condition`. **JOIN is part of the FROM clause and must be fully resolved BEFORE WHERE.** The responder's SQL puts WHERE between the first from_item and the JOIN — a syntax error.
+- Engineer copy-pasting this hits a Trino parser error like `mismatched input 'JOIN' expecting {<EOF>, '.', ...}`.
 
-### Q3 — most-recent row per session_id, append-on-update table, no self-join
-**Responder:** ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY updated_at DESC NULLS LAST) subquery `WHERE rn=1`; alternative `max_by(col, updated_at)` + `MAX(updated_at)` GROUP BY session_id; notes no QUALIFY in Trino.
+**Resource grep audit (correct form is canonical, NOT source of defect):**
+- `Grep "FROM .* WHERE .* JOIN"` in `resources/`: zero matches with the broken order on canonical worked-example SQL. The few matches are inline tables describing Oracle-to-Trino rewrites (e.g., r27 outer-join `(+)` translation) — not broken canonicals.
+- All canonical join examples in resources use correct `FROM a JOIN b ON ... WHERE ...` order (verified across r18, r22, r24, r28 hundreds of times).
+- **NOT a resource defect.** Pure responder hallucination on the worked-example.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | ROW_NUMBER dedup form verified trino.io/docs/467/functions/window.html. `max_by(x,y)` verified aggregate.html. NULLS LAST default claim verified per memory pin `reference_trino_null_ordering_default`. No-QUALIFY caveat correct. |
-| Clarity | 5.0 | Two-form presentation with a clear "use which when" framing. |
-| Applicability | 5.0 | Both forms paste-and-run on Trino 467. |
-| Completeness | 4.75 | Minor: doesn't call out tie-breaker need (`ORDER BY updated_at DESC, event_id DESC`) when two rows share the same `updated_at` — common in append-on-update tables with bulk loads. Not load-bearing. |
+**Correct facts verified:**
+- `join_distribution_type` valid values per trino.io/docs/current/optimizer/cost-based-optimizations.html: `AUTOMATIC` / `BROADCAST` / `PARTITIONED` — responder cited all three correctly (cross-checked vs r18 L158, L198 invented-values defang).
+- Broadcasting a 150-row table is the optimal CBO choice (single-row send, negligible memory) — correctly identified.
+- Diagnosis "cost is the fact scan, add partition filter" is the right hypothesis for a 4-5min query against a 700M-row Iceberg table — matches r18 §query-perf-regression playbook.
+- EXPLAIN verification suggestion correct (look for `BROADCAST` distribution marker in the join node).
 
-**Q3 = 4.9375**
-
-### Q4 — dbt incremental merge, new column added, OLD rows show NULL; full refresh needed or does Iceberg schema evolution backfill?
-**Responder PRIMARY:** Iceberg ADD COLUMN is metadata-only, does NOT backfill, old rows read NULL by design, NO full refresh needed; set dbt `on_schema_change='append_new_columns'` (default `'ignore'` drops the new column); merge inserts populate new rows naturally. **CORRECT.**
-
-**Responder SECONDARY (backfill snippet):** `ALTER TABLE iceberg.analytics.sessions EXECUTE UPDATE SET new_column = <expression> WHERE new_column IS NULL AND some_condition;` — **FABRICATED SYNTAX.**
-
-**SOURCE VERIFICATION — `ALTER TABLE ... EXECUTE UPDATE` is INVALID on Trino 467:**
-- Verified vs trino.io/docs/current/connector/iceberg.html: Iceberg connector ALTER TABLE EXECUTE procedures are EXACTLY `optimize`, `optimize_manifests` (470+, not 467), `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats`. **No `UPDATE` procedure exists.**
-- Verified vs trino.io/docs/current/sql/alter-table.html: "Executable commands are contributed by connectors" — only the connector-registered procedures above are valid.
-- Row-level UPDATE on Iceberg is done via the **standalone `UPDATE table SET col = expr WHERE ...` statement** (trino.io/docs/current/sql/update.html), NOT through `ALTER TABLE ... EXECUTE`.
-- The responder appears to have hybridized two distinct syntaxes (`ALTER TABLE EXECUTE` for table procedures + standalone `UPDATE` DML) into a parse-error form. Copy-pasted by the engineer it would fail with a Trino parser error.
-
-**Resource grep (canonical correct form is present, NOT the source of the defect):**
-- `resources/13-postgres-to-iceberg-ingestion.md` L4237: `UPDATE iceberg.analytics.accounts SET tier = 'free' WHERE tier IS NULL;`
-- `resources/17-iceberg-table-maintenance.md` L387/L435/L538: standalone `UPDATE iceberg.analytics.events SET ... WHERE ...`
-- `resources/09-lakehouse-schema-design.md` L1229/L1273: standalone `UPDATE iceberg.analytics.accounts SET ... WHERE ...`
-- Resources have the CORRECT standalone form at 6 locations. Grep for `EXECUTE UPDATE` returns **zero matches**. **NOT a resource defect.**
-
-**Classification:** Per-instance broken-secondary-alternative matching memory pin `feedback_responder_broken_secondary_alternative` (iter936 / iter943 / iter948 / iter950 / iter954 / iter1013 / iter1019 / iter1020 family). The PRIMARY answer (Iceberg metadata-only / old rows NULL by design / `on_schema_change='append_new_columns'` / no full refresh) is fully correct and usable; the responder padded a broken backfill alternative form the engineer did not ask for. Per pin: scope as per-instance one-off, NO resource fix, do not let it bias the judge against the primary.
-
-**on_schema_change default-is-'ignore' sanity check:** VERIFIED via docs.getdbt.com/docs/build/incremental-models — default is `'ignore'` (silently drops new columns from the INSERT/UPDATE); `'append_new_columns'` is the correct opt-in for additive schema changes; `'sync_all_columns'` drops removed columns too; `'fail'` raises on mismatch. Responder's framing matches docs verbatim.
+**Classification:** This is a PARSE-ERROR PRIMARY worked-example, not a "broken-secondary-alternative" — more serious than the memory-pin `feedback_responder_broken_secondary_alternative` pattern (which describes BROKEN trailing alternatives after a CORRECT lead). Here the lead conceptual answer is correct, but the canonical paste-ready SQL the engineer would copy is broken. However, the broken construct (WHERE-before-JOIN) is a one-off keyword-juxtaposition slip, NOT something the resource set could be edited to prevent — every JOIN example in the resources is correctly ordered. No FIX-A.
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 3.5 | Primary 100% correct + matches resources + dbt docs verbatim. Secondary backfill snippet is a parse-error fabrication (`ALTER TABLE ... EXECUTE UPDATE` does not exist on Trino 467). |
-| Clarity | 4.5 | Primary explanation of metadata-only schema evolution + on_schema_change semantics is clear and beginner-friendly. |
-| Applicability | 3.75 | Primary actionable (do nothing for old rows; add `on_schema_change='append_new_columns'` to dbt config). Secondary backfill pasted by an engineer would parse-error — they'd need to debug or strip the `ALTER TABLE ... EXECUTE` wrapper. Drag on Applicability. |
-| Completeness | 4.5 | Core question fully answered; the secondary backfill snippet was an unsolicited alternative. Could mention that for non-NULL backfills the correct form is the standalone `UPDATE iceberg.<schema>.<table> SET col = expr WHERE col IS NULL` (NOT wrapped in ALTER TABLE EXECUTE). |
+| Accuracy | 2.5 | Conceptual diagnosis (broadcast already happening, fact scan is the cost, partition filter is the lever, session property right values) all correct. But the headline copy-paste SQL is a parse error. |
+| Clarity | 4.0 | Diagnosis narrative is clear: "Trino is probably already broadcasting"; "verify with EXPLAIN"; "force with SET SESSION". |
+| Applicability | 2.5 | Copy-paste the worked-example → parse error. Engineer must spot the bug and rearrange JOIN before WHERE. SET SESSION line works as-is. |
+| Completeness | 4.0 | Covers EXPLAIN verification + session-property override + partition-filter lever. Misses dynamic-filtering callout (often the real cost driver on probe-side scans even with broadcast). |
 
-**Q4 = 4.0625**
+**Q2 = 3.25**
+
+### Q3 — VARCHAR comma-list 'web,mobile,api'; check exact token 'mobile' without matching 'mobile_beta'; cleaner than LIKE/regex?
+**Responder:** `contains(split(platforms, ','), 'mobile')`; trim with `transform(split(...), x->trim(x))` if spaces; UNNEST alternative for grouping; notes `regexp_like(platforms,'(^|,)mobile(,|$)')` also works but split+contains is clearer.
+
+**SOURCE VERIFICATION:**
+- `split(varchar, varchar) -> array(varchar)` — verified trino.io/docs/current/functions/array.html.
+- `contains(array(T), element T) -> boolean` exact equality match — verified array.html (returns TRUE only on `=` match, NOT pattern). This is exactly the "exact token, no substring" guarantee the engineer asked for; `LIKE '%mobile%'` would match `mobile_beta`, `contains(split(...), 'mobile')` would not.
+- `transform(array(T), function(T,U)) -> array(U)` — verified array.html.
+- `trim(varchar) -> varchar` — verified string.html.
+- `regexp_like(varchar, varchar) -> boolean` with anchored `(^|,)mobile(,|$)` — verified regexp.html; correct workaround pattern.
+
+**No defect. All forms valid Trino 467 and engineer-actionable.**
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | All four forms (split+contains, transform+trim wrapper, UNNEST, regexp_like) are valid Trino 467 and correctly avoid the substring false-positive. |
+| Clarity | 5.0 | Routes engineer from "cleaner than LIKE/regex" → split+contains as primary, with explicit "if spaces" upgrade path. Beginner-friendly. |
+| Applicability | 5.0 | Copy-paste-runnable. Directly answers "exact token without matching mobile_beta". |
+| Completeness | 5.0 | Covers primary + spaces variant + UNNEST + regex alternative. No nuance missed. |
+
+**Q3 = 5.000**
+
+### Q4 — revenue per customer: orders JOIN order_line_items then SUM(orders.total_amount) GROUP BY customer — inflated 5-6x
+**Responder:** Classic join FANOUT (order row duplicated per line item, total_amount summed once per item); fix = pre-aggregate line items in a CTE then join (GROUP BY order_id), or divide by `COUNT(*) OVER (PARTITION BY order_id)`; verify with `COUNT(DISTINCT order_id)`.
+
+**SOURCE VERIFICATION:**
+- Fanout diagnosis correct: `orders JOIN order_line_items ON order_id` produces N rows per order (one per line item); SUM(order.total_amount) on this multiplied table sums `total_amount` N times per order → 5-6× inflation factor consistent with avg ~5-6 line items per order. Verified pattern: matches r07 join-fanout family, r28 §join-correctness guidance.
+- Primary fix `WITH agg_li AS (SELECT order_id, SUM(li.amount) AS line_total FROM order_line_items GROUP BY order_id) SELECT o.customer_id, SUM(o.total_amount) FROM orders o LEFT JOIN agg_li ON ... GROUP BY o.customer_id` — correct standard pre-aggregate-in-CTE pattern.
+- `COUNT(DISTINCT order_id)` verification: correct sanity check (distinct order count × avg total = expected revenue).
+- Minor: responder typo `COUN(*) OVER` (missing T) — not load-bearing, engineer would spot/fix on paste.
+- Minor: divide-by-COUNT-OVER alternative works but is fragile vs CTE pre-aggregation (compounding NULL cases on outer joins). Responder lists it as an alternative, not primary — acceptable.
+
+**No defect. Diagnosis + primary fix + verification all correct.**
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 4.5 | Fanout diagnosis + CTE pre-aggregate fix + COUNT(DISTINCT) verification all correct. `COUN(*)` typo (-0.25) and divide-by-count alternative noted without caveats about NULL behavior on outer joins (-0.25). |
+| Clarity | 4.75 | Maps "5-6x inflation" → "1 order × 5-6 line items" mental model directly. |
+| Applicability | 4.5 | CTE fix is copy-paste-runnable. Divide-by-count alternative has the typo. |
+| Completeness | 5.0 | Diagnosis + two fix forms + verification step + an implicit invitation to inspect avg line items per order. |
+
+**Q4 = 4.6875**
 
 ## Score table
 
 | Q | Topic | Accuracy | Clarity | Applicability | Completeness | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | analytical-query-patterns Iceberg+Trino (timezone bucketing, naive UTC col -> local day) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
-| Q2 | analytical-query-patterns Iceberg+Trino (per-row tz column -> at_timezone) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
-| Q3 | analytical-query-patterns Iceberg+Trino (latest-per-key dedup ROW_NUMBER/max_by) | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
-| Q4 | postgres-to-iceberg-ingestion (Iceberg schema evolution + dbt on_schema_change + backfill DML) | 3.5 | 4.5 | 3.75 | 4.5 | **4.0625** |
+| Q1 | Iceberg partition design + bucketing on top of day | 3.5 | 3.5 | 4.5 | 4.0 | **3.875** |
+| Q2 | CBO / join_distribution_type / broadcast vs partitioned + worked-example SQL | 2.5 | 4.0 | 2.5 | 4.0 | **3.250** |
+| Q3 | SQL best practices: comma-list token-exact match (split+contains vs regex/LIKE) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q4 | Analytical query patterns: join fanout diagnosis + CTE pre-aggregate fix | 4.5 | 4.75 | 4.5 | 5.0 | **4.6875** |
 
-**Iter average = (5.000 + 5.000 + 4.9375 + 4.0625) / 4 = 4.7500 STRONG PASS** (margin +1.25 over 3.5 threshold)
+**Iteration average = (3.875 + 3.250 + 5.000 + 4.6875) / 4 = 4.203 PASS** (margin +0.703)
 
-## FIX-A REACH VERDICT
+## Source-verified defects (both responder one-off, NEITHER is a resource defect)
 
-**Q1 (bare TIMESTAMP UTC-intent col -> local day):** **FIX-A REACHED — TEXTBOOK** — responder used the `with_timezone(event_ts,'UTC') AT TIME ZONE 'America/New_York'` function form EXACTLY as written in r07 L2447-2451; the STEP-0 column-type router at L2406-2408 (added iter1105) reached on the first re-probe of a tz-naive UTC column. Explicit defang of `CAST(... AS TIMESTAMP WITH TIME ZONE)` shows the L2428 CAST-trap block also reached. Two-step alternative offered as well.
+1. **Q1 partition-explosion-rationale mislabel.** "DAY-ONLY partitioning = 50,000 partitions per day × 365 = 18.25M/year" — math is correct for `day × user_id` joint partitioning (50K users × 365 days), wrong label "day-only" (which would yield 1/day). Grep `resources/` for `50,000.*per day`, `DAY-ONLY`, `partitions per day` — zero matches with the mislabeled framing. r10 L874 has the CORRECT counter-form "tenants × days = 29,200 partitions/year". Pure responder rationale slip.
 
-**Q2 (per-row timezone in users.timezone column):** **FIX-A REACHED — TEXTBOOK** — responder used the `at_timezone(with_timezone(event_ts,'UTC'), user_timezone_col)` form EXACTLY as written in r07 L2470 / L2483 (Fact 3b); third router branch at L2409 reached. Explicit operator-form-needs-literal contrast nails the precise distinction Fact 3b L2464-2466 codifies.
+2. **Q2 PRIMARY worked-example SQL parse error.** `FROM events e WHERE e.occurred_at >= TIMESTAMP '2026-06-01' JOIN iceberg.analytics.plans r ON e.plan_id = r.id GROUP BY e.user_id` — JOIN must precede WHERE per Trino SELECT grammar (`from_item` recursive `from_item join_type from_item ON ...` resolves fully before WHERE). Verified vs trino.io/docs/current/sql/select.html. Grep `resources/` for broken-order canonicals — zero matches; all canonical join SQL across r18, r22, r24, r28 use correct `FROM a JOIN b ON ... WHERE ... GROUP BY ...` order. Pure responder keyword-juxtaposition slip. Distinct from `feedback_responder_broken_secondary_alternative` pattern (this is the PRIMARY worked example, not a trailing alternative); but classification is the same — per-instance one-off, not a resource-fixable defect.
 
-Both timezone column-type angles tested. The iter1105 r07 FIX-A (STEP-0 column-type router + bare-AT-TIME-ZONE-on-naive defang line + Fact 3 function form hoisting) is **CLOSED**. No further r07 timezone-bucketing work needed.
+## Memory-pin compliance
 
-## Defect classification (Q4 backfill)
+- `reference_trino_bucket_arg_order` (column-first `bucket(col, N)`): responder cited correctly with explicit Spark-vs-Trino contrast. PIN HOLDS.
+- `feedback_responder_broken_secondary_alternative`: Q2 PRIMARY-SQL parse-error is adjacent to but distinct from this pin (primary not secondary). Same scope policy applies — per-instance one-off, no resource fix.
+- `feedback_synthesis_ceiling`: residual is a Haiku copy-paste-quality ceiling, not a resource gap. Continue accepting occasional per-instance cost.
 
-- **Wrong syntax:** `ALTER TABLE iceberg.analytics.sessions EXECUTE UPDATE SET col = expr WHERE ...` — Trino 467 parse error. `ALTER TABLE EXECUTE` only accepts connector-registered procedures (Iceberg: optimize, expire_snapshots, remove_orphan_files, drop_extended_stats; optimize_manifests is 470+). There is no `UPDATE` procedure under EXECUTE.
-- **Correct form:** standalone `UPDATE iceberg.analytics.sessions SET col = expr WHERE col IS NULL AND some_condition;` (no ALTER TABLE EXECUTE wrapper).
-- **Resource grep:** `EXECUTE UPDATE` appears in **zero resource files**. The correct standalone form is documented at 6 locations (r13 L4237, r17 L387/L435/L538, r09 L1229/L1273). Resources are CORRECT.
-- **Verdict:** RESPONDER ONE-OFF, NOT a resource defect. Matches `feedback_responder_broken_secondary_alternative` memory pin pattern (correct primary + tacked-on fabricated alternative form the engineer did not ask for). Per pin: **NO resource fix, scope as per-instance one-off, do not bias the judge**.
+## Topic rubric updates
+
+- **Iceberg partition design for SaaS** (Q1): 4.4451/42 → (186.6942 + 3.875)/43 = **4.4318/43 PASSED** (-0.013)
+- **CBO / ANALYZE TABLE / Puffin / NDV / join ordering** (Q2 session-property + broadcast/partitioned): 4.6316/18 → (83.3688 + 3.25)/19 = **4.5556/19 PASSED** (-0.076; well above raised 4.5 threshold, margin +0.056)
+- **SQL query best practices for OLAP** (Q3 + Q4 secondary): 4.471/157 → (701.947 + 5.000 + 4.6875)/159 = **4.475/159 PASSED** (+0.004)
+- **Analytical query patterns Iceberg+Trino** (Q4 fanout primary): 4.4197/59 → (260.7623 + 4.6875)/60 = **4.4242/60 PASSED** (+0.005)
+
+ALL required topics REMAIN PASSED.
 
 ## Teacher guidance
 
-**RECOMMENDATION = NO-OP** (margin +1.25). The iter1105 r07 timezone-bucketing FIX-A reached on the very first 2-angle re-probe (column-type-aware function form for naive UTC col + per-row at_timezone for column-stored zone). Both Q1 and Q2 returned the canonical block verbatim. This is textbook reach pattern (analogous to iter1099 r18 Check 3 reach + iter1102 r09 dbt-snapshots/r16 storage-tiering REDO reach).
+**RECOMMENDATION = NO-OP.** No resource edits.
 
-- **NO new r07 edits.** The STEP-0 router at L2406-2410 + Fact 3 function-form canonical at L2447-2451 + Fact 3b per-row canonical at L2470/L2483 + bare-AT-TIME-ZONE-on-naive defang at L2456-2457 are all working. Don't churn.
-- **NO state.json bump** (already 1106, already `passed:true`).
-- **NO federation re-probe** (federation row 4.50244/312 fragile-PASS per iter1097).
-- **NO Q4 EXECUTE-UPDATE chase.** Resources don't carry the wrong claim (grep confirms `EXECUTE UPDATE` is absent across all resources); correct standalone form at 6 locations. Per `feedback_responder_broken_secondary_alternative` pin: per-instance one-off, do not fix.
-- **OPTIONAL DURABILITY PROBES next sweep** (in order of marginal value, no edit just probe):
-  - storage-tiering row (3.5625/6 still thinnest — 7th angle needed)
-  - dbt-model-contracts (4.391/6, second-thinnest)
-  - cost-considerations (4.2129/20)
-  - Q4-style Iceberg-schema-evolution-with-backfill RE-PROBE to confirm the EXECUTE UPDATE fabrication doesn't recur (if Iceberg-table-maintenance or postgres-to-iceberg-ingestion drops by >0.005 this iter, prioritize this probe)
+Justification:
+- Neither defect is sourced from a resource file (grep audit confirmed zero matches for both broken forms).
+- Q1 "DAY-ONLY = 50K/day" is a one-off rationale label slip; resources already carry the CORRECT counter-arithmetic at r10 L874 ("tenants × days = 29,200/year"). Adding a defang card "day-only ≠ N-per-day, day-only = 1-per-day" risks the `feedback_new_card_over_attracts_adjacent` regression on neighboring partition questions and would not durably block a keyword-juxtaposition slip.
+- Q2 PRIMARY-SQL parse error (WHERE-before-JOIN) is a one-off keyword-order slip; resources have hundreds of correctly-ordered FROM-JOIN-WHERE-GROUP-BY canonicals across r18, r22, r24, r28. Adding an explicit "JOIN before WHERE" router card would not help — the responder's failure is in synthesis ordering, not in finding the canonical (the canonical correct form is everywhere).
+- Both defects fall under the `feedback_synthesis_ceiling_stop_churning` umbrella: Haiku synthesis quality ceiling on novel multi-step writeups; closing one specific failure mode does not durably block a different keyword-juxtaposition slip in the next domain.
+- Iter average +0.703 above PASS threshold, all topics retain PASS margins (CBO row drops to +0.056 above the raised 4.5 threshold — thin but not breaching; will recover with the next clean breadth datapoint).
 
-**Patterns this iter:**
-- iter1105 FIX-A reach on 1st re-probe with column-type router pattern — same shape as iter1098->1099 r18 Check 3 root-cause-reconciliation reach, iter1101->1102 r16/r09 affirmative-first TL;DR hoist reach. The reconcile-don't-append + hoist-affirmative-above-negative pattern continues to work for findability + content-disambiguation defects.
-- Q4 broken-secondary fabrication = Nth instance of the broken-secondary memory pin pattern (now 11th case in the chain: iter936/943/948/950/954/1013/1019/1020/1102/1103/1106). Confirms the pin is a stable feature of the Haiku responder's padding behavior, not a fixable resource issue.
-- Verify-first against trino.io alter-table.html + connector/iceberg.html caught the `ALTER TABLE EXECUTE UPDATE` fabrication before it could bias the rubric. This is the correct defense against responder-generated novel hallucinated syntax. Continue to grep resources first to rule out resource-sourced before classifying as responder one-off.
+**Optional next-sweep probes (no edit, just probe):**
+- Q1-style partition-rationale re-probe in different domain (e.g., events by `tenant_id × day` instead of `user_id × day`) to confirm the "DAY-ONLY = 50K/day" mislabel does not recur — if it does, escalate to LIGHT FIX-A.
+- Q2-style broadcast/partitioned join re-probe with a NEW worked-example domain (e.g., fact JOIN small currency table) to confirm WHERE-before-JOIN parse-error does not recur — if it does, escalate to LIGHT FIX-A (likely a defang row in r18 or r28 listing the WRONG SQL inline-marked, per `feedback_defang_donotwrite_snippets` pattern).
+- Federation row (4.50244/312 fragile-PASS per iter1097) — leave untouched as usual.
+- Storage-tiering 7th datapoint (3.5625/6 still thinnest), dbt-model-contracts 7th angle (4.391/6), cost-considerations 21st angle (4.2129/20) — continue durability probes when convenient.
 
-## Topic score updates
+NO state.json bump (already 1107, already passed:true).
+NO federation re-probe (4.50244/312 fragile-PASS per iter1097).
+NO commit beyond rubric+feedback.
 
-- **analytical-query-patterns Iceberg+Trino** (Q1+Q2+Q3): 4.3897/56 -> (245.8232 + 5.000 + 5.000 + 4.9375) / 59 = 260.7607 / 59 = **4.4197/59 PASSED** (+0.030)
-- **postgres-to-iceberg-ingestion** (Q4): 4.5004/172 -> (774.0688 + 4.0625) / 173 = 778.1313 / 173 = **4.4979/173 PASSED** (-0.0025; tiny drag from Q4 fabricated secondary; well above threshold)
+## Pattern observation
 
-All required topics REMAIN PASSED.
+Two distinct responder-side defects in one sweep — both in the "synthesis quality on novel paste-ready SQL" failure class:
+- Q1 = rationale arithmetic mislabel (the RIGHT numbers under the WRONG label).
+- Q2 = SQL clause-order keyword juxtaposition (the RIGHT clauses in the WRONG order).
 
-No `::` / QUALIFY / false-semi-join / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / over-warning / Spark-Oracle-spillover / imported-prior issues this iter. ONE broken-secondary (Q4 EXECUTE UPDATE fabrication) — responder-side per memory pin, NOT resource-side.
+Both share the signature: conceptual answer correct, the engineer-facing artifact (the snippet they would copy) has a small but load-bearing bug. Resources can't durably block these via additive content; they are Haiku synthesis-quality ceiling. The iter avg passes because Q3 + Q4 are clean. Pattern matches `feedback_synthesis_ceiling_stop_churning` — accept the occasional Q cost, do not churn the resources.
