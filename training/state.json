@@ -1,7 +1,7 @@
 {
-  "iteration": 1101,
+  "iteration": 1102,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1101 -> 3.656 PASS overall BUT both FIX-A re-probes FAILED (Q1 tiering 2.50, Q2 snapshot-hard-delete 2.25): findability anchors ROUTED the responder correctly but it reads top-down and STOPPED before the affirmative MECHANISM (Mechanism A mc-ilm ~8 lines below the NO-access row; hard_deletes matrix ~115 lines deep), surfaced only the negative + fabricated harmful substitutes (Q1 recommended DELETE old data; Q2 hand-rolled LEFT JOIN, asserted snapshots cant detect hard deletes). REDO = AFFIRMATIVE-FIRST placement: hoisted YES/NO TL;DRs to TOP of both blocks (r16 ~L503: YES mc-ilm age-tiering keeps data queryable / NO not access-based / DO NOT delete; r09 ~L356: 3 orthogonal snapshot decisions incl hard_deletes=new_record, do NOT hand-roll LEFT JOIN) + DO-NOT-WRITE defang rows negating both fabricated substitutes. New memory refinement [Responder Findability] iter1100->1101 affirmative-first. Q3 YTD-running-total 5.0 / Q4 ANALYZE-Puffin 4.875 clean. Re-probe Q1+Q2 AGAIN next sweep to confirm affirmative-first reaches; storage-tiering AT threshold (3.50/5) thinnest row."
+  "note": "iter1102 THIRD re-probe of the affirmative-first hoists (iter1101 REDO). Q1 storage-tiering access-framing + Q2 dbt snapshot hard-deletes, fresh wording \u2014 confirm the TOP-OF-BLOCK YES/NO TL;DRs now make the responder surface the AFFIRMATIVE mechanism (mc-ilm age tiering keeps data queryable; hard_deletes=new_record) instead of the negative+fabricated-substitute. storage-tiering AT threshold (3.50/5) \u2014 Q1 MUST recover. Q3+Q4 breadth."
 }
