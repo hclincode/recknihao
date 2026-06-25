@@ -1,7 +1,7 @@
 {
-  "iteration": 1108,
+  "iteration": 1109,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1108 re-probe iter1107 one-off slips in fresh domains. Q1=bucketing on a high-cardinality column (different domain) \u2014 confirm responder labels the partition-explosion rationale correctly (NOT day-only=N/day). Q2=broadcast join small dim to huge fact (different domain) \u2014 confirm clean FROM..JOIN..ON..WHERE order (lift tightened CBO row 4.5556/19, +0.056 over 4.5). Q3+Q4 breadth. If either slip recurs -> LIGHT FIX-A."
+  "note": "iter1109 breadth durability sweep. 4 varied less-recently-probed angles across passed topics. Avoid the long recent-coverage list. Verify-first any slip; NO-OP expected. Federation untouched (fragile-PASS 4.50244/312). CBO row thin (4.5716/20, +0.072 over 4.5) \u2014 avoid weak CBO probes."
 }

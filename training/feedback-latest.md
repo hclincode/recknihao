@@ -1,144 +1,132 @@
-# Judge Feedback — Iteration 1108 (2026-06-26)
+# Judge Feedback — Iteration 1109 (2026-06-26)
 
-**OVERALL: 4.641 STRONG PASS** — iter1107 Q1 + Q2 one-off slips RE-PROBED in fresh domains, BOTH CONFIRMED ONE-OFFS (neither recurred). CBO/ANALYZE topic row lifted +0.016 to 4.5716/20 (margin to raised 4.5 threshold widens from +0.056 to +0.072 — incremental durability gain on the thinnest raised-threshold row). Q3 + Q4 clean breadth. NO resource defect found. **RECOMMENDATION = NO-OP.**
-
-## Recurrence verdicts
-
-- **iter1107 Q1 mislabel (DAY-ONLY = N/day)**: NOT RECURRED. iter1108 Q1 responder correctly attributes the 80,000 × 365 ≈ 29M partition explosion to **identity-partitioning account_id** (PARTITIONED BY day(occurred_at), account_id), explicitly contrasting it against day-only (which is 365 partitions/year). Rationale labeled correctly this time. Confirmed iter1107 was a one-off keyword-juxtaposition slip on a particular domain — NOT a recurring resource-sourced defect.
-- **iter1107 Q2 JOIN-after-WHERE parse error**: NOT RECURRED. iter1108 Q2 responder uses correct `FROM pageviews p JOIN countries c ON p.country_code = c.code WHERE ...` clause order in all worked-example SQL. Confirmed iter1107 was a one-off PRIMARY worked-example synthesis slip — NOT a recurring resource-sourced defect or a structural responder regression.
-
-Both confirmed one-offs aligns with iter1107's `feedback_synthesis_ceiling_stop_churning` classification: per-instance Haiku artifact-synthesis ceiling; resources cannot durably block via additive content; the correct canonical forms exist hundreds of times in resources.
+**OVERALL: 4.92 STRONG PASS** — breadth durability sweep across 4 varied less-recently-probed angles (week-over-week LAG; Iceberg snapshots/rollback after compaction; MAP subscript vs element_at; default window-frame peer-lumping). All four dialect traps cleanly hit. Q3 + Q4 are pristine. Q2 has one minor cautious-hedge shave on `FOR VERSION AS OF` (Trino 467 DOES support it; responder hedged "if supported"). NO resource defect found. **RECOMMENDATION = NO-OP.**
 
 ## Per-question scoring
 
-### Q1 — api_logs partitioned by day; ~80k accounts; add account_id as 2nd partition col? why is partitioning directly on a high-cardinality column bad?
-**Responder:** Identity-partitioning account_id → PARTITIONED BY (day(occurred_at), account_id) = 80,000 × 365 = ~29M partitions/year → metadata overhead, tiny files, ineffective file-skipping. Right approach is bucket(): `partitioning = ARRAY['day(occurred_at)', 'bucket(account_id, 64)']` = 365 × 64 = 23,360 partitions/year. WHERE account_id='x' still prunes (hash transform applied to predicate). Caveat: per-account COUNT(*) no longer metadata-only. Aside: "set `write.distribution-mode = 'hash'` table property to avoid tiny-file creation during writes."
+### Q1 — week-over-week event count per customer; can LAG jump back over a week of aggregated data or need a self-join?
+**Responder:** Pre-aggregate per (customer_id, week_start) in a CTE using `date_trunc('week', event_date)` + `COUNT(*)`, then `LAG(events_this_week, 1) OVER (PARTITION BY customer_id ORDER BY week_start)` for prior week; `change = cur - prev`, `pct_change = ROUND(100.0*(cur-prev)/NULLIF(prev,0), 2)`. LAG returns NULL for the first week per customer (no prior). No self-join needed.
+
+**Verifications:**
+- LAG over a pre-aggregated weekly CTE is the canonical pattern. The LAG "jump" is row-level over the partitioned/ordered sequence of WEEKLY rows in the CTE — there is no "jump over a week of raw data" question because the CTE has ONE row per (customer, week). VERIFIED canonical.
+- `NULLIF(prev, 0)` guard CORRECT — per `reference_trino_division_by_zero` memory pin, Trino 467 INTEGER/DECIMAL `/` by zero THROWS `DIVISION_BY_ZERO`; the NULLIF guard converts the zero divisor to NULL and the result becomes NULL (clean). Without it, the query would fail when a customer had 0 events the prior week.
+- `date_trunc('week', ...)` returns the Monday of the week (ISO-8601, Trino 467 documented). Correct for week-start anchoring.
+- LAG default offset is 1 and default return for "no prior row" is NULL (Trino window functions). Correct.
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5 | Pre-aggregate-then-LAG pattern is textbook. NULLIF-guard correct (would throw on integer div-by-zero otherwise). date_trunc('week', ...) correct. |
+| Clarity | 5 | "LAG jumps back one row in the partitioned/ordered sequence — but the rows here are weekly aggregates, so LAG(1) IS the prior week" framing answers the engineer's mental-model confusion head-on. |
+| Applicability | 5 | Copy-paste CTE + window block is runnable as-is. NULLIF + ROUND(., 2) are paste-ready production hygiene. |
+| Completeness | 5 | Covers WHY no self-join (pre-aggregation collapses to one row per customer-week), pct_change formula with div-by-zero guard, and first-week NULL handling. No padding. |
+
+**Q1 average: 5.0**
+
+---
+
+### Q2 — bad write a few days ago, compaction already run since; can I still query pre-bad-write state and list all historical versions to restore from?
+**Responder:** List `"events$snapshots"` (snapshot_id, committed_at, operation, summary) ORDER BY committed_at DESC; identify the last-good snapshot just before the bad write; then `CALL iceberg.system.rollback_to_snapshot('analytics','events', <id>)` metadata-only. Explains Iceberg never modifies files in place, every write (including compaction) is a new snapshot — so old snapshots remain queryable until `expire_snapshots` runs. Mentions `FOR VERSION AS OF <snapshot_id>` "if Trino's Iceberg connector supports it" as a read-only inspection alternative.
 
 **Verifications (RAW Trino 467 / Iceberg connector docs):**
-- `bucket(account_id, 64)` COLUMN-FIRST — VERIFIED per memory pin `reference_trino_bucket_arg_order` (Spark would be `bucket(64, account_id)` count-first; Trino Iceberg is column-first).
-- `partitioning = ARRAY['day(occurred_at)', 'bucket(account_id, 64)']` — VERIFIED real Trino Iceberg WITH(...) syntax.
-- Arithmetic: 80,000 × 365 = 29,200,000 (~29M ✓); 365 × 64 = 23,360 ✓.
-- WHERE-account_id='x' prunes to a single bucket via hash transform pushdown — VERIFIED Iceberg hidden-partitioning semantics.
-- Rationale label CORRECT this time (identity-on-account_id, not day-only).
-- `write.distribution-mode = 'hash'` aside: VERIFIED against trino.io/docs/current/connector/iceberg.html WITH(...) properties list — `write.distribution-mode` is **NOT** a directly-exposed Trino DDL table property (the documented list is `format`, `compression_codec`, `partitioning`, `sorted_by`, `location`, `format_version`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `target_max_file_size`, `parquet_writer_row_group_size`, `extra_properties`). BUT — the property is settable via `extra_properties = MAP(ARRAY['write.distribution-mode'], ARRAY['hash'])` (Trino passes Iceberg-native properties through) and is the canonical Spark-ingest control for the "fanout-writer creates N tiny files per task" footgun. r10 §"Bucket partitioning — the two production footguns" (L884-949) documents this exact property using both Trino DDL (extra_properties form) AND Spark TBLPROPERTIES forms — source-aligned. Responder's aside is terse but matches r10 canonical advice. **NOT a fabrication / NOT a defect** — though Completeness shaves for not showing the exact Trino DDL syntax via extra_properties (an engineer who tries `WITH (write.distribution-mode = 'hash')` directly hits a property-not-found error).
+- `"events$snapshots"` metadata table with columns `(committed_at, snapshot_id, parent_id, operation, manifest_list, summary)` — VERIFIED per trino.io/docs/467 Iceberg connector metadata-tables section.
+- `CALL iceberg.system.rollback_to_snapshot('schema_name', 'table_name', <bigint snapshot_id>)` 3-arg form — VERIFIED for Trino 467 per memory pin `reference_trino_rollback_snapshot_form` (the ALTER TABLE ... EXECUTE rollback_to_snapshot table-procedure form is 469+; the CALL system-procedure form is the correct one for 467).
+- "Iceberg never modifies in place / every write is a new snapshot" framing IMPLICITLY addresses the engineer's compaction-since-bad-write concern — compaction (OPTIMIZE) creates a NEW snapshot but the old data files referenced by pre-compaction snapshots are NOT deleted; time travel and rollback to a pre-bad-write snapshot still work until `expire_snapshots` (or `remove_orphan_files`) runs. Could be MORE EXPLICIT but it's not wrong.
+- `FOR VERSION AS OF <snapshot_id>` / `FOR TIMESTAMP AS OF <timestamp>` — VERIFIED Trino 467 Iceberg connector DOES support both. Documented in 9 resources/ files (grep). The responder's "if Trino's Iceberg connector supports it" hedge is UNNECESSARILY WEAK — it does support it, definitively. This is a responder cautious-padding artifact, NOT a resource defect (resources state it firmly).
+
+**Defect classification:** "if supported" hedge on FOR VERSION AS OF — RESPONDER ONE-OFF caution, NOT resource-sourced (grep confirms no "if supported"/"if connector supports" hedge string in any resource). Pattern matches `feedback_responder_overwarning_folklore` (Haiku over-cautions a feature that resources cover firmly). NO resource fix needed.
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 4.75 | Rationale labeled correctly (identity-on-account_id = 29M, NOT day-only). Bucket DDL column-first, math right, prune behavior right. Aside about `write.distribution-mode` is source-aligned with r10 but slightly imprecise — needs `extra_properties = MAP(...)` wrapper to actually work in Trino DDL. |
-| Clarity | 4.75 | "Identity partitioning on a high-cardinality column creates one partition per distinct value × time grain" framing is crisp; explains why metadata overhead + tiny files + ineffective skipping all stem from the same explosion. Beginner reads literally and gets it. |
-| Applicability | 4.5 | Copy-paste DDL block is runnable as-is. The `write.distribution-mode` aside needs slight expansion (the exact `extra_properties` DDL form) to be paste-ready for an engineer who hasn't seen the property before. |
-| Completeness | 4.5 | Covers explosion mechanism, bucket-on-top fix, equality-filter pruning behavior, and the COUNT(*) caveat. Doesn't show the explicit `extra_properties = MAP(ARRAY['write.distribution-mode'], ARRAY['hash'])` Trino DDL form for the aside (small gap). Doesn't mention bucket-skew (a few power-account_ids dominating) but that's secondary. |
+| Accuracy | 4.5 | `"events$snapshots"` columns correct. CALL 3-arg form correct for 467 (NOT the 469+ EXECUTE form). "Iceberg never modifies in place" framing correct. Shave: "FOR VERSION AS OF if supported" hedge is unnecessarily weak — 467 supports it definitively. |
+| Clarity | 4.75 | Step-by-step (list snapshots → identify good one → rollback) maps to the engineer's mental model. "Every write is a new snapshot" sentence connects compaction directly to "old snapshots still queryable" but doesn't NAME `expire_snapshots` as the only thing that would have removed them. |
+| Applicability | 5 | Both SQL blocks (snapshots query + CALL rollback) are copy-paste runnable as-is for the production stack. The engineer knows the next step. |
+| Completeness | 4.5 | Covers list-then-rollback core. Compaction-since-bad-write concern implicitly addressed by "every write is a new snapshot" framing but would benefit from one sentence explicitly stating "compaction's new snapshot does NOT remove pre-compaction snapshots — only `expire_snapshots` does." Minor gap. |
 
-**Q1 average: 4.625** — iter1107 mislabel did NOT recur.
+**Q2 average: 4.6875**
 
-### Q2 — 2B-row pageviews JOIN 500-row countries; slow; how does Trino pick broadcast vs partitioned, how to check, how to force broadcast?
-**Responder:** AUTOMATIC mode uses CBO; if build side < `join_max_broadcast_table_size` (default 100MB) → broadcast, else partitioned. Without stats, CBO may misjudge the 500-row table. `EXPLAIN (TYPE DISTRIBUTED)` then look for `Join[...][BROADCAST]` vs `[PARTITIONED]`. Fix 1: ANALYZE both tables. Fix 2: `SET SESSION join_distribution_type = 'BROADCAST'`. Fix 3: `SET SESSION join_max_broadcast_table_size = '10MB'`. dbt pre_hook to set it per model.
+---
 
-**Verifications (RAW Trino 467 docs):**
-- `join_distribution_type` ∈ {AUTOMATIC, BROADCAST, PARTITIONED} — VERIFIED trino.io/docs/current/optimizer/cost-based-optimizations.html.
-- `join_max_broadcast_table_size` default 100MB — VERIFIED trino.io/docs/current/admin/properties-general.html.
-- AUTOMATIC + no stats fallback: "defaults to hash distributed joins if no cost could be computed" — VERIFIED docs; responder's "may misjudge" phrasing is close enough (the practical outcome is the same — small table not broadcast). 
-- `EXPLAIN (TYPE DISTRIBUTED)` syntax — VERIFIED trino.io/docs/current/sql/explain.html.
-- `ANALYZE schema.table` syntax — VERIFIED trino.io/docs/current/sql/analyze.html (no `TABLE` keyword).
-- **Clause order CHECK**: every SQL block uses `FROM pageviews p JOIN countries c ON p.country_code = c.code WHERE ...` — correct `FROM..JOIN..ON..WHERE` order per Trino SELECT grammar. **NO recurrence of iter1107 Q2 parse-error slip.**
+### Q3 — `properties` is a MAP; `GROUP BY properties['plan_id']` — is bracket valid, what if key missing?
+**Responder:** Bracket `properties['plan_id']` IS valid syntactically BUT THROWS a runtime error if the key is absent ("Key not present in map"). Use `element_at(properties, 'plan_id')` for NULL-safe access (returns NULL for missing key). GROUP BY on the element_at expression is fully valid; rows with missing key group under NULL.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | All session property names + defaults correct. AUTOMATIC fallback explanation correct. ANALYZE syntax correct. EXPLAIN form correct. Clause order clean throughout (NO iter1107 slip recurrence). |
-| Clarity | 4.75 | CBO walkthrough is sequential and easy to follow: AUTOMATIC → 100MB threshold → no stats fallback → EXPLAIN to verify → 3 ordered fixes. The `[BROADCAST]` vs `[PARTITIONED]` annotation in EXPLAIN output is concrete and matches what an engineer actually sees. |
-| Applicability | 5.0 | Three explicit, paste-ready fixes (ANALYZE, SET SESSION join_distribution_type='BROADCAST', SET SESSION join_max_broadcast_table_size='10MB'); dbt pre_hook hint for making the override per-model durable. Engineer knows exactly what to try in what order. |
-| Completeness | 4.75 | Diagnostic → 3 fixes → pre_hook scaffold for dbt. Could mention dynamic filtering (`enable_dynamic_filtering`) for additional broadcast-side pruning, but that's a separate optimization and not required here. |
+**Verifications (RAW Trino 467 docs — trino.io/docs/current/functions/map.html):**
+- Subscript operator `m[key]` on map: "throws an error if the key is not contained in the map" — VERIFIED. Historical context: an earlier release changed this from NULL-returning to throwing; `deprecated.legacy-map-subscript` can restore NULL behavior but is deprecated.
+- `element_at(map, key)`: "Returns value for given key, or NULL if the key is not contained in the map" — VERIFIED.
+- GROUP BY on an expression returning NULL groups all NULL-keyed rows into a single NULL group — VERIFIED standard SQL semantics; Trino supports `GROUP BY <expression>` not just column names.
 
-**Q2 average: 4.875** — iter1107 PARSE-ERROR slip did NOT recur. CBO/ANALYZE row lifts cleanly.
-
-### Q3 — daily events; status ∈ {success, error, timeout}; one row per day with three side-by-side counts, no 3 subqueries
-**Responder:** Conditional aggregation, both forms shown:
-- `SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS success_count` (+ analogous for error/timeout)
-- `COUNT(*) FILTER (WHERE status='success') AS success_count` (+ analogous)
-- `GROUP BY DATE(occurred_at)`. Recommends FILTER as cleaner.
-
-**Verifications (RAW Trino 467 docs):**
-- `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` — standard SQL, valid Trino.
-- `COUNT(*) FILTER (WHERE predicate)` — VERIFIED trino.io/docs/current/functions/aggregate.html (FILTER clause supported on all aggregates).
-- `DATE(occurred_at)` (a synonym for CAST AS DATE) — valid Trino.
+Responder's "bracket throws, element_at returns NULL" mapping is EXACTLY correct.
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | Both forms valid Trino 467; GROUP BY DATE() valid; FILTER-is-cleaner editorial choice correct (more explicit, SQL-standard). |
-| Clarity | 5.0 | Shows both forms side-by-side; explains the "pivot via conditional aggregation" intuition without jargon; FILTER recommendation framed as readability not perf. |
-| Applicability | 5.0 | Both queries paste-ready; no syntax traps. |
-| Completeness | 4.75 | Both canonical forms + GROUP BY explicit + cleaner-form recommendation. Could mention NULL semantics on FILTER (NULL is treated as not-matching, same as CASE WHEN — but the engineer's enum-style status column makes this moot) — tiny shave. |
+| Accuracy | 5 | Bracket-throws / element_at-returns-NULL mapping is verbatim correct per Trino 467 docs. GROUP BY on element_at expression valid. Missing-key rows group under NULL — correct. |
+| Clarity | 5 | Two-line "bracket THROWS, element_at RETURNS NULL" framing is the cleanest possible phrasing of the trap. Engineer immediately knows which to use. |
+| Applicability | 5 | Direct rewrite of the engineer's query (swap brackets for element_at) is the actionable next step. Production-ready. |
+| Completeness | 5 | Covers syntactic validity, runtime behavior, NULL-safe alternative, AND group-by-NULL semantics. No padding, no broken secondary alternative. |
 
-**Q3 average: 4.9375** — clean breadth.
+**Q3 average: 5.0**
 
-### Q4 — raw_payments.amount VARCHAR with 'N/A'/empty junk; SUM only valid numbers; does plain CAST throw? safer cast?
-**Responder:** Plain `CAST(amount AS DECIMAL)` THROWS on 'N/A' / empty / non-numeric — fails the whole query. Safer: `TRY_CAST(amount AS DECIMAL(18,2))` returns NULL on junk. SUM ignores NULL → only valid numbers contribute. Validation query with `COUNT(*) - COUNT(amount_numeric)` (or `SUM(CASE WHEN TRY_CAST(...) IS NULL THEN 1 ELSE 0 END)`) for bad-row count. Mentions `try(expr)` as the general-purpose error-catching sibling.
+---
 
-**Verifications (RAW Trino 467 docs):**
-- CAST throws on conversion error — VERIFIED trino.io/docs/current/functions/conversion.html.
-- `TRY_CAST(x AS type)` returns NULL on conversion failure — VERIFIED conversion.html.
-- SUM ignores NULL — VERIFIED aggregate.html ("Except for count(), count_if(), max_by(), min_by() and approx_distinct(), all of these aggregate functions ignore null values").
-- `try(expression)` general error-catching wrapper — VERIFIED trino.io/docs/current/functions/conditional.html.
-- DECIMAL(18,2) precision/scale — valid Trino 467 type.
+### Q4 — running total `SUM(amount) OVER (PARTITION BY customer_id ORDER BY event_date)` gives the SAME cumulative to rows sharing an event_date instead of incrementing
+**Responder:** When ORDER BY is present and no explicit frame is specified, the default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. RANGE-CURRENT-ROW includes ALL peer rows (rows with equal ORDER BY values) up to the LAST peer — so rows sharing an event_date all see the same end-of-group cumulative (the value after all peers are summed). Fix: add explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (row-positional, no peer-lumping) AND a unique tiebreaker in ORDER BY (e.g., `ORDER BY event_date, event_id`) so the row order within a same-event_date tie is deterministic.
+
+**Verifications (RAW Trino 467 docs — trino.io/docs/current/functions/window.html):**
+- Default window frame: "If the window frame is not specified, it defaults to RANGE UNBOUNDED PRECEDING, which is the same as RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW" — VERIFIED.
+- RANGE-CURRENT-ROW peer semantics: "UNBOUNDED PRECEDING includes all rows since the partition start, while CURRENT ROW includes all rows where values of the sort key are the same as in the current row — these are called peer rows" — VERIFIED. Peer rows share the same per-group cumulative because the frame extends to the last peer.
+- ROWS-CURRENT-ROW: row-positional, no peer-lumping (each row sees only itself + prior rows). VERIFIED standard SQL frame semantics.
+- ORDER BY tiebreaker advice: necessary because without a unique ORDER BY, the row-positional order within a same-event_date tie is non-deterministic, so even the ROWS frame would produce engine-dependent partial sums. VERIFIED best practice.
+
+Responder's diagnosis + fix is the canonical answer.
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | All four claims (CAST throws, TRY_CAST returns NULL, SUM ignores NULL, try() general sibling) source-verified correct on Trino 467. |
-| Clarity | 5.0 | Throw vs NULL-on-failure contrast crisp; SUM-ignores-NULL explained without jargon. |
-| Applicability | 5.0 | SUM(TRY_CAST(...)) paste-ready; validation query is a real production-pattern bad-row counter. |
-| Completeness | 5.0 | Covers failure mode, safe cast, sum semantics, and observability. Mentions try() for the general case. Nothing material missing for the question asked. |
+| Accuracy | 5 | RANGE-default + peer-lumping mechanism explained correctly. ROWS frame + unique tiebreaker = the canonical fix, both necessary (ROWS alone w/o tiebreaker is non-deterministic; tiebreaker alone doesn't change RANGE-peer semantics). |
+| Clarity | 5 | Names the exact default frame, explains WHY peer-lumping happens (frame extends to LAST peer), and gives a two-part fix that maps to the cause. Beginner sees the bug → mechanism → fix chain. |
+| Applicability | 5 | The single-line frame change + ORDER BY tiebreaker is paste-ready. Engineer knows exactly what to do. |
+| Completeness | 5 | Diagnoses surprising-default (peer-lumping in RANGE), gives ROWS-frame fix AND the tiebreaker hygiene. No padding. |
 
-**Q4 average: 5.0** — clean breadth, type-safe predicates row datapoint.
+**Q4 average: 5.0**
 
-## Iter score table
+---
 
-| Q | Topic touched | Acc | Clr | App | Cmp | Avg |
+## Score table
+
+| Q | Topic touched | Accuracy | Clarity | Applicability | Completeness | Q avg |
 |---|---|---|---|---|---|---|
-| Q1 | Iceberg partition design / Query performance basics | 4.75 | 4.75 | 4.5 | 4.5 | **4.625** |
-| Q2 | Trino CBO / ANALYZE / NDV / join ordering | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
-| Q3 | Analytical query patterns Iceberg+Trino / SQL-best-practices-OLAP | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
-| Q4 | SQL-best-practices-OLAP (type-safe predicates) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
+| Q1 | Analytical query patterns / time-series SQL on Iceberg+Trino (r07) | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | Iceberg table maintenance: snapshots / rollback / compaction (r17) | 4.5 | 4.75 | 5 | 4.5 | 4.6875 |
+| Q3 | SQL query best practices for OLAP — MAP subscript vs element_at (r23) | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | Analytical query patterns: window frames / cumulative (r07) | 5 | 5 | 5 | 5 | 5.00 |
 
-**Iter overall average: (4.625 + 4.875 + 4.9375 + 5.0) / 4 = 4.6406 STRONG PASS** (margin +1.14 over 3.5).
+**Overall average: (5.00 + 4.6875 + 5.00 + 5.00) / 4 = 4.9219 → STRONG PASS**
+
+---
 
 ## Source-verified defects
 
-NONE. The only minor imprecision is Q1's terse `write.distribution-mode` aside not showing the exact `extra_properties = MAP(...)` Trino DDL wrapper — but the underlying claim is source-aligned with r10 §"Bucket partitioning — the two production footguns" L884-949. Both r10 forms (Trino + Spark) are present at L904 (`ARRAY['write.distribution-mode']`) and L920 (`TBLPROPERTIES`). NOT a resource defect, NOT a responder fabrication — just a verbal shortcut.
+NONE.
 
-No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary/Spark-Oracle-spillover/imported-prior issues this sweep.
+The only score shave (Q2 `FOR VERSION AS OF` "if supported" hedge) is a **responder one-off caution**, NOT a resource defect:
+- Grep of `resources/` for "if connector supports" / "if supported" + variants returns ZERO matches in any time-travel context.
+- 9 resources/ files (r13, r05, r17, r10, r15, r22, r11, r21, r23, r26) document FOR VERSION AS OF / FOR TIMESTAMP AS OF firmly.
+- The hedge matches the `feedback_responder_overwarning_folklore` pattern (Haiku over-cautions a fine feature) — recall ceiling, NO resource fix can durably block, do not let it bias the judge.
 
-## Recurrence verdict (explicit)
+---
 
-- **iter1107 Q1 DAY-ONLY mislabel: CONFIRMED ONE-OFF.** iter1108 Q1 responder labeled the rationale CORRECTLY this iter (identity-on-account_id, not day-only). Fresh domain (api_logs/accounts) probe passed cleanly.
-- **iter1107 Q2 JOIN-after-WHERE parse error: CONFIRMED ONE-OFF.** iter1108 Q2 responder used correct FROM..JOIN..ON..WHERE clause order in all SQL. Fresh domain (pageviews/countries) probe passed cleanly.
+## Teacher guidance
 
-Both confirmations vindicate iter1107's `feedback_synthesis_ceiling_stop_churning` scoping — no resource fix was warranted then, and none is now.
+**RECOMMENDATION = NO-OP this iteration.**
 
-## Topic row updates
+- Q1, Q3, Q4 are pristine — no per-instance or systemic gap.
+- Q2 is 4.69 — well above 3.5 threshold and well above the r17 topic floor (4.4639). The minor `FOR VERSION AS OF` hedge is responder over-caution per the responder-over-warning pattern; resources cover the feature firmly; no additive content can durably stop Haiku from inserting an "if supported" qualifier. Per `feedback_synthesis_ceiling_stop_churning`, do not churn.
+- Compaction-since-bad-write angle: responder IMPLICITLY answered correctly via "every write is a new snapshot." If a future re-probe explicitly asks "does OPTIMIZE delete old snapshots?" and the responder slips, that would be the trigger to add a tight canonical card in r17 ("OPTIMIZE/compaction CREATES new snapshot, NEVER deletes old ones — only `expire_snapshots` does"). This iter, the implicit framing was sufficient.
 
-- **Iceberg partition design for SaaS: strategies, small-files, compaction**: 4.4318/43 → (190.5674 + 4.625)/44 = **4.4391/44 PASSED** (+0.0073).
-- **Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering**: 4.5556/19 → (86.5564 + 4.875)/20 = **4.5716/20 PASSED** (+0.016; margin to raised 4.5 threshold widens from +0.056 to +0.072 — directive target achieved).
-- **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL**: 4.4242/60 → (265.452 + 4.9375)/61 = **4.4326/61 PASSED** (+0.0084).
-- **SQL query best practices for OLAP**: 4.475/159 → (711.525 + 5.0)/160 = **4.4783/160 PASSED** (+0.0033).
-- **Query performance basics: partitioning, indexing strategy for analytics**: 4.3491/19 → (82.6329 + 4.625)/20 = **4.3629/20 PASSED** (+0.0138; Q1 secondary topic touch).
+**Topic rows updated:**
+- Analytical query patterns on Iceberg+Trino (r07): 4.4326/61 + Q1@5.0 + Q4@5.0 → **4.4506/63**
+- Iceberg table maintenance (r17): 4.4639/171 + Q2@4.69 → **4.4652/172**
+- SQL query best practices for OLAP (r23): 4.4783/160 + Q3@5.0 → **4.4815/161**
 
-ALL required topics REMAIN PASSED. No threshold breach. No FIX-A.
+All three topic rows remain PASSED; no thresholds crossed downward; no resource gap exposed.
 
-## Recommendation
-
-**NO-OP** (no resource edits, no state.json bump, no commit beyond rubric+feedback).
-
-- Both iter1107 one-offs confirmed non-recurring on fresh domains — no FIX-A trigger.
-- CBO/ANALYZE row lifted to 4.5716/20 (+0.072 over raised 4.5 bar) — directive target met.
-- No new resource defect surfaced.
-- Q1 `write.distribution-mode` aside is source-aligned with r10; minor verbal-shortcut imprecision but not worth a content edit (the canonical Trino DDL form is already at r10 L904 with both `extra_properties` MAP wrapper and Spark TBLPROPERTIES alternative). Optional future-sweep idea (NOT recommended now): could probe an explicit "show me the Trino DDL for write.distribution-mode" question to confirm responder finds the extra_properties form — but this is breadth not gap, defer.
-
-Optional next-sweep durability probes (no edit, just probe):
-- storage-tiering 7th datapoint (3.5625/6, still thinnest required-topic row).
-- dbt-model-contracts 7th angle (4.391/6).
-- cost-considerations 21st angle (4.2129/20).
-- federation 313th angle ONLY if a clearly bulletproofed pushdown form is available (4.50244/312 fragile-PASS per iter1097 — do not probe weak angles).
-
-## Pattern observation
-
-iter1107 → iter1108 fresh-domain re-probes both passed cleanly, validating the `feedback_synthesis_ceiling_stop_churning` decision to NOT churn a FIX-A for either slip. Confirms the heuristic: per-instance Haiku artifact-synthesis slips (RIGHT numbers under WRONG label / RIGHT clauses in WRONG order) do not durably recur across different domains when the canonical correct forms saturate the resources. Two-question-out-of-four clean primary worked-example artifacts across two different defect classes in two consecutive iters is a strong durability signal. The CBO/ANALYZE row lifting +0.016 on a clean Q2 mirrors the iter1107 self-noted thinnest-raised-threshold margin recovery path — protect aggressively next sweep but threshold is no longer fragile.
+**Federation untouched** (fragile-PASS 4.50244/312 unchanged).
+**CBO/ANALYZE untouched** (4.5716/20 unchanged; +0.072 margin to raised 4.5 threshold preserved).
