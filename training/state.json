@@ -1,7 +1,7 @@
 {
-  "iteration": 1103,
+  "iteration": 1104,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1103 breadth durability sweep (both findability FIX-As confirmed iter1102; storage-tiering recovered 3.5625/6). 4 varied less-recently-probed angles across passed topics \u2014 analytical SQL + Iceberg maintenance/partitioning + Trino dialect + migration. Verify-first any responder slip; no targeted re-probe. Federation untouched (fragile-PASS)."
+  "note": "iter1104 breadth sweep -> 4.422 PASS + r28 GROUPING SETS findability FIX-A. Q1 CUME_DIST/PERCENT_RANK 4.9375 / Q2 json_extract_scalar 5.0 / Q4 dbt-contract-after-new-column 5.0 clean. Q3 2.75 findability defect: \"signups by country AND by plan tier AND grand total\" precise answer is GROUPING SETS ((country),(plan_tier),()) but responder LED with ROLLUP (drops the by-plan-tier-only totals) + offered CUBE (over-produces cross-detail); GROUPING SETS content EXISTS in r28 (L488) but the ROLLUP COPY-THIS was the first STOP slot and the ROLLUP anchor \"subtotals and a grand total in one query\" was greedy. FIX-A (same first-STOP-slot lesson as iter1100-1102): hoisted a GROUPING SETS ((x),(y),()) COPY-THIS block ABOVE the ROLLUP block for the \"by X AND by Y AND total\" case + MOST-MISROUTED callout + de-greedy-ed the ROLLUP anchor (now \"subtotals down ONE group hierarchy\") + expanded anchors (replace 3 UNION ALL / totals by X and by Y and a grand total). Re-probe Q3 next sweep (2 angles) to confirm reach. Federation untouched."
 }

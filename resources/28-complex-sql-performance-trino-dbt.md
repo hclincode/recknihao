@@ -412,18 +412,29 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 
 ## LEADING CANONICAL — Trino GROUPING SETS / ROLLUP / CUBE with the GROUPING() bitmask (read FIRST when asked "subtotal", "subtotals", "grand total", "ROLLUP", "CUBE", "GROUPING SETS", "GROUPING function", "GROUPING_ID", "label the subtotal row", "row_type")
 
-> Keyword anchors: subtotal, subtotals, grand total, ROLLUP, CUBE, GROUPING SETS, GROUPING function, GROUPING_ID, row_type, label the subtotal row, multi-level aggregate, hierarchy rollup.
+> Keyword anchors: subtotal, subtotals, grand total, ROLLUP, CUBE, GROUPING SETS, GROUPING function, GROUPING_ID, row_type, label the subtotal row, multi-level aggregate, hierarchy rollup, totals by X and by Y and a grand total in one query, by-country totals AND by-plan totals, subtotals on two independent dimensions without the cross detail, three independent groupings in one query, replace 3 UNION ALL aggregations, consolidate multiple GROUP BY queries into one, one report with several different breakdowns plus a total.
 >
-> Decision keyword anchors (pick the operator FIRST, before copying any example below): "all products within each region AND all regions for each product category", "subtotals on both dimensions", "region totals AND category totals", "independent margins", "every combination of subtotals", "breakdown by both X and Y with subtotals for each".
+> Decision keyword anchors (pick the operator FIRST, before copying any example below): "all products within each region AND all regions for each product category", "subtotals on both dimensions", "region totals AND category totals", "independent margins", "every combination of subtotals", "breakdown by both X and Y with subtotals for each", "totals by X and totals by Y and a grand total", "replace three separate UNION ALL'd GROUP BY queries".
 
 > **⚠️ PICK THE GROUPING CONSTRUCT (one-line router — read this FIRST, before any WRONG / defang block below):**
 > - **"detail + subtotals down a group hierarchy + grand total"** (e.g. per-`(region, product)` detail, then a per-region subtotal, then the overall total — **NO per-product-only row**) **→ `ROLLUP(region, product)`.**
 > - **"every combination including each column alone"** (per-region AND per-product independent margins) **→ `CUBE(region, product)`.**
 > - **"only specific named grouping sets"** (a hand-picked list, NOT the cross-tab detail) **→ `GROUPING SETS (...)`.**
 >
-> **If the ask is "subtotal per `<group>` plus a grand total" (one group hierarchy, no second-column-only margin), that's `ROLLUP`.** Business-phrased anchors that mean ROLLUP: *subtotal per group plus grand total*, *per-region subtotal and overall total*, *hierarchical subtotals*, *subtotals and a grand total in one query*, *department then team drill-down totals*, *year then month subtotals*.
+> **⭐ MOST-MISROUTED CASE — "totals by X AND by Y AND a grand total, in one query" (two DIFFERENT dimensions; you're replacing 2–3 separate `UNION ALL`'d `GROUP BY` queries) → `GROUPING SETS ((x), (y), ())`, NOT `ROLLUP`.** `ROLLUP(x, y)` does **NOT** emit a by-`y`-only row, so it silently DROPS one of the two breakdowns you asked for. If your ask is "signups by country, AND by plan tier, AND overall" — or any "by A and by B and a total" — copy the GROUPING SETS block immediately below, NOT the ROLLUP block under it.
 >
-> ✅ **COPY THIS for "subtotal per group + grand total" (hierarchical subtotals):**
+> ✅ **COPY THIS for "totals by X AND by Y AND grand total" (two independent breakdowns in one query, NO cross-detail — replaces 3 UNION ALL'd GROUP BYs):**
+> ```sql
+> SELECT country, plan_tier, COUNT(*) AS signups
+> FROM signups
+> GROUP BY GROUPING SETS ((country), (plan_tier), ())
+> -- yields: one row per country (plan_tier NULL) + one row per plan_tier (country NULL) + one grand-total row (both NULL).
+> -- NO per-(country, plan_tier) cross-detail row. This is the single-query replacement for three UNION ALL'd GROUP BYs.
+> ```
+>
+> **If instead the ask is "subtotal per `<single group>` plus a grand total" (ONE group hierarchy, no second-column-only margin), that's `ROLLUP`.** Business-phrased anchors that mean ROLLUP: *subtotal per group plus grand total*, *per-region subtotal and overall total*, *hierarchical / prefix subtotals down one grouping*, *department then team drill-down totals*, *year then month subtotals*. (NOTE: "by A **and** by B and a total" — two different dimensions — is **GROUPING SETS** above, not this.)
+>
+> ✅ **COPY THIS for "subtotal per group + grand total" (hierarchical subtotals down ONE grouping):**
 > ```sql
 > SELECT region, product, SUM(revenue) AS total
 > FROM sales
