@@ -1,7 +1,7 @@
 {
-  "iteration": 1098,
+  "iteration": 1099,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1098 thin-margin durability sweep -> 4.625 PASS + RESOURCE ROOT-CAUSE FIX-A. Q1 dbt-contracts 5.0 / Q2 cost 4.75 / Q3 Oracle-ROWNUM-pagination 5.0 (OFFSET-before-LIMIT correct) all clean. Q4 perf-regression 3.75: verify-first flag caught a SOURCE-WRONG claim in r18 (Check 3 table L84 + worked example L113-115) that WHERE date(occurred_at)=DATE x BREAKS Iceberg partition pruning -> FALSE; UnwrapCastInComparison@467 unwraps it and it STILL prunes (judge WebFetched the rule source; contradicts r07 \u00a71 truth-source). FIX-A: rewrote r18 L84 + worked example to use a GENUINELY-non-prunable example (LOWER(tenant_id) on VARCHAR partition col) + explicit NOTE that temporal date()/CAST/date_trunc/year wraps DO prune, cross-ref r07 \u00a71; also fixed r18 L940 (column-mismatch not function-wrap) + r28 L11 (opaque-only). Matches [Trino Unwraps Temporal Predicates] pin. Re-probe Q4 next sweep with a NON-date()-wrap angle to confirm FIX-A reaches. Federation untouched (fragile-PASS 4.50244/312)."
+  "note": "iter1099 FIX-A re-probe + thin-margin durability. Q1 = perf-regression with a date_trunc/CAST-AS-DATE filter dangled as a RED HERRING \u2014 confirms iter1098 r18 FIX-A reaches: corrected resource should say the temporal wrap STILL prunes (UnwrapCast/DateTrunc) and point to real causes (small files/stats/skew/opaque-wrap), NOT blame date(). Q2 storage-tiering (4.25/2 thinnest). Q3 dbt snapshots/SCD2 (4.4299/8). Q4 another Oracle construct. No federation (fragile-PASS 4.50244/312)."
 }
