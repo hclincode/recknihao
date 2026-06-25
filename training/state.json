@@ -1,7 +1,7 @@
 {
-  "iteration": 1102,
+  "iteration": 1103,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1102 THIRD re-probe of the affirmative-first hoists (iter1101 REDO). Q1 storage-tiering access-framing + Q2 dbt snapshot hard-deletes, fresh wording \u2014 confirm the TOP-OF-BLOCK YES/NO TL;DRs now make the responder surface the AFFIRMATIVE mechanism (mc-ilm age tiering keeps data queryable; hard_deletes=new_record) instead of the negative+fabricated-substitute. storage-tiering AT threshold (3.50/5) \u2014 Q1 MUST recover. Q3+Q4 breadth."
+  "note": "iter1103 breadth durability sweep (both findability FIX-As confirmed iter1102; storage-tiering recovered 3.5625/6). 4 varied less-recently-probed angles across passed topics \u2014 analytical SQL + Iceberg maintenance/partitioning + Trino dialect + migration. Verify-first any responder slip; no targeted re-probe. Federation untouched (fragile-PASS)."
 }
