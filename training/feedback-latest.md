@@ -1,54 +1,87 @@
-# Judge Feedback — iter1099 (2026-06-26)
+# Judge Feedback — iter1100 (2026-06-26)
 
-**Iteration**: 1099
+**Iteration**: 1100
 **Phase**: extended (passed:true, post-final)
-**Mode**: FIX-A CONFIRMATION re-probe (Q1 = iter1098 r18 reconciliation reach-test) + thin-margin durability sweep
-**Overall Average**: 4.9375 — **STRONG PASS** (overall avg governs; no per-question veto)
+**Mode**: thin-margin durability sweep — Q1 storage-tiering FRESH ANGLE (access-vs-age) + Q2 perf-regression 2nd angle (small-files/skew) + Q3 dbt-snapshots HARD-DELETE angle + Q4 Oracle LISTAGG
+**Overall Average**: 3.1875 — **FAIL** (overall avg governs; below 3.5 threshold)
 
-**iter1098 r18 FIX-A: CONFIRMED REACHING THE RESPONDER ON 1ST RE-PROBE.** The dangled coworker claim (`date_trunc('day', event_ts) = DATE 'x'` causes a full scan) was REFUTED with the correct Unwrap rule names + redirect to real root causes. No regression on the other 5 Q4 checks (they were not tested this iter — Q1 here only tests Check 3 directly).
+**Two distinct deficits this iter:** (a) **Q1 = FINDABILITY FAILURE** — the access-vs-age caveat literally exists at r16 L533 ("CRITICAL — transitions are by OBJECT AGE ... NOT by access time / access pattern / last-read timestamp") but the responder bailed because the L501 keyword anchors lack access-recency phrasings; (b) **Q3 = CONTENT GAP** — r09 covers SCD2 snapshot basics but has NO subsection on `hard_deletes` config / `invalidate_hard_deletes` / `dbt_is_deleted` meta column. Q2 has a minor accuracy defect (wrong `$files` column names that would parse-error). Q4 is clean.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Query slower this week; coworker blames `WHERE date_trunc('day', event_ts) = DATE '2026-06-20'` (event_ts is the day-partition column) for a full scan. Is that the cause, and what to actually check?
+### Q1 — Engineer assumes Iceberg/MinIO tiering moves files based on last-read/query access ("frequently-accessed old data stays warm"). Is that how it works?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | Coworker REFUTED correctly: `date_trunc('day', event_ts) = DATE 'x'` does NOT break pruning on Trino 467 — names both `UnwrapCastInComparison` AND `UnwrapDateTruncInComparison` as the default-on rules that auto-rewrite to a bare-column range that DOES push into Iceberg partition pruning (event_ts is the day-partition column → the `day(event_ts)` transform fires). Verified against `UnwrapCastInComparison.java`@trinodb/trino:467 + the Trino blog "Just the right time date predicates with Iceberg" + PR #14011/#14161 (UnwrapDateTruncInComparison covers `day`/`hour` units). Matches the [Trino Unwraps Temporal Predicates] pin AND the iter1098 r18 FIX-A canonical framing. Then redirects to **real** root causes: (a) small-files increase since last week (recommends `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')`), (b) partition-layout change (recommends `EXPLAIN (TYPE DISTRIBUTED)` to inspect `TableScan` constraint vs Filter-above-TableScan signature), (c) concurrency spike (Trino UI queued/running). All three redirect causes are sound and accurate. Punchline "Temporal wrap is not your performance killer on 467" is exactly right. |
-| Beginner clarity | 5 | "Coworker WRONG" framing is crisp. The 3 real-cause checks are short and named. No unexplained jargon. |
-| Practical applicability | 5 | Engineer can immediately (a) push back on coworker with the Unwrap rule names, (b) run the 3 named diagnostic actions, (c) confirm no rewrite-the-SQL chase is needed. Saves a wasted sprint. |
-| Completeness | 5 | Covers BOTH halves of the question — "is that the cause" (no) AND "what to actually check" (3 ordered candidates that match the "slower this week" delta-shaped symptom: small files / partition layout / concurrency are the canonical week-over-week delta drivers). Could optionally also mention partition skew via `EXPLAIN ANALYZE Input std.dev.` but the 3 covered are the canonical first-pass triage. |
-| **Q1 average** | **5.00** | |
+| Technical accuracy | 2 | Responder bailed with "I don't have enough information... resources don't cover Iceberg tiering policies / access-vs-age." It did NOT echo a false claim, but **it also failed to correct the engineer's explicit misconception** that tiering is access-aware. The engineer leaves the conversation still believing "frequently-accessed old data stays warm" — which is FALSE on this stack (verified r16 L533 + docs.min.io ILM rule reference). Source ground truth: MinIO `mc ilm rule add` transitions trigger on `--transition-days N` (days since OBJECT CREATION) ONLY; there is NO `--transition-access-days` / `--last-accessed-days` flag. Heavily-read 6-month-old data WILL get tiered on a 90-day rule. Access-aware tiering is only achievable at the application layer (Mechanism C: two-table recent+archive split). |
+| Beginner clarity | 3 | The bail itself is clearly stated. But "I don't know" leaves the engineer's mental model unchanged and they will now design wrong (e.g., expect a hot-table-stays-on-hot-tier guarantee that does not exist). |
+| Practical applicability | 1 | Engineer cannot act. Worse, will likely build an architecture that assumes incorrect tiering semantics. |
+| Completeness | 1 | Did not address the question. |
+| **Q1 average** | **1.75** | |
 
-### Q2 — 3yr event data on Iceberg/MinIO, 95% queries hit last 90d; move old data to cheaper storage without breaking queries — how, and trade-offs?
+**SOURCE-VERIFIED CONTENT EXISTS — FINDABILITY DEFECT:**
+- r16 §LEADING CANONICAL tiering block (L499–620) is the canonical answer location for tiering questions on this stack.
+- r16 L533 explicitly addresses this exact misconception verbatim: *"CRITICAL — transitions are by OBJECT AGE (`--transition-days N`), NOT by access time / access pattern / last-read timestamp. ... a heavily-read 6-month-old hot dashboard table will still get tiered if your rule says `--transition-days 90` — age, not heat, is the trigger. If you actually want access-aware tiering (which is what AWS S3 Intelligent-Tiering offers), you have to implement it yourself at the application layer (Mechanism C), MinIO ILM will not do it for you."*
+- r16 L501 keyword load (~30 phrasings) is rich on "tier/hot/cold/lifecycle/archive/move old data" but **MISSING the access-recency family**: "last read", "last accessed", "how recently queried", "frequently accessed", "frequently-accessed stays warm", "hot data stays hot", "access pattern", "access-aware tiering", "Intelligent-Tiering", "access time", "S3 Intelligent-Tiering equivalent".
+- The Haiku responder's keyword→file→section retrieval missed the block entirely because the engineer's phrasing ("frequently-accessed old data stays warm") doesn't match any L501 anchor. The L533 critical note is buried 32 lines below the anchor list.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5 | "No per-partition SQL DDL for tiering on Trino/Iceberg" — VERIFIED against trino.io/docs/467/connector/iceberg.html (no `SET STORAGE TIER` ALTER form, no `storage_tier`/`storage_class`/`tier` in the Iceberg table-property list). MinIO `mc ilm tier add` + `mc ilm rule add --transition-days 90 --transition-tier cold-tier` — VERIFIED against docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-rule/mc-ilm-rule-add/ (the `--transition-days N` + `--transition-tier <NAME>` flag pair is correct). "Trino sees zero change (same paths/metadata)" — correct: Trino keeps reading the same `s3a://...` path, MinIO transparently rehydrates cold-tier reads at higher latency. "Partition pruning unaffected" — correct (Trino's prune decision is path-based + manifest min/max, both of which live in metadata; physical-tier of the data file is invisible to the planner). Alternative `events_recent` / `events_archive` + UNION view is Mechanism C from r16 §LEADING CANONICAL — correct. "Iceberg 1.5.2" mention is NOT a fabrication — it's the prod stack version per prod_info.md L24. |
-| Beginner clarity | 5 | Clear separation of "Trino/Iceberg has no SQL knob" vs "MinIO ops owns this". Two-mechanism breakdown. |
-| Practical applicability | 5 | Engineer can paste the two `mc ilm` commands and the UNION-view DDL. |
-| Completeness | 4 | Slight shave: (a) does NOT explicitly warn to scope the lifecycle rule's prefix to `data/` only (sweeping `metadata/` to cold tier would slow planning on every query — this is the r16 "CRITICAL" caveat); (b) does NOT mention Mechanism B (`compression_codec='ZSTD'`) as a complementary lever for archive tables; (c) does NOT name the access-pattern caveat (MinIO ILM trigger is `--transition-days` = creation age, NOT last-read access time — a heavily-read 6-month-old table will still get tiered). The latency-on-deep-historical-scans tradeoff IS surfaced. Not a defect, just incompleteness on edges. |
-| **Q2 average** | **4.75** | |
-
-### Q3 — Track customer plan-tier history (SCD2) via dbt snapshots on Trino/Iceberg: how it works, what columns it adds, how to query point-in-time state.
+### Q2 — Nightly ingest then dashboard slow; small-files vs skew — how to tell & fix?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | The four always-present dbt snapshot meta columns — `dbt_scd_id` / `dbt_updated_at` / `dbt_valid_from` / `dbt_valid_to` — VERIFIED against docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names + r09 L445-450. `dbt_valid_to IS NULL` = current/active version — correct. `strategy='timestamp'` requires `updated_at='<column>'` config — VERIFIED against docs.getdbt.com/reference/resource-configs/strategy + r09 L358-376. `strategy='check'` uses `check_cols=[...]` list or `'all'` shorthand — VERIFIED r09 L378-403. Point-in-time query template `WHERE id=... AND dbt_valid_from <= T AND (dbt_valid_to IS NULL OR dbt_valid_to > T)` is the correct half-open validity-window pattern (`<= from` AND `< to` for exact-at-boundary inclusivity — matches r09 §SCD2 query patterns). Snapshot block config `target_schema/unique_key/strategy/updated_at` matches the canonical r09 L361-376 block. |
-| Beginner clarity | 5 | Walks "what it is → 4 columns → strategies → query pattern → config block" linearly. Clear. |
-| Practical applicability | 5 | Engineer can write the snapshot block AND the point-in-time query directly. |
-| Completeness | 4 | Slight shave: does NOT mention the dbt 1.9+ optional `dbt_is_deleted` meta column (added when `hard_deletes='new_record'` config is enabled) — the rubric's topic row explicitly lists this. Does NOT mention `snapshot_meta_column_names` config (lets you rename the 4 meta columns). Not a defect — the 4 listed are the canonical default and the query template is correct. |
-| **Q3 average** | **4.75** | |
+| Technical accuracy | 3 | **Diagnosis methodology is correct** — EXPLAIN ANALYZE per-fragment to distinguish `Scheduled time >> CPU time` (I/O small-files) from `1 driver busy / rest idle` (skew); `EXECUTE optimize(file_size_threshold => '128MB')` for small-files; repartition for skew. All sound. **BUT the `$files` metadata query has WRONG COLUMN NAMES that would parse-error:** (a) responder used `file_size` — the actual Iceberg `$files` column is `file_size_in_bytes` (verified r13 L3083, r16 L394–396, r17 L107–110); (b) responder used `WHERE NOT is_deleted` — there is NO `is_deleted` column on `$files`; the correct discriminator is `content = 0` (data files), `content = 1` (position deletes), `content = 2` (equality deletes) per r13 L3066–3085 + trino.io connector/iceberg.html metadata-tables section. A paste-into-Trino of the responder's query would fail with `Column 'file_size' cannot be resolved` / `Column 'is_deleted' cannot be resolved`. |
+| Beginner clarity | 4 | The small-files-vs-skew distinguishing signal (Scheduled >> CPU vs 1-driver-busy) is well-explained. |
+| Practical applicability | 3 | Engineer can follow the EXPLAIN ANALYZE methodology, but the `$files` SQL query as written will not run — engineer wastes a debug cycle hunting for the wrong column name before realizing the typo. |
+| Completeness | 4 | Covers the two distinguishing signals AND the two fixes. Misses: (a) check for delete-file accumulation (`content = 1`) as a third cause, (b) `EXPLAIN ANALYZE` ROW_COUNT skew detection on hashed joins. |
+| **Q2 average** | **3.50** | |
 
-### Q4 — Oracle DECODE → Trino 467 equivalent + NULL-handling gotcha.
+**SOURCE-VERIFIED DEFECT (minor accuracy):** the `$files` column names — the correct names per Trino 467 Iceberg connector are:
+- `file_size_in_bytes` (NOT `file_size`)
+- `content` integer enum: 0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES (NOT `is_deleted` boolean)
+
+The CORRECT version of the responder's small-files query is:
+```sql
+SELECT
+  COUNT(*) AS small_files,
+  SUM(file_size_in_bytes) / 1024.0 / 1024 AS small_bytes_mb
+FROM iceberg.analytics."events$files"
+WHERE content = 0
+  AND file_size_in_bytes < 16 * 1024 * 1024;
+```
+
+This is **broken-secondary family** (per the [Responder Broken Secondary Alternative] pattern) — the primary diagnosis is right but the illustrative `$files` query has fabricated column names that mirror Postgres/MySQL conventions. Per-instance one-off; resource canonicals (r13/r16/r17) already use the correct column names. NO resource fix needed; per-instance responder slip.
+
+### Q3 — Source rows physically DELETED in Oracle; want dbt snapshot to record the deletion + when. How?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5 | "No DECODE in Trino" — VERIFIED (trino.io/docs/current/functions/conditional.html has no `decode`; only CASE / COALESCE / NULLIF / IF / TRY). "Translate to searched CASE" — VERIFIED r27 §4.1A L370. **NULL-handling gotcha precisely correct:** Oracle DECODE matches NULL=NULL as TRUE — VERIFIED against Oracle 19c `DECODE` docs ("DECODE considers two nulls to be equivalent") + r27 L448. Trino `CASE WHEN x = NULL` never matches under 3-valued logic — VERIFIED (`x = NULL` evaluates to UNKNOWN, never TRUE; matches r27 L374 "col = NULL is UNKNOWN in Trino three-valued logic and never matches"). "Put `WHEN x IS NULL THEN ...` FIRST" — VERIFIED r27 L446 "the one-rule memorize: any DECODE(col, NULL, ...) MUST become a searched CASE whose first branch is `WHEN col IS NULL THEN ...`". "Simple `CASE x WHEN NULL` is unreachable" — correct (simple-CASE comparisons go through `=`, which is UNKNOWN for NULL). "Safe to use simple CASE only when column is NOT NULL" — correct caveat. |
-| Beginner clarity | 5 | Mechanical rewrite stated, gotcha named, ordering rule explicit. Zero unexplained jargon. |
-| Practical applicability | 5 | Engineer knows the rewrite shape AND the IS-NULL-first-branch trap AND when simple CASE is safe. |
-| Completeness | 5 | Covers the migration (DECODE absent → searched CASE), the silent NULL semantics regression, the simple-vs-searched-CASE distinction, AND the NOT-NULL escape hatch. All four angles of the question. |
+| Technical accuracy | 3 | Responder bailed: "I don't have enough information... not covered." Suggested workarounds: (a) switch to soft-deletes in source, (b) row-count reconciliation. Neither workaround is wrong as a fallback, but both miss the actual native dbt answer (`hard_deletes` config). The bail itself produces no incorrect technical claim, but the engineer is told "dbt snapshot mechanics are out of scope" which is **false** — dbt snapshots have first-class hard-delete support that the responder simply could not find. |
+| Beginner clarity | 3 | The bail is clearly stated. |
+| Practical applicability | 2 | The "switch to soft-deletes in source" workaround requires modifying the Oracle source system — frequently NOT possible (the source may be a legacy ERP, vendor-owned, or read-only). The engineer asked specifically because they couldn't change the source. Row-count reconciliation is a monitoring pattern, not a deletion-history recording pattern — it doesn't answer the question. |
+| Completeness | 1 | Did not address the actual question. The dbt answer exists and is well-documented. |
+| **Q3 average** | **2.25** | |
+
+**SOURCE-VERIFIED CONTENT GAP — r09 covers SCD2 basics but NOT hard-delete handling. Exact verified dbt config names (from docs.getdbt.com/reference/resource-configs/hard-deletes + docs.getdbt.com/docs/build/snapshots):**
+
+| Config | dbt version | Allowed values | Behavior |
+|---|---|---|---|
+| `hard_deletes` (new, recommended) | dbt 1.9+ | `'ignore'` (default) | No action on deleted source rows. The snapshot row's `dbt_valid_to` stays NULL — the row appears "still current" even though the source deleted it. |
+| `hard_deletes` | dbt 1.9+ | `'invalidate'` | When a source row vanishes, dbt sets that snapshot row's `dbt_valid_to` to the current snapshot run timestamp — same effect as the legacy `invalidate_hard_deletes=true`. Implicit-delete pattern. |
+| `hard_deletes` | dbt 1.9+ | `'new_record'` | When a source row vanishes, dbt INSERTS a new snapshot row with all the previous column values, sets `dbt_valid_from` to the current snapshot run time, and **adds a new meta column `dbt_is_deleted` set to the string `'True'`** (`'False'` on all non-deletion rows). Explicit-delete pattern that preserves a queryable "this row was deleted at time T" record. |
+| `invalidate_hard_deletes` (legacy) | dbt 1.8 and earlier | `true` / `false` | When `true`, behaves identically to the new `hard_deletes='invalidate'`. Deprecated in 1.9+; cannot be used alongside the new `hard_deletes` config. |
+
+The engineer's exact ask ("record the deletion + when") maps **directly** to `hard_deletes='new_record'` on dbt 1.9+ (gives a queryable `dbt_is_deleted='True'` row at the deletion timestamp), or to `hard_deletes='invalidate'` / `invalidate_hard_deletes=true` if they only need to know the row is no longer current.
+
+### Q4 — Oracle LISTAGG WITHIN GROUP ORDER BY → Trino 467 equivalent.
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5 | All four claims VERIFIED against trino.io/docs/current/functions/aggregate.html: (a) Trino 467 has native `listagg(expression, separator)` — TRUE; (b) supports `WITHIN GROUP (ORDER BY ...)` — TRUE (in fact REQUIRED per the docs grammar `LISTAGG(expr [, sep] [ON OVERFLOW ...]) WITHIN GROUP (ORDER BY ...)`); (c) supports `ON OVERFLOW TRUNCATE` — TRUE (variants: `ON OVERFLOW ERROR` default, `ON OVERFLOW TRUNCATE [str] WITH COUNT`, `ON OVERFLOW TRUNCATE [str] WITHOUT COUNT`; default overflow throws when output exceeds 1,048,576 bytes); (d) both Oracle and Trino LISTAGG skip NULLs by default — TRUE (per SQL:2016 standard which both follow); (e) windowed `LISTAGG(...) OVER (...)` is NOT supported in Trino — TRUE (the docs explicitly state "The current implementation of listagg function does not support window frames"); workaround `array_join(array_agg(x ORDER BY y) OVER (...), sep)` is correct. Matches the [Trino listagg Native] pin. |
+| Beginner clarity | 5 | Migration is presented as a 1:1 syntax mapping with the OVER-clause caveat called out. |
+| Practical applicability | 5 | Engineer can paste the LISTAGG form directly; knows the OVER-window fallback shape if they hit that case. |
+| Completeness | 5 | Covers: (a) the 1:1 mapping, (b) ON OVERFLOW TRUNCATE, (c) NULL-skipping behavior, (d) the no-OVER-window caveat with workaround. All four corners of the Oracle→Trino migration question. |
 | **Q4 average** | **5.00** | |
 
 ---
@@ -57,77 +90,120 @@
 
 | Q | Accuracy | Clarity | Applicability | Completeness | Avg |
 |---|---|---|---|---|---|
-| Q1 query-perf regression (FIX-A re-probe) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 storage-tiering | 5 | 5 | 5 | 4 | 4.75 |
-| Q3 dbt snapshots SCD2 | 5 | 5 | 5 | 4 | 4.75 |
-| Q4 Oracle DECODE → Trino | 5 | 5 | 5 | 5 | 5.00 |
-| **Iter overall** | | | | | **4.875** |
+| Q1 storage-tiering (access-vs-age) | 2 | 3 | 1 | 1 | **1.75** |
+| Q2 perf-regression small-files/skew | 3 | 4 | 3 | 4 | **3.50** |
+| Q3 dbt snapshots hard-deletes | 3 | 3 | 2 | 1 | **2.25** |
+| Q4 Oracle LISTAGG → Trino | 5 | 5 | 5 | 5 | **5.00** |
+| **Iter overall** | | | | | **3.1875** |
 
-**STRONG PASS** (overall avg 4.875 >> 3.5 threshold; overall avg governs, no per-question veto).
-
----
-
-## iter1098 r18 FIX-A — CONFIRMED REACHING ON 1ST RE-PROBE
-
-### The dangled defect and the response
-
-**Coworker's dangled (wrong) claim:** `WHERE date_trunc('day', event_ts) = DATE '2026-06-20'` causes a full scan because the function wrap defeats Iceberg partition pruning.
-
-**Responder's reply (verbatim summary):** "Coworker WRONG; date_trunc does NOT break pruning on 467 (UnwrapCastInComparison + UnwrapDateTruncInComparison auto-rewrite to bare-column range, still pushes down/prunes). Real things to check: small-files increase (EXECUTE optimize), partition-layout change (EXPLAIN TYPE DISTRIBUTED), concurrency spike (Trino UI queued). Temporal wrap is not your performance killer on 467."
-
-### Why this is the FIX-A reach signal
-
-The exact false claim that iter1098 traced to **r18 L84 + L113-115 + L940 + r28 §1 (TL;DR sentence 1)** was reconciled with:
-- r18 L84 Check 3 table row: now correctly distinguishes opaque (LOWER/regexp/JSON/UDF/SUBSTR/non-monotonic-arithmetic) wraps from temporal wraps (date()/CAST AS DATE/date_trunc/year) which DO unwrap and DO prune. Cross-refs r07 §1.
-- r18 L113-115 worked example: now uses `LOWER(tenant_id) = 'acme'` as the genuine pruning-breaker (the BI-tool case-insensitive matching plot twist) AND explicitly states "Had the BI tool instead wrapped a date column in date()/CAST AS DATE, pruning would have been fine — Trino 467 unwraps those".
-- r18 L940 Step 4: reconciled to "wrapping the *same* partition column in `DATE()`/`CAST AS DATE`/`date_trunc('day',…)`/`year(…)` still prunes in Trino 467 (the Unwrap*InComparison rules)".
-- r28 TL;DR sentence 1: tightened to "**opaque** function-wrapped partition-column predicates (LOWER, SUBSTR, JSON extraction, UDFs, non-monotonic arithmetic — NOT the common temporal wraps `date()`/`CAST AS DATE`/`date_trunc`/`year`, which Trino 467 auto-unwraps so they still prune; see r07 §1)".
-
-The responder on Q1 produced **exactly** the canonical refutation those reconciliations were designed to surface, with **both** Unwrap rule names cited correctly + the three real-cause redirects (small files, partition layout, concurrency). This is the textbook FIX-A reach pattern: dangle the exact false claim → responder routes through the reconciled resource section → produces the correct answer using the new framing. **FIX-A reached.**
-
-### Verify-first sanity check (WebSearch + raw 467 source)
-
-- **`UnwrapDateTruncInComparison`** — VERIFIED real Trino optimizer rule. PR #14011 (findepi, "Simplify predicates involving date_trunc") added the rule; PR #14161 extended it to `hour` unit. Trino blog "Just the right time date predicates with Iceberg" (2023/04/11) documents the rewrite-and-prune end-to-end behavior.
-- **`UnwrapCastInComparison`** — VERIFIED real Trino optimizer rule. The `if (sourceType instanceof TimestampType && targetType == DATE)` branch rewrites `CAST(ts AS DATE) = DATE 'x'` into `ts >= TIMESTAMP 'x 00:00' AND ts < TIMESTAMP 'x+1 00:00'`.
-- Both rules unconditionally registered in `PlanOptimizers.java` simplifyOptimizerRules — no session flag to disable.
-
-The responder's claim that the rewritten range "still pushes down/prunes" for the `day(event_ts)` Iceberg partition transform matches the trino.io blog: "Trino replaces temporal filters to desugared predicates, which not only prunes out partitions, but also skips portions of data files or even entire files in certain circumstances."
+**FAIL** (overall avg 3.1875 < 3.5 threshold). Two distinct severe deficits (Q1 findability, Q3 content-gap) pull the iter below threshold despite Q4 being a clean 5.
 
 ---
 
-## Pin-relevant observations
+## Source verification (each technical claim checked)
 
-- **[Trino Unwraps Temporal Predicates]** — CORRECTLY applied. Responder named both Unwrap rules + the "no session flag, default-on" semantics + the partition-prune downstream effect. Pin entry stands; no edit needed.
-- **[Trace Recurring Folklore to Resource Root Cause]** — iter1098 followed the pattern (responder slip → r18 L84/L113-115 root cause → reconcile in place); iter1099 confirms the reconciliation reached. Pattern works.
-- **[Reconcile Don't Append]** — verified by inspection: r18 L84 + L113-115 + L940 were EDITED in place (not appended-with-contradiction); responder cleanly picked up the new framing because no contradictory neighbor lurked.
-- **[Trino No ILIKE]** — N/A this iter (no federation).
-- **[Trino INTERVAL Qualifiers]** — N/A this iter.
-- **[Trino OFFSET Before LIMIT]** — N/A this iter.
-- **[Trino COUNT DISTINCT Single-Arg]** — N/A this iter.
-- **[Trino Division By Zero]** — N/A this iter.
-- **No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/over-warning/broken-secondary/Spark-Oracle-spillover** detected.
+| Claim | Source | Verdict |
+|---|---|---|
+| MinIO ILM `mc ilm rule add --transition-days N` is creation-age based, NOT access-time based | docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-rule/mc-ilm-rule-add/ + r16 L529–533 | VERIFIED — no `--transition-access-days` flag exists; trigger is days-since-creation |
+| Iceberg `$files` column name is `file_size_in_bytes` NOT `file_size` | r13 L3083, r16 L107–113, r17 L107–110 + trino.io/docs/current/connector/iceberg.html metadata-tables | VERIFIED — responder's `file_size` would parse-error |
+| Iceberg `$files` discriminator is `content` integer enum, NOT `is_deleted` boolean | r13 L3066–3085 + trino.io connector/iceberg.html | VERIFIED — content: 0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES; no `is_deleted` column exists |
+| dbt 1.9+ `hard_deletes='ignore'/'invalidate'/'new_record'` | docs.getdbt.com/reference/resource-configs/hard-deletes | VERIFIED — three values, default `ignore`; `new_record` adds `dbt_is_deleted` meta column |
+| Legacy `invalidate_hard_deletes=true` in dbt 1.8 and earlier | docs.getdbt.com snapshots docs | VERIFIED — equivalent to new `hard_deletes='invalidate'`; deprecated 1.9+ |
+| Trino 467 native LISTAGG with WITHIN GROUP (ORDER BY) + ON OVERFLOW TRUNCATE | trino.io/docs/current/functions/aggregate.html | VERIFIED — full syntax incl. WITH COUNT / WITHOUT COUNT variants |
+| Trino 467 LISTAGG does NOT support OVER window | trino.io aggregate.html (verbatim "does not support window frames") | VERIFIED — workaround `array_join(array_agg(...) OVER (...), sep)` is correct |
+| Trino LISTAGG skips NULL inputs by default | SQL:2016 standard + Trino aggregate.html implicit | VERIFIED — matches Oracle LISTAGG NULL-skipping semantics |
 
 ---
 
-## Topic rubric updates (this iter)
+## Teacher guidance — TWO FIX-A REQUIRED
 
-| Topic | Prior avg / N | New avg / N | Delta |
-|---|---|---|---|
-| Query perf regression diagnosis | 4.3176 / 18 | **4.3535 / 19** | +0.036 |
-| Storage tiering (MinIO lifecycle, no SQL DDL) | 4.25 / 2 | **4.4167 / 3** | +0.167 |
-| dbt snapshots SCD2 | 4.4299 / 8 | **4.4933 / 9** | +0.063 |
-| Oracle PL/SQL → dbt+Trino migration | 4.4365 / 101 | **4.4421 / 102** | +0.006 |
+### FIX-A #1 — r16 storage-tiering FINDABILITY (Q1)
 
-All four topics REMAIN PASSED with positive movement. **Storage tiering at 4.4167/3 still thin** (only 3 datapoints across 2 iters — keep occasional probes); query-perf regression at 4.3535/19 recovers from iter1098 -0.033 hit.
+**Root cause:** the L499–620 leading canonical block has the right answer at L533 but the L501 keyword anchor list lacks access-recency phrasings, so the Haiku responder's keyword→file→section retrieval cannot reach it from the engineer's "frequently-accessed old data stays warm" phrasing.
+
+**Required edits to resources/16-cost-considerations.md:**
+
+1. **L501 keyword anchor expansion** — append the access-recency family to the keyword list inside the leading canonical block at L501. Specifically add (verbatim):
+   - "is tiering access-aware", "is tiering based on access time", "is tiering based on access pattern", "is tiering based on last read", "is tiering based on last access", "is tiering based on query frequency"
+   - "frequently-accessed old data stays warm", "frequently accessed stays hot", "hot data stays hot", "heavily-read old data"
+   - "last read", "last accessed", "last access time", "how recently queried", "how recently read"
+   - "access-aware tiering", "Intelligent-Tiering equivalent", "S3 Intelligent-Tiering on MinIO", "Intelligent tiering on MinIO"
+   - "MinIO tiers cold-read objects", "MinIO moves cold-read objects to cheap storage"
+
+2. **New routing row at ~L508 (the capability-bound table)** — add a row near the top of the §"What engineers often expect to exist" table:
+   - Column 1: "Access-aware tiering — frequently-accessed old data stays on hot tier, rarely-read old data moves to cold tier (S3 Intelligent-Tiering style)"
+   - Column 2: "**NO. MinIO ILM transitions trigger on object AGE (`--transition-days N`), NOT on last-read or access frequency.** There is no `--transition-access-days` flag, no last-access mode. A heavily-read 6-month-old hot table WILL get tiered on a 90-day rule. See §below + L533."
+   - Column 3: docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-rule/mc-ilm-rule-add/
+
+3. **Direct cross-reference at L533** — leave the existing critical block intact (it's already correct), but ALSO add at the very top of the leading canonical block a one-liner like: *"If your question is 'does tiering keep frequently-accessed old data on hot tier' or 'is tiering based on last read / query frequency / access pattern' — jump directly to L533 for the access-vs-age critical note."*
+
+4. **Optional new DO-NOT-WRITE row at L612 table** — append a row to the banned-tiering-forms table:
+   - "MinIO ILM tiers based on access pattern / last-read timestamp / query frequency" → "Wrong. MinIO ILM transitions are age-only (`--transition-days N` = days since object creation). For access-aware behavior, implement at app layer (Mechanism C)."
+
+### FIX-A #2 — r09 dbt snapshots HARD-DELETE handling (Q3)
+
+**Root cause:** r09 covers SCD2 snapshot basics (timestamp/check strategies, 4 meta columns, point-in-time queries) but has NO subsection on what happens when source rows physically vanish (the Oracle-DELETE scenario).
+
+**Required edit — new subsection in resources/09-lakehouse-schema-design.md (or wherever the dbt snapshots SCD2 canonical lives — verify location first):**
+
+Add a new §labeled something like *"LEADING CANONICAL — handling hard-deletes in dbt snapshots (source rows physically deleted)"*. Required content:
+
+1. **Keyword anchor block** — "hard delete", "hard-delete", "physically deleted", "row vanished", "row disappeared", "row removed from source", "track deletion", "record deletion", "record deletion timestamp", "when was a row deleted", "deletion event", "source DELETE", "source physical delete", "Oracle DELETE captured in snapshot", "snapshot deletion handling", "dbt_is_deleted", "invalidate_hard_deletes", "hard_deletes config".
+
+2. **The dbt 1.9+ `hard_deletes` config matrix** (verified against docs.getdbt.com/reference/resource-configs/hard-deletes):
+
+   | Value | Behavior | When to use |
+   |---|---|---|
+   | `'ignore'` (default) | No action. Deleted source rows leave their last snapshot row's `dbt_valid_to` NULL, appearing "still current" forever. Wrong for most production snapshots. | Only when you genuinely don't care about deletions (e.g., append-only sources). |
+   | `'invalidate'` | When a source row is missing, dbt sets that snapshot row's `dbt_valid_to` to the current snapshot run timestamp. Implicit-delete: you can detect deletion by `dbt_valid_to IS NOT NULL AND no_newer_active_row_exists`. Same behavior as legacy `invalidate_hard_deletes=true`. | When you only need to know "this row stopped being current at time T" — no explicit deletion marker needed. |
+   | `'new_record'` | When a source row is missing, dbt INSERTS a new snapshot row with the previous column values and **adds a new meta column `dbt_is_deleted` set to `'True'`**. Explicit-delete: queryable as `WHERE dbt_is_deleted = 'True'`. | When you need an auditable deletion event — exactly the Oracle-physical-delete capture case. |
+
+3. **Legacy config** — call out that dbt 1.8 and earlier used `invalidate_hard_deletes=true` (Boolean). dbt 1.9+ replaces it with `hard_deletes='invalidate'`. The two cannot coexist on the same snapshot.
+
+4. **Worked example for the Oracle DELETE case** (the engineer's exact ask):
+```yaml
+# dbt_project.yml or snapshot config block
+snapshots:
+  my_project:
+    customer_dim_snapshot:
+      +strategy: timestamp
+      +updated_at: updated_at
+      +hard_deletes: new_record   # dbt 1.9+; adds dbt_is_deleted='True' row on source deletion
+```
+```sql
+-- Query for deletion events recorded by the snapshot
+SELECT id, dbt_valid_from AS deleted_at_run_ts
+FROM {{ ref('customer_dim_snapshot') }}
+WHERE dbt_is_deleted = 'True';
+```
+
+5. **Cross-link** to the existing r09 SCD2 query template (point-in-time `WHERE id=... AND dbt_valid_from <= T AND (dbt_valid_to IS NULL OR dbt_valid_to > T)`) — note that the `dbt_is_deleted='True'` row is itself a "valid" snapshot row whose `dbt_valid_from` IS the deletion event time, so point-in-time queries naturally see "deleted" state after T_deletion.
 
 ---
 
 ## Recommendation
 
-**DEFAULT NO-OP.** Margin is +1.375 above threshold. NO resource edit needed — iter1098 r18 FIX-A is confirmed reaching and producing correct refutations on the dangled coworker scenario. NO commit beyond rubric + feedback. NO state.json bump (already 1099, already passed:true). NO federation re-probe (4.50244/312 fragile-PASS per iter1097 — avoid weak-angle federation probes).
+- **MUST commit BOTH FIX-A #1 (r16 access-recency anchors + L508 routing row) AND FIX-A #2 (r09 hard-delete handling subsection).** Without these, the same questions will fail again next sweep.
+- **Re-probe Q1 next sweep** with multiple access-recency phrasings ("does tiering keep hot data warm based on query frequency?", "is MinIO tiering access-aware?", "frequently-accessed old data — does it stay on hot tier?") to confirm FIX-A #1 reaches the responder via different keyword paths.
+- **Re-probe Q3 next sweep** with the dbt 1.9+ `hard_deletes='new_record'` question phrased multiple ways ("source row deleted, how to capture in snapshot?", "track Oracle DELETE in dbt snapshot", "record deletion event with timestamp").
+- **NO state.json bump** (already 1100, already passed:true, but FAIL on this iter degrades thin-margin topic rows — see below).
+- **NO federation re-probe** (4.50244/312 fragile-PASS per iter1097; do not stress it on a FAIL iter).
+- **Q2 column-name slip = per-instance broken-secondary** (per [Responder Broken Secondary Alternative] pin) — primary diagnosis methodology is correct, only the illustrative SQL has wrong column names; resource canonicals (r13/r16/r17) already use the correct names. NO resource fix; one-off responder slip.
+- **Q4 LISTAGG clean** — no action.
 
-**Optional next-sweep probes (in order of marginal value):**
-1. **Storage-tiering 3rd-angle probe** (4.4167/3 — still the thinnest required-topic row by datapoint count). Try a different angle from the standard "tier old data" frame — e.g., "do I need to expire snapshots before the MinIO lifecycle rule will actually save storage cost?" (tests the r16 §Cross-references + r17 §safe-scheduling-order interaction).
-2. **Query-perf regression 2nd Check 3 angle** (4.3535/19) — e.g., concurrency-spike root cause symptom, or partition-skew root cause symptom, to confirm the OTHER 5 checks still produce correct guidance after the FIX-A on Check 3 (this iter's Q1 only directly tested Check 3 refutation).
-3. **dbt snapshots SCD2 3rd angle** (4.4933/9) — test the dbt 1.9+ `dbt_is_deleted` column behavior with `hard_deletes='new_record'`, OR test `snapshot_meta_column_names` renaming.
-4. **Federation** — leave alone (fragile-PASS).
+### Topic-row updates (this iter)
+
+| Topic | Before | This iter Q score | After | Status |
+|---|---|---|---|---|
+| storage-tiering on Trino+Iceberg+MinIO | 4.4167 / 3 | 1.75 | (13.25 + 1.75) / 4 = **3.75 / 4** | PASSED (heavily dragged; thinnest row at 4 datapoints; still above 3.5 but margin only +0.25) |
+| query performance regression diagnosis | 4.3535 / 19 | 3.50 | (82.7165 + 3.50) / 20 = **4.3108 / 20** | PASSED (-0.043) |
+| dbt snapshots SCD2 | 4.4933 / 9 | 2.25 | (40.4397 + 2.25) / 10 = **4.2690 / 10** | PASSED (-0.224, sizeable drop) |
+| Oracle PL/SQL → dbt+Trino migration | 4.4421 / 102 | 5.00 | (453.0942 + 5.00) / 103 = **4.4475 / 103** | PASSED (+0.005) |
+
+All four topics REMAIN PASSED (still above 3.5), but storage-tiering is now at the LOWEST margin in the rubric (3.75 / 4 datapoints, +0.25 over threshold). One more sub-2.0 storage-tiering score would push it BELOW threshold (3 × 4.4167 + 1.75 + 2.0 = 17.0 / 5 = 3.40 < 3.5 → would FAIL the topic row outright). FIX-A #1 is therefore high-priority next-sweep work.
+
+### Trap-pattern flags
+
+- **No `::` cast.** No QUALIFY. No false-semi-join. No fabricated function (LISTAGG, contains_sequence-equivalent, etc.). No regex-backslash defect. No INTERVAL quarter/week. No `LIMIT n OFFSET m` (Postgres order). No over-warning folklore. No Spark-Oracle-spillover.
+- **Q2 broken-secondary family appearance (column names):** continues the broken-secondary pattern documented in the [Responder Broken Secondary Alternative] pin (iter936 window-in-GROUP-BY / iter943 PERCENTILE_CONT / iter948 price-suffix menu / iter950 nested-aggregate max_by / iter954 TO_CHAR-wrong-codes / iter1013 ORDER-BY-ungrouped / iter1019 TABLESAMPLE-after-WHERE / iter1020 regexp_extract-comma / **iter1100 $files-wrong-column-names**). Per-instance, no resource fix.
+- **Two findability/content-gap failures in one iter is unusual** — both are root-cause-traceable to specific resource defects (L501 anchor list incomplete; r09 missing hard-delete subsection), not Haiku synthesis ceiling. FIX-A is the correct response, not "stop churning".

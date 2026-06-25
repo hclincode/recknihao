@@ -1,7 +1,7 @@
 {
-  "iteration": 1099,
+  "iteration": 1100,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1099 FIX-A re-probe + thin-margin durability. Q1 = perf-regression with a date_trunc/CAST-AS-DATE filter dangled as a RED HERRING \u2014 confirms iter1098 r18 FIX-A reaches: corrected resource should say the temporal wrap STILL prunes (UnwrapCast/DateTrunc) and point to real causes (small files/stats/skew/opaque-wrap), NOT blame date(). Q2 storage-tiering (4.25/2 thinnest). Q3 dbt snapshots/SCD2 (4.4299/8). Q4 another Oracle construct. No federation (fragile-PASS 4.50244/312)."
+  "note": "iter1100 thin-margin sweep -> 3.1875 FAIL (two findability deficits, both fixed). Q1 storage-tiering 1.75 + Q3 dbt-snapshot-hard-deletes 2.25: responder BAILED (\"not covered\") on content that EXISTS. FIX-A #1 (findability): r16 tiering canonical L501 \u2014 added access-recency keyword anchors (\"last read/access\", \"how recently queried\", \"frequently-accessed old data stays warm\", \"access-aware/usage-based tiering\", \"S3 Intelligent-Tiering equiv\") + a capability-bound table row explicitly correcting access-vs-AGE (MinIO transitions by object AGE not last-read; app-layer Mechanism C for access-aware). FIX-A #2 (findability+worked-workflow): r09 snapshot anchor L354 \u2014 added hard-delete phrasings; inserted a hard_deletes value matrix (ignore/invalidate/new_record) + worked Oracle-DELETE->new_record snapshot + \"which rows deleted & when\" query (dbt_is_deleted VARCHAR True). Core facts already at r09 L464 but unreachable from hard-delete phrasing. Q2 perf 3.50 (good methodology; minor  col slip file_size->file_size_in_bytes, is_deleted->content=0). Q4 LISTAGG 5.0 clean. Re-probe Q1+Q3 next sweep to confirm findability fix reaches. storage-tiering now thinnest (3.75/4). Federation untouched."
 }

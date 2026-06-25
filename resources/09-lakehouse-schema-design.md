@@ -351,7 +351,7 @@ To find every user's **current** state, filter `WHERE is_current = TRUE`.
 
 **Option 1 — dbt snapshot (recommended for teams already using dbt).**
 
-> **Findability anchor — keywords this Option-1 block answers (so a Haiku responder routing on these phrases lands here, the single source of truth, not on r10/r23/r27/r28 where only one-line forward pointers live):** "dbt snapshot", "dbt snapshots", "SCD2 strategy", "SCD Type 2", "snapshot strategy", "dbt snapshot strategy", "timestamp vs check strategy", "check strategy vs timestamp strategy", "which snapshot strategy", "snapshot strategy=timestamp", "snapshot strategy=check", "check_cols", "tracked columns dbt snapshot", "no reliable updated_at column", "snapshot has no updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_scd_id", "dbt_is_deleted", "dbt snapshot metadata columns", "current rows from a dbt snapshot", "dbt_is_current does not exist".
+> **Findability anchor — keywords this Option-1 block answers (so a Haiku responder routing on these phrases lands here, the single source of truth, not on r10/r23/r27/r28 where only one-line forward pointers live):** "dbt snapshot", "dbt snapshots", "SCD2 strategy", "SCD Type 2", "snapshot strategy", "dbt snapshot strategy", "timestamp vs check strategy", "check strategy vs timestamp strategy", "which snapshot strategy", "snapshot strategy=timestamp", "snapshot strategy=check", "check_cols", "tracked columns dbt snapshot", "no reliable updated_at column", "snapshot has no updated_at", "dbt_valid_from", "dbt_valid_to", "dbt_scd_id", "dbt_is_deleted", "dbt snapshot metadata columns", "current rows from a dbt snapshot", "dbt_is_current does not exist", "hard delete", "hard deletes", "source row deleted", "record physically deleted in source", "row removed from source table", "snapshot freezes on last version after delete", "detect deletes in dbt snapshot", "record that a row was deleted and when", "invalidate_hard_deletes", "hard_deletes config", "hard_deletes new_record", "hard_deletes invalidate", "track deletions in SCD2", "capture deletion timestamp in snapshot".
 
 dbt offers TWO strategies — pick exactly one per snapshot:
 
@@ -464,6 +464,33 @@ WHERE dbt_valid_from <= TIMESTAMP '2025-08-10 12:00:00'
 **DEFAULT vs CONDITIONAL — the one column that is NOT a default.** `dbt_is_deleted` is **NOT** one of the four always-present defaults. It is **added only when** the snapshot config sets **`hard_deletes='new_record'`** (dbt 1.9+, replaces the legacy `invalidate_hard_deletes=true`). Direct doc quote ([docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names](https://docs.getdbt.com/reference/resource-configs/snapshot_meta_column_names)): *"A string value indicating if the record has been deleted. (True if deleted, False if not deleted). Added when hard_deletes='new_record' is configured."* On a default snapshot (no `hard_deletes` config or `hard_deletes='ignore'` / `'invalidate'`), the `dbt_is_deleted` column does **NOT** exist — referencing it in a downstream query errors with `Column 'dbt_is_deleted' cannot be resolved`.
 
 **There is no `dbt_is_current` column.** To query current records: `WHERE dbt_valid_to IS NULL`.
+
+> **HARD DELETES — recording that a source row was physically deleted (and when).** *Keyword anchors: hard delete, source row deleted, record removed from source table, snapshot freezes on last version after a delete, detect/track deletions in a dbt snapshot, capture deletion timestamp, `invalidate_hard_deletes`, `hard_deletes`.* By DEFAULT a dbt snapshot only sees rows the source SELECT returns — when a row is **physically DELETED** from the source (e.g. an Oracle `DELETE FROM customers WHERE id=...`), it simply stops appearing, so the snapshot **freezes the last version forever with `dbt_valid_to` still NULL** (it looks permanently "current"). dbt has a built-in config to fix this — pick the behavior you want (verified at [docs.getdbt.com/reference/resource-configs/hard_deletes](https://docs.getdbt.com/reference/resource-configs/hard_deletes)):
+>
+> | `hard_deletes` value | What happens when a source row disappears | Use when |
+> |---|---|---|
+> | `'ignore'` (DEFAULT) | Nothing — the last version stays open (`dbt_valid_to` NULL) forever. You can't tell it was deleted. | You don't care about deletions. |
+> | `'invalidate'` | dbt **closes** the version: stamps `dbt_valid_to` = run time, so the row is no longer "current" — but adds NO new row and NO flag. (This is the exact behavior of the legacy `invalidate_hard_deletes=true` boolean, which `hard_deletes` REPLACES in dbt 1.9+.) | You want deleted entities to drop out of the "current" set but don't need an explicit deleted-marker row. |
+> | `'new_record'` | dbt **inserts a new version row** with the conditional **`dbt_is_deleted='True'`** meta column set, and `dbt_valid_from` = the deletion's observed time — so history explicitly records the deletion AND when. (This is the only mode that adds the `dbt_is_deleted` column; see the conditional-column note above.) | **Your case — "record that a deletion happened and roughly when."** |
+>
+> ```sql
+> -- snapshots/customers_snapshot.sql — capture hard deletes as explicit deleted-marker rows
+> {% snapshot customers_snapshot %}
+> {{ config(
+>     target_schema='analytics', unique_key='id',
+>     strategy='timestamp', updated_at='updated_at',
+>     hard_deletes='new_record') }}            -- <- adds dbt_is_deleted, inserts a row on delete
+> SELECT id, name, plan_tier, updated_at
+> FROM {{ source('oracle', 'customers') }}
+> {% endsnapshot %}
+>
+> -- Which customers were deleted, and approximately when (dbt_valid_from of the deleted-marker row):
+> SELECT id, dbt_valid_from AS deleted_at_approx
+> FROM analytics.customers_snapshot
+> WHERE dbt_is_deleted = 'True';            -- note: VARCHAR 'True'/'False', not a boolean
+> ```
+>
+> **Gotchas:** (a) `dbt_is_deleted` is the **string** `'True'`/`'False'` (VARCHAR), not a SQL boolean — filter with `= 'True'`. (b) `'new_record'` only adds the column going forward; pre-existing snapshot tables need a `--full-refresh` (which DESTROYS existing history) or a manual `ALTER TABLE ... ADD COLUMN` — plan the cutover. (c) the deletion timestamp is when **dbt observed** the row missing (the snapshot run), not the exact source DELETE time — it is only as granular as your snapshot cadence. (d) on dbt ≤1.8 the only option is the legacy boolean `invalidate_hard_deletes=true` (= `'invalidate'` behavior); the `dbt_is_deleted` / `'new_record'` mode requires dbt 1.9+.
 
 > **DO NOT WRITE** (snapshot-strategy citation-hygiene):
 > - `strategy='timestamp'` with NO `updated_at='<col>'` config key — dbt errors at parse: *"snapshot 'X' is using the 'timestamp' strategy and must have an 'updated_at' configured"*. The `updated_at` key is required for timestamp strategy.
