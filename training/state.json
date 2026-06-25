@@ -1,7 +1,7 @@
 {
-  "iteration": 1110,
+  "iteration": 1111,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1110 breadth durability sweep. 4 varied less-recently-probed angles across passed topics. Verify-first any slip; NO-OP expected. Federation untouched (fragile-PASS 4.50244/312); CBO thin (4.5716/20 +0.072) avoid weak CBO probes."
+  "note": "iter1111 breadth durability sweep. 4 varied less-recently-probed angles (touch Oracle-migration construct + complex-SQL-perf + columnar/Parquet + a correctness bug). Avoid the long recent-coverage list. Verify-first; NO-OP expected. Federation untouched; CBO thin (avoid weak CBO probes)."
 }

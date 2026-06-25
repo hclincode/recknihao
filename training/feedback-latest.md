@@ -1,148 +1,119 @@
-# Judge Feedback — Iteration 1110 (2026-06-26)
+# Iter1111 Feedback — 4.66 STRONG PASS — NO RESOURCE DEFECT (Q2 partial gap is responder findability slip, not resource-sourced)
 
-**OVERALL: 4.91 STRONG PASS** — breadth durability sweep across 4 varied less-recently-probed angles (most-common-plan-tier per customer with tiebreak via `max_by` + ROW; Joda-vs-MySQL format-specifier trap for "June 25, 2026"; dbt staging/intermediate/mart layering + materializations; GROUP-BY-on-nullable-column NULL semantics + COUNT(*) vs COUNT(col)). All four dialect / SQL-semantics traps cleanly hit. Q1, Q2, Q3 pristine. Q4 has one minor wording shave on the "shows 0 or is filtered out" aside (a NULL group with COUNT(event_type)=0 still appears as a row unless a HAVING clause filters it; "filtered out" is imprecise) plus a minor completeness shave for not naming WHERE / INNER JOIN as the actual cause if rows truly disappeared. NO resource defect found. **RECOMMENDATION = NO-OP.**
+**Iter average: (4.9375 + 3.75 + 4.9375 + 5.000) / 4 = 4.65625 STRONG PASS** (margin +1.16 above 3.5).
+**Recommendation: NO-OP.** All five contested Q1 claims source-verified CORRECT against Trino 467 docs. Q2 incremental-without-merge gap exists in the responder's answer BUT the canonical fix (merge strategy + unique_key for dedup correctness) is already documented in r28 at L150, L177, L1521, L1596, and §6.8 — this is Haiku grabbing the perf-side incremental advice without the correctness-side merge advice that lives in the same file. Per `feedback_synthesis_ceiling_stop_churning`, scope as per-instance one-off; do NOT churn additive content.
+
+---
+
+## Source verification (the five critical Q1 claims)
+
+Verified vs trino.io/docs/current/sql/select.html via WebFetch + WebSearch:
+
+| Responder claim | Verified? | Source |
+|---|---|---|
+| "Trino docs explicitly mark WITH RECURSIVE as EXPERIMENTAL" | **YES** | trino.io/docs/current/sql/select.html — *"This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload."* |
+| "recursion depth cap defaults to 10" | **YES** | trino.io/docs/current/sql/select.html — *"recursion depth is fixed, defaults to 10, and doesn't depend on the actual query results"* |
+| "SET SESSION max_recursion_depth = 50 to raise" | **YES** | session property name and form verified |
+| "exceeding raises NOT_SUPPORTED: Recursion depth limit exceeded (does NOT silently truncate)" | **YES** | AWS Athena re:Post (same engine) shows exact message `NOT_SUPPORTED: Recursion depth limit exceeded (10). Use 'max_recursion_depth'`; r27 §7A.1 L3994 explicitly defangs the "silently truncates" misconception |
+| "plan grows QUADRATICALLY with depth — doubling depth roughly quadruples plan size" | **YES** | trino.io/docs/current/sql/select.html — *"When changing the value consider that the size of the query plan growth is quadratic with the recursion depth."* |
+
+All five contested claims about Trino's WITH RECURSIVE behavior are source-verified CORRECT. The judge prompt suggested doubt about (5) "quadratic vs linear" — Trino docs explicitly say **quadratic**, and the responder is correct.
+
+---
 
 ## Per-question scoring
 
-### Q1 — most-common plan_tier per customer over last 90d with ties; is there a mode() function or count-then-rank manually?
-**Responder:** Inner CTE `GROUP BY customer_id, plan_tier` with `COUNT(*) AS cnt` filtered by `occurred_at >= current_date - INTERVAL '90' DAY`; outer `GROUP BY customer_id` with `max_by(plan_tier, cnt)` to pick the plan_tier at the max count. Notes that ties are broken arbitrarily by `max_by`; for a deterministic tiebreak, use `max_by(plan_tier, ROW(cnt, plan_tier))` so that ROW lexicographic comparison falls back to plan_tier when cnts tie. Implies (correctly) that Trino has no built-in `mode()`.
+### Q1 — Oracle CONNECT BY PRIOR → Trino WITH RECURSIVE — 4.9375 (5.00 + 5.00 + 4.75 + 5.00) / 4
 
-**Verifications (RAW Trino 467 docs — trino.io/docs/current/functions/aggregate.html):**
-- `max_by(x, y)` returns `x` at the row where `y` is maximum — VERIFIED.
-- Trino has NO built-in `mode()` aggregate (the aggregate.html function list does not include `mode`); the count-then-`max_by` recipe is the canonical Trino mode pattern — VERIFIED.
-- `ROW(a, b)` lexicographic ordering (Trino comparison semantics: row types compare element-by-element) — VERIFIED standard SQL ROW comparison.
-- `max_by(plan_tier, ROW(cnt, plan_tier))` is a valid, idiomatic deterministic-tiebreak form in Trino 467: on cnt ties, ROW comparison falls through to plan_tier, picking the lexicographically-greater plan_tier deterministically. Idiom is well-known in the Trino community for "argmax with secondary sort." VERIFIED canonical.
-- `INTERVAL '90' DAY` is a valid INTERVAL qualifier (DAY is one of YEAR/MONTH/DAY/HOUR/MINUTE/SECOND per memory pin `reference_trino_interval_qualifiers`). VERIFIED.
+**Strengths**: All five contested claims verified against trino.io. Hits r27 §7A.1 canonical (L3954+) cleanly — experimental flag named, default=10 named correctly (not the wrong "100" / "1000" priors defanged at L3994), NOT_SUPPORTED error correctly named (not the "silently truncates" defanged misconception), quadratic-plan caveat correctly named. Closure-table fallback for very deep hierarchies is the dbt-recommended pattern at L3997+. Memory pin re-confirmed: r27 §7A.1 still authoritative and findable.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | max_by(x,y) semantics correct; ROW-based tiebreak idiomatic and valid; correctly implies no mode() in 467; INTERVAL '90' DAY qualifier correct. |
-| Clarity | 5 | "count distinct combinations in inner CTE, then max_by in outer" framing maps cleanly to the engineer's mental model. ROW-tiebreak rationale (lexicographic fallback to plan_tier) is the right one-liner. |
-| Applicability | 5 | Two-level CTE + outer max_by SQL is paste-ready. The optional ROW-tiebreak upgrade gives a production hygiene path when determinism matters (e.g., dashboards with stable ordering). |
-| Completeness | 5 | Covers the recipe, the tie behavior, the deterministic upgrade, and the (correct) implicit answer to "is there a mode() function" → no, but max_by-on-counts is canonical. |
+**Shave**: Recursive-CTE syntax assumes some SQL familiarity (base case + UNION ALL + recursive step pattern); a one-line "base = root rows, recursive = step that joins back to the partial result, UNION ALL stitches them" could lower the floor. Minor; -0.25 on Clarity only.
 
-**Q1 average: 5.0**
+**Topic**: Oracle PL/SQL → dbt + Trino migration.
+**Resource source**: r27 §7A.1 L3954–4024 (full canonical with caveats).
 
----
+### Q2 — dbt ROW_NUMBER dedup model 45+ min — 3.75 (3.75 + 3.50 + 4.25 + 3.50) / 4
 
-### Q2 — format a timestamp as "June 25, 2026" (full month name); which family of specifiers?
-**Responder:** `format_datetime(CAST(event_ts AS timestamp), 'MMMM d, yyyy')` → 'June 25, 2026'. MMMM = full month name, d = day no leading zero, yyyy = year. Warns the two families do NOT mix: format_datetime uses Joda DateTimeFormat (`MM`=month numeric, `mm`=minute, `MMMM`=full month text), date_format uses MySQL-style (`%M`=full month name, `%d`=day padded, `%Y`=4-digit year).
+**Strengths**: Correctly identifies the window function is NOT the slowdown cause; correctly recommends `materialized='incremental'` + partition pruning by `day(occurred_at)` + `is_incremental()` lookback filter against `(SELECT MAX(occurred_at) FROM {{this}})`. Correctly self-corrects on QUALIFY (Trino 467 has no QUALIFY per memory pin `reference_trino_no_qualify`) and provides the subquery `WHERE rn = 1` form. Perf-side advice is sound.
 
-**Verifications (RAW Joda DateTimeFormat + Trino 467 docs — trino.io/docs/current/functions/datetime.html):**
-- Trino's `format_datetime(timestamp, format)` uses JodaTime's `DateTimeFormat` pattern format — VERIFIED per trino.io datetime.html.
-- Joda spec: `MMMM` = full month text ("June"), `MMM` = short month text ("Jun"), `MM` = month-of-year numeric (padded "06"), `M` = month-of-year numeric, `mm` = minute-of-hour, `d` = day-of-month no padding, `yyyy` = 4-digit year — VERIFIED per joda.org DateTimeFormat API.
-- Trino's `date_format(timestamp, format)` is MySQL `date_format`-compatible — VERIFIED per trino.io datetime.html ("compatible with the MySQL date_parse and str_to_date functions").
-- MySQL spec: `%M` = month name in full ("June"), `%b` = abbreviated month ("Jun"), `%m` = month numeric padded ("06"), `%d` = day-of-month padded ("25"), `%Y` = 4-digit year — VERIFIED.
-- The "two families don't mix" warning is the EXACT trap to call out — applying `%M` to format_datetime or `MMMM` to date_format produces garbage / parse errors. Responder hit the trap on both sides.
-- The full string `'MMMM d, yyyy'` yields "June 25, 2026" with no leading zero on the day, exactly as the engineer asked. CORRECT.
+**Real gap — structural correctness for a DEDUP semantic**:
+- The example as written omits `incremental_strategy` (defaults to `append` in dbt-trino per docs.getdbt.com/reference/resource-configs/trino-configs) and omits `unique_key`.
+- For a model whose purpose is "one row per user_id (latest)", a plain `append`-strategy incremental with a lookback re-processes the overlap window AND APPENDS those rows — producing **duplicate rows for already-seen user_ids on every run**. The dedup semantic breaks.
+- The correct dedup-incremental form requires `incremental_strategy='merge'` + `unique_key='user_id'` (so MERGE INTO matches on user_id and updates in place), OR `incremental_strategy='delete+insert'` + `unique_key` for partition-replace patterns, OR `materialized='table'` for a full refresh.
+- This is documented IN THE SAME RESOURCE the responder pulled the perf advice from: **r28 L177** explicitly: *"`incremental_strategy='append'` paired with a lookback window → `append` will INSERT duplicate rows for already-seen events in the lookback window. `merge` matches on `unique_key` and updates in place, preserving idempotence."* Also r28 L150 (cross-ref to r27 §6.8 worked example), r28 L1510–1547 (canonical late-arriving-data LOOKBACK variant pair with merge+unique_key), r28 L1596 (defanged "append+lookback = duplicates" anti-pattern).
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Joda specifiers (MMMM, d, yyyy) and MM-vs-mm trap correct. MySQL specifiers (%M, %d, %Y) correct. Both family memberships correctly attributed. |
-| Clarity | 5 | Naming the two families explicitly (Joda for format_datetime, MySQL for date_format) and listing the CONFUSABLE pairs (MM vs mm, MM vs %M) is the textbook explanation of this classic Trino trap. |
-| Applicability | 5 | Single-line working SQL + the trap explanation = engineer can paste and immediately knows which family they're in. Bonus: the date_format equivalent is implicitly given via the %M/%d/%Y mapping. |
-| Completeness | 5 | Covers the working format string, both families' specifiers, the MM/mm trap, AND why mixing them silently breaks. No padding, no broken secondary alternative. |
+**Verdict on the gap**: NOT a resource defect — the canonical correct form is documented at 5 distinct locations in r28. This is a **responder findability slip**: Haiku grabbed the perf-side incremental advice (incremental + partition + lookback) from r28 but did not also pull the correctness-side advice (merge + unique_key) that lives in the same file's anti-pattern table. Pattern matches `feedback_responder_broken_secondary_alternative` family — primary perf diagnosis correct, but the worked example would compile to a model that breaks dedup correctness over time.
 
-**Q2 average: 5.0**
+**QUALIFY-then-retract presentation**: this is the responder correctly hitting memory pin `reference_trino_no_qualify` and self-correcting. Slightly awkward UX (engineer might wonder why QUALIFY was offered then withdrawn) but truthful and follows the canonical rewrite to subquery `WHERE rn = 1`. Per-instance Haiku phrasing artifact; NOT a resource-fixable defect.
 
----
+**Topic**: Improving complex SQL performance on Trino with dbt.
+**Resource source for the gap**: r28 L177, L1510–1547, L1596.
 
-### Q3 — dbt staging vs mart layer; table vs view vs ephemeral materialization choice
-**Responder:** Staging models (`stg_*`) do light cleaning/renaming/casting, materialized as `view`. Intermediate models do reusable joins for 2+ downstream consumers, materialized as `table` or `incremental`. Mart models (`fct_*` / `dim_*`) are business-ready, materialized as `table` or `incremental`. Ephemeral materialization compiles the model into an inlined CTE in the downstream model's SQL — no stored object, useful when only one downstream consumer reuses the SQL.
+### Q3 — SELECT * defeats Iceberg columnar advantage — 4.9375 (5.00 + 4.75 + 5.00 + 5.00) / 4
 
-**Verifications (dbt-core docs):**
-- staging (`stg_`) + intermediate (`int_`) + marts (`fct_` / `dim_`) layering — STANDARD dbt convention per dbt-labs project structure best practices. VERIFIED.
-- staging-as-view rationale: light transforms, no storage cost, recomputed cheaply. STANDARD. VERIFIED.
-- intermediate-as-table-or-incremental when reused: avoids re-executing joins. STANDARD. VERIFIED.
-- mart-as-table-or-incremental: business-facing freshness + query performance. STANDARD. VERIFIED.
-- ephemeral materialization: dbt compiles ephemeral models as CTEs that are interpolated into downstream models' SQL (no view, no table in the warehouse). This is correct per dbt-core docs on ephemeral materializations. VERIFIED.
+**Strengths**: Correctly diagnoses that SELECT * reads all 60 column chunks from each Parquet file → ~12× more I/O than projecting 5 needed columns (5/60 ≈ 8% I/O reduction is concrete and correct). Correctly explains Parquet's columnar physical layout: all columns stored in one file but organized as separate column chunks within row groups, with the Trino reader seeking to each needed column chunk's byte range via the Parquet footer index. Decompression cost is per-column. The "list only the columns you need" actionable directive is exactly what an engineer needs to take away.
 
-Production-fit note: on Trino+Iceberg+dbt-trino (the stack), `table` materialization writes an Iceberg table; `view` writes a Trino view; `incremental` updates an Iceberg table merge-style. All four (view, table, incremental, ephemeral) are supported by dbt-trino. Production-aligned.
+**Shave**: Did not explicitly mention complex-type/nested-column projection (Iceberg + Parquet support sub-field projection on structs), or how dictionary encoding amplifies the savings; both are nice-to-have but not load-bearing. -0.25 on Completeness only.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5 | Layer naming + materialization mapping + ephemeral-as-inlined-CTE all standard dbt and verified. Production-stack-compatible. |
-| Clarity | 5 | Per-layer breakdown with one-line rationale ("light cleaning → view," "reused by 2+ models → table") is the cleanest possible framing for someone new to dbt. Ephemeral explained by its mechanism (inlined CTE), not just a name. |
-| Applicability | 5 | Engineer sees the exact `stg_` / `int_` / `fct_` / `dim_` naming, which materialization to pick, and when ephemeral is the right tool. Direct next steps for any dbt project on the production stack. |
-| Completeness | 5 | Covers all three layers + intermediate + all four materialization options + the "when to use ephemeral" criterion. No padding. |
+**Topic**: Column-oriented storage.
 
-**Q3 average: 5.0**
+### Q4 — Monthly invoice SUM precision (12345.999999998 vs 12346.00) — 5.000 (5.00 + 5.00 + 5.00 + 5.00) / 4
 
----
+**Strengths**: Correct root-cause diagnosis (IEEE-754 binary floating-point cannot exactly represent decimal cents like 0.10 — accumulated tiny round-off errors over many additions produce the …999998 tail). Correct fix at the type level: store money as `DECIMAL(18,2)` (Oracle `NUMBER` → Trino `DECIMAL` is the standard migration mapping per r27 type-rewrite section). Correct query-side guard: `CAST(SUM(amount) AS DECIMAL(18,2))` if amount is already DOUBLE/REAL and changing the column type is infeasible short-term. Correct guidance on when DOUBLE is appropriate (scientific / approximate measurements, never money). All four dimensions cleanly addressed.
 
-### Q4 — events grouped by (customer_id, event_type); rows where event_type IS NULL "disappeared"; COUNT(*) vs COUNT(event_type)? does GROUP BY on a nullable column drop rows?
-**Responder:** GROUP BY does NOT drop NULL rows — NULL forms its own group and appears as a row with NULL in the event_type column. The disappearing-data issue is COUNT(event_type): it skips NULLs (per SQL standard, COUNT(col) counts only non-NULL values), so for the NULL group the column-count is 0 even though the rows exist. Fix: use COUNT(*) instead, which counts all rows including those with NULL event_type. One illustrative comment said the NULL group "shows 0 or is filtered out."
-
-**Verifications (Trino 467 docs — trino.io/docs/current/functions/aggregate.html + ANSI SQL semantics):**
-- GROUP BY on a nullable column: NULL forms its own group, appearing as a single row with NULL in the GROUP BY column. STANDARD SQL semantics. VERIFIED — Trino follows ANSI here.
-- `COUNT(expression)` skips NULL values: "Returns the number of non-null input values" per Trino aggregate.html. VERIFIED.
-- `COUNT(*)` counts all rows regardless of NULL. VERIFIED standard SQL.
-- Diagnosis "the rows are there but COUNT(event_type) reports 0 for the NULL group" is the CORRECT root-cause analysis for the user's symptom.
-
-**Minor shaves:**
-1. The aside "shows 0 or is filtered out" is imprecise. A NULL group with COUNT(event_type)=0 still appears as a ROW in the result; it is NOT auto-filtered out. Only an explicit `HAVING COUNT(event_type) > 0` would drop it. The "filtered out" half of the alternative is either misleading or refers to a hypothetical HAVING the user didn't mention. Minor Accuracy shave.
-2. The responder did not explicitly note that if the rows TRULY disappeared (i.e., the NULL group is missing from output entirely, not just showing count=0), the cause is elsewhere — most commonly a WHERE filter that excludes NULL (any predicate like `event_type = 'X'` or `event_type IN (...)` returns UNKNOWN→excluded for NULL rows), an INNER JOIN that drops the row, or a HAVING clause. Minor Completeness shave for not covering this branch of the user's symptom.
-
-Core diagnosis (GROUP BY doesn't eat NULLs; COUNT(*) vs COUNT(col)) is correct and actionable. The shaves are framing/edge-coverage only.
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 4.5 | Core SQL semantics correct (GROUP BY-keeps-NULL, COUNT(col)-skips-NULL, COUNT(*)-counts-all). "Shows 0 or is filtered out" aside is imprecise — a NULL group with COUNT(event_type)=0 is NOT filtered out by default; only HAVING would do that. |
-| Clarity | 5 | The "GROUP BY doesn't drop the rows; the COUNT does" framing is precisely the conceptual fix for the engineer's confusion. Clean. |
-| Applicability | 5 | Direct swap (`COUNT(*)` for `COUNT(event_type)`) is the actionable fix; engineer can paste and verify. |
-| Completeness | 4 | Covers the COUNT-skips-NULL diagnosis cleanly but does NOT cover the alternative cause: if rows TRULY disappeared (not just count=0), it's a WHERE/INNER JOIN/HAVING issue, not GROUP BY. The user's "disappeared" phrasing is ambiguous; covering both branches would be complete. |
-
-**Q4 average: 4.625**
+**Topic**: SQL query best practices for OLAP (type-safe predicates + correct decimal/numeric handling).
 
 ---
 
 ## Score table
 
-| Q | Topic touched | Accuracy | Clarity | Applicability | Completeness | Q avg |
+| Q | Topic | Acc | Compl | Clar | Act | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | SQL best practices / argmax+tiebreak via max_by+ROW (r23) | 5 | 5 | 5 | 5 | 5.00 |
-| Q2 | SQL best practices / datetime formatting Joda-vs-MySQL trap (r23) | 5 | 5 | 5 | 5 | 5.00 |
-| Q3 | dbt model layering + materializations (r05 / dbt project structure) | 5 | 5 | 5 | 5 | 5.00 |
-| Q4 | Analytical query patterns / GROUP BY NULL semantics + COUNT(*) vs COUNT(col) (r07 / r23) | 4.5 | 5 | 5 | 4 | 4.625 |
+| Q1 | Oracle PL/SQL → dbt+Trino | 5.00 | 5.00 | 4.75 | 5.00 | **4.9375** |
+| Q2 | Complex SQL perf on Trino+dbt | 3.75 | 3.50 | 4.25 | 3.50 | **3.7500** |
+| Q3 | Column-oriented storage | 5.00 | 4.75 | 5.00 | 5.00 | **4.9375** |
+| Q4 | SQL best-practices OLAP | 5.00 | 5.00 | 5.00 | 5.00 | **5.0000** |
+| **Iter avg** | | | | | | **4.6563** |
 
-**Overall average: (5.00 + 5.00 + 5.00 + 4.625) / 4 = 4.90625 → STRONG PASS** (margin +1.41 to 3.5 threshold).
+**Margin: +1.16 above 3.5 pass threshold. STRONG PASS.**
 
 ---
 
-## Source-verified defects
+## Source-verified defect classification
 
-NONE.
+| Defect | Type | Resource-sourced? | Action |
+|---|---|---|---|
+| Q2 incremental example omits `incremental_strategy='merge'` + `unique_key` for dedup correctness | Responder findability slip | **NO** — canonical merge+unique_key form documented in r28 at 5 locations (L150, L177, L1510–1547, L1596, §6.8 cross-ref to r27) | **NO-OP**; per `feedback_synthesis_ceiling_stop_churning` |
+| Q2 QUALIFY-then-retract presentation | Responder per-instance phrasing artifact | NO — memory pin `reference_trino_no_qualify` correctly hit; subquery WHERE rn=1 rewrite is canonical | **NO-OP**; truthful self-correction |
 
-The two Q4 shaves are **responder one-off framing imprecisions**, NOT resource defects:
-- Grep audit of r07 / r23 / r27 for "GROUP BY ... NULL" + "COUNT(*) vs COUNT(col)" patterns: resources consistently and correctly state that GROUP BY creates a NULL group and COUNT(col) skips NULLs. No resource sources the "filtered out" framing.
-- The omission of the WHERE/INNER JOIN root-cause branch is a per-instance completeness call, not a missing canonical card. The responder accurately answered the question that was asked (does GROUP BY eat rows? no; what's wrong with COUNT(event_type)? it skips NULLs); covering the alternative root cause would have required the engineer to have asked it. Minor Completeness shave only.
-- Pattern matches `feedback_responder_overwarning_folklore` weakly (one ambiguous aside on `HAVING`/filtered-out) — recall ceiling, NO resource fix can durably block, do not let it bias the judge.
+No fabrications. No imported-prior self-errors. No `::` cast / false-semi-join / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover. No defang regressions.
 
 ---
 
 ## Teacher guidance
 
-**RECOMMENDATION = NO-OP this iteration.**
+**Primary recommendation: NO-OP this iter.**
 
-- Q1, Q2, Q3 are pristine — no per-instance or systemic gap. Three independent canonical traps hit cleanly (max_by+ROW tiebreak, Joda-vs-MySQL specifiers, dbt layering + ephemeral mechanics).
-- Q4 is 4.625 — well above 3.5 threshold and well above the r07/r23 topic floors. The two minor shaves (aside imprecision + alt-root-cause completeness) are per-instance Haiku framing, not resource gaps. Per `feedback_synthesis_ceiling_stop_churning` and `feedback_responder_overwarning_folklore`, do not churn the resource.
-- Q2 dialect trap (Joda MMMM/MM/mm vs MySQL %M/%m/%Y) is one of the most-failed angles in SQL training corpora industry-wide; the responder hit it cleanly with BOTH families' specifiers correctly attributed and the MM↔mm + MM↔%M confusion pairs explicitly named. Strong durability signal on r23 datetime-formatting content.
-- Q1 ROW-tuple tiebreak idiom is a non-obvious Trino-specific argmax form (foreign-looking to engineers coming from Postgres / Snowflake); the responder produced it spontaneously as a deterministic-upgrade option, signaling that the canonical card is well-placed.
+- **r27 §7A.1 CONNECT BY → WITH RECURSIVE canonical**: REACHED CLEANLY on Q1 — all five technical claims hit correctly (experimental, default=10, NOT_SUPPORTED on exceed, quadratic plan growth, dbt closure-table fallback). The §7A.1 anti-defang block at L3994 ("DO NOT WRITE default 1000 / default 100 / silently truncates") successfully blocked the four most common misconceptions. Memory pin durable.
 
-**Topic rows updated:**
-- SQL query best practices for OLAP (r23): 4.4815/161 + Q1@5.0 + Q2@5.0 + (Q4 shared touch @4.625) → **4.4862/164** (+0.0047, three new datapoints)
-- dbt sources / source freshness (r05 / dbt layering — Q3 touches dbt project structure / materializations, mapped to closest existing row "dbt sources / source freshness" with intent to broaden, but layer/materialization content lives across r05 + dbt resources; conservative attribution: + Q3@5.0): 4.3706/7 + Q3@5.0 → **4.4493/8** (+0.0787)
-- Analytical query patterns on Iceberg+Trino (r07): 4.4506/63 + (Q4 shared touch @4.625) → **4.4509/64** (+0.0003)
+- **r28 dedup-incremental canonicals**: PRIMARY perf advice REACHED on Q2 (incremental + partition + lookback), but the SAME-FILE correctness advice (merge + unique_key) was NOT pulled into the worked example. This is the responder grabbing one of two co-located canonical pieces. Resources are already comprehensive; no additive content can durably force Haiku to always pair them. Per `feedback_synthesis_ceiling_stop_churning`, accept the occasional per-instance slip and re-probe in 2–3 iterations to confirm it's an artifact, not a recurring pattern.
 
-All three touched rows remain PASSED; no thresholds crossed downward; no resource gap exposed.
+- **r03 columnar canonical**: REACHED CLEANLY on Q3 — Parquet column-chunk physical layout, byte-range seek, per-column decompression all named correctly with concrete 5/60 = 8% I/O example.
 
-**Federation untouched** (fragile-PASS 4.50244/312 unchanged).
-**CBO/ANALYZE untouched** (4.5716/20 unchanged; +0.072 margin to raised 4.5 threshold preserved).
+- **r23/r27 DECIMAL-vs-DOUBLE money canonical**: REACHED CLEANLY on Q4 — root cause (IEEE-754 binary float), type fix (DECIMAL(18,2)), query fix (CAST), Oracle NUMBER → Trino DECIMAL migration mapping all named correctly.
 
-**Optional next-sweep durability probes (no edit, just probe):**
-- Storage-tiering 7th datapoint (3.5625/6 still thinnest required-topic row).
+**Optional next-sweep durability probes (no resource edits, just probe)**:
+- Q2-shape re-probe with a different domain (e.g., latest-per-session_id or latest-per-account_id dedup): if the merge+unique_key omission RECURS, consider a `feedback_defang_donotwrite_snippets`-style inline `-- WRONG: missing incremental_strategy='merge'` defang on the existing r28 canonical OR hoisting the "incremental dedup requires merge+unique_key" guarantee into a top-of-file STEP-0 router in r28.
+- Storage-tiering 7th datapoint (3.5625/6 — thinnest passing row).
 - dbt-model-contracts 7th angle (4.391/6).
-- dbt-snapshots SCD2 13th angle (4.1513/12 — thinnest above-3.5 row outside the structural floors).
-- Cost-considerations 21st angle (4.2129/20).
+- cost-considerations 21st angle (4.2129/20).
 
-Two strong durability signals this sweep on classic dialect/semantics traps (Q1 max_by+ROW argmax + Q2 Joda-vs-MySQL format family). Continue NO-OP discipline on per-instance framing artifacts; churn only on findability/canonical-content defects.
+**No federation re-probe** (4.50244/312 fragile-PASS preserved). **No CBO re-probe** unless a bulletproofed angle is available (4.5716/20, +0.072 margin to raised 4.5 threshold preserved per iter1108).
+
+---
+
+## Iter1111 summary
+
+Four varied less-recently-probed angles touched four distinct required topics. Three pristine (~5.0) on canonical traps (recursive CTE Oracle migration, columnar SELECT * pushdown, DECIMAL-vs-DOUBLE money); one shave (3.75) on a dedup-incremental correctness gap that is sourced but unconsumed in the resources. NO new defects. NO resource edits. **NO-OP** recommended.
+
+Pattern observation: the WITH RECURSIVE Q1 hit ALL five contested technical claims correctly including the quadratic-plan-growth claim that the judge prompt suggested might be a linear-unroll fabrication. The Trino source-of-truth (trino.io/docs/current/sql/select.html) confirms "size of the query plan growth is quadratic with the recursion depth" verbatim — responder is right, the suspicion was unfounded. Continue verify-first-against-trino.io before suspecting a responder fabrication on a verifiable technical claim; the responder's recursive CTE understanding here is durable resource-channeled correctness.
