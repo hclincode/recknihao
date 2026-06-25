@@ -1,8 +1,25 @@
-# Judge Feedback — iter1104 (2026-06-26)
+# Judge Feedback — iter1105 (2026-06-26)
 
-**Phase**: extended (passed:true). Breadth durability sweep, 4 angles.
-**Iter average**: (4.9375 + 5.0 + 2.75 + 5.0) / 4 = **4.422 PASS** (margin +0.922)
-**Verdict**: PASS on average; **ONE source-verified Q3 defect** — FIX-A on r28 GROUPING SETS findability/router-prominence.
+**Phase**: extended (passed:true). FIX-A re-probe (Q1+Q2 GROUPING SETS first-STOP-slot hoist from iter1104), Q3+Q4 breadth.
+**Iter average**: (5.0 + 5.0 + 3.25 + 5.0) / 4 = **4.5625 PASS** (margin +1.0625)
+**Verdict**: PASS on average. **FIX-A REACHED** for both Q1 and Q2 — responder now LEADS with `GROUPING SETS ((x),(y),())` for "totals by X AND by Y AND grand total" on two completely different domains. ONE source-verified Q3 partial defect (`AT TIME ZONE` on tz-naive column is session-dependent; canonical r07 form not retrieved).
+
+---
+
+## FIX-A reach verdict (the main item this iter)
+
+| Q | Domain | Asked construct | Responder LED with | FIX-A status |
+|---|---|---|---|---|
+| Q1 | revenue by region + by product line + grand total | one query, no cross-grid | `GROUP BY GROUPING SETS ((region), (product_line), ())` + `ORDER BY GROUPING(...)` | **REACHED** — matches r28 §`COPY THIS for "totals by X AND by Y AND grand total"` exactly |
+| Q2 | tickets by priority + by team + total | one query, no priority×team grid | `GROUP BY GROUPING SETS ((priority_level), (assigned_team), ())` + `GROUPING() ORDER BY` | **REACHED** — same canonical form |
+
+Both Qs correctly:
+- Rejected ROLLUP (which would silently drop the by-`y`-only row)
+- Rejected the per-`(X,Y)` cross-detail framing
+- Explained the "replaces N UNION ALL queries" framing the r28 router uses
+- Used `GROUPING(col)=1` semantics to label/order subtotal rows
+
+The iter1104 first-STOP-slot hoist (GROUPING SETS COPY-THIS block now precedes the ROLLUP COPY-THIS block at r28 L426 vs L437, with a "⭐ MOST-MISROUTED CASE" pre-router callout at L424) is doing its job on two different domains. **Closed.**
 
 ---
 
@@ -10,180 +27,115 @@
 
 | Claim | Source verified | Verdict |
 |---|---|---|
-| `cume_dist()` returns fraction at-or-below (preceding + peer / total) | trino.io/docs/current/functions/window.html (quoted: "number of rows preceding or peer with the row ... divided by the total number of rows") | CORRECT |
-| `cume_dist=0.85` with `ORDER BY api_calls ASC` ⇒ top 15% | Logical: 85% have api_calls ≤ current → current is in top 15% by api_calls | CORRECT |
-| `percent_rank()` = (rank-1)/(N-1), [0,1] rank position | trino.io/docs/current/functions/window.html | CORRECT |
-| `json_extract_scalar(json, path)` returns VARCHAR | trino.io/docs/current/functions/json.html (return type varchar) | CORRECT |
-| Missing JSONPath → NULL (no error) | trinodb/trino discussions/19197 + general ON ERROR default = NULL semantics | CORRECT |
-| `GROUP BY ROLLUP(a, b)` emits (a,b) + (a) + () — NO (b)-only | trino.io/docs/current/sql/select.html GROUP BY ROLLUP grammar | CORRECT (this is why responder Q3 LEAD is wrong) |
-| `GROUP BY CUBE(a, b)` emits full power set including (a,b) detail | sql/select.html GROUP BY CUBE | CORRECT |
-| `GROUP BY GROUPING SETS ((a),(b),())` emits exactly per-A + per-B + grand total, NO (a,b) detail | sql/select.html GROUPING SETS — this is the precise tool for Q3 | CORRECT |
-| `config.contract.enforced=true` runs a build-time preflight comparing projected columns+types to declared `columns` list | docs.getdbt.com/docs/collaborate/govern/model-contracts (quoted "preflight check ... names and data types matching" + "contract must include every column's name and data_type") | CORRECT |
-| Undeclared projected columns fail the preflight | docs.getdbt.com (quoted "contracts apply to all columns defined in a model") | CORRECT |
-| Only `not_null` is runtime-enforced on dbt-trino+Iceberg; primary_key/unique are metadata-only | docs.getdbt.com/reference/resource-configs/trino-configs + dbt-trino constraint support docs | CORRECT |
+| `GROUP BY GROUPING SETS ((a),(b),())` emits per-A + per-B + grand total, NO (a,b) detail | trino.io/docs/467/sql/select.html GROUPING SETS grammar | CORRECT (Q1+Q2 LEAD) |
+| `GROUPING(col)` returns 1 for a column rolled away in that row, 0 otherwise | trino.io/docs/467/functions/aggregate.html | CORRECT (Q1+Q2 ORDER BY pattern) |
+| `naive_ts AT TIME ZONE 'X'` for a TIMESTAMP without time zone uses the SESSION time zone to interpret the value, then converts to X | trino.io/docs/467/functions/datetime.html (datetime ops); cross-checked vs r07 §timezone-bucketing canonical | RESPONDER Q3 IS SESSION-DEPENDENT for tz-naive UTC-stored columns — partial defect |
+| For a tz-NAIVE UTC-intent column the robust form is `with_timezone(occurred_at, 'UTC') AT TIME ZONE 'Asia/Tokyo'` OR two-step `occurred_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo'` | r07 L2422-L2448 canonical block (verified at trino.io/docs/467/functions/datetime.html `with_timezone(timestamp(p), zone)`) | The canonical answer Q3 should have produced |
+| For a tz-AWARE column (`timestamp(p) with time zone` — typical Iceberg UTC-normalized storage), bare `event_ts AT TIME ZONE 'X'` IS correct (session-independent) | trino.io/docs/467 type semantics; r07 L2407 example uses this | CORRECT but the responder did NOT disambiguate which case |
+| `DATE(timestamp with time zone)` buckets on the LOCAL wall-clock date implied by the value's attached zone | Trino CAST semantics — date extracted in the value's own attached zone, not session zone | CORRECT |
+| dbt incremental `merge` strategy + `unique_key` makes a re-processed lookback window idempotent | docs.getdbt.com/docs/build/incremental-models + dbt-trino merge docs | CORRECT (Q4) |
+| `{% if is_incremental() %}` guard runs only on subsequent runs (first run is CTAS, no `WHERE`) | docs.getdbt.com/docs/build/incremental-models#understand-the-is_incremental-macro | CORRECT (Q4) |
+| `partitioning: ['day(occurred_at)']` Iceberg partition transform | iceberg.apache.org/docs/latest/iceberg-trino/ + Trino Iceberg connector docs | CORRECT (Q4) |
 
 ---
 
 ## Per-Question scoring
 
-### Q1 — CUME_DIST vs PERCENT_RANK percentile rank within plan tier ("you're in top 15%")
+### Q1 — revenue by region AND by product line AND grand total, ONE query (NOT a region×product grid)
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | Both window functions correctly described; "0.85 → top 15%" with ASC ORDER BY is mathematically right; PERCENT_RANK contrast (rank position, not at-or-below fraction) is right |
-| Clarity | 5.0 | Direct framing "fraction at-or-below"; engineer can read without OLAP background |
-| Applicability | 5.0 | `CUME_DIST() OVER (PARTITION BY plan_tier ORDER BY api_calls)` is copy-paste ready |
-| Completeness | 4.75 | Covered both functions + the contrast cleanly. Tiny shave for not flagging the peer-row tie semantics or NULL-skip behavior — edge angles, not the asked question |
+| Accuracy | 5 | `GROUP BY GROUPING SETS ((region), (product_line), ())` is exactly the canonical Trino 467 form. `ORDER BY GROUPING(region) + GROUPING(product_line)` ordering pattern correct. |
+| Clarity | 5 | Explicitly explained "replaces three UNION ALL queries"; called out NULL semantics for rolled-up columns; explained NO cross-detail row. |
+| Applicability | 5 | Copy-paste runnable on the prod stack; matches the r28 leading canonical block verbatim. |
+| Completeness | 5 | Covered the operator choice, the row shape, the NULL labels, the ORDER BY, and the "why not ROLLUP" warning. |
+| **Q1 avg** | **5.00** | |
 
-**Q1 avg: 4.9375** CLEAN.
-
----
-
-### Q2 — Extract fields from a JSON-string `properties` column; missing-field behavior
+### Q2 — ticket counts by priority AND by team AND total, ONE result (NOT a priority×team grid)
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | `json_extract_scalar(properties, '$.plan')` → VARCHAR ✓; missing path → NULL (no error) ✓; `CAST(...) AS BIGINT` for seats ✓ |
-| Clarity | 5.0 | JSONPath dot notation explicit; NULL-on-missing behavior stated plainly |
-| Applicability | 5.0 | `COALESCE(json_extract_scalar(...), 'default')` exactly the prod idiom; CAST for typed fields exactly right |
-| Completeness | 5.0 | Covered missing-key NULL semantics, COALESCE default, CAST for type-safe consumption — all three things a SaaS engineer using JSON-string columns needs |
+| Accuracy | 5 | Identical canonical shape to Q1, different domain. `GROUPING SETS ((priority_level), (assigned_team), ())` is right. |
+| Clarity | 5 | Same explanation pattern; engineer can map column-by-column. |
+| Applicability | 5 | Direct copy with team/priority placeholders. |
+| Completeness | 5 | Covered subtotal NULLs, GROUPING() labelling, ordering. |
+| **Q2 avg** | **5.00** | |
 
-**Q2 avg: 5.0** CLEAN.
-
----
-
-### Q3 — Signups grouped by country, by plan_tier, AND grand total — one query, replacing 3 UNIONed aggregations
+### Q3 — UTC-stored event timestamps; bucket by CUSTOMER LOCAL calendar date (e.g. Tokyo 11PM UTC → next day); no hardcoded offsets
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Accuracy | 2.5 | **LEAD with `GROUP BY ROLLUP(country, plan_tier)` is WRONG for the asked question.** ROLLUP emits `(country, plan_tier)` detail + `(country)` subtotals + `()` grand total — it does **NOT** emit `(plan_tier)`-only totals. The manager **explicitly asked for "signups grouped by plan tier"** as one of the three target row groups. Engineer who copies the LEAD verbatim ends up with every plan-tier-only total **missing** from the report. CUBE fallback ("if you need independent margins") is workable but over-produces (includes the unwanted `(country, plan_tier)` cross detail). **The precise tool — `GROUP BY GROUPING SETS ((country), (plan_tier), ())` — is NEVER MENTIONED.** GROUPING(country,plan_tier) CASE labeling is internally fine but applied to the wrong operator |
-| Clarity | 3.5 | Internal explanation is clear, but the engineer cannot tell from the answer which tool actually matches their three-row-group need; they're being routed to ROLLUP-or-CUBE without the surgical option |
-| Applicability | 3.0 | Engineer who follows the LEAD gets wrong output. CUBE alternative requires post-filter to remove cross-detail rows, which the responder did not mention. The "column-names-only" reminder is correctly cited but only for the wrong operators |
-| Completeness | 2.0 | Misses the precise tool entirely. The literal question wording ("by country, by plan tier, AND grand total — replace 3 UNION ALL queries") is the textbook GROUPING SETS use case. Does not surface the GROUPING bitmask labels adapted for the GROUPING SETS form |
+| Accuracy | 3 | **PARTIAL DEFECT** — bare `event_ts AT TIME ZONE 'Asia/Tokyo'` is the CORRECT form ONLY when `event_ts` is `timestamp(p) with time zone` (the Iceberg UTC-normalized form). If `event_ts` is bare `TIMESTAMP` (no tz) storing UTC, Trino's `AT TIME ZONE` interprets the value using the **SESSION timezone** first — if the session is not UTC, the result is hours-off. The robust session-independent form is `with_timezone(event_ts, 'UTC') AT TIME ZONE 'Asia/Tokyo'` (or two-step `event_ts AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Tokyo'`). r07 L2422-L2448 has the canonical block + an inline-marked WRONG form ("session-dependent — only correct when current_timezone() = 'UTC', off by hours otherwise"). The responder did NOT disambiguate the two column-type cases. Additional secondary concern: the WHERE-clause form `WHERE event_ts AT TIME ZONE 'X' >= CURRENT_DATE - INTERVAL '30' DAY` wraps the partition column in an expression on the LEFT, which may forfeit partition pruning; r07 L2412 canonical predicate form uses bare `created_at` on the LEFT (`WHERE created_at >= date_trunc('day', current_timestamp AT TIME ZONE 'X') - INTERVAL '30' DAY`) to keep the column sargable. |
+| Clarity | 4 | IANA zone-name framing clear; the "shift before bucketing" rationale is right. Missing: explicit type disambiguation paragraph. |
+| Applicability | 3 | Works in the easy case (Iceberg timestamptz storage), silently wrong in the harder one (Spark-ingested bare TIMESTAMP storing UTC, session zone ≠ UTC). The user's "Tokyo 11PM UTC → next day" framing suggests they're aware of UTC storage but didn't say which type — responder should have asked or covered both. Predicate non-sargable form may also hurt prod perf. |
+| Completeness | 3 | Missed: (a) tz-naive vs tz-aware column branch, (b) `with_timezone()` / two-step alternative for tz-naive, (c) keeping the partition column bare on the left of WHERE for pruning, (d) `at_timezone(ts, user_tz_column)` for per-customer-zone bucketing (the question's "CUSTOMER LOCAL" framing implied the customer's zone is a per-row attribute, not a literal). |
+| **Q3 avg** | **3.25** | |
 
-**Q3 avg: 2.75** Q-level FAIL (below 3.5); iter PASSES on average via no-veto rule.
-
----
-
-### Q4 — dbt model contract `enforced: true`; new column on underlying Iceberg table, build fails before SQL runs
+### Q4 — dbt incremental missing late-arriving (2-3 day) records, avoid full reprocessing
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Accuracy | 5.0 | Build-time preflight comparing model's projected columns+types to YAML declared `columns` list ✓; every projected column must be declared (no undeclared extras) ✓; data_type must match exactly (bigint ≠ integer) ✓; only `not_null` enforced at write on dbt-trino+Iceberg ✓; `primary_key`/`unique` metadata-only ✓. All VERIFIED against docs.getdbt.com + dbt-trino constraint docs |
-| Clarity | 5.0 | "Trino itself doesn't know contracts exist — dbt is the enforcer" framing is the right mental model |
-| Applicability | 5.0 | Engineer knows exactly what to do: add the new column with `name:` + `data_type:` to the `.yml` columns list — that's literally the fix and the responder named it |
-| Completeness | 5.0 | Addresses both halves: (a) what the contract check does (preflight column/type match), (b) how to fix the broken build (declare the new column). Draws the build-time vs runtime constraint enforcement line correctly |
-
-**Q4 avg: 5.0** CLEAN.
-
----
-
-## Summary table
-
-| Q | Topic | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | Analytical query patterns (CUME_DIST percentile within partition) | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
-| Q2 | SQL best practices (json_extract_scalar idiom) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-| Q3 | Improving complex SQL on Trino with dbt (GROUPING SETS / ROLLUP / CUBE) | 2.5 | 3.5 | 3.0 | 2.0 | **2.75** |
-| Q4 | dbt model contracts | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-
-**Iter average = 17.6875 / 4 = 4.422 PASS** (no per-Q veto; pass threshold 3.5).
+| Accuracy | 5 | `incremental_strategy='merge'` + `unique_key='event_id'` + 3-day lookback `WHERE occurred_at >= (SELECT date_add('day', -3, COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01')) FROM {{ this }})` guarded by `{% if is_incremental() %}` is the canonical r28 §139 / r28 §144 block. `day(occurred_at)` Iceberg partitioning is right. The COALESCE bootstrap handles the empty-table first run after backfill. The idempotency explanation (matched rows update in place, unmatched insert) is right. |
+| Clarity | 5 | Clean, walked through each config line; clear on why each is needed. |
+| Applicability | 5 | Copy-paste into a dbt-trino project. Matches resource exactly. |
+| Completeness | 5 | Covered config, lookback predicate, is_incremental guard, partitioning, merge idempotency. |
+| **Q4 avg** | **5.00** | |
 
 ---
 
-## Q3 verdict — FINDABILITY / ROUTER-PROMINENCE FIX-A on r28
+## Score table
 
-### Is the GROUPING SETS content present in resources?
+| Q | Acc | Clar | Appl | Comp | Avg |
+|---|---|---|---|---|---|
+| Q1 GROUPING SETS revenue/region/product | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 GROUPING SETS tickets/priority/team | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 AT TIME ZONE local-day bucketing | 3 | 4 | 3 | 3 | 3.25 |
+| Q4 dbt incremental late-arriving lookback | 5 | 5 | 5 | 5 | 5.00 |
+| **Iter avg** | **4.50** | **4.75** | **4.50** | **4.50** | **4.5625 PASS** |
 
-**YES.** Grep against `resources/28-complex-sql-performance-trino-dbt.md`:
-
-- **r28 L413**: `LEADING CANONICAL — Trino GROUPING SETS / ROLLUP / CUBE` block exists
-- **r28 L415**: keyword anchors include `subtotal, subtotals, grand total, ROLLUP, CUBE, GROUPING SETS, GROUPING function, GROUPING_ID, row_type, label the subtotal row, multi-level aggregate, hierarchy rollup`
-- **r28 L417 (Decision keyword anchors)**: `region totals AND category totals`, `subtotals on both dimensions`, `independent margins`, `every combination of subtotals`, `breakdown by both X and Y with subtotals for each`
-- **r28 L419-422 (router)** explicitly states:
-  - "detail + subtotals down a group hierarchy + grand total" → `ROLLUP(a, b)`
-  - "every combination including each column alone" → `CUBE(a, b)`
-  - "only specific named grouping sets (a hand-picked list, NOT the cross-tab detail)" → `GROUPING SETS (...)`
-- **r28 L462 (DECIDE FIRST section)**: ROLLUP vs CUBE vs GROUPING SETS decision matrix
-- **r28 L481-489** — the **exact worked example for this question**:
-  ```sql
-  -- by-region totals AND by-category totals AND grand total — but EXPLICITLY NOT the per-region-per-category detail.
-  -- WRONG — CUBE(region, product_category) emits the FULL power set INCLUDING the (region, product_category) detail
-  -- RIGHT — GROUPING SETS lists EXACTLY the three wanted summaries and nothing else:
-  GROUP BY GROUPING SETS ((region), (product_category), ())
-  ```
-- **r28 L493**: `DO NOT WRITE GROUPING SETS ((a,b),(a),(b),()) when you do NOT want the detail → that IS CUBE(a,b)`
-- **r28 L495**: 3-way one-line rule: "hand-picked SPECIFIC subtotals (NOT the full cross-tab) → `GROUPING SETS ((a), (b), ())`; EVERY combination / full power set → `CUBE(a, b)`; hierarchical / prefix drill-down → `ROLLUP(a, b)`"
-
-### Why didn't the GROUPING SETS canonical reach?
-
-**FINDABILITY: the responder read ROLLUP first and stopped — visual STOP point above the GROUPING SETS worked example.**
-
-1. **The ROLLUP "COPY THIS" block at r28 L426-434 is the FIRST copyable example after the router.** Haiku reads top-down; the first `COPY THIS for "subtotal per group + grand total" (hierarchical subtotals)` block lands before the engineer reads the DECIDE FIRST section at L462 + its WRONG/RIGHT GROUPING SETS worked example at L481-489.
-2. **Router phrasing at L422 — "only specific named grouping sets (a hand-picked list, NOT the cross-tab detail)"** — is CS-abstract. The engineer's natural phrasing of "I have 3 UNION ALL queries doing different group-bys + a grand total, combine them" does not lexically match "hand-picked list."
-3. **Missing keyword anchors for the engineer's actual phrasing.** Greppable anchors in r28 L415-417 do not include any of:
-   - "replace N UNION ALL aggregations / consolidate multiple GROUP BYs"
-   - "totals by X and by Y and a grand total in one query"
-   - "by-country totals AND by-plan totals AND grand total"
-   - "subtotals on two independent dimensions without the cross detail"
-   - "three independent groupings in one query"
-4. **The router's "subtotals on both dimensions" + "independent margins" anchors (L417, L466) currently route to `CUBE(a, b)`**, but CUBE over-produces (adds the unwanted detail). The natural "two independent dimensions + grand total, NO cross detail" phrasing has no clear anchor pointing at the surgical GROUPING SETS form.
-
-### Verdict: FIX-A on r28 — findability / router-prominence (NOT content-addition; content is correct)
-
-**SAME PATTERN as iter1100 storage-tiering (L501 anchor expansion) and iter1101→iter1102 r16/r09 TL;DR-HOIST.** Correct content exists below a visual STOP point; FIX is to expand keyword anchors so the natural-phrasing question routes there AND hoist the surgical worked example into the prominent position adjacent to the router.
-
-### Recommended FIX-A on r28 — three coordinated edits
-
-1. **Expand keyword anchors at r28 L415** to include the natural engineer phrasings:
-   - `replace 3 UNION ALL aggregations into one query`
-   - `consolidate multiple GROUP BYs`
-   - `totals by X and by Y and a grand total in one query`
-   - `by-country totals AND by-plan totals AND a grand total`
-   - `subtotals on two independent dimensions without the cross detail`
-   - `three independent groupings in one query`
-   - `signups by country + signups by plan + grand total in one report`
-   - `manager wants three summary breakdowns combined`
-
-2. **Add a NEW prominent "REPLACE N UNION ALL" decision-router row at r28 L417 (Decision keyword anchors)** with explicit ROLLUP/CUBE/GROUPING SETS branches and a one-liner: "if your current code is `SELECT ... GROUP BY a` UNION ALL `SELECT ... GROUP BY b` UNION ALL `SELECT ... grand total`, the surgical Trino replacement is `GROUP BY GROUPING SETS ((a), (b), ())`."
-
-3. **Hoist the `GROUPING SETS ((a),(b),())` "RIGHT" worked example at L486-489 to a `COPY THIS` block immediately under the router at L422**, so it appears **BEFORE** the ROLLUP `COPY THIS` block at L426. Current structure puts ROLLUP `COPY THIS` first — Haiku grabs it. Router decision must be visually adjacent to all three copyable examples, not just the ROLLUP one.
-
-**Re-probe next sweep**: Q3 from 2 angles — (a) the literal 3-UNION-ALL replacement scenario (this iter's wording) and (b) a different domain (e.g. "ops wants daily totals AND per-region totals AND grand total in one dashboard query") — to confirm both reach the GROUPING SETS canonical.
-
-### What this defect is NOT
-
-- Not a Trino dialect error or fabricated function.
-- Not a [Responder Broken Secondary Alternative] — the LEAD itself is the problem, not a trailing aside.
-- Not a [Responder Over-Warning Folklore] — no over-cautious framing.
-- Not an imported-prior self-error on the judge or directive side.
-- Not a content gap in resources — the precise tool with a worked example is correctly documented at r28 L481-495.
+Margin to 3.5 threshold: **+1.0625**.
 
 ---
 
-## Topics touched & rubric score updates
+## Source-verified defects this iter
 
-| Topic | Prior | This iter Q | New running | Status |
-|---|---|---|---|---|
-| Analytical query patterns on Iceberg+Trino | 4.378 / 52 | Q1 CUME_DIST percentile-within-partition (4.9375) | (227.656 + 4.9375) / 53 = **4.388 / 53** | PASSED |
-| SQL query best practices for OLAP | 4.4672 / 156 | Q2 json_extract_scalar+CAST+COALESCE (5.0) | (696.8832 + 5.0) / 157 = **4.471 / 157** | PASSED |
-| Improving complex SQL performance on Trino with dbt | 4.6764 / 18 | Q3 GROUPING SETS / ROLLUP / CUBE for 3-UNION-ALL collapse (2.75) | (84.1752 + 2.75) / 19 = **4.575 / 19** | PASSED (drag from Q3 but well above threshold) |
-| dbt model contracts | 4.2687 / 5 | Q4 enforced:true + new column on Iceberg breaks build (5.0) | (21.3435 + 5.0) / 6 = **4.391 / 6** | PASSED (recovers off sub-4.3) |
+1. **Q3 — `AT TIME ZONE` session-dependence on tz-naive columns NOT disambiguated.** The bare `event_ts AT TIME ZONE 'Asia/Tokyo'` form silently breaks when `event_ts` is `TIMESTAMP` (no tz) storing UTC AND the Trino session zone is not UTC. The canonical r07 block (L2422-L2448) explicitly inline-marks this WRONG and shows the session-independent forms. The responder did not retrieve the with_timezone / two-step alternative, and did not branch on column type.
 
-**All four touched topics REMAIN PASSED.** No row crosses below threshold.
+Secondary (not score-impacting beyond Q3 Applicability): the predicate-side `WHERE event_ts AT TIME ZONE 'X' >= CURRENT_DATE - INTERVAL '30' DAY` wraps the column in an expression on the LEFT, which may lose partition pruning. r07 L2412 shows the canonical sargable form (`WHERE created_at >= date_trunc('day', current_timestamp AT TIME ZONE 'X') - INTERVAL '30' DAY` — column bare on the left).
 
 ---
 
-## Recommendation
+## Teacher guidance
 
-**LIGHT FIX-A on r28** — findability / router-prominence on the GROUPING SETS canonical (3 coordinated edits above). NOT a content-addition; the correct worked example already exists at L481-495, but it sits below the ROLLUP `COPY THIS` visual-STOP point and the engineer's natural phrasing doesn't have anchors pointing at it.
+### Verdict on Q3: **MIXED — resource gap is borderline; primarily a responder retrieval gap.**
 
-- **NO state.json bump** (already 1104, already passed:true).
-- **NO federation re-probe** (4.50244 / 312 fragile-PASS per iter1097).
-- **NO Q1 / Q2 / Q4 follow-up** (all clean breadth).
-- **Re-probe Q3 next sweep** from 2 different domains (3-UNION-ALL collapse, two-independent-dimension report) to confirm FIX-A reach.
-- **Optional durability probes** (no edits): storage-tiering row (3.5625 / 6, still thinnest), dbt-snapshots-SCD2 (4.1513 / 12), cost-considerations 22nd angle.
+The canonical r07 block IS in place at L2422-L2448 with the correct two forms and an explicit WRONG block. The responder did not retrieve it. Possible reasons:
 
-### Pattern observation
+- The r07 timezone-bucketing block may not be findable from the specific question phrasing "UTC-stored event timestamps ... bucket by CUSTOMER LOCAL calendar date ... Tokyo 11PM UTC → next day ... without hardcoding offsets". Check whether the keyword anchors in that section catch on phrases like "customer local", "per-customer zone", "11PM UTC next day", "tz-naive UTC-stored column", "session-independent".
+- The current "WRONG (session-dependent)" example at L2446-L2447 uses `CAST(occurred_at AS TIMESTAMP WITH TIME ZONE)` as the wrong-shape, NOT bare `occurred_at AT TIME ZONE 'Asia/Tokyo'` — the responder's specific wrong shape (bare AT TIME ZONE with NO disambiguation of column type) is not directly inline-marked.
 
-Nth findability defect of the iter1100→iter1101→iter1102 family: correct content exists in r28 but lives BELOW a visual STOP point (the ROLLUP `COPY THIS` block). Same fix pattern that worked for r16 storage-tiering (TL;DR-hoist + DO-NOT-WRITE defang) and r09 dbt-snapshots (TL;DR three-orthogonal-decisions hoist) applies here: HOIST the surgical worked example into the router's adjacent COPY THIS position, expand keyword anchors at the top of the LEADING CANONICAL block, add natural-engineer-phrasing routing (UNION ALL collapse, two independent dimensions without cross detail). Per [Trace Recurring Folklore to Resource Root Cause] memory-pin — when a responder repeatedly misroutes between operators in the same router despite all three options being documented, the fix is at the router-card prominence layer, not at the content layer.
+### Recommended FIX-A for next iter (LIGHT, additive — do NOT churn):
+
+1. **Add a keyword-magnetic findability sentence at the TOP of the r07 timezone-bucketing block.** Something like: "READ FIRST when asked: bucket UTC timestamps by customer local date, per-customer zone, IANA zone, 11PM UTC → next day, no hardcoded offsets, customer-local calendar day." (mirror the GROUPING SETS L415 keyword-anchor pattern that successfully closed iter1104).
+
+2. **Add a column-type router sentence:** "**FIRST check the column type**: `DESCRIBE` the table. If `timestamp(p) with time zone` → bare `event_ts AT TIME ZONE 'zone'` is correct. If `timestamp(p)` (no tz, Spark-ingested UTC) → MUST use `with_timezone(event_ts, 'UTC') AT TIME ZONE 'zone'` to be session-independent."
+
+3. **Add bare `event_ts AT TIME ZONE 'Asia/Tokyo'` (no `with_timezone`/no two-step) as an explicit defang/WRONG line in the inline-marked WRONG block,** since the responder's specific footgun shape is not currently captured there.
+
+4. **For the "CUSTOMER LOCAL" framing**, ensure the `at_timezone(with_timezone(ts, 'UTC'), customer_zone_column)` worked example (already at r07 L2459+) is cross-referenced from the keyword block at the top of the section — the responder did not surface this even though the question implied per-row customer zone.
+
+### Do NOT touch r28 GROUPING SETS (FIX-A REACHED twice this iter — locked).
+
+### Do NOT touch Q4 (clean canonical retrieval).
+
+### Don't churn / scope guard
+
+The Q3 ask is a real footgun, but it's also borderline: if the engineer's Iceberg column is `timestamp with time zone` (the recommended UTC-normalized form), the responder's answer is correct. Don't escalate to a major rewrite — the LIGHT FIX-A above (4 small additions) should close findability and the responder's specific wrong-shape gap without restructuring the section.
+
+---
+
+## Topic touch map (rubric updates)
+
+- **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL** — Q1+Q2 (GROUPING SETS subtotal-pivot pattern) + Q3 (time-series bucketing by local zone). Mixed: two strong + one partial.
+- **Improving complex SQL performance on Trino with dbt** — Q4 (dbt incremental late-arriving + lookback) + Q1+Q2 (single-query-replaces-N-UNION-ALL is a complex-SQL-perf pattern).
+- **Oracle PL/SQL → dbt/Trino migration** — Q4 (dbt incremental config pattern).
