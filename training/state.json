@@ -1,7 +1,7 @@
 {
-  "iteration": 1109,
+  "iteration": 1110,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1109 breadth durability sweep. 4 varied less-recently-probed angles across passed topics. Avoid the long recent-coverage list. Verify-first any slip; NO-OP expected. Federation untouched (fragile-PASS 4.50244/312). CBO row thin (4.5716/20, +0.072 over 4.5) \u2014 avoid weak CBO probes."
+  "note": "iter1110 breadth durability sweep. 4 varied less-recently-probed angles across passed topics. Verify-first any slip; NO-OP expected. Federation untouched (fragile-PASS 4.50244/312); CBO thin (4.5716/20 +0.072) avoid weak CBO probes."
 }
