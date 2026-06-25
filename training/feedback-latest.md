@@ -1,116 +1,184 @@
-# Judge Feedback — iter1095 (2026-06-25)
+# Judge Feedback — iter1096 (2026-06-26)
 
-**Overall: 4.953 STRONG PASS** (overall average governs; NO per-question veto). Clean sweep; ZERO source-verified defects. **Q1 ROOT-CAUSE FIX-A CONFIRMED REACHING THE RESPONDER CLEANLY.**
+**Overall: 4.844 STRONG PASS** (overall average governs; NO per-question veto). Q1 date_diff FIX-A durability re-probe **PASSED on a SECOND angle** (full-months-active, not age). One real-but-cosmetic Q2 defect (illustrative GROUP BY example would parse-error if copy-pasted). FIX-A REACHING CLEANLY ACROSS TWO INDEPENDENT MONTH/YEAR ANGLES NOW.
 
 Verified BOTH directions vs RAW git-tag 467 source + Joda-Time API + official Trino docs:
-- `DateTimeFunctions.java` (467) `diffDate` → Joda `getDateField(...).getDifferenceAsLong(...)` (state.json note + iter1094 chain)
-- Joda-Time `DateTimeField.getDifferenceAsLong` Javadoc: "Any fractional units are dropped from the result" (re-verified via WebSearch this iter)
-- `r23` L2213-2225 LEADING-CANONICAL AGE block (post-FIX-A): bare `date_diff('year', date_of_birth, current_date)`, worked example "dob 2000-06-15, today 2026-06-14 → 25 (partial 26th year dropped), today 2026-06-15 → 26"
-- `r27` L766-768 MONTHS_BETWEEN mapping (post-FIX-A): "integer count of *complete*, day-aware months — drops the fractional part... NOT a count of boundary crossings"
-- `functions/window.md` (LAG default offset 1, default value NULL)
-- `sql/select.md` UNNEST + CROSS JOIN UNNEST drops NULL/empty arrays
-- WebSearch: Joda-Time `DateTimeField` API (fractional-dropped semantics confirmed verbatim)
+- `DateTimeFunctions.java` (467) `diffDate` → Joda `getDifferenceAsLong` (carried + [Trino date_diff Day-Aware] pin)
+- Joda-Time `DateTimeField.getDifferenceAsLong` Javadoc: "Any fractional units are dropped from the result"
+- `functions/json.md` 467: `json_extract_scalar(json, json_path)` with JSONPath dot notation `$.a.b.c` returns VARCHAR; non-scalar paths → NULL (use `json_extract` for object/array)
+- `functions/window.md` 467: ROW_NUMBER OVER (PARTITION BY ... ORDER BY ...); aggregate function inside window's ORDER BY is allowed when the outer SELECT has the matching GROUP BY (window phase runs AFTER aggregation phase)
+- `functions/aggregate.md` 467: `COUNT(...) FILTER (WHERE predicate)` is standard-SQL filtered aggregate; supported in 467
+- `sql/select.md` 467: no native PIVOT/UNPIVOT keyword; conditional-aggregate is the canonical pivot
+- WebSearch official trino.io docs (json.html, window.html) re-verified this iter
 
 ---
 
-## Q1 — Loyalty: complete years subscribed (Sept-15-2021 vs Mar-3-2021) — 5.00  ← FIX-A REACHED CLEANLY
+## Q1 — Full months active: Feb-3 → May-20 → expect 3 not 4 — 5.00  ← FIX-A DURABILITY CONFIRMED (2nd angle)
 
 - Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
 
-`SELECT customer_id, signup_date, date_diff('year', signup_date, current_date) AS years_subscribed FROM subscriptions;`
+`SELECT date_diff('month', subscription_start, subscription_end) AS months_active;`
 
-**FIX-A confirmation:** the iter1095 root-cause reconciliation of r23 ~L2213 (removed the wrong "year-field subtraction, =26" canonical and the corrupting CASE-subtract-1 idiom) + r27 L732/L739/L768 (removed the "count of month boundaries crossed" narration and the wrong "=2" example) reached the responder cleanly. The responder produced:
+**FIX-A durability:** this is the SECOND independent re-probe of the iter1095 root-cause reconciliation (r23 ~L2213 + r27 L732/L739/L768). iter1095 tested *years* (loyalty); iter1096 tests *months* (subscription tenure), a different unit, different sign of partial period. Both produced the **bare `date_diff(unit, start, end)` with NO CASE adjustment** — exactly the canonical post-FIX-A pattern. The reconciliation holds across units.
 
-1. **Bare `date_diff('year', signup_date, current_date)` with NO CASE adjustment** — exact match to the new canonical. No subtract-1, no boundary correction, no leap-year hand-waving. The single expression IS the answer.
-2. **Day-aware / complete-units narration** — described as "returns complete years, day-aware". Matches the verified Joda contract ("Any fractional units are dropped from the result").
-3. **Correct worked numbers**:
-   - Sept-15-2021 → June-2025 = **3** ("4th anniversary not arrived"). True value: anniversaries 2022/2023/2024 passed, 2025 not yet → 3. ✓
-   - March-3-2021 → June-2025 = **4**. True value: anniversaries 2022/2023/2024/2025 all passed → 4. ✓
-4. **Quietly corrected the engineer's own arithmetic slip** — the engineer stated "2 years" for the Sept-15-2021 case but the true day-aware value is 3 (per judge-prompt instruction). The responder produced 3 (the truth) without echoing the engineer's wrong "2". This is the exact behavior FIX-A was meant to produce: the responder trusts the canonical over an off-by-one user prior.
+**True value verification:**
+- Feb-3 + 1 month = Mar-3 (≤ May-20) ✓ → complete month 1
+- Feb-3 + 2 months = Apr-3 (≤ May-20) ✓ → complete month 2
+- Feb-3 + 3 months = May-3 (≤ May-20) ✓ → complete month 3
+- Feb-3 + 4 months = Jun-3 (> May-20) ✗ → 4th month incomplete, dropped
+- date_diff('month', DATE '2024-02-03', DATE '2024-05-20') = **3** ✓ matches responder
 
-No CASE shenanigans, no "+1 leap-year" folklore, no over-warning. Source-verified clean against RAW 467 `DateTimeFunctions.java` → Joda `yearOfEra().getDifferenceAsLong` (drops fractional). The 1094 regression (boundary-crossing narration, "=2 is what you want") is fully closed.
+**Day-aware narration correct:** responder stated "Trino's date_diff drops the fractional unit — Feb-3 to May-20 is 3 complete months because the 4th anniversary day Jun-3 has not yet been reached by May-20". Verbatim alignment with Joda Javadoc + [Trino date_diff Day-Aware] pin.
 
-## Q2 — LAG(plan_name) for previous plan per user, no self-join — 5.00
+**Engineer expectation alignment:** engineer explicitly asked "will it give 3 not 4?" — responder answered **3 (yes)** with the day-aware justification. The pre-FIX-A wrong canonical would have predicted 4 (Feb→Mar→Apr→May = 4 boundary crossings) — the responder's 3 confirms the wrong canonical is no longer being cited.
 
-- Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
+**Oracle contrast clean:** responder noted Oracle MONTHS_BETWEEN returns a fractional Number (e.g. `MONTHS_BETWEEN('2024-05-20','2024-02-03') ≈ 3.55`) and that Trino's date_diff is the integer/day-aware equivalent — no truncation function wrapping needed. Matches r27 L766-768 reconciled mapping.
 
-`LAG(plan_name) OVER (PARTITION BY user_id ORDER BY event_timestamp) AS previous_plan`. Verified `functions/window.md` (467): `lag(x)` returns the value at the row preceding the current row within the partition; default offset 1, default value NULL. PARTITION BY user_id scopes to per-user history; ORDER BY event_timestamp orders chronologically so the immediately-preceding row is the prior event. First row per user → NULL (no preceding row), correctly noted by the responder — flagging signup events / users with only one row. No self-join needed (the canonical motivation for window functions). Trailing `ORDER BY user_id, event_timestamp` for display readability is harmless.
-
-Plan-change detection follow-on (`WHERE previous_plan IS NOT NULL AND previous_plan <> plan_name`) is the natural next step — responder set up the row shape correctly for it.
-
-## Q3 — UNNEST feature_flags array, distinct users per flag — 4.9375
-
-- Accuracy 5 | Completeness 5 | Clarity 4.75 | Actionability 5
-
-`SELECT flag, COUNT(DISTINCT user_id) AS n_users_with_flag FROM events e CROSS JOIN UNNEST(e.feature_flags) AS t(flag) GROUP BY flag ORDER BY n_users_with_flag DESC;`
-
-Verified `sql/select.md` (467) UNNEST: an array `ARRAY<T>` unnests into a single column of type `T`, so `AS t(flag)` (one alias) is correct. `CROSS JOIN UNNEST(arr)` is the canonical Trino flatten pattern. `COUNT(DISTINCT user_id)` per flag is the right popularity metric (counts unique users not unique events — a user with two events both flagging `dark_mode` counts once for that flag, which is what "popular by user reach" means).
-
-**Correctly flagged caveat:** "CROSS JOIN (not LEFT JOIN) drops NULL/empty arrays" — verified. To preserve users with NULL or empty `feature_flags`, switch to `LEFT JOIN UNNEST(e.feature_flags) AS t(flag) ON true` (the `ON true` is required Trino syntax for LEFT JOIN UNNEST). The responder mentioning this nuance is a strong-signal answer; minor Clarity shave only because the LEFT JOIN UNNEST exact form wasn't spelled out (not penalized as a defect — the engineer can find it from the keyword the responder gave).
-
-No fabricated `unnest_array` / `array_explode` / `flatten` function (the recurring foreign-prior trap); no `WITH ORDINALITY` mis-applied (orthogonal).
-
-## Q4 — Dedup (user_id, event_type, occurred_at) before aggregating — 4.875
-
-- Accuracy 5 | Completeness 4.5 | Clarity 5 | Actionability 5
-
-Primary: inner `SELECT DISTINCT user_id, event_type, occurred_at FROM events` subquery, then GROUP BY + COUNT(*) on top. Alternative: bare `SELECT DISTINCT`. Both correct. "Trino 467 has no DISTINCT ON (Postgres-only)" — VERIFIED true; DISTINCT ON is a Postgres-specific extension, not in Trino 467 SQL grammar. Useful defensive note — engineers migrating from Postgres routinely try `SELECT DISTINCT ON (user_id) ...` and hit parse errors.
-
-Pattern is the canonical Trino approach: dedup-then-aggregate via a subquery is exactly what the engineer asked for and avoids inflated counts from the 2-3x pipeline double-write. SELECT DISTINCT and GROUP BY-all-columns are semantically identical in Trino (the optimizer plans them the same way) — the responder's framing of "DISTINCT in subquery, then aggregate" is correct and clean.
-
-**Minor completeness gap (not penalized as defect):** the responder didn't mention the `ROW_NUMBER() OVER (PARTITION BY user_id, event_type, occurred_at ORDER BY <tiebreaker>) = 1` alternative, which becomes "better than SELECT DISTINCT" only when there ARE other columns in the row that differ between duplicates and you need to keep ONE specific row (e.g., the latest ingestion). For the engineer's stated case — pure 2-3x exact-triple duplicates — SELECT DISTINCT (or GROUP BY all cols) is genuinely the right answer and ROW_NUMBER would be over-engineering. Half-point completeness shave is for not making this scope-of-use distinction explicit, NOT for an error.
-
-No false-claim that DISTINCT is slow / forbidden / "use GROUP BY only" folklore (the Postgres folklore trap); no `OVER(PARTITION BY ... QUALIFY ...)` (QUALIFY is not in Trino 467).
+No CASE/subtract-1/boundary-correction noise. No fabricated alternative. Clean.
 
 ---
 
-## Scores
+## Q2 — Pull nested JSON field metadata.device.os_version — 4.375
+
+- Accuracy 4 | Completeness 4.5 | Clarity 4.75 | Actionability 4.25
+
+`json_extract_scalar(metadata, '$.device.os_version') AS os_version`
+
+**Core function recommendation CORRECT:**
+- `json_extract_scalar(json, json_path)` returns VARCHAR — VERIFIED `functions/json.md` 467
+- JSONPath dot notation `$.device.os_version` for nested traversal — VERIFIED (WebSearch official docs: `json_extract_scalar(json, '$.store.book[0].author')` style)
+- "Shorter than nested calls" — TRUE; one call vs `json_extract_scalar(json_extract_scalar(json_extract(metadata,'$.device'),'$.os_version'),...)` chain
+- Scalar-vs-object caveat correct: `json_extract_scalar` on a non-scalar returns NULL; use `json_extract` then chain for nested objects
+
+**REAL DEFECT (Accuracy shave to 4) — illustrative GROUP BY example is syntactically broken:**
+
+The responder's example query `SELECT event_id, json_extract_scalar(metadata, '$.device.os_version') AS os_version FROM events GROUP BY os_version` is a **parse-time error** in Trino 467. `event_id` is in the SELECT but is neither aggregated nor in the GROUP BY → Trino throws `Column must be an aggregate expression or appear in GROUP BY clause`. If the engineer copy-pastes the example for the "group by extracted field" use-case the engineer asked about, the query fails before returning a row.
+
+**Verdict on judge-prompt's "real defect vs cosmetic" question: REAL but LOW-IMPACT.**
+- It's not the headline answer (the function recommendation is the headline and is correct).
+- It IS a copy-paste-fail SQL snippet — same family as the [Responder Broken Secondary Alternative] pin (e.g. iter1013 ORDER-BY-ungrouped).
+- The fix the engineer would discover in seconds (drop `event_id` from SELECT, or aggregate it with `array_agg`, or GROUP BY both `os_version` and `event_id` — depending on intent).
+- Scored as a moderate Accuracy shave (4 not 3), not a per-question fail (no per-question veto regardless).
+
+**No resource fix needed.** This is a one-off responder padding pattern (the broken-secondary family from the pin); base resources for json_extract_scalar are correct. Per pin guidance: "scope each as per-instance one-off re-probe NOT a resource defect, don't churn".
+
+---
+
+## Q3 — Top 5 customers per pricing plan by 90-day spend — 5.00
+
+- Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
+
+```sql
+WITH plan_spend AS (
+  SELECT plan, customer_id,
+         SUM(amount) AS total_spend,
+         ROW_NUMBER() OVER (PARTITION BY plan ORDER BY SUM(amount) DESC) AS rn
+  FROM payments
+  WHERE event_date >= CURRENT_DATE - INTERVAL '90' DAY
+  GROUP BY plan, customer_id
+)
+SELECT plan, customer_id, total_spend
+FROM plan_spend
+WHERE rn <= 5;
+```
+
+**All four critical pieces correct:**
+1. **Aggregate-inside-window-ORDER-BY pattern** — `ROW_NUMBER() OVER (PARTITION BY plan ORDER BY SUM(amount) DESC)` with GROUP BY plan, customer_id at the same SELECT level is VALID Trino 467 SQL. Window functions run AFTER GROUP BY aggregation in the logical execution order, so `SUM(amount)` inside `OVER ORDER BY` is resolved against the grouped row. Re-verified via WebSearch window.html. No defect.
+2. **Outer WHERE rn <= 5** — subquery/CTE wrap is REQUIRED in Trino because window functions cannot appear directly in WHERE, and Trino 467 has NO QUALIFY clause (matches the [Trino No QUALIFY] family pin context). Responder correctly stated this.
+3. **`INTERVAL '90' DAY`** — valid Trino 467 syntax (DAY is one of the supported interval qualifiers per [Trino INTERVAL Qualifiers] pin — YEAR/MONTH/DAY/HOUR/MINUTE/SECOND only; no QUARTER/WEEK). `CURRENT_DATE - INTERVAL '90' DAY` returns a DATE. Clean.
+4. **PARTITION BY plan + ORDER BY SUM(amount) DESC + rn <= 5** correctly implements top-N-per-group (vs the engineer's naive `LIMIT 5` after `ORDER BY total_spend` which gives top 5 globally, not per-plan — responder explicitly diagnosed this).
+
+No per-customer non-determinism risk worth flagging (ties on SUM(amount) within a plan can change which 5 customers are picked across re-runs; ROW_NUMBER vs DENSE_RANK trade-off not asked). No defects.
+
+---
+
+## Q4 — Pivot to one row per user with per-event-type counts — 5.00
+
+- Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
+
+```sql
+SELECT user_id,
+       COUNT(*) FILTER (WHERE event_type = 'login')  AS logins,
+       COUNT(*) FILTER (WHERE event_type = 'export') AS exports,
+       COUNT(*) FILTER (WHERE event_type = 'invite') AS invites
+FROM events
+GROUP BY user_id;
+```
+
+**All correct:**
+- `COUNT(*) FILTER (WHERE predicate)` — VERIFIED Trino 467 aggregate.html supports standard-SQL FILTER clause on aggregate functions; counts rows matching predicate per group.
+- One pass over `events`, no self-joins (directly answers engineer's "without multiple self-joins" ask).
+- `SUM(CASE WHEN event_type='login' THEN 1 ELSE 0 END)` alternative also correct and equivalent (slightly more verbose, same plan after Trino's optimizer rewrites).
+- "No native PIVOT keyword in Trino" — TRUE; Trino 467 has no PIVOT/UNPIVOT (not in `sql/select.md` grammar); conditional-aggregate IS the canonical Trino pivot pattern.
+
+NULL handling is correct: `COUNT(*) FILTER` returns 0 (not NULL) for users with no events of a given type, because the outer COUNT runs on a (possibly empty) filtered set per group — exactly what the engineer wants for a per-user dashboard.
+
+No defects. No fabricated alternative. No over-warning. Clean.
+
+---
+
+## Score table
 
 | Q | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|
-| Q1 date_diff complete years loyalty | 5 | 5 | 5 | 5 | 5.000 |
-| Q2 LAG previous plan per user | 5 | 5 | 5 | 5 | 5.000 |
-| Q3 CROSS JOIN UNNEST array | 5 | 5 | 4.75 | 5 | 4.9375 |
-| Q4 dedup SELECT DISTINCT subquery | 5 | 4.5 | 5 | 5 | 4.875 |
+| Q1 — full months active (FIX-A 2nd re-probe) | 5.00 | 5.00 | 5.00 | 5.00 | **5.000** |
+| Q2 — json_extract_scalar nested path | 4.00 | 4.50 | 4.75 | 4.25 | **4.375** |
+| Q3 — top-N per group ROW_NUMBER | 5.00 | 5.00 | 5.00 | 5.00 | **5.000** |
+| Q4 — pivot via FILTER | 5.00 | 5.00 | 5.00 | 5.00 | **5.000** |
 
-**Overall average = (5.000 + 5.000 + 4.9375 + 4.875) / 4 = 4.953 → STRONG PASS** (+1.453 above 3.5 threshold)
-
-Source-verified defects: **NONE.**
+**Overall average: (5.000 + 4.375 + 5.000 + 5.000) / 4 = 4.844 → STRONG PASS** (margin +1.344 above 3.5 threshold)
 
 ---
 
-## FIX-A Verdict
+## Source-verified defects this iter
 
-The iter1095 root-cause reconciliation is **CONFIRMED REACHING THE RESPONDER CLEANLY** on the first re-probe. Q1 produced:
-- Bare `date_diff('year', ...)` with no CASE adjustment (matches r23 L2213 post-FIX-A canonical)
-- Day-aware/complete-units narration (no "boundary crossing" folklore)
-- Correct worked numbers (3 and 4), and quietly corrected the engineer's "2" arithmetic slip without echoing it
+1. **Q2 illustrative SELECT not in GROUP BY** — `SELECT event_id, json_extract_scalar(...) AS os_version FROM events GROUP BY os_version` is a Trino parse-time error (column must be aggregated or grouped). REAL defect (would fail if copied), LOW IMPACT (not the headline recommendation; engineer asked for a "shorter path" function recommendation, and the function pick is correct). Matches the [Responder Broken Secondary Alternative] pin family — one-off responder padding, no resource fix.
 
-The two contradicting source-wrong canonicals (r23 ~L2213 pre-fix "=26 with subtract-1 CASE" and r27 L732/L739/L768 "boundary crossings, =2") are now both reconciled-in-place with day-aware/complete-units narration. No residual folklore artifact in the responder's Q1.
-
-This is a clean close on the iter1094 Q2 narration defect family AND the iter641-pinned AGE under-counting defect (the subtract-1 CASE that ACTIVELY under-counted age by 1). Two long-standing source-wrong pins removed in one root-cause sweep — matches the [Trace Recurring Folklore to Resource Root Cause] pin discipline.
+ZERO accuracy defects on Q1/Q3/Q4. ZERO fabricated functions. ZERO QUALIFY/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning slips.
 
 ---
 
-## Topic checklist updates
+## FIX-A durability ruling — date_diff day-aware
 
-All four questions hit topics already at PASSED status with thick margins. Updates:
+**FIX-A REACHING CLEANLY ACROSS TWO INDEPENDENT ANGLES.**
 
-- **SQL query best practices for OLAP** (Q1 date_diff, Q3 UNNEST, Q4 SELECT DISTINCT dedup) — incremental reinforcement, already PASSED at 4.4600 / 153 Qs. New Qs touched: +3.
-- **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL** (Q1 tenure/loyalty time-series, Q2 LAG plan-change cohort) — already PASSED at 4.3567 / 47 Qs. New Qs touched: +2.
+| Iter | Angle | Unit | Partial-period direction | Responder bare-form? | Numbers correct? | Notes |
+|---|---|---|---|---|---|---|
+| iter1095 | Loyalty years (signup → today) | year | partial 26th/4th year DROPPED | YES (no CASE) | YES (3, 4) | Quietly corrected engineer's "2 years" prior |
+| iter1096 | Subscription full-months (start → end) | month | partial May DROPPED (May-20 < Jun-3) | YES (no CASE) | YES (3) | Matched engineer's stated expectation 3 not 4 |
 
-No topic state-flip; no near-threshold topic touched; federation row unchanged (no federation probe this iter).
+Both probes confirm:
+- The iter1095 r23 ~L2213 reconcile (removed wrong "year-field subtraction =26 + CASE-subtract-1" canonical) holds.
+- The iter1095 r27 L732/L739/L768 reconcile (removed "boundary crossings, =2" narration) holds.
+- The responder learns the day-aware/complete-units contract from the new canonicals, not from boundary-crossing folklore.
+- The reconciliation generalizes across UNITS (year + month tested; day/hour/quarter/week not yet re-probed but Joda contract is uniform).
+
+**FIX-A bake complete on month/year angles.** Federation (lone NEEDS-WORK row, 4.4994 / 310) is now safe to re-probe in iter1097 per state.json plan.
 
 ---
 
 ## Teacher guidance
 
-**RECOMMENDATION: DEFAULT NO-OP.** Margin +1.453 above threshold, zero source-verified defects, FIX-A confirmed reaching cleanly. Do NOT churn the r23 / r27 date_diff canonical further — the reconciliation landed. Do NOT add additional defensive worked examples for date_diff (the existing AGE-canonical + Jan-15→Mar-10 month example covers both year and month axes).
+**NO resource edit recommended this iter.**
 
-**Do NOT bump state.json** (already at 1095). **Do NOT add a federation probe** — federation is still the only NEEDS-WORK row at 4.4994 / 310 Qs, but breadth-probing it on a clean iter risks re-introducing churn on a near-threshold topic right after a major FIX-A landed; let the FIX-A bake one more sweep before re-probing federation.
+Rationale:
+1. The headline Q1 FIX-A is durable across two independent angles. No further reconciliation needed for date_diff day-aware on month/year.
+2. Q2 illustrative-GROUP-BY defect is per-instance responder padding (broken-secondary family per pin), NOT a resource gap. The `json_extract_scalar` resource canonical is correct; the responder added a broken example on its own.
+3. Q3/Q4 are clean canonical patterns; resources already strong.
+4. Per [Synthesis Ceiling — Stop Churning] pin: after a FIX-A confirms on multiple re-probes, return to breadth, do not add defang for one-off responder padding.
 
-**Re-probe priority for next sweep (informational only, not required):**
-- One more date_diff angle from a 3rd phrasing (e.g., "months since first purchase" or "weeks of inactivity") to confirm FIX-A holds across phrasings, not just loyalty/age.
-- The recurring [Responder Broken Secondary Alternative] pattern did NOT fire this iter — confirm it stays quiet across at least one more sweep before considering it dormant.
+**For iter1097 plan:**
+- The federation row (4.4994 / 310, lone NEEDS-WORK) is the only path-to-PASSED-everywhere remaining. Suggested next iter: a bulletproofed federation probe (per [All Topics Passed] note + iter1095 deferral). Pick angles the resource explicitly covers (predicate pushdown on JDBC `catalog.schema.table`, cross-catalog join broadcast, when-to-federate-vs-ingest); avoid ILIKE-pushdown angle (hard-locked per [Trino No ILIKE] pin).
+- No `prod_info.md` mismatch this iter — all four answers use Trino 467 with Iceberg connector, MinIO/Hive-Metastore agnostic; pure SQL dialect questions.
 
-**No commit needed beyond the iter1095 FIX-A already committed.** No DO-NOT-WRITE additions; the post-FIX-A canonicals are the copy-attractive forms now.
+**Recommendation: DEFAULT NO-OP** (margin +1.344 with clean Q1 FIX-A confirm and only a cosmetic Q2 cosmetic). NO state.json bump (already 1096). NO commit beyond rubric + feedback. Federation deferred to iter1097.
+
+---
+
+## Source citations
+
+- [Trino 467 JSON functions](https://trino.io/docs/current/functions/json.html)
+- [Trino 467 Window functions](https://trino.io/docs/current/functions/window.html)
+- [Trino 467 Aggregate functions](https://trino.io/docs/current/functions/aggregate.html)
+- [Trino 467 Date and time functions](https://trino.io/docs/current/functions/datetime.html)
+- [Joda-Time DateTimeField API (getDifferenceAsLong "fractional units dropped")](https://joda-time.sourceforge.net/apidocs/org/joda/time/DateTimeField.html)

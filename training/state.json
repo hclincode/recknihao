@@ -1,7 +1,7 @@
 {
-  "iteration": 1095,
+  "iteration": 1096,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1095 MAJOR ROOT-CAUSE FIX-A (reconcile-in-place): traced the recurring iter1094 Q2 date_diff narration defect (responder said 'counts month boundaries/transitions', claimed 2 for Jan15->Mar10) to TWO source-wrong hard-pinned resources and corrected both. (1) r23 ~L2213 AGE canonical (pinned since iter641) FALSELY claimed date_diff('year',2000-06-15,2026-06-14)=26 (year-field subtraction) and taught a CASE-subtract-1 idiom that ACTIVELY UNDER-COUNTS age by 1 (real value is 25, day-aware) -> rewrote: date_diff('year',dob,current_date) IS completed-years age directly (no CASE), added month worked example date_diff('month','2024-01-15','2024-03-10')=1, defanged the subtract-1 idiom as a DO-NOT-WRITE. (2) r27 L732/L739/L768 'count of month boundaries crossed' + wrong example '=2' -> corrected to day-aware complete-units, example date_diff('month','2026-01-15','2026-03-10')=1. VERIFIED RAW Trino 467 DateTimeFunctions.java diffDate delegates entirely to Joda getDifferenceAsLong ('fractional units are dropped') + Joda Javadoc + iter1094 judge + [Trino date_diff Day-Aware] pin. Matches [Trace Recurring Folklore to Resource Root Cause]. r13 L5761 (DST/timezone) untouched (separate, correct). Lock inventory otherwise intact."
+  "note": "iter1096 durability breadth sweep (no federation per iter1095 judge: let date_diff FIX-A bake one more sweep). Re-probe a SECOND day-aware date_diff angle (full-months-active) to confirm r23/r27 reconcile holds, plus breadth. Federation (lone NEEDS-WORK, 4.49944/310) deferred to iter1097."
 }
