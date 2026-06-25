@@ -1,7 +1,7 @@
 {
-  "iteration": 1096,
+  "iteration": 1097,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1096 durability breadth sweep (no federation per iter1095 judge: let date_diff FIX-A bake one more sweep). Re-probe a SECOND day-aware date_diff angle (full-months-active) to confirm r23/r27 reconcile holds, plus breadth. Federation (lone NEEDS-WORK, 4.49944/310) deferred to iter1097."
+  "note": "iter1097 FEDERATION RE-PROBE (lone NEEDS-WORK 4.49944/310, ~at 4.5 bar; date_diff FIX-A bake complete per iter1096 judge). 2 federation Qs on r22 SAFEST conceptual angles (when-to-federate-vs-ingest \u00a71/\u00a74; predicate-pushdown concept + EXPLAIN verify \u00a73 \u00a73.4; AVOID ILIKE/string-range/TopN traps) + 2 breadth. Two clean 5.0s -> federation avg crosses 4.5 (=(4.49944*310+10)/312=4.5027). r22 \u00a713 hard-locked, do not edit."
 }
