@@ -81,7 +81,7 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 > | Signature | Diagnosis |
 > |---|---|
 > | `TableScan` has a **predicate inside the connector** (`constraint = day(occurred_at) IN ...`) → pruning ON | Pruning is working; root cause is something else (skew, joins, file count). Go to Check 4. |
-> | `TableScan` has **NO partition predicate inside the connector** + a `Filter` node ABOVE the TableScan applying the date predicate | **Pruning broke.** Predicate shape changed (likely `WHERE date(occurred_at)='...'` or `WHERE CAST(occurred_at AS DATE)='...'` — function-wrapped predicate that the optimizer cannot push to partition layout). Fix by rewriting to a raw range comparison: `WHERE occurred_at >= TIMESTAMP '2026-05-01 00:00:00' AND occurred_at < TIMESTAMP '2026-05-02 00:00:00'`. See Step 4 below for the full predicate-shape rules. |
+> | `TableScan` has **NO partition predicate inside the connector** + a `Filter` node ABOVE the TableScan applying the predicate | **Pruning broke.** The predicate now wraps the partition/sort column in an *opaque, non-invertible* expression the optimizer cannot rewrite into a bare-column range — e.g. `WHERE LOWER(tenant_id)='acme'` on a VARCHAR partition column, or a `regexp_like(...)` / JSON-extraction / UDF / `SUBSTR(col,...)` / non-monotonic-arithmetic wrap. **NOTE — the common *temporal* wraps do NOT break pruning in Trino 467:** `WHERE date(occurred_at)='...'`, `CAST(occurred_at AS DATE)='...'`, `date_trunc('day',occurred_at)='...'`, `year(occurred_at)=...` all still prune, because the default-on `Unwrap{Cast,DateTrunc,Year}InComparison` rules rewrite them into a bare-column range automatically (verified `UnwrapCastInComparison.java`@467; see [r07 §1](07-analytical-query-patterns.md#trino-467-reality)). Fix by removing the opaque wrap — compare the bare column directly (`WHERE tenant_id='acme'`) or pre-compute the value at ingest. See Step 4 below for the full predicate-shape rules. |
 > | `TableScan` shows `inputRows` in the **billions** when the dashboard should only need one day | Same root cause as the row above — predicate didn't push. Same fix. |
 >
 > ### Check 4 (≈15s): Is one fragment doing all the work? — `EXPLAIN ANALYZE` and look at per-fragment time
@@ -110,9 +110,9 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 > >
 > > **Check 2**: `SELECT COUNT(*) FROM iceberg.analytics.user_events` returns in 0.4s. Fast. Not metadata bloat. Continue.
 > >
-> > **Check 3**: `EXPLAIN (TYPE DISTRIBUTED)` shows TableScan with `inputRows = 1.4B` and a `Filter` node above it carrying `date(occurred_at) = DATE '2026-05-22'`. **Pruning broke.** The dashboard's BI tool got upgraded last weekend and now wraps the date predicate in `date(...)`. Old shape was `occurred_at >= TIMESTAMP '2026-05-22 00:00:00' AND occurred_at < TIMESTAMP '2026-05-23 00:00:00'`.
+> > **Check 3**: `EXPLAIN (TYPE DISTRIBUTED)` shows TableScan with `inputRows = 1.4B` and a `Filter` node above it carrying `LOWER(tenant_id) = 'acme'`. **Pruning broke.** The dashboard's BI tool got upgraded last weekend and now lower-cases the tenant filter for "case-insensitive matching" — but `tenant_id` is a VARCHAR partition column and `LOWER()` is non-invertible, so the optimizer cannot rewrite it into a bare-column constraint and every partition is scanned. Old shape was the bare `tenant_id = 'acme'`. (Had the BI tool instead wrapped a *date* column in `date()`/`CAST AS DATE`, pruning would have been **fine** — Trino 467 unwraps those; the `LOWER()` on a string column is the genuine killer.)
 > >
-> > **Fix**: edit the dashboard SQL to remove the `date()` wrap and use the raw range comparison. Re-run: query back to 2s. **Total triage time: ~60 seconds.**
+> > **Fix**: edit the dashboard SQL to drop the `LOWER()` wrap and compare the bare partition column (`WHERE tenant_id = 'acme'`); if case-insensitive matching is genuinely needed, fold `tenant_id` to lower-case **at ingest** so the stored partition values are already normalized. Re-run: query back to 2s. **Total triage time: ~60 seconds.**
 >
 > ### DO-NOT-WRITE — banned forms in the oncall checklist (these are the fabrications the responder tends to invent under pressure)
 >
@@ -937,7 +937,7 @@ partitioning = ARRAY['day(event_date)', 'tenant_id']
 | `WHERE feature_name = 'invite'` (non-partition column) | Full table scan |
 | No WHERE clause | Full table scan |
 
-**Common regression trigger**: a WHERE clause that previously used a partition column gets changed to use a derived value. Example: `WHERE DATE(event_time) = CURRENT_DATE` may not prune as well as `WHERE event_date = CURRENT_DATE` depending on how the column is typed. Check the exact column used in the filter against the partition spec.
+**Common regression trigger**: a WHERE clause that previously filtered the **partition column** gets changed to filter a **different (derived or non-partition) column**. Example: if the table is partitioned on `event_date` but the filter switches to `WHERE DATE(event_time) = CURRENT_DATE` (a *different* column, `event_time`), the predicate constrains `event_time`, not the `event_date` partition, so the `event_date` partitions are not pruned. The culprit is the **column mismatch**, NOT the `DATE()` wrap itself — wrapping the *same* partition column in `DATE()`/`CAST AS DATE`/`date_trunc('day',…)`/`year(…)` still prunes in Trino 467 (the Unwrap*InComparison rules; see [r07 §1](07-analytical-query-patterns.md#trino-467-reality)). Check that the filtered column matches the partition spec, and that any wrap on it is one of the auto-unwrapped temporal forms (not an opaque `LOWER`/`SUBSTR`/UDF/JSON wrap).
 
 ---
 

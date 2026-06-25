@@ -1,7 +1,7 @@
 {
-  "iteration": 1097,
+  "iteration": 1098,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1097 FEDERATION RE-PROBE (lone NEEDS-WORK 4.49944/310, ~at 4.5 bar; date_diff FIX-A bake complete per iter1096 judge). 2 federation Qs on r22 SAFEST conceptual angles (when-to-federate-vs-ingest \u00a71/\u00a74; predicate-pushdown concept + EXPLAIN verify \u00a73 \u00a73.4; AVOID ILIKE/string-range/TopN traps) + 2 breadth. Two clean 5.0s -> federation avg crosses 4.5 (=(4.49944*310+10)/312=4.5027). r22 \u00a713 hard-locked, do not edit."
+  "note": "iter1098 thin-margin durability sweep -> 4.625 PASS + RESOURCE ROOT-CAUSE FIX-A. Q1 dbt-contracts 5.0 / Q2 cost 4.75 / Q3 Oracle-ROWNUM-pagination 5.0 (OFFSET-before-LIMIT correct) all clean. Q4 perf-regression 3.75: verify-first flag caught a SOURCE-WRONG claim in r18 (Check 3 table L84 + worked example L113-115) that WHERE date(occurred_at)=DATE x BREAKS Iceberg partition pruning -> FALSE; UnwrapCastInComparison@467 unwraps it and it STILL prunes (judge WebFetched the rule source; contradicts r07 \u00a71 truth-source). FIX-A: rewrote r18 L84 + worked example to use a GENUINELY-non-prunable example (LOWER(tenant_id) on VARCHAR partition col) + explicit NOTE that temporal date()/CAST/date_trunc/year wraps DO prune, cross-ref r07 \u00a71; also fixed r18 L940 (column-mismatch not function-wrap) + r28 L11 (opaque-only). Matches [Trino Unwraps Temporal Predicates] pin. Re-probe Q4 next sweep with a NON-date()-wrap angle to confirm FIX-A reaches. Federation untouched (fragile-PASS 4.50244/312)."
 }

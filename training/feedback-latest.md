@@ -1,196 +1,157 @@
-# Judge Feedback — iter1097 (2026-06-26)
+# Judge Feedback — iter1098 (2026-06-26)
 
-**Overall: 4.969 STRONG PASS** (overall average governs; NO per-question veto). **FEDERATION RE-PROBE: Q1 + Q2 BOTH CLEAN — federation topic row CROSSES 4.5 (4.4994 → 4.5024 over 312 datapoints, lone NEEDS-WORK row now PASSED).** Q3 + Q4 breadth probes also clean. ZERO source-verified defects this iter.
-
-Verified BOTH directions vs official Trino docs (current = 481, principles consistent with 467) + RAW git-tag 467 source + WebSearch:
-- `optimizer/pushdown.md` — pushed predicates: TableScan shows `constraint on [col]`; not pushed: separate ScanFilterProject node above TableScan
-- `connector/postgresql.md` — PostgreSQL connector pushes equality + range on numeric/date/UUID/temporal; equality + inequality (`=`, `!=`, IN) on VARCHAR/CHAR; does NOT push range predicates (`>`, `<`, `BETWEEN`) on string types by default (collation mismatch); experimental opt-in `postgresql.experimental.enable-string-pushdown-with-collate` exists
-- `functions/aggregate.md` 467 — `max_by(x, y)` returns x associated with max y; n-form `max_by(x, y, n)` for top-n
-- `functions/window.md` 467 — `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)` canonical pick-latest
-- `functions/json.md` 467 — `json_extract_scalar(json, json_path)` returns VARCHAR; JSONPath dot notation `$.a.b.c` for nested
-- `sql/select.md` 467 — plain GROUP BY accepts EXPRESSIONS (only GROUPING SETS/CUBE/ROLLUP are column-names-only per [Trino Complex Grouping Column-Names-Only] pin); window funcs can't appear in WHERE → CTE/subquery wrap required; Trino 467 has NO QUALIFY clause
+**Iteration**: 1098
+**Phase**: extended (passed:true, post-final)
+**Mode**: thin-margin durability sweep, NO federation
+**Overall Average**: 4.625 — **PASS** (overall avg governs; no per-question veto)
 
 ---
 
-## Q1 — Federate-live vs copy/ingest Postgres customer dimension into Iceberg — 4.9375  ← FEDERATION
+## Per-question scoring
 
-- Accuracy 5 | Completeness 4.75 | Clarity 5 | Actionability 5
+### Q1 — dbt model contracts on Trino/Iceberg: setup + are constraints enforced at build time?
 
-**Recommendation:** copy the small slowly-changing customer dimension into Iceberg via nightly Spark incremental append using `updated_at` as the watermark. Use live federation only when the dimension changes multiple times per minute and reports need true real-time.
-
-**Trade-offs cited (all VERIFIED against official Trino federation docs):**
-- **Federation HURTS when:** every report hits production Postgres (no caching, no warm cache, runs on the OLTP system competing with app workload) — TRUE; federation pushes a query to Postgres and waits for it to scan + filter + return on every Trino query.
-- **Federation HURTS when:** the customer rows have to cross the network from Postgres → Trino workers for the join. Without aggressive predicate pushdown, the JDBC connector pulls more rows than necessary, marshals them over the wire, and joins them broadcast/distributed-style at Trino workers — strictly slower than reading already-laid-out Iceberg files from MinIO.
-- **Ingest HURTS when:** dimension changes frequently and analytics must be true real-time (the staleness budget is below the refresh cadence) — TRUE; the heuristic "leave live only if it changes multiple times/minute" is reasonable for a SaaS customer-dimension shape.
-- **Why nightly Spark incremental:** small slowly-changing dim, low row churn, daily staleness budget acceptable for most BI/reporting use; matches the production stack (Spark + Iceberg 1.5.2 + Hive Metastore) per `prod_info.md`.
-
-**Production-stack fit:** clean. Matches the on-prem k8s Trino-467 + Spark-Iceberg pattern in `prod_info.md`. Spark incremental ingest is the documented ingest path; using `updated_at` is the canonical SaaS dim CDC watermark.
-
-**Minor Completeness shave (4.75 not 5):** the answer doesn't explicitly call out that broadcast-join-across-catalogs (Trino broadcasts the smaller side; if the Postgres-side filter doesn't push down, broadcasting an unfiltered dim is the actual cost driver), nor that the federation path can WORK acceptably when the dim is tiny + cached + predicates push (the answer leans hard toward "always copy"). Engineer would likely never regret the copy-path recommendation in this scenario, so the shave is small.
-
-**No federation pitfalls violated:** no claim of ILIKE pushdown (matches [Trino No ILIKE] pin), no claim of cross-catalog ACID, no claim that federation gets Iceberg's partition pruning over Postgres rows. Clean.
-
----
-
-## Q2 — Does Trino push Postgres-side WHERE down? How to check? — 5.000  ← FEDERATION
-
-- Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
-
-**Answer:** It depends on the type and operator; verify with EXPLAIN.
-
-| Predicate | Pushed? | Verified |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| `created_at >= '2024-01-01'` (date range) | YES | range pushdown on temporal types per connector docs |
-| `status = 'active'` (VARCHAR equality) | YES | equality on string types per connector docs |
-| `status IN ('a','b')` (IN-list on VARCHAR) | YES | IN-list = equality class per connector docs |
-| `name > 'CANADA'` (VARCHAR range) | NO | range on CHAR/VARCHAR not pushed by default (collation) |
-| `name BETWEEN 'A' AND 'C'` (VARCHAR range) | NO | same — collation mismatch between Trino UTF-8 and Postgres column collation |
+| Technical accuracy | 5 | Build-time preflight semantics correct (dbt validates projected column shape vs YAML before DDL/DML hits Trino; build fails on mismatch, target table never touched). Runtime enforcement matrix correct: `not_null` runtime-enforced via Iceberg `NOT NULL` column constraint on CREATE TABLE; `primary_key`/`unique`/`foreign_key` definable-but-not-enforced (metadata-only, pair with dbt tests). "Trino itself doesn't know contracts exist" framing accurate. Verified vs dbt-trino constraints docs + Iceberg column-constraint behavior in 467. |
+| Beginner clarity | 5 | Walks YAML setup, build-time check, runtime check, what-to-pair-with-tests. Zero unexplained jargon. |
+| Practical applicability | 5 | Engineer can copy the YAML, run `dbt build`, expect the exact failure modes described. |
+| Completeness | 5 | Covers setup AND the "are constraints actually enforced at build time" question both directly. |
+| **Q1 average** | **5.00** | |
 
-ALL FIVE rows above match the responder's claims directly and match the official `postgresql.md` and `pushdown.md` docs.
+### Q2 — lakehouse cost: small files vs too many partitions — what drives cost, what to look at first?
 
-**Compound predicate `status='active' AND created_at >= '2024-01-01'`:** BOTH legs push down individually, so the compound AND pushes as a single combined constraint into the JDBC TableScan handle — the Postgres-side query Trino issues will include the WHERE clause and Postgres returns only the matching rows. VERIFIED via WebSearch.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5 | 4-step ordered diagnosis. (1) Snapshot retention: `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` — VERIFIED 467 syntax + min-retention default. (2) Small files: `EXECUTE optimize(file_size_threshold => '128MB')` — VERIFIED 467 `optimize` accepts ONLY `file_size_threshold` parameter. (3) Position-delete residue: claim "Trino 467 cannot rewrite position deletes, must run Spark `rewrite_position_delete_files`" — VERIFIED 467 connector EXECUTE registry is `optimize` / `expire_snapshots` / `remove_orphan_files` / `drop_extended_stats` only; NO `rewrite_position_delete_files`. (4) Orphan files via Spark `remove_orphan_files`. `$snapshots` / `$files` metadata-table column references (content=0 data, content=1 position-delete) accurate. |
+| Beginner clarity | 5 | Each step has a "look-at" query + "fix" SQL. Clear thresholds. |
+| Practical applicability | 5 | Engineer can paste each diagnostic query and each remediation SQL. |
+| Completeness | 4 | Slight shave: the question explicitly asks about "small files vs too many partitions" — the **too-many-partitions** angle (over-partitioning → manifest list growth → planning time + per-partition file-header overhead → query-cost as well as storage-cost) is not directly addressed; responder treats cost = storage only. Also missed that Trino 467 ALSO has native `EXECUTE remove_orphan_files` (since release 411) — recommending Spark for step 4 is not wrong but misses the Trino-native form. |
+| **Q2 average** | **4.75** | |
 
-**EXPLAIN diagnostic — both directions VERIFIED against official `pushdown.md`:**
-- **Pushed:** `EXPLAIN (TYPE DISTRIBUTED) SELECT ...` shows the predicate inside the `TableScan` node printout — `TableScan[table = postgresql:..., constraint on [created_at, status], ...]`. NO separate `ScanFilterProject` / `FilterNode` above the TableScan for that predicate.
-- **Not pushed:** the same EXPLAIN shows a `ScanFilterProject` / `FilterNode` node ABOVE the `TableScan`, with the predicate as `filterPredicate=...`. The connector pulled rows and Trino filtered them locally.
+### Q3 — Oracle ROWNUM pagination → correct Trino 467 equivalent + gotchas
 
-Direct quote from official `pushdown.md`: *"If predicate pushdown for a specific clause is successful, the EXPLAIN plan for the query does not include a ScanFilterProject operation for that clause."* — verbatim match for the responder's framing.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5 | Oracle ROWNUM-is-assigned-BEFORE-ORDER-BY gotcha correct (classic Oracle 11g top-N footgun requiring subquery wrap or 12c+ FETCH FIRST). Trino `ORDER BY ... LIMIT N` applies after ORDER BY at the logical layer — correct. Pagination `ORDER BY ... OFFSET 50 LIMIT 50` with explicit "DO NOT write `LIMIT 50 OFFSET 50` — Trino requires OFFSET first" — VERIFIED against [Trino OFFSET Before LIMIT] pin (Trino 467 grammar order is ORDER BY → OFFSET → LIMIT/FETCH; the Postgres/MySQL `LIMIT n OFFSET m` order is a PARSE error in 467). Keyset pagination as deep-page alternative is sound advice. |
+| Beginner clarity | 5 | Clean ROWNUM vs LIMIT contrast; explicit DO-NOT-WRITE band; keyset pattern shown. |
+| Practical applicability | 5 | Engineer knows the rewrite, the syntactic trap, and when to escalate to keyset. |
+| Completeness | 5 | Migration semantics + pagination + deep-page tradeoff — all three angles addressed. |
+| **Q3 average** | **5.00** | |
 
-**Experimental opt-in (omitted but acceptable):** `postgresql.experimental.enable-string-pushdown-with-collate` catalog property (or session property `enable_string_pushdown_with_collate`) lets you push VARCHAR ranges when you know the Postgres collation matches. Not mentioned by responder; not penalized — it's experimental/off-by-default and the engineer's question was about default behavior.
+### Q4 — dashboard query 3s → 4-5min, SQL unchanged — diagnose in what order?
 
-**Production-stack fit:** clean. Matches on-prem Trino 467 + PostgreSQL connector path; `EXPLAIN (TYPE DISTRIBUTED)` is the standard verification path on the production stack.
-
-**No defects.** No fabricated pushdown claim (e.g., no ILIKE-pushes-down, no LIKE-anchored-prefix-pushes-down). No QUALIFY/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT slips. Clean federation answer.
-
----
-
-## Q3 — Dedup to one row per user keeping latest occurred_at — 4.9375
-
-- Accuracy 5 | Completeness 4.75 | Clarity 5 | Actionability 5
-
-**Two canonical forms given:**
-
-```sql
--- Form A: max_by aggregate (if you want specific columns of the latest row)
-SELECT user_id,
-       max_by(event_id, occurred_at) AS latest_event_id,
-       max(occurred_at)              AS latest_occurred_at
-FROM events
-GROUP BY user_id;
-
--- Form B: ROW_NUMBER (if you want ALL columns of the latest row)
-SELECT *
-FROM (
-  SELECT *,
-         ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY occurred_at DESC) AS rn
-  FROM events
-)
-WHERE rn = 1;
-```
-
-**Both forms VERIFIED Trino 467:**
-- `max_by(x, y)` — `functions/aggregate.md` 467: "Returns the value of x associated with the maximum value of y over all input values." Cleaner than `MAX(occurred_at)` subquery + self-join.
-- `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY occurred_at DESC)` then `WHERE rn = 1` in outer SELECT — canonical Trino top-1-per-group. Window function can't appear in WHERE directly → subquery/CTE wrap REQUIRED in Trino 467 (no QUALIFY clause).
-- "No QUALIFY in Trino 467" caveat correct — verified against `sql/select.md` 467 grammar (matches [Trino No QUALIFY] family context).
-
-**Cleaner than `MAX(occurred_at)` + self-join:** TRUE. The naive form is `SELECT e.* FROM events e JOIN (SELECT user_id, MAX(occurred_at) AS m FROM events GROUP BY user_id) m ON e.user_id = m.user_id AND e.occurred_at = m.m` — TWO scans + join, blows up on ties. Both responder forms are SINGLE scan + window/aggregate. Direct answer to engineer's "cleaner than" ask.
-
-**Minor Completeness shave (4.75):** doesn't call out the tie-handling semantics (if a user has TWO events at the exact same `occurred_at`, `ROW_NUMBER` arbitrarily picks one — non-deterministic across re-runs unless you add a tie-breaker like `, event_id DESC` to the ORDER BY; `max_by` similarly returns one arbitrary x for ties). Minor edge, not a defect — the engineer can re-probe.
-
-**No defects.** No QUALIFY/broken-secondary/over-warning/fabricated-fn.
-
----
-
-## Q4 — Extract nested JSON for GROUP BY — 5.000
-
-- Accuracy 5 | Completeness 5 | Clarity 5 | Actionability 5
-
-```sql
-SELECT json_extract_scalar(properties, '$.payment.currency') AS currency,
-       COUNT(*) AS event_count
-FROM events
-GROUP BY json_extract_scalar(properties, '$.payment.currency');
-```
-
-**Direct answer to "does it work in GROUP BY or need subquery wrapper?"** — works DIRECTLY in GROUP BY, no subquery needed. VERIFIED:
-- `sql/select.md` 467: plain `GROUP BY` accepts EXPRESSIONS (only `GROUPING SETS / CUBE / ROLLUP` are column-names-only per the [Trino Complex Grouping Column-Names-Only] pin from iter1001 memory).
-- `functions/json.md` 467: `json_extract_scalar(json, json_path)` returns VARCHAR; JSONPath dot notation `$.payment.currency` traverses nested objects to a scalar leaf.
-
-**MAP-type alternative correctly stated:** if `properties` is `MAP<VARCHAR, MAP<VARCHAR, VARCHAR>>` (or a structured map column), use `element_at(element_at(properties, 'payment'), 'currency')` for safe missing-key handling (`[]` subscript throws, `element_at` returns NULL — matches map.md element_at-vs-subscript safety). Accurate and appropriate.
-
-**Design note: "promote hot nested field to a top-level column":** TRUE and production-quality advice. For a field repeatedly used in GROUP BY / WHERE / partition pruning / aggregations, promoting from `json_extract_scalar(properties, '$.payment.currency')` to a top-level `payment_currency VARCHAR` column at ingest:
-- Eliminates per-row JSON parse cost
-- Enables Iceberg per-column statistics (NDV, null count, min/max) for the CBO
-- Enables partition transforms (`PARTITIONED BY (payment_currency)` if low-cardinality)
-- Enables column projection (only read that one column, not the full `properties` JSON blob)
-
-Matches r09/r07 patterns. No fabrication; clean architectural guidance.
-
-**No defects.** No QUALIFY/regex-backslash/over-warning/broken-secondary. Clean.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 3 | 6-check ordered triage. Checks 1, 2, 4, 5, 6 (concurrency via Trino UI queued/running, COUNT(*) bare-table test, single-fragment via EXPLAIN ANALYZE, partition skew, small files/manifest bloat with `splitsCreated`) all sound. `optimize_manifests` is 470+ not 467 — VERIFIED. **Check 3 is FALSE.** Responder claimed `WHERE date(occurred_at) = DATE 'x'` BREAKS Iceberg partition pruning and the fix is to rewrite to `occurred_at >= TIMESTAMP 'x 00:00' AND occurred_at < TIMESTAMP 'x+1 00:00'`. **Verify-first refutation:** Trino 467's `UnwrapCastInComparison.java` (default-on, no session flag) rewrites `CAST(timestamp AS DATE) = DATE 'x'` — which is what `date(timestamp_col)` is, since `date()` is the documented alias of `CAST(x AS DATE)` per r23 L1163 — into the EXACT range predicate the responder proposed as the "manual fix"; that rewritten range pushes for Iceberg partition pruning via the `day(occurred_at)` transform. Companion rules `UnwrapDateTruncInComparison` + `UnwrapYearInComparison` similarly unwrap `date_trunc('day',col)=DATE 'x'` and `year(col)=2026`. Matches the [Trino Unwraps Temporal Predicates] pin (iter871 verify-first correction). The "BI tool started wrapping in date()" worked-example punchline is therefore a non-bug — pruning would NOT break in 467. |
+| Beginner clarity | 5 | Steps are crisply ordered, EXPLAIN syntax explicit, expected outputs named. |
+| Practical applicability | 3 | Checks 1/2/4/5/6 are actionable. Check 3 would send the engineer to rewrite their dashboard SQL chasing a non-bug — they would "fix" the date() wrap and observe no change in plan, because the optimizer was already doing the rewrite. The EXPLAIN procedure itself is fine; the diagnostic INTERPRETATION is wrong. |
+| Completeness | 4 | 6 checks span all reasonable root causes. Loses 1 for not teaching the optimizer Unwrap rules in passing. |
+| **Q4 average** | **3.75** | |
 
 ---
 
 ## Score table
 
-| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
-|---|---|---|---|---|---|---|
-| Q1 — federate-live vs copy/ingest dim | **Federation** | 5.00 | 4.75 | 5.00 | 5.00 | **4.9375** |
-| Q2 — predicate pushdown + EXPLAIN check | **Federation** | 5.00 | 5.00 | 5.00 | 5.00 | **5.0000** |
-| Q3 — dedup latest occurred_at | analytical-query-patterns | 5.00 | 4.75 | 5.00 | 5.00 | **4.9375** |
-| Q4 — json_extract_scalar in GROUP BY | sql-best-practices | 5.00 | 5.00 | 5.00 | 5.00 | **5.0000** |
-
-**Overall average: (4.9375 + 5.0000 + 4.9375 + 5.0000) / 4 = 4.9688 → STRONG PASS** (margin +1.469 above 3.5 threshold)
-
----
-
-## Federation topic row — CROSSES 4.5
-
-| Snapshot | Datapoints | Total points | Avg | Threshold | Status |
+| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
 |---|---|---|---|---|---|
-| Pre-iter1097 | 310 | 4.49944 × 310 = 1394.8264 | 4.49944 | 4.5 | **FAIL** (lone NEEDS-WORK row) |
-| iter1097 contribution | +2 (Q1=4.9375, Q2=5.0000) | +9.9375 | — | — | — |
-| **Post-iter1097** | **312** | **1404.7639** | **4.5024** | **4.5** | **PASS** ✓ |
+| Q1 dbt model contracts | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 cost-considerations | 5 | 5 | 5 | 4 | 4.75 |
+| Q3 Oracle ROWNUM | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 query-perf regression | 3 | 5 | 3 | 4 | 3.75 |
+| **Iter overall** | | | | | **4.625** |
 
-**Federation row CROSSES the raised 4.5 threshold.** All required topics in the rubric now PASS. The lone path-to-PASSED-everywhere remaining is closed.
-
-Math: (4.49944 × 310 + 4.9375 + 5.0000) / 312 = (1394.8264 + 9.9375) / 312 = 1404.7639 / 312 = **4.50244** > 4.5 ✓
-
----
-
-## Source-verified defects this iter
-
-**ZERO defects.** ZERO fabricated functions. ZERO QUALIFY/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning/broken-secondary slips. ZERO `prod_info.md` mismatches (all four answers fit the on-prem Trino-467 + Iceberg 1.5.2 + MinIO + Hive Metastore stack).
-
-The federation answers (Q1 + Q2) are the cleanest federation re-probe in the score history. Q2 in particular is a textbook-quality response: type-operator matrix that exactly matches the official `connector/postgresql.md` pushdown table, plus an EXPLAIN diagnostic that verbatim-matches the `optimizer/pushdown.md` "ScanFilterProject is absent" indicator.
+**PASS** (overall avg 4.625 >> 3.5 threshold; overall avg governs, no per-question veto).
 
 ---
 
-## Teacher guidance
+## Source-verified defects
 
-**NO resource edit recommended this iter.**
+### Q4 — RESOURCE-SOURCED FALSE PRUNING FOLKLORE (r18) — needs FIX-A
 
-Rationale:
-1. **Federation crossed 4.5** — the lone NEEDS-WORK row is now PASS. The hard-locked r22 federation card (per [Trino No ILIKE] pin) survived another two probes without defects.
-2. Q3/Q4 are clean canonical patterns; resources already strong (analytical query patterns + SQL best practices both PASSED with high margins).
-3. No new pin entries needed — no responder slip, no new docs misreading. Per [Synthesis Ceiling — Stop Churning] pin: when answers are clean across the topic-PASS bar, return to breadth, do NOT add defensive content.
+**The wrong claim (responder, verbatim worked example):**
+> "EXPLAIN (TYPE DISTRIBUTED) shows TableScan with `inputRows = 1.4B` and a `Filter` node above it carrying `date(occurred_at) = DATE '2026-05-22'`. **Pruning broke.** The dashboard's BI tool got upgraded last weekend and now wraps the date predicate in `date(...)`. Fix: edit the dashboard SQL to remove the `date()` wrap and use the raw range comparison."
 
-**For iter1098 plan:**
-- ALL REQUIRED TOPICS NOW PASS (federation 4.5024 / 312 just crossed the raised 4.5 bar; every other row was already PASS with margin).
-- state.json `passed: true` was already set in extended phase; this iter confirms the federation row finally caught up to it. No state.json bump needed — `iteration: 1097` is current.
-- Per the project deadline ([Training Deadline] pin: 2026-06-30 23:59 CST end of run), 4 days remain.
-- Recommended remaining iters: durability re-probes on the THIN-MARGIN topics: `dbt model contracts 4.0859/4`, `cost-considerations 4.1846/19`, `storage-tiering 4.25/2`, `dbt-snapshots-SCD2 4.4299/8`, `Oracle-PL/SQL migration 4.4309/100`, `query-perf-regression-diagnosis 4.3510/17`. Federation can be left to drift up naturally — every additional clean federation probe pushes it further above 4.5; every defect would risk dropping back (margin is +0.0024, very thin).
-- AVOID re-probing federation on weak angles (ILIKE pushdown — hard-locked failure mode per pin; cross-catalog ACID — not supported; federation broadcast-only join — partially myth). The 4.5024 margin is THIN; one Q1-style 4.94 keeps PASS but one 4.0 federation answer drops back to FAIL (would need to be 4.49944×310 + (4.5024 baseline) − one_low_score / 313 = sensitive). Treat federation as fragile-PASS.
+**Why it's wrong (verify-first):**
+Trino 467 `UnwrapCastInComparison.java` rewrites `CAST(timestamp AS DATE) = DATE 'x'` (equivalently `date(timestamp_col) = DATE 'x'`, since `date()` is the alias of `CAST(x AS DATE)` per r23 L1163) into `ts >= TIMESTAMP 'x 00:00' AND ts < TIMESTAMP 'x+1 00:00'`. That rewritten range pushes for Iceberg partition pruning via the `day(occurred_at)` partition transform. Companion rules `UnwrapDateTruncInComparison` + `UnwrapYearInComparison` similarly unwrap `date_trunc('day',col)=DATE 'x'` and `year(col)=2026`. All three rules are unconditionally registered in `PlanOptimizers.java` `simplifyOptimizerRules` — there is no session flag. The Trino team blog ["Just the right time date predicates with Iceberg"](https://trino.io/blog/2023/04/11/date-predicates.html) explicitly documents this. Pin: **[Trino Unwraps Temporal Predicates]** (iter871 verify-first correction of an earlier directive).
 
-**Recommendation: DEFAULT NO-OP** (margin +1.469 overall; federation just crossed +0.0024). NO state.json edit beyond iteration bump in workflow. NO commit beyond rubric + feedback. NO new pin (no novel-error-class encountered).
+**WebFetch confirmation (UnwrapCastInComparison.java at trinodb/trino@467):**
+> "if (sourceType instanceof TimestampType && targetType == DATE) { return unwrapTimestampToDateCast..."
+> "and(new Comparison(GREATER_THAN_OR_EQUAL, timestampExpression, dateTimestamp), new Comparison(LESS_THAN, timestampExpression, nextDateTimestamp))"
+
+The rule explicitly produces the timestamp-bounded range the responder claims must be hand-written.
+
+**Resource provenance — RESOURCE-SOURCED, not responder one-off:**
+
+The responder is FAITHFULLY citing r18. The wrong claim lives at:
+- `resources/18-query-performance-regression.md` **L84** (Check 3 table row, "function-wrapped predicate that the optimizer cannot push to partition layout — Fix by rewriting to a raw range comparison")
+- `resources/18-query-performance-regression.md` **L113-115** (the leading worked example, "Pruning broke. The dashboard's BI tool got upgraded last weekend and now wraps the date predicate in `date(...)` ... Fix: edit the dashboard SQL to remove the `date()` wrap")
+
+**Truth source already in the repo (internal contradiction):**
+
+`resources/07-analytical-query-patterns.md` **L63-74** already codifies the CORRECT framing:
+> "Trino 467 reality — the common wrapped temporal comparisons DO still prune (they are NOT footguns here): Unlike Postgres/Oracle, Trino 467 ships default-on optimizer rules that automatically unwrap the common date/timestamp comparisons into a bare-column range before pushdown, so they still trigger Iceberg partition pruning + Parquet min/max file skipping ... ALL of these unwrap to a bare-column range in Trino 467 and DO prune: WHERE CAST(order_date AS date) = DATE '...', WHERE date_trunc('day', order_ts) = DATE '...', WHERE year(order_date) = 2026, WHERE EXTRACT(YEAR FROM order_date) = 2026 ... The genuine pruning-killer: an opaque, non-invertible expression on the partition/sort column that the optimizer CANNOT rewrite into a bare-column range — a UDF, regexp_*, JSON extraction, LOWER(col)/SUBSTR(col, ...), or non-monotonic arithmetic."
+
+So r07 §1 contradicts r18 Check 3 / worked example. The responder picked the topic-matching r18 (query-perf-regression-diagnosis) and got the wrong claim. **This is the 3rd appearance of the function-wrap-breaks-pruning false imported sargability prior** (iter870 directive → iter871 verify-first correction → r18 still carries the stale wrong claim that the iter871 fix never reached).
+
+### Q2 — sanity-check pass
+
+- `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` — VERIFIED syntax against trino.io/docs/467/connector/iceberg.html.
+- `EXECUTE optimize(file_size_threshold => '128MB')` — VERIFIED 467 `optimize` accepts ONLY `file_size_threshold` parameter.
+- "Trino 467 cannot rewrite position deletes" — VERIFIED 467 EXECUTE registry is exactly `optimize` / `expire_snapshots` / `remove_orphan_files` / `drop_extended_stats`; no `rewrite_position_delete_files`; Spark `CALL ... rewrite_position_delete_files` is the correct fallback.
+- Minor: Trino 467 ALSO has native `ALTER TABLE ... EXECUTE remove_orphan_files` (since release 411). Recommending Spark for step 4 is not wrong, but misses the Trino-native form. Not penalized further — Q2 still 4.75.
 
 ---
 
-## Source citations
+## Teacher guidance — FIX-A on r18
 
-- [Trino Pushdown — optimizer/pushdown.html (current)](https://trino.io/docs/current/optimizer/pushdown.html)
-- [Trino PostgreSQL connector — connector/postgresql.html (current)](https://trino.io/docs/current/connector/postgresql.html)
-- [PR #9746 — experimental string-collation pushdown for PostgreSQL connector](https://github.com/trinodb/trino/pull/9746)
-- [Trino 467 Aggregate functions](https://trino.io/docs/current/functions/aggregate.html)
-- [Trino 467 Window functions](https://trino.io/docs/current/functions/window.html)
-- [Trino 467 JSON functions](https://trino.io/docs/current/functions/json.html)
-- [Trino 467 SELECT semantics](https://trino.io/docs/current/sql/select.html)
+**Priority: HIGH** (false claim is the leading worked example's punchline; engineer would chase a non-bug rewrite).
+
+1. **r18 Check 3 table (~L84)** — rewrite the "function-wrapped predicate" row to match r07 §1 truth. Replace with something like:
+
+   > | `TableScan` has NO partition predicate inside the connector + a `Filter` node ABOVE the TableScan carrying an OPAQUE function on the partition column (LOWER, SUBSTR, regexp_*, json_extract_scalar, a UDF, or non-monotonic arithmetic) | **Pruning broke.** Trino 467's optimizer unwraps `CAST(ts AS DATE)=DATE 'x'`, `date(ts)=DATE 'x'`, `date_trunc('day', ts)=DATE 'x'`, `year(ts)=2026`, and `EXTRACT(YEAR FROM ts)=2026` into a bare-column range that DOES prune (see r07 §1) — these are NOT the breakage. The genuine pruning-killer is an **opaque, non-invertible** function the optimizer cannot invert: LOWER on a partition-string column, JSON extraction, a UDF, or non-monotonic arithmetic. Fix: pre-compute the value at ingest as a separate partition-aligned column, OR rewrite the predicate to a form Trino can invert (raw column = literal, or `BETWEEN start AND end`). |
+
+2. **r18 worked example (~L113-115)** — rewrite the BI-tool punchline to a TRULY pruning-breaking root cause. Suggested replacement:
+
+   > **Check 3:** `EXPLAIN (TYPE DISTRIBUTED)` shows TableScan with `inputRows = 1.4B` and a `Filter` node above it carrying `LOWER(tenant_id) = 'acme'` (the partition column is `tenant_id`, a partition-aligned VARCHAR). **Pruning broke.** The dashboard's BI tool got "case-insensitive tenant matching" turned on and now wraps the partition column in `LOWER(...)` — which is opaque to the optimizer (no Unwrap rule covers `LOWER`). Old shape: `tenant_id = 'acme'`. **Fix:** turn off the BI-tool case-insensitive option, OR normalize the partition column to lowercase at ingest so `tenant_id = 'acme'` is a direct match. Re-run: query back to 2s. **Total triage time: ~60 seconds.**
+
+3. **r28 L11 (secondary)** — "function-wrapped partition-column predicates that defeat partition pruning" → tighten to "**opaque** function-wrapped partition-column predicates (LOWER, regexp_*, JSON extract, UDF, non-monotonic arithmetic) that defeat partition pruning". The date()/CAST AS DATE / year() / date_trunc forms DO unwrap.
+
+4. **r18 L940 (tertiary)** — "WHERE DATE(event_time) = CURRENT_DATE may not prune as well as WHERE event_date = CURRENT_DATE depending on how the column is typed" → either delete (hedged folklore that contradicts r07 §1) or replace with "DATE(event_time) = CURRENT_DATE DOES unwrap and prune in 467 via UnwrapCastInComparison; only an opaque-function wrap (LOWER/SUBSTR/JSON-extract/UDF) on the partition column actually breaks pruning."
+
+5. **Add cross-ref from r18 to r07 §1** as the authoritative truth source for the Unwrap rules.
+
+6. **Re-probe Q4 next sweep from a 2nd angle** — concurrency-spike or skew or manifest-bloat root cause, NOT date()-wrap. Confirm the FIX-A reaches the responder AND that checks 1, 2, 4, 5, 6 still work (don't damage the otherwise-sound 6-step triage).
+
+**Do NOT** append a new section to r18 contradicting the old (per [Reconcile Don't Append] pin); EDIT the existing L84 + L113-115 in place. Otherwise responder may cite the wrong one.
+
+---
+
+## Topic rubric updates (this iter)
+
+| Topic | Prior avg / N | New avg / N | Delta |
+|---|---|---|---|
+| dbt model contracts | 4.0859 / 4 | **4.2687 / 5** | +0.183 |
+| Cost considerations | 4.1846 / 19 | **4.2129 / 20** | +0.028 |
+| Oracle PL/SQL → dbt+Trino migration | 4.4309 / 100 | **4.4365 / 101** | +0.006 |
+| Query perf regression diagnosis | 4.3510 / 17 | **4.3176 / 18** | -0.033 |
+
+All four topics REMAIN PASSED. Q4 drops slightly from durability hit but stays >3.5.
+
+---
+
+## Pin-relevant observations
+
+- **[Trino Unwraps Temporal Predicates]** — 3rd appearance of the false imported sargability prior. iter870 directive asserted the prior; iter871 verify-first corrected it. r18 still carries the stale wrong claim — this iter is the resource-level reconciliation (analogous to iter948 HAVING-trims-memory folklore root-cause traced to r07 L37).
+- **[Trace Recurring Folklore to Resource Root Cause]** — followed. Recurring folklore (function-wrap-breaks-pruning) traced from responder slip → r18 L84 + L113-115 root cause → FIX-A on r18 + r28 L11 + r18 L940.
+- **[Reconcile Don't Append]** — FIX-A on r18 must REWRITE Check 3 table row L84 + worked example L113-115 (not append a contradictory new section); otherwise responder will cite the wrong one.
+- **[Trino OFFSET Before LIMIT]** — Q3 cleanly cites it.
+- **[Trino No ILIKE]** — N/A this iter (no federation).
+
+---
+
+## Recommendation
+
+**FIX-A on r18** (Check 3 table L84 + worked example L113-115) + secondary cleanup on r28 L11 + r18 L940. Re-probe Q4 next sweep with a 2nd angle (concurrency / skew / manifest-bloat root cause, NOT date()-wrap) to confirm FIX-A reaches and doesn't damage the other 5 checks.
+
+NO state.json bump (already 1098, already passed:true). NO federation re-probe (4.50244/312 fragile-PASS per iter1097). NO commit beyond rubric + feedback + r18/r28 FIX-A.
