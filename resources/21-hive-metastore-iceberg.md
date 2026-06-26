@@ -128,7 +128,9 @@ ALTER TABLE iceberg.analytics.events
 SET TBLPROPERTIES ('format-version' = '2');
 ```
 
-Migrated tables default to Iceberg format version 1, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations, upgrade to v2. Read-only tables and append-only tables do not need v2.
+**Hive-MIGRATED tables (via Spark's `migrate()`) default to Iceberg format version 1**, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations on a migrated table, upgrade it to v2 with the `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` above. Read-only tables and append-only tables do not need v2.
+
+> **IMPORTANT — this v1 default applies ONLY to tables produced by Spark's `migrate()` procedure. It does NOT apply to brand-new tables.** A **NEW** Iceberg table created with `CREATE TABLE` on **Trino 467** — or by a dbt-trino `materialized='table'` / `'incremental'` model — **defaults to `format_version = 2`** (the Trino Iceberg `format_version` table property has defaulted to `2` since **Trino 419**, well before 467; verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)). So **`MERGE INTO` / row-level `DELETE` / `UPDATE` work out of the box on new Trino-created Iceberg tables — you do NOT need to set `format_version=2` first.** Only LEGACY Hive-migrated v1 tables need the explicit v1→v2 upgrade. Keyword anchors: do I need format_version 2 before MERGE, Trino 467 default format_version new table, new CREATE TABLE v2 default, migrated v1 vs new-table v2. **DO-NOT-WRITE:** "Default Iceberg tables are format v1, set format_version=2 before MERGE" — WRONG for new Trino-created tables (they are already v2); it is true ONLY for Spark-`migrate()`-produced tables. See also [resource 17 §formats](17-iceberg-table-maintenance.md) and [resource 25](25-iceberg-format-internals.md) for the new-table v2 default.
 
 ### Summary of limitations
 

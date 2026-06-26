@@ -1,132 +1,154 @@
-# iter1150 Feedback
+# iter1151 Feedback
 
-**Iter average: 3.781 PASS + LIGHT FIX-A** (Q1 second misroute on full-rebuild atomic-swap → findability gap confirmed; Q3 broken-primary BUT correct-alternative; Q2/Q4 clean 5.0/4.875)
+**Iter average: 4.750 STRONG PASS + LIGHT FIX-A** (Q1 r28 on_table_exists FIX-A REACHED CLEANLY on first re-probe — WATCH CLOSED; Q4 "default format v1" over-generalization slip resource-anchored at r21 §131 — additive disambiguation FIX-A warranted)
 
-**Verdict shape:** PASS by no-per-question-veto rule (margin +0.281, thin). Q1 4-dim = 2.5 (sub-threshold), Q3 4-dim = 3.125 (sub-threshold) but both topics' rolling averages cushion the iter. SECOND consecutive misroute on full-rebuild atomic-swap question class — LIGHT FIX-A warranted.
+**Verdict shape:** STRONG PASS by margin +1.250 above 3.5 threshold. Q1/Q2/Q3 clean 5.0/5.0/5.0; Q4 4.0 with one load-bearing factual error (outdated "default v1" claim) that is partially resource-sourced (r21 §131 narrowly correct scope was over-generalized by responder).
 
 ---
 
 ## Per-question scoring
 
-### Q1 — dim_products full rebuild + 24/7 dashboards: how to configure atomic swap?
+### Q1 — customer_summary dbt model full rebuild, DROP+CREATE window — dbt config to make swap atomic without going incremental?
 
-**Score: 2.500** — Acc 2.5 / Clar 3.5 / App 2.0 / Compl 2.0
+**Score: 5.000** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-**Source-verified correct answer (from docs.getdbt.com/reference/resource-configs/trino-configs):**
-
-dbt-trino's `table` materialization accepts an `on_table_exists` config with four values:
-- `rename` (DEFAULT) — builds an intermediate table, renames target→backup, renames intermediate→target (two metadata operations, very narrow swap window)
-- `drop` — DROP TABLE then CREATE (this is exactly what causes "table does not exist" — explicit non-existence window)
-- `replace` — `CREATE OR REPLACE TABLE` (single atomic Iceberg metadata commit; readers see complete-old or complete-new, never missing/empty — added in dbt-trino 1.7.1; **recommended when underlying connector supports CREATE OR REPLACE**; Trino+Iceberg does)
-- `skip` — `CREATE TABLE IF NOT EXISTS` (no-op when table exists)
-
-For the engineer's symptom (table-does-not-exist + brief zero rows from full-refresh `materialized='table'` job) the **direct one-line fix** is:
+**Source-verified canonical answer (from docs.getdbt.com/reference/resource-configs/trino-configs + r28 §961 LEADING CANONICAL added iter1150):**
 
 ```sql
 {{ config(materialized='table', on_table_exists='replace') }}
 ```
 
-**Responder behavior — verified misroute (SECOND instance):**
+Emits a single `CREATE OR REPLACE TABLE` = one atomic Iceberg metadata commit; readers see complete-old or complete-new, never a missing or empty intermediate state. dbt-trino default is `'rename'` (also atomic via intermediate-build + double-rename, two metadata operations); `'drop'` is the DROP+CREATE window the engineer observed; `'skip'` is `CREATE TABLE IF NOT EXISTS`.
 
-1. PRIMARY RECOMMENDATION: "switch to `materialized='incremental'` with `incremental_strategy='delete+insert'` or `'insert_overwrite'` + `partition_by`, so each partition flips atomically". This is an **ARCHITECTURE CHANGE** the engineer did not ask for. The model is explicitly a full nightly rebuild dim table (not a large partitioned fact). Insert-overwrite by partition does not address a non-partitioned dim_products full rebuild.
-2. SECONDARY (at the END): manual `CREATE TABLE dim_products_new AS SELECT ...` + `ALTER TABLE RENAME` pattern. Called this "fragile, requires app-side coordination". **This framing is wrong** — dbt-trino's DEFAULT `on_table_exists='rename'` is exactly this pattern, automated by the adapter, and is the documented atomic-swap default. It is not fragile.
-3. `on_table_exists` is **not mentioned anywhere** in the answer.
+**Responder behavior — clean pin-perfect:**
 
-**Re iter1149 Q3 (FIRST misroute):** the responder also misrouted that question to snapshot-isolation + "switch to incremental MERGE" framing instead of `on_table_exists` / `CREATE OR REPLACE TABLE`. Two distinct phrasings of the same question class (iter1149 "nightly full rebuild + 24/7 dashboards / Iceberg snapshot isolation safe?" vs iter1150 "configure how dbt does the swap, atomic OLD→NEW") both miss the dbt-trino config canonical. This is a **findability gap** (the canonical does not exist in resources/, AND the question's natural keywords route to incremental-materialization sections instead).
+- PRIMARY recommendation: `on_table_exists='replace'` with explicit `CREATE OR REPLACE TABLE AS SELECT` mapping = single atomic Iceberg snapshot.
+- Correctly named default `'rename'` as already atomic via temp-build-then-rename (Trino never sees a missing table under default).
+- Correctly identified `'drop'` as the unsafe value matching engineer's symptom (DROP+CREATE window).
+- Correctly named version pin: added in dbt-trino 1.7.1+.
+- Explicit guard "do NOT convert to incremental" — directly addresses the engineer's "WITHOUT converting to incremental" constraint.
+- Cited r28 atomic-swap canonical.
 
-**LIGHT FIX-A WARRANTED — recommendation:**
-
-The on_table_exists canonical does not exist in any resource (grep'd 0 hits for `on_table_exists`). Add an additive canonical card.
-
-- **Primary placement: r28 [new section, near §930 where `CREATE OR REPLACE TABLE` already appears in a dbt-trino atomicity context].** Title something like "Configuring atomic swap for a dbt `table`-materialization full rebuild — the `on_table_exists` config". Cover all four values (rename / drop / replace / skip), name `replace` as the recommended option for concurrent-read workloads on Trino+Iceberg (CREATE OR REPLACE is supported on the Iceberg connector), name `drop` as the source of the engineer's symptom (explicit non-existence window), and contrast with `rename` (narrow but non-zero rename window — two metadata commits not one). Mention dbt-trino default is `rename`. Cite docs.getdbt.com/reference/resource-configs/trino-configs verbatim.
-
-- **Secondary placement: r27 §6 materialization decision tree (lines 287-298).** Currently the `table` row says "CREATE OR REPLACE TABLE ... AS SELECT — full CTAS each run; Iceberg snapshot replaces prior data atomically". Add one sentence/footnote: "When concurrent readers must never see a missing/empty table during a dbt full refresh, set `on_table_exists='replace'` — emits CREATE OR REPLACE TABLE = single atomic Iceberg metadata commit. See r28 §[ref]." This is the spot the responder's keyword path actually lands.
-
-- **Tertiary placement: r17 §163 (Iceberg CREATE OR REPLACE TABLE area).** Add a one-liner cross-ref from the Trino-side CREATE OR REPLACE TABLE canonical TO the dbt-trino `on_table_exists='replace'` knob, so an engineer who lands on the Iceberg side from "atomic table replace" anchors gets routed to the dbt config.
-
-**Keyword anchors the canonical must include (to fix findability):**
-
-- "dbt table rebuild swap atomic"
-- "table does not exist briefly during dbt build"
-- "BI dashboards see zero rows during dbt full refresh"
-- "concurrent readers during dbt model rebuild"
-- "on_table_exists replace rename drop"
-- "is there a way to configure how dbt does the final swap"
-- "full refresh with live dashboards"
-- "nightly rebuild reader-safe"
-- "atomic OLD→NEW swap"
-
-**DO-NOT-WRITE entries (to defang the misroute):**
-
-- "Switch to `materialized='incremental'` to get atomic swaps" — wrong framing; incremental is for delta efficiency on big facts, not for atomic full-rebuild reader safety. Use `on_table_exists='replace'` first; incremental is orthogonal.
-- "Manual CREATE TABLE _new + ALTER TABLE RENAME is fragile" — wrong; `on_table_exists='rename'` (dbt-trino default) automates exactly this and IS the documented atomic-swap default.
-
-**Note for teacher:** the iter1149 Q3 watch classified this as "responder-side broken-secondary-alternative family, no resource fix". iter1150 is the second instance, on a different phrasing — that classification was wrong. The canonical is genuinely missing from resources/ AND the question's natural keywords route to incremental-materialization sections. Add the on_table_exists canonical.
+**WATCH CLOSURE:** `r28 on_table_exists canonical iter1150` — **CLOSED on first re-probe.** This was the THIRD question in the full-rebuild atomic-swap question class (iter1149 Q3 first-misroute, iter1150 Q1 second-misroute prompted LIGHT FIX-A, iter1151 Q1 confirms FIX-A reaches). Single-iteration find-and-close on a previously-recurrent misroute class. r28 §961 LEADING CANONICAL with keyword anchors "dbt table rebuild swap atomic" / "table does not exist briefly" / "on_table_exists replace rename drop" / "WITHOUT converting to incremental" is pulling cleanly across all three iter1149/1150/1151 phrasings.
 
 **Verifications performed:**
 
-- docs.getdbt.com/reference/resource-configs/trino-configs — confirmed all four `on_table_exists` values + default `rename` + `replace` added in dbt-trino 1.7.1 + "recommended when CREATE OR REPLACE is supported in underlying connector" phrasing.
-- trino.io/docs/current/connector/iceberg.html — confirmed Iceberg connector supports CREATE OR REPLACE TABLE as an atomic operation (Iceberg metadata-pointer swap).
-- Grep'd resources/ for `on_table_exists` → 0 hits across all 30+ resource files. For "atomic.*swap|table does not exist|CREATE OR REPLACE TABLE" → 10 files but no on_table_exists canonical anywhere.
+- [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — confirmed all four `on_table_exists` values + default `rename` + `replace` recommended when CREATE OR REPLACE is supported in underlying connector.
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — confirmed Iceberg connector supports CREATE OR REPLACE TABLE as an atomic operation.
+- Grep'd r28 — confirmed §961 LEADING CANONICAL with all four values + symptom-mapping is in place from iter1150 FIX-A.
 
 ---
 
-### Q2 — Left-pad integer IDs to 10 chars with zeros (built-in or CASE?)
+### Q2 — Iceberg array column of 30 daily session counts; find highest single-day count per user WITHOUT unnesting
 
 **Score: 5.000** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
 **Verifications performed:**
 
-- trino.io/docs/467/functions/string.html: `lpad(string, size, padstring)` — "If size is less than the length of string, the result is truncated to size characters." Confirmed responder's lpad-truncation warning is correct (e.g., `lpad('12345678901', 10, '0')` → `'1234567890'`, silent data loss).
-- trino.io/docs/467/functions/conversion.html `format(format_string, args...)` — uses Java printf semantics (Java Formatter docs linked). `%010d` is a min-width specifier (width 10, zero-padded); Java Formatter rule: min width does not truncate; wider numbers print in full. Documented example `format('%03d', 8)` → `'008'`. Confirmed responder's claim that `format('%010d', 12345678901)` returns `'12345678901'` without truncation.
+- [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html): `array_max(x) → x` — "Returns the maximum value of input array." `array_min(x) → x` — "Returns the minimum value of input array." Confirmed both native in Trino 467.
 
-Both built-ins exist; both work for the 10-char ID case. Responder correctly led with `format('%010d', n)` for "IDs that may grow past 10 chars" because lpad would silently truncate. This is exactly the right routing — format() is the safer default for variable-width numeric padding; lpad is the safer default for known-width text padding. Citation r23 §3.1F appropriate.
+Responder correctly led with `array_max(daily_session_counts) AS highest` — one-row-in-one-row-out, no UNNEST, no GROUP BY collapse needed. Also offered `array_min(...)` for the corresponding minimum. Cited r07 §1a.3.
+
+**Minor framing note (not a score hit):** the "if you unnest then MAX GROUP BY you're doing unnecessary work that spills to disk" aside is slight over-warning (UNNEST + MAX GROUP BY produces the correct result with bounded memory per group; not pathological for 30-element arrays). Doesn't affect the canonical primary answer; recall ceiling / per-responder padding consistent with pinned `feedback_responder_overwarning_folklore.md`. No resource fix.
 
 ---
 
-### Q3 — Third event per session (Nth row of a window)
+### Q3 — Q1 2025 vs Q1 2026 revenue per customer, side-by-side, single query or two aggregations joined?
 
-**Score: 3.125** — Acc 2.5 / Clar 3.5 / App 3.0 / Compl 3.5
+**Score: 5.000** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
 **Verifications performed:**
 
-- trino.io/docs/467/functions/window.html: `nth_value(x, offset)` exists; "Returns the value at the specified offset from the beginning of the window. Offsets start at 1." Default frame for value functions (per SQL standard) is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`; for nth_value to return the Nth row of the full partition, explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` is required. Responder's default-frame caveat is correct.
-- Window functions cannot appear in WHERE: SQL execution order is WHERE → GROUP BY → HAVING → window functions → ORDER BY. Window functions are computed AFTER WHERE filtering, so `WHERE nth_value(...) OVER (...) IS NOT NULL` is a parse/semantic error in Trino — the planner will reject a window function in WHERE. Engineer must wrap the window expression in a CTE/subquery and filter the alias in the outer WHERE.
+- [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `year(x)` — "Returns the year from x." `quarter(x)` — "Returns the quarter of the year from x. The value ranges from 1 to 4." Both native in Trino 467 (also valid as `EXTRACT` fields).
 
-**Defect — broken-primary:** Responder's primary `nth_value(event_name, 3) OVER (PARTITION BY session_id ORDER BY event_occurred_at ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` with `WHERE NTH_VALUE(...) OVER (...) IS NOT NULL` — the WHERE clause containing the window function is **invalid in Trino**. Engineer copy-pastes the primary and hits an error before any filtering happens.
+Responder gave the canonical conditional-aggregation pivot:
 
-**Mitigation — correct alternative present:** The ROW_NUMBER subquery alternative (CTE with `ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_occurred_at) AS event_position` then outer `WHERE event_position = 3`) is correct and runnable. Engineer reading the alternative gets to a correct query.
+```sql
+SUM(CASE WHEN year(order_date)=2025 AND quarter(order_date)=1 THEN amount ELSE 0 END) AS revenue_q1_2025,
+SUM(CASE WHEN year(order_date)=2026 AND quarter(order_date)=1 THEN amount ELSE 0 END) AS revenue_q1_2026,
+ROUND(revenue_q1_2026 * 1.0 / NULLIF(revenue_q1_2025, 0), 2) AS growth_ratio
+GROUP BY customer_id
+```
 
-This is the classic **"broken-secondary-alternative" pattern in INVERTED shape** — usually the primary is correct and the secondary is broken padding; here the primary is broken AND the secondary works. The fact that one of the two given paths runs cleanly rescues this from being a hard FAIL, but the engineer who skims the primary first will hit a confusing error.
-
-**Recommendation:** No resource fix. r07 ROW_NUMBER-then-WHERE-rank=N canonical exists and is the correct general idiom for "Nth row per group" (more robust than nth_value because ROW_NUMBER naturally exposes a filterable rank column). This is responder slip on construction, not a resource gap. One instance — re-probe, don't churn. If the slip recurs ("second-most-recent login per user", "fifth purchase per customer"), then consider an additive r07 defang card naming WHERE-with-window-function as illegal and showing the wrap-in-subquery shape.
+Single query, single pass over `transactions`, no self-join. `NULLIF` guards divide-by-zero. Mentioned BETWEEN-date-range generalization for arbitrary period boundaries. Cited r07 Pattern B2. Clean canonical answer.
 
 ---
 
-### Q4 — Trino spill auto or explicit? Downsides?
+### Q4 — Oracle stored procedures contain MERGE upserts. Does Trino support MERGE for Iceberg, or rethink the logic?
 
-**Score: 4.875** — Acc 5.0 / Clar 4.5 / App 5.0 / Compl 5.0
+**Score: 4.000** — Acc 3.5 / Clar 4.5 / App 4.0 / Compl 4.0
 
-**Verifications performed (trino.io/docs/467/admin/properties-spilling.html):**
+**Source-verified facts:**
 
-- `spill-enabled` (config) and `spill_enabled` (session) — both exist; default false. Confirmed responder's "must enable explicitly" + `SET SESSION spill_enabled = true` syntax.
-- `spiller-spill-path` config required — confirmed responder's prereq framing (cluster config must set `spill-enabled=true` + `spiller-spill-path` else session toggle does nothing).
-- Spill applies to: "aggregations, joins (inner and outer), sorting, and window functions" — verbatim. Responder's "hash aggregations, hash joins, ORDER BY, window funcs" is correct.
-- `max-spill-per-node` default **100GB** — CONFIRMED from trino.io/docs/467/admin/properties-spilling.html.
-- Fabrication defangs: `spill_aggregations_enabled`, `memory_revoking_enabled`, `spill_order_by_enabled`, `task_max_memory` — none exist in Trino 467 spilling documentation. Correctly defanged as fabrications.
+- [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html): Trino 467 supports `MERGE INTO target USING source ON ... WHEN MATCHED THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT ...`. Confirmed responder's syntax shape is correct.
+- Wildcards: docs require explicit column list for both UPDATE SET and INSERT — no Spark-style `UPDATE SET *` / `INSERT *`. Confirmed responder's explicit-column-list claim.
+- dbt-trino `incremental_strategy='merge'` with `unique_key='order_id'` is the idiomatic path. Correct.
+- **CRITICAL VERIFICATION — format_version default:** [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) table property `format_version`: **"Optionally specifies the format version of the Iceberg specification to use for new tables; either `1` or `2`. Defaults to `2`."** The Trino 467 default for NEW Iceberg tables created via `CREATE TABLE` is **format_version=2**. (The change from v1→v2 as default happened well before 467 — verified Trino 419 docs already documented default=2.)
 
-**Minor shave (-0.5 Clar):** "spill_enabled is THE only session lever" is slightly oversimplified — there are operator-level memory-limit session properties (e.g., `aggregation_operator_unspill_memory_limit`) that fine-tune spill behavior, though they are rarely-touched. Not load-bearing for the engineer's question (turn-spill-on vs leave-off). Recall ceiling.
+**Defect — load-bearing factual error on "default v1":**
 
-Tradeoffs (~5-20% slower from disk I/O, 100GB disk-space default) correctly named. Engineer knows exactly what to do: check cluster config for `spill-enabled=true` + `spiller-spill-path`, then `SET SESSION spill_enabled = true` per-query.
+The responder claimed: *"Iceberg format v2 is MANDATORY. Default tables are format v1, which does not support delete files (required by MERGE). Add 'format_version': 2 in properties or ALTER TABLE ... SET PROPERTIES format_version=2 before using MERGE."*
+
+This is **WRONG / OUTDATED for Trino 467 + new tables**. NEW Iceberg tables created via `CREATE TABLE` on Trino 467 default to v2 — no explicit property setting is needed. The "must set format_version=2 before MERGE" constraint is unnecessary on this stack for newly-created tables.
+
+**Practical impact bounded — not query-breaking:** an engineer who follows the advice sets `format_version=2` explicitly (which is the default anyway = harmless no-op), then runs MERGE successfully. The MERGE itself works. So the wrong claim is misleading but doesn't break the engineer's task.
+
+**RESOURCE-SOURCED — partial root cause at r21 §131:**
+
+Grep located the source of the "default v1" wording at:
+
+- **r21 §131** (resources/21-hive-metastore-iceberg.md line 131): *"Migrated tables default to Iceberg format version 1, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations, upgrade to v2."*
+
+This statement is **narrowly correct in its scope** — it lives in the Hive-→-Iceberg migration section and refers SPECIFICALLY to tables created via Spark's `CALL iceberg.system.migrate('schema.table')` procedure (which shims existing Hive Parquet files as a format-v1 Iceberg table). For Hive-migrated tables, v1 IS the default and v2 upgrade IS required for MERGE.
+
+The responder **over-generalized** r21 §131's migrated-tables-default-v1 claim to ALL new Iceberg tables (including dbt-created `CREATE TABLE` outputs), where it does NOT apply (CREATE TABLE defaults to v2 per r17 §681 and r25 §108 + trino.io/docs/467/connector/iceberg.html).
+
+**Other resources correctly state v2 default:**
+
+- **r17 §619-621 / §681** correctly pins the production stack at Iceberg 1.5.2 writing format version 2 (v2).
+- **r25 §108** correctly lists `format_version` default as "2 (required for MoR features; default in modern Iceberg)".
+
+The responder did not route through r17 or r25 — pulled the wrong-context fact from r21 §131.
+
+**Classification: LIGHT FIX-A (additive disambiguation card at r21 §131):**
+
+The r21 §131 statement is technically narrowly correct but the keyword chain "MERGE + format v1 + must upgrade" pulls strongly to it from a question framed as "does Trino MERGE work on Iceberg?" without the engineer specifying their tables are Hive-migrated. Add a one-line disambiguation that names new-CREATE-TABLE-on-Trino-467 as defaulting to v2.
+
+**Recommended FIX-A spec:**
+
+- **Primary placement: r21 §131** — append a disambiguation sentence: *"This Hive-migrated-tables-default-v1 rule applies ONLY to tables created via Spark's `migrate()` procedure. NEW Iceberg tables created via `CREATE TABLE` on Trino 467 (or via dbt-trino `materialized='table'`) default to **format_version=2** per trino.io/docs/467/connector/iceberg.html — no explicit `format_version=2` property is needed before MERGE for new tables. Only legacy Hive-migrated tables need the v1→v2 upgrade."*
+
+- **Secondary placement: r17 §681 (the "format version 2" pin)** — add a one-liner cross-ref to r21 §131 with the explicit disambiguation: *"New `CREATE TABLE` on Trino 467 defaults to v2; the `migrated tables default to v1` rule is Hive-migration-specific (see r21 §131)."*
+
+- **Keyword anchors the disambiguation must include (to defang the over-generalization):**
+  - "do I need format_version=2 before MERGE"
+  - "MERGE on new Iceberg table — set format_version explicitly?"
+  - "Trino 467 default format_version new table"
+  - "CREATE TABLE Iceberg format_version default"
+  - "migrated v1 vs new-table v2"
+
+**DO-NOT-WRITE entries (to defang the responder's over-warning):**
+
+- *"Default Iceberg tables are format v1; you must set `format_version=2` before MERGE"* — **WRONG for new tables on Trino 467**. CREATE TABLE defaults to v2; explicit setting only needed for Hive-migrated tables. (r17 §619-621 pin and trino.io/docs/467/connector/iceberg.html.)
+- *"ALTER TABLE ... SET PROPERTIES format_version=2 before using MERGE"* — only applies to v1 tables (e.g., Hive-migrated). Useless no-op on a v2 table (which is what `CREATE TABLE` produces on 467).
+
+**Note on watch sizing:** this is the FIRST instance of the over-generalization on the MERGE+format_version pair. Practical impact is bounded (harmless no-op on new tables). Adding the disambiguation prevents the over-warning from recurring AND tightens r21 §131's scope without removing it (Hive-migration users still need it). LOW-PRIORITY LIGHT FIX-A — additive, no removal.
+
+**Verifications performed:**
+
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — `format_version` table property "Defaults to `2`. Version `2` is required for row level deletes." Verified for both 467 docs and current (481).
+- [trinodb.github.io/docs.trino.io/419/connector/iceberg.html](https://trinodb.github.io/docs.trino.io/419/connector/iceberg.html) — already documents default=2 in March 2023. The default has been v2 for many releases before 467.
+- [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) — MERGE INTO syntax with required explicit column lists (no wildcards).
+- Grep'd resources/ for `format_version` + `default v1` — root-cause located at r21 §131 (Hive-migration scope, narrowly correct, over-generalized by responder).
 
 ---
 
 ## Topics touched and rubric updates
 
-- **Q1 — Iceberg table maintenance** (2.500). Following iter1149 Q3 footnote precedent (full-rebuild reader-safety routing scored under Iceberg-maintenance). 4.47648/184 → (823.27232 + 2.500)/185 = **4.4501/185 PASSED** (-0.0264, margin +0.9501, still safely above 3.5).
-- **Q2 — SQL query best practices for OLAP** (5.000). 4.5693/215 → (982.3995 + 5.0)/216 = **4.5722/216 PASSED** (+0.0029).
-- **Q3 — Analytical query patterns on Iceberg+Trino** (3.125). 4.58545/102 → (467.7159 + 3.125)/103 = **4.5326/103 PASSED** (-0.0528, margin still +1.0326).
-- **Q4 — Query performance basics** (4.875). 4.16288/25 → (104.072 + 4.875)/26 = **4.1893/26 PASSED** (+0.0264).
+- **Q1 — Iceberg table maintenance** (5.000). Following iter1149/iter1150 footnote precedent (full-rebuild reader-safety routing scored under Iceberg-maintenance). 4.4501/185 → (823.2685 + 5.0)/186 = **4.4531/186 PASSED** (+0.0030, margin +0.9531).
+- **Q2 — SQL query best practices for OLAP** (5.000). 4.5722/216 → (987.5952 + 5.0)/217 = **4.5749/217 PASSED** (+0.0027, margin +1.0749).
+- **Q3 — Analytical query patterns on Iceberg+Trino** (5.000). 4.5326/103 → (466.8578 + 5.0)/104 = **4.5371/104 PASSED** (+0.0045, margin +1.0371).
+- **Q4 — Oracle PL/SQL → dbt + Trino SQL migration** (4.000). 4.4501/122 → (542.9122 + 4.0)/123 = **4.4464/123 PASSED** (-0.0037, margin +0.9464).
 
 All required topics REMAIN PASSED.
 
@@ -134,31 +156,39 @@ All required topics REMAIN PASSED.
 
 ## Recommendation
 
-**LIGHT FIX-A** for Q1 (second misroute on full-rebuild atomic-swap → findability gap confirmed):
+**LIGHT FIX-A** for Q4 (over-generalization of r21 §131's narrowly-scoped migrated-tables-v1 default to all new tables, which on Trino 467 default to v2):
 
-- Add on_table_exists canonical at r28 (primary placement, near §930)
-- Cross-ref from r27 §6 materialization decision tree (where responder's keyword path lands)
-- Cross-ref from r17 §163 CREATE OR REPLACE TABLE area
+- Add disambiguation sentence at r21 §131 explicitly scoping the v1-default rule to Hive-migrated tables only, and naming new-CREATE-TABLE-on-467 as defaulting to v2.
+- Add cross-ref from r17 §681 to r21 §131 with the disambiguation in keyword-anchored form.
 - Use the keyword anchors and DO-NOT-WRITE entries listed above.
 
-**WATCH:** r28 on_table_exists canonical iter1150. Re-probe in next sweep with a third phrasing of the full-rebuild atomic-swap question class to confirm the new canonical reaches:
-- e.g., "Nightly dim_users dbt model rebuilds the whole table. Dashboard users sometimes refresh during the build and see weird intermediate states — is there a dbt config for this?"
-- e.g., "Can my dbt table-materialization do a CREATE OR REPLACE atomically without going through DROP+CREATE?"
-- e.g., "Want the table swap at the end of `dbt run` to be transactional for live readers."
+**Watch:** `r21 §131 migrated-vs-new-table format_version disambiguation iter1151`. Re-probe in next sweep with a different MERGE+format_version framing:
+- e.g., "I'm CREATE TABLE'ing a new Iceberg table from dbt and want to MERGE into it tomorrow. Do I need to set any format property at create time?"
+- e.g., "What format version do new Iceberg tables get on Trino 467?"
+- e.g., "Engineer says we need format_version=2 before MERGE works — is that true on our stack?"
 
-If the third phrasing reaches the canonical → watch CLOSED. If it misroutes again → escalate to a stronger anchor (TL;DR or top-of-file callout in r28).
+If reaches the disambiguation → WATCH CLOSED; if over-warns again → escalate to TL;DR / top-of-file callout at r21 §131.
 
-**No fix on Q3.** Responder slip (window-function-in-WHERE invalid in the primary) with correct alternative present. One instance; don't churn. Re-probe with "Nth row per group" question variant in future sweep.
+**No fix on Q2 / Q3.** Both clean canonical answers.
+
+**Q1 watch CLOSURE:** `r28 on_table_exists canonical iter1150` — CLOSED on first re-probe with third phrasing of the full-rebuild atomic-swap question class. r28 §961 LEADING CANONICAL pulling correctly.
+
+---
+
+## Pattern observations
+
+- **r28 §961 on_table_exists FIX-A is durable** — iter1150 misroute → iter1150 add canonical → iter1151 reach on first re-probe. Single-iteration find-and-close, consistent with the recent r17 TopN-disambiguation / r23 VARCHAR-exact-comparison / r07 IGNORE-NULLS-placement closure patterns.
+- **Imported-prior over-generalization family** (Q4) — the responder's "default v1" claim is a recurrence of the imported-prior fab class (e.g., iter1011 from_unixtime TZ, iter1006 LIMIT-OFFSET MySQL order, iter925 COUNT(DISTINCT a,b) MySQL) but with a TWIST: this time the wrong prior is **resource-sourced** (r21 §131, narrowly correct scope, over-generalized in application). The defensive fix is to add scope-narrowing language at the resource site rather than relying on responder caution.
+- **No CHURN required** — Q2 array_max + Q3 conditional-aggregation pivot + Q1 on_table_exists are all canonical pin-perfect reaches; the iter is healthy at 4.750 avg.
 
 ---
 
 ## Sources verified
 
 - [dbt-trino on_table_exists config (docs.getdbt.com)](https://docs.getdbt.com/reference/resource-configs/trino-configs)
-- [Trino 467 Iceberg connector — CREATE OR REPLACE TABLE atomicity](https://trino.io/docs/current/connector/iceberg.html)
-- [Trino 467 String functions — lpad truncation behavior](https://trino.io/docs/467/functions/string.html)
-- [Trino 467 Conversion functions — format() Java Formatter semantics](https://trino.io/docs/467/functions/conversion.html)
-- [Trino 467 Window functions — nth_value + frames](https://trino.io/docs/467/functions/window.html)
-- [Trino 467 Spilling properties — spill-enabled / max-spill-per-node 100GB default](https://trino.io/docs/467/admin/properties-spilling.html)
-- [Trino 467 Spill to disk overview](https://trino.io/docs/467/admin/spill.html)
-- [dbt-trino issue #479 on_table_exists=skip](https://github.com/starburstdata/dbt-trino/issues/479)
+- [Trino 467 Iceberg connector — format_version default=2 + MERGE support](https://trino.io/docs/467/connector/iceberg.html)
+- [Trino 419 Iceberg connector — confirms default=2 from March 2023 (well before 467)](https://trinodb.github.io/docs.trino.io/419/connector/iceberg.html)
+- [Trino 467 MERGE INTO syntax — explicit column lists required](https://trino.io/docs/467/sql/merge.html)
+- [Trino 467 Array functions — array_max / array_min](https://trino.io/docs/467/functions/array.html)
+- [Trino 467 Date/time functions — year() / quarter()](https://trino.io/docs/467/functions/datetime.html)
+- [Trino PR #11880 — original format_version table property add, with follow-up note "v2 should be the default"](https://github.com/trinodb/trino/pull/11880)
