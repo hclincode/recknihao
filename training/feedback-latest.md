@@ -1,220 +1,208 @@
-# iter1152 Feedback
+# iter1153 Feedback
 
-**Iter average: 4.781 STRONG PASS NO-OP** (Q1 r21 §131 migrated-vs-new-table FIX-A REACHED CLEANLY on first re-probe — WATCH CLOSED; Q1 broken verification-query aside is a one-off responder slip per the broken-secondary-alternative family — NO resource fix; Q2/Q3/Q4 clean)
+**Iter average: 4.281 PASS NO-OP** (Q1 OFF-BY-ONE on HAVING threshold — gaps-and-islands CONSTRUCTION correct, FINAL ASSEMBLY threshold wrong; classified one-off Haiku synthesis-ceiling slip per pinned `feedback_synthesis_ceiling_stop_churning` — NO RESOURCE FIX; Q2 clean 5.0; Q3 minor causal imprecision on "row count → tiny files"; Q4 clean)
 
-**Verdict shape:** STRONG PASS by margin +1.281 above 3.5 threshold. Q2/Q3 clean 5.0; Q4 clean 4.75; Q1 4.375 — core answer (no property flip needed, new dbt/Trino tables default to v2, MERGE works out of the box, migrated-only caveat) is the exact iter1151 FIX-A reach; the broken `system.metadata.table_properties` verification-query aside is a per-instance secondary-alternative slip not a resource defect.
+**Verdict shape:** PASS by margin +0.781 above 3.5 threshold. Q2 clean 5.0; Q4 clean 4.875; Q3 4.0 with minor causal slip on small-file root cause; Q1 3.25 fail by per-question threshold but absorbed by topic cushioning (Analytical-query-patterns sits at +1.0326 above threshold). No per-question veto by topic-cushion rule. No resource fix warranted.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Freshly created Iceberg table via dbt model. Teammate said "Iceberg starts in an older format, no row-level deletes, must flip a property first." True for brand-new table on Trino 467 or do merges/updates work out of the box?
+### Q1 — Surface "resurrected" customers: active, then dark for 60+ days, then active again. Single query? Roughly what would it look like?
 
-**Score: 4.375** — Acc 4.0 / Clar 5.0 / App 4.0 / Compl 4.5
+**Score: 3.25** — Acc 2.5 / Clar 4.5 / App 2.5 / Compl 3.5
 
-**Source-verified canonical answer (from r21 §131-133 — iter1151 FIX-A — and trino.io/docs/467/connector/iceberg.html):**
+**Source-verified canonical answer (from r07 §3099-3156 Pattern B-Session gaps-and-islands construction template):**
 
-- A new Iceberg table created on Trino 467 via `CREATE TABLE` or via dbt-trino `materialized='table' / 'incremental'` defaults to `format_version=2` — `MERGE / UPDATE / DELETE` work out of the box, no property flip needed.
-- The "default format v1" claim is narrowly correct ONLY for tables produced by Spark's `CALL iceberg.system.migrate('schema.table')` procedure (Hive Parquet wrapped as Iceberg shim). Those legacy tables start at v1 and DO need `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` from Spark before MERGE.
-- The Trino Iceberg `format_version` table property "Defaults to `2`. Version `2` is required for row level deletes." (verbatim from [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)). Default has been v2 since Trino 419 (well before 467).
-
-**Responder behavior — core answer pin-perfect, verification-query aside BROKEN:**
-
-CORE answer (passes cleanly):
-- YES out-of-the-box for freshly created dbt tables.
-- NO property change required.
-- Trino 467 defaults `format_version=2`.
-- v2 supports row-level deletes and MERGE.
-- Correctly scoped the migrated-only caveat: "only MIGRATED tables (Hive→Iceberg via Spark migrate()) start at v1 and need upgrade; a CREATE TABLE from dbt skips that."
-
-This is the EXACT iter1151 r21 §131 FIX-A reach. The disambiguation block at r21 §133 (added iter1151 — `IMPORTANT — this v1 default applies ONLY to tables produced by Spark's migrate() procedure...`) is pulling correctly on the keyword chain "dbt table model fresh / row-level deletes / flip a property / Trino 467." Watch label `r21 §131 migrated-vs-new-table format_version disambiguation iter1151` **CLOSED on first re-probe**.
-
-BROKEN secondary-aside — the responder offered a verification query:
+The classic gaps-and-islands shape applies — LAG to detect the >60-day gap, `SUM(is_new_segment) OVER (PARTITION BY customer_id ORDER BY activity_date)` for running segment_id, then aggregate per customer:
 
 ```sql
--- Responder's verification query (BROKEN):
-SELECT value AS format_version
-FROM system.metadata.table_properties
-WHERE key = 'format-version';
-```
-
-This query is factually wrong on TWO axes:
-
-1. **Wrong table.** `system.metadata.table_properties` is a property-DEFINITIONS catalog: it lists which properties each connector accepts, with columns `(catalog_name, property_name, default_value, type, description)` (verified [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) + [trinodb/trino#14000](https://github.com/trinodb/trino/issues/14000)). It has NO `key` column, NO `value` column, and does NOT report a specific table's bound property value. Running the responder's query as-is yields `Column 'key' cannot be resolved` / `Column 'value' cannot be resolved`.
-2. **Wrong shape conceptually.** Even if the columns existed, `system.metadata.table_properties` would return one row per (catalog, property_name) — the connector's allowed-property schema — not per-table values.
-
-The CORRECT canonical for "what format_version is THIS table on?" lives at **r17 §1373-1376** verbatim:
-
-```sql
-SELECT value AS format_version
-FROM iceberg.analytics."events$properties"
-WHERE key = 'format-version';
-```
-
-The responder pulled the right column SHAPE (`value AS format_version`, `WHERE key = 'format-version'`) from r17 §1373-1376 but pasted the wrong FROM clause — substituted `system.metadata.table_properties` for `iceberg.<schema>."<table>$properties"`. r10 §306-340 explicitly catalogs this exact wrong query shape as a DO-NOT-WRITE entry ("WRONG — this query FABRICATES columns. system.metadata.table_properties is a REAL Trino system table, BUT its columns are catalog_name, property_name, default_value, type, description..."). Both the canonical (right) and the defang (DON'T) ARE in the resources.
-
-**Classification: ONE-OFF responder slip — broken-secondary-alternative family (NO resource fix).**
-
-This matches the pinned `feedback_responder_broken_secondary_alternative.md` pattern verbatim: "Haiku nails the LEAD but frequently appends a BROKEN 'for completeness' alternative form (...) leads pass, scope each as per-instance one-off re-probe NOT a resource defect, don't churn (no single resource fix for responder padding)." Both the canonical (r17 §1373-1376) and the explicit defang (r10 §306-340) already exist; the responder under-routed and pasted the wrong table on its own. The CORE answer to the actual question — "do I need to flip format_version?" — is correct and load-bearing; the broken verification query is the secondary aside the engineer can ignore or correct after one error message.
-
-**Practical impact bounded:** the engineer reads "no property flip needed" (correct), trusts that, and runs MERGE successfully without the verification query. If they DO run the verification query, they get an immediate parse error and a 5-second Google reveals the correct `"<table>$properties"` form. The slip is irritating, not query-breaking.
-
-**Score breakdown rationale:**
-- Acc 4.0: core answer fully correct (no v2 flip needed, defaults v2, migrated-only caveat, MERGE works) — exactly the iter1151 FIX-A target. Verification query factually wrong on table identity AND column existence — subtracts 1.0.
-- Clar 5.0: writing is clear, the migrated-vs-new-table distinction is well-stated.
-- App 4.0: engineer can act on the core answer immediately; verification step would error and require a 1-minute fix.
-- Compl 4.5: addresses both the question (out-of-the-box?) and the natural follow-up ("how do I verify?") — the verification just happens to be wrong.
-
-**WATCH CLOSURE:** `r21 §131 migrated-vs-new-table format_version disambiguation iter1151` — **CLOSED on first re-probe.** The disambiguation block at r21 §133 (added iter1151 FIX-A) is keyword-anchored on "do I need format_version=2 before MERGE / Trino 467 default format_version new table / new CREATE TABLE v2 default / migrated v1 vs new-table v2" and pulled cleanly on the iter1152 framing "freshly created Iceberg table via dbt table model / row-level deletes / must flip a table property first." Responder's core answer mirrors the new r21 §133 wording verbatim ("only MIGRATED tables (Hive→Iceberg via Spark migrate()) start at v1 and need upgrade; a CREATE TABLE from dbt skips that"). Single-iteration find-and-close.
-
-**Verifications performed:**
-
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — `format_version` table property "Optionally specifies the format version of the Iceberg specification to use for new tables; either `1` or `2`. Defaults to `2`. Version `2` is required for row level deletes." VERIFIED — matches core responder claim.
-- [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) — `system.metadata.table_properties` lists property DEFINITIONS not per-table values; columns are `catalog_name, property_name, default_value, type, description`. CONFIRMED — responder's verification query references columns (`key`, `value`) that do not exist on this table.
-- Grep'd resources/ — confirmed r17 §1373-1376 has the canonical `iceberg.<schema>."<table>$properties"` form with `value AS format_version WHERE key = 'format-version'`, AND r10 §306-340 explicitly defangs the wrong `system.metadata.table_properties` substitution as a fabrication. Both findability anchors exist; responder under-routed.
-
----
-
-### Q2 — `display_name = first_name || ' ' || last_name`, last_name NULL → whole thing NULL. Trino string function for graceful NULL concat, or is wrap-every-column-with-coalesce the only way?
-
-**Score: 5.000** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
-
-**Source-verified canonical answer (from [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html)):**
-
-- `concat_ws(separator, string1, ..., stringN) → varchar` — "If separator is null, then the return value is null. Any null values provided in the arguments after the separator are skipped." VERBATIM from docs.
-- `concat(string1, ..., stringN) → varchar` — "provides the same functionality as the SQL-standard concatenation operator (||)" — NULL-propagating (any NULL arg → whole result NULL).
-- `||` — SQL-standard NULL-propagating.
-
-Responder gave `CONCAT_WS(' ', first_name, last_name)` and correctly stated:
-- It SKIPS NULL values in the string args after the separator — `concat_ws(' ', 'John', NULL)` → `'John'` (no trailing space, no NULL result).
-- Contrast against `||` and `concat()` which propagate NULL.
-- Caveat that separator-itself-NULL → whole-result NULL.
-
-All claims verified verbatim from Trino 467 docs. The "previously misremembered as Postgres-only" framing is correctly resolved — `concat_ws` IS native Trino 467 (per docs). Cited r27. Clean canonical answer.
-
-**Verifications performed:**
-
-- [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html) — `concat_ws` two-arg + array variants confirmed. "Any null values provided in the arguments after the separator are skipped" verbatim.
-- Confirmed `concat()` has same semantics as `||` (SQL-standard NULL-propagating) — responder's contrast accurate.
-
----
-
-### Q3 — Per customer: top 5 products by total revenue this quarter PLUS one "Everything else" row summing all other products. Single query or two?
-
-**Score: 5.000** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
-
-**Source-verified canonical answer:**
-
-Single query, two-stage pattern:
-
-```sql
-WITH ranked_products AS (
-  SELECT customer_id, product_name,
-         SUM(revenue) AS product_revenue,
-         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY SUM(revenue) DESC) AS rn
-  FROM sales
-  WHERE order_date >= date_trunc('quarter', current_date)
-  GROUP BY customer_id, product_name
+WITH customer_activity AS (
+  SELECT DISTINCT customer_id, DATE(event_timestamp) AS activity_date
+  FROM events
+  WHERE event_timestamp >= CURRENT_DATE - INTERVAL '180' DAY
+),
+gaps_flagged AS (
+  SELECT customer_id, activity_date,
+    CASE
+      WHEN LAG(activity_date) OVER (PARTITION BY customer_id ORDER BY activity_date) IS NULL THEN 1
+      WHEN date_diff('day', LAG(activity_date) OVER (PARTITION BY customer_id ORDER BY activity_date), activity_date) > 60 THEN 1
+      ELSE 0
+    END AS starts_new_segment
+  FROM customer_activity
+),
+segments AS (
+  SELECT customer_id, activity_date,
+    SUM(starts_new_segment) OVER (PARTITION BY customer_id ORDER BY activity_date) AS segment_id
+  FROM gaps_flagged
 )
-SELECT customer_id,
-       CASE WHEN rn <= 5 THEN product_name ELSE 'Everything else' END AS product_label,
-       SUM(product_revenue) AS total_revenue
-FROM ranked_products
-GROUP BY customer_id, CASE WHEN rn <= 5 THEN product_name ELSE 'Everything else' END
-ORDER BY customer_id, total_revenue DESC;
+SELECT customer_id, COUNT(DISTINCT segment_id) AS num_activity_periods
+FROM segments
+GROUP BY customer_id
+HAVING COUNT(DISTINCT segment_id) >= 2;   -- <<< CORRECT threshold: ONE resurrection = TWO segments
 ```
 
-All Trino 467 valid:
-- `ROW_NUMBER() OVER (... ORDER BY SUM(revenue) DESC)` — window over aggregate alias in a GROUP BY scope is legal (window functions execute after GROUP BY; `SUM(revenue)` is the already-aggregated value).
-- `GROUP BY` on CASE expression — confirmed legal per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) "A simple GROUP BY clause may contain any expression composed of input columns." (Plain GROUP BY accepts expressions; only GROUPING SETS / CUBE / ROLLUP require column names — pinned in `reference_trino_complex_grouping_column_names_only.md`.)
-- `date_trunc('quarter', current_date)` — verified native [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (`'quarter'` is a valid unit string for `date_trunc`).
-- Outer `SUM(product_revenue)` over already-aggregated CTE is correct: for `rn<=5`, each (customer, product) appears once, `SUM` over one value = that value (harmless no-op); for `rn>5`, sums all-others into one 'Everything else' row.
-- ROW_NUMBER tie-at-rank-5 caveat: if revenue ties at rank 5, ROW_NUMBER picks one product deterministically as rank 5 and the other goes to 'Everything else'. Standard known trade-off; RANK/DENSE_RANK would change tie behavior — but acceptable default.
+**Walk through the segment math for the actual ask "active → dark 60+ → active":**
 
-Responder correctly noted Trino has no QUALIFY (per pinned `feedback_trino_dialect_accuracy.md` — Trino 467 has NO QUALIFY clause). Clean canonical answer.
+- Day 1 (first activity per customer): `LAG IS NULL` → `starts_new_segment = 1` → running SUM = 1 → segment_id = 1.
+- Days 2-N within initial active window: `starts_new_segment = 0` → segment_id stays at 1.
+- Day after a 60+ day silence: `date_diff > 60` → `starts_new_segment = 1` → running SUM = 2 → segment_id = 2.
+- Subsequent days in the resurrected active window: segment_id stays at 2.
 
-**Verifications performed:**
+A SINGLE resurrection produces `COUNT(DISTINCT segment_id) = 2`. The qualifying customers are exactly those with `>= 2` segments.
 
-- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — confirmed GROUP BY on expression is legal.
-- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) — `date_trunc('quarter', x)` is a documented unit string.
-- [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — confirmed ROW_NUMBER + ordered window valid form.
+**Responder behavior — construction correct, FINAL THRESHOLD off-by-one:**
 
----
+CORRECT pieces (lifted cleanly from r07 §3099-3156 Pattern B-Session template — all four building blocks match the canonical):
+- DISTINCT `customer_id, DATE(event_timestamp)` over 180-day window → deduped one-row-per-customer-per-active-day grain.
+- `LAG(activity_date) OVER (PARTITION BY customer_id ORDER BY activity_date)` for the prior activity.
+- `CASE WHEN LAG IS NULL THEN 1 WHEN date_diff('day', LAG, activity_date) > 60 THEN 1 ELSE 0 END` — both the LAG-IS-NULL first-row carve-out (r07 §3154 verbatim) and the gap-test against the plain bigint 60 not `INTERVAL '60' DAY` (r07 §3153 verbatim) are correct.
+- `SUM(starts_new_segment) OVER (PARTITION BY customer_id ORDER BY activity_date)` running-SUM segment_id (r07 §3155 verbatim).
+- Notes "date_diff returns bigint compare to 60 not INTERVAL", "no timestamp-timestamp operator", "windows in their own SELECT layer" — all directly mirror r07 Pattern B-Session pin-text.
 
-### Q4 — Oracle `(+)` outer-join notation rejected by Trino. Direct translation + edge cases that don't map cleanly?
+DEFECT — `HAVING COUNT(DISTINCT segment_id) >= 3` is OFF BY ONE:
 
-**Score: 4.750** — Acc 5.0 / Clar 5.0 / App 4.5 / Compl 4.5
+- The comment claims "3+ periods means: active, dark, active again (or more)" — that interpretation is wrong. 3 segments means TWO resurrections (active → dark → active → dark → active), i.e. a customer who went dark and came back TWICE.
+- A SINGLE resurrection (the literal ask "active, then dark for 60+ days, then active again") produces exactly 2 segments / 1 qualifying gap.
+- Result for the engineer: a copy-pasted query returns ZERO or near-zero rows on a real dataset (because two-time-resurrected customers are rare), and the engineer concludes "we don't have any resurrected customers" — silently wrong. Worst failure mode: no parse error, returns a plausible-looking small subset that systematically MISSES the customers the engineer actually wanted to surface.
 
-**Source-verified canonical answer:**
+**Source classification — synthesis-ceiling slip, NOT a resource defect:**
 
-- Trino 467 does NOT support Oracle's `(+)` non-standard outer-join notation. Use ANSI `LEFT/RIGHT/FULL OUTER JOIN` exclusively.
-- `A.x = B.x(+)` → B is OPTIONAL → `FROM A LEFT OUTER JOIN B ON A.x = B.x`.
-- `A.x(+) = B.x` → A is OPTIONAL → `FROM A RIGHT OUTER JOIN B ON A.x = B.x` (equivalently `FROM B LEFT JOIN A`).
-- Filter-on-optional-side gotcha: `WHERE c.status = 'active'(+)` MUST move to the ON clause, NOT the WHERE clause; a WHERE predicate on the optional table after the join degrades the outer join to an inner join (NULL-padded rows fail the WHERE filter and disappear). This is the single most common silent-correctness defect in mechanical (+) → ANSI translations.
+Grepped resources/ for `resurrect|reactivat|came back|winback|active.*dark|dark.*active` and for `>= [23].*segment / num_activity_periods / COUNT(DISTINCT segment_id) >=`:
+- ZERO resources teach a "resurrection" canonical with any stated `>=` threshold.
+- r07 §3099-3156 (Pattern B-Session) teaches the construction but the example application is "number of sessions per user" (an unqualified count, no threshold filter); r07 §3180-3230 (Pattern B-Streak) teaches "longest streak per user" (MAX over per-island counts, no threshold filter either).
+- No resource taught `>= 3` for resurrection — the responder lifted the CONSTRUCTION template correctly from the Session card, but synthesized the threshold incorrectly when mapping "resurrection = active → dark → active" to a count over the synthesized segment_id.
+- This pattern matches the pinned `feedback_synthesis_ceiling_stop_churning` family (responder construction is right, final assembly off by one), and the pinned `feedback_responder_broken_secondary_alternative` family (leads pass, secondary/threshold-decision-aside slips). NO RESOURCE FIX — adding a resurrection-threshold canonical risks over-attracting adjacent gaps-and-islands questions to the wrong card (per pinned `feedback_new_card_over_attracts_adjacent`) and the failure mode is responder synthesis not findability.
 
-Responder gave all of the above correctly:
-- (+) is a parse error in Trino.
-- LEFT/RIGHT mapping correct.
-- Filter-on-optional-side-must-go-in-ON edge case correctly flagged as the load-bearing gotcha.
-- Cited r27.
+**Verdict per dim:**
+- Technical accuracy 2.5: construction blocks correct, but the final HAVING threshold delivers the wrong answer to the actual question.
+- Beginner clarity 4.5: CTE chain + walkthrough comments are well-explained.
+- Practical applicability 2.5: engineer copy-paste produces silently wrong results (no parse error, wrong subset).
+- Completeness 3.5: covers shape and dialect caveats, missed correct threshold reasoning.
 
-**Minor completeness shave (-0.5 Compl, -0.5 App):** other Oracle (+) limitations the responder could have mentioned for "edge cases that don't map cleanly":
-- Oracle (+) cannot be used with `OR` in the join predicate — direct translation to ANSI works fine (ANSI ON-clause supports OR), so this is actually a CASE WHERE ANSI is MORE permissive than (+).
-- Oracle (+) cannot express FULL OUTER JOIN (it's one-sided only) — ANSI `FULL OUTER JOIN` covers this gap.
-- A single table can't be marked optional to two different tables with (+) in one statement — ANSI chains of LEFT JOIN handle this cleanly.
-- (+) cannot reference a subquery / inline view — ANSI joins to subqueries are fine.
-
-These would all be "edge cases ANSI handles BETTER than (+)" — useful framing for an engineer migrating from Oracle. Not load-bearing for the core question (the engineer asked about translation + edge cases; the filter-in-WHERE gotcha is the most important one), but mentioning at least one more would round out the answer.
-
-**Verifications performed:**
-
-- [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — Trino uses ANSI JOIN syntax exclusively (LEFT/RIGHT/FULL/INNER/CROSS); no `(+)` operator parse path.
-- Oracle (+) semantics confirmed from Oracle docs — `(+)` marks the OPTIONAL side (will be padded with NULL when no match).
+**Recommendation:** NO RESOURCE FIX. Watch label `r07 gaps-and-islands resurrection-threshold off-by-one iter1153`; re-probe in next sweep with a structurally similar two-period-detection variant ("find users who paused subscription for 30+ days then re-subscribed" / "accounts that went silent 90+ days and returned"). If recurs across phrasings → consider an additive r07 §3160 mini-note pinning "1 resurrection = 2 segments / `HAVING >= 2`" alongside the Pattern B-Session card. If one-off → keep as Haiku synthesis-ceiling and leave the card untouched.
 
 ---
 
-## Topics touched and rubric updates
+### Q2 — Postgres EXTRACT(EPOCH FROM event_ts) for raw Unix seconds. Does that exact syntax work in Trino, or a different function?
 
-- **Q1 — Iceberg table maintenance** (4.375). Following iter1151 Q1 precedent (full-rebuild and Iceberg-table-property routing scored under Iceberg-maintenance). 4.4531/186 → (828.2766 + 4.375)/187 = **4.4527/187 PASSED** (-0.0004, margin +0.9527).
-- **Q2 — SQL query best practices for OLAP** (5.000). NULL handling in string concat is a Trino-dialect best-practice gotcha. 4.5749/217 → (992.7533 + 5.0)/218 = **4.5768/218 PASSED** (+0.0019, margin +1.0768).
-- **Q3 — Analytical query patterns on Iceberg+Trino** (5.000). Top-N + "everything else" is a canonical aggregation-pivot pattern. 4.5371/104 → (471.8584 + 5.0)/105 = **4.5415/105 PASSED** (+0.0044, margin +1.0415).
-- **Q4 — Oracle PL/SQL → dbt + Trino SQL migration** (4.750). 4.4464/123 → (546.9072 + 4.75)/124 = **4.4488/124 PASSED** (+0.0024, margin +0.9488).
+**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-All required topics REMAIN PASSED.
+**Source-verified canonical answer (from [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):**
 
----
+- Trino EXTRACT supports fields: YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, DOW, DAY_OF_YEAR, DOY, YEAR_OF_WEEK, YOW, HOUR, MINUTE, SECOND, TIMEZONE_HOUR, TIMEZONE_MINUTE. EPOCH is NOT in the list — `EXTRACT(EPOCH FROM event_ts)` is a parse error in Trino 467.
+- Use `to_unixtime(event_ts) -> double` for Unix seconds (verbatim docs signature).
+- `from_unixtime(unixtime) -> timestamp(3) with time zone` for the reverse direction (verbatim docs signature; matches the pinned `reference_trino_from_unixtime_tz` note that ALL from_unixtime overloads carry time zone, no without-tz variant).
 
-## Recommendation
+**Responder behavior — clean substitution:**
 
-**NO RESOURCE FIX (NO-OP).** Iter is healthy at 4.781 avg, +1.281 above threshold.
+- Definitively says EXTRACT(EPOCH ...) is not Trino syntax.
+- Names `to_unixtime(event_ts) -> DOUBLE` as the canonical substitution.
+- Comparison table contrasts `to_unixtime` (timestamp → seconds) vs `from_unixtime` (seconds → timestamp(3) with time zone) — both signatures match the docs verbatim.
+- `CAST(to_unixtime(...) AS BIGINT)` for integer-only consuming systems is correct (typical millisecond-aware downstream system expects BIGINT epoch).
+- `to_unixtime(current_timestamp) - to_unixtime(event_ts)` for seconds-ago is correct and idiomatic.
+- Millisecond round-trip `from_unixtime(event_ms / 1000.0)` correctly divides by 1000.0 (NOT 1000) to preserve sub-second precision into the DOUBLE input.
 
-- Q1 broken verification query: one-off responder slip in the broken-secondary-alternative family (per pinned `feedback_responder_broken_secondary_alternative.md`). Both the canonical right form (r17 §1373-1376) and the explicit defang (r10 §306-340) ARE in the resources; responder under-routed on its own. No single resource fix for responder secondary-aside padding. Recall ceiling.
-- Q2/Q3/Q4: no defects.
+Imported-Postgres-prior correctly resolved (consistent with the pinned imported-prior family: EXTRACT(EPOCH) is Postgres-only). r13 citation appropriate.
 
-**Watch closures:**
-- `r21 §131 migrated-vs-new-table format_version disambiguation iter1151` — **CLOSED** on first re-probe with brand-new-dbt-table framing. The iter1151 r21 §133 IMPORTANT block (added "this v1 default applies ONLY to tables produced by Spark's migrate() procedure...") is pulling cleanly; responder's core answer matches its language. Single-iteration find-and-close.
-
-**Watch openings:**
-- None. Q1 verification-query slip is the broken-secondary-alternative pattern — established as a Haiku synthesis ceiling not a resource gap (pinned). Re-probe in next sweep with a different format_version verification framing (e.g., "how do I check what format version my table is on?") to confirm `iceberg.<schema>."<table>$properties"` routes cleanly when ASKED as a primary question, not just as a secondary aside.
-
----
-
-## Pattern observations
-
-- **r21 §131-133 disambiguation FIX-A is durable.** iter1151 over-generalization slip → iter1151 add IMPORTANT block at r21 §133 → iter1152 reach on first re-probe with structurally similar new-dbt-table framing. Consistent with the recent r28 on_table_exists / r18 TopN-disambiguation / r07 IGNORE-NULLS-placement single-iteration find-and-close pattern.
-- **Broken-secondary-alternative pattern, Nth instance** (Q1 verification query). Haiku PRIMARY answer is canonical-correct; SECONDARY "for completeness" verification query is broken — substituted `system.metadata.table_properties` for `iceberg.<schema>."<table>$properties"`. Per pinned guidance: per-instance one-off, no resource fix, recall ceiling. Don't churn r10 §306-340 (already explicitly defangs this exact wrong-table substitution).
-- **Imported-prior caution working** (Q2). `concat_ws` was correctly identified as native Trino 467 (not Postgres-only). The responder noted the prior misremembering and self-corrected — clean reach. Consistent with the to_char / listagg / starts_with imported-prior corrections (pinned).
-- **Healthy iter; no churn warranted.** 3 of 4 questions clean canonical reaches; Q1 core is the exact iter1151 FIX-A target. Avg 4.781 is high-confidence STRONG PASS.
+Clean 5.0 all dimensions.
 
 ---
 
-## Sources verified
+### Q3 — Iceberg events table partitioned by day; launch/Black-Friday days have 50-100x more rows than a quiet day. Structural problem? Does Trino/Iceberg handle the imbalance automatically, or a slow-query situation to address explicitly?
 
-- [Trino 467 Iceberg connector — format_version default=2](https://trino.io/docs/467/connector/iceberg.html)
-- [Trino 467 system.metadata.* catalog — table_properties is property-definitions not per-table values](https://trino.io/docs/current/connector/system.html)
-- [trinodb/trino#14000 — system.metadata access control + table column shape](https://github.com/trinodb/trino/issues/14000)
-- [Trino 467 String functions — concat / concat_ws / NULL skip semantics](https://trino.io/docs/current/functions/string.html)
-- [Trino 467 Date/time functions — date_trunc 'quarter' unit](https://trino.io/docs/current/functions/datetime.html)
-- [Trino 467 Window functions — ROW_NUMBER](https://trino.io/docs/current/functions/window.html)
-- [Trino 467 SELECT — GROUP BY on expression](https://trino.io/docs/467/sql/select.html)
-- Grep'd resources/ — r17 §1373-1376 canonical `"<table>$properties"` form for format_version verification + r10 §306-340 explicit defang of wrong `system.metadata.table_properties` substitution + r21 §131-133 iter1151 disambiguation FIX-A in place.
+**Score: 4.0** — Acc 3.5 / Clar 4.5 / App 4.0 / Compl 4.0
+
+**Source-verified canonical answer (from [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) + r10 partition-design + r17 maintenance):**
+
+- Not a structural break: day partitioning still prunes correctly on heavy days; the planner reads the file list for the matching partition irrespective of row count per partition. Skew on a temporal partition is not a blow-up.
+- The real risk is on the WRITE side / FILE LAYOUT, not the partition-bucket count. Two distinct mechanisms can produce a small-files problem on a heavy partition:
+  1. **High write parallelism on heavy days**: Spark's writer task count tends to scale with input rows; 50M rows fed to many parallel writers can produce many medium files per task — but typically those tasks each produce 100-500MB files, NOT tiny files (Spark target file size ~128MB-1GB).
+  2. **High commit cadence on heavy days**: streaming / micro-batch ingestion that commits every few seconds during a Black Friday spike accumulates many small commits → many small files per commit → metadata bloat. This is the dominant small-files cause in practice.
+- Fix: periodic `ALTER TABLE iceberg.<schema>.events EXECUTE optimize` (rewrites small data files into 128-512MB targets; verified [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) ALTER TABLE EXECUTE optimize section).
+- For partition-targeted optimize: `ALTER TABLE ... EXECUTE optimize WHERE <identity-partition-col> = ...` — supported, but the WHERE clause must push down to the table scan as a partition predicate, NOT remain as a FilterNode (verified at [trino issue #25279](https://github.com/trinodb/trino/issues/25279)). For `day(occurred_at)` transform with raw-timestamp range predicate the unwrap-cast rules typically push it down, but it's an edge case worth verifying with EXPLAIN.
+
+**Responder behavior — core guidance correct, causal claim imprecise:**
+
+CORRECT:
+- "Not structural" — accurate.
+- "Pruning still works (heavy day prunes same as light day)" — correct; partition pruning is per-partition-value, not per-row-count.
+- "Trino planner doesn't choke" — correct; partition row-count skew doesn't break planning.
+- Routes to `EXECUTE optimize` nightly as the maintenance lever — correct canonical.
+- Partition-targeted form `ALTER TABLE iceberg.analytics.events EXECUTE optimize WHERE occurred_at >= CURRENT_DATE - INTERVAL '1' DAY AND occurred_at < CURRENT_DATE` is the documented half-open form for daily-targeted compaction — valid for identity-transformed partition columns and (for `day(occurred_at)` transform) typically pushes down via unwrap-cast, but engineer should verify with EXPLAIN.
+- "Bins to 128-512MB files" — correct compaction target range.
+
+CAUSAL IMPRECISION (-0.5 Acc, -0.5 Compl):
+- "a launch day with 50M rows → Spark writes many tiny Parquet files (hundreds/thousands)" conflates row count per partition with file count. A SINGLE large batch of 50M rows actually produces FEWER, LARGER files (target ~128MB-1GB per Spark task). The small-files problem on heavy days comes from (a) high write parallelism producing many medium files spread across many tasks, AND/OR (b) high commit cadence (streaming / micro-batch) producing many small commits. Row count per partition by itself does NOT cause file fragmentation.
+- The CORRECT framing: "frequent SMALL COMMITS on heavy days produce many small files; row count per partition by itself doesn't fragment" → "use EXECUTE optimize to rewrite into 128-512MB files".
+- "metadata reads slow + query startup latency" — directionally right, but the root cause is small-file count not row count per partition.
+- Did not name the `optimize(file_size_threshold => ...)` parameter for tuning what counts as "small enough to rewrite" (recall ceiling, NOT a defect).
+
+The engineer arrives at the right action (run EXECUTE optimize on the heavy partitions) but with a slightly wrong mental model of why it's needed. Practical outcome is correct; conceptual hygiene is muddled.
+
+**Verdict per dim:**
+- Technical accuracy 3.5: core claims correct, small-file root cause imprecise.
+- Beginner clarity 4.5: explanation flows clearly.
+- Practical applicability 4.0: EXECUTE optimize is the right fix; WHERE-clause edge case unaddressed but practically usable.
+- Completeness 4.0: covers pruning-still-works + compaction lever, misses commit-cadence root cause.
+
+---
+
+### Q4 — Oracle procedures loop row-by-row (open cursor, fetch, conditional logic, write output, repeat). Converting to a dbt model — no loops/cursors. Right mental model for translating cursor logic to SQL dbt can run?
+
+**Score: 4.875** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.5
+
+**Source-verified canonical answer (from r27 §6 + §1259-1260 + dbt-trino docs):**
+
+The cursor-to-set-based mental shift:
+- Replace per-row cursor loops with single SELECTs that operate on the entire dataset; CTEs + window functions express the per-row logic as a column.
+- IF/THEN/ELSE → `CASE WHEN ... THEN ... ELSE ... END`.
+- INSERT row-by-row in cursor → `materialized='incremental'` (delta merges) or `materialized='table'` (full rebuild).
+- Per-iteration MERGE → dbt-trino `incremental_strategy='merge'` + `unique_key='<pk>'` (verified at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)).
+- Iceberg partitioning config: `partitioning = ARRAY['day(order_date)']` for hidden-partition Trino-side transform (verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)).
+
+**Responder behavior — clean translation framework:**
+
+- Mental shift framed correctly: "from row-at-a-time imperative to declarative set-based".
+- Translation table accurate: cursor → window functions; IF/THEN → CASE; temp tables → CTEs / ephemeral models; per-row MERGE → dbt incremental + merge strategy; exception handlers → dbt tests.
+- Cursor example (route order >1000 to premium queue, else standard) → single dbt SELECT with `CASE WHEN total_amount > 1000 THEN 'premium' ELSE 'standard' END AS order_category` is the canonical idiomatic translation.
+- Config block uses `materialized='incremental'`, `incremental_strategy='merge'`, `unique_key='order_id'`, `partitioning = ARRAY['day(order_date)']` — all valid dbt-trino Iceberg config values.
+- Cites r27/r09 — appropriate.
+
+Minor completeness shave (-0.5 Compl): could have explicitly named the "stateless / no in-flight state between rows" axiom (every cursor variable that accumulates across iterations becomes a window function `SUM/COUNT/LAG/LEAD/ROW_NUMBER OVER (...)`); the translation table implies it but doesn't name it. Could have mentioned that loops with ROWNUM/early-exit semantics need rank+filter rewrites (`WHERE rn <= N`). Both are recall-ceiling, not defects.
+
+Clean 4.875.
+
+---
+
+## Score history aggregation (this iter)
+
+- Q1 → **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL**: 4.5415/105 → (476.8584 + 3.25)/106 = **4.5298/106 PASSED** (-0.0117, margin still +1.0298, well above threshold).
+- Q2 → **SQL query best practices for OLAP**: 4.5768/218 → (997.7533 + 5.0)/219 = **4.5788/219 PASSED** (+0.0020, margin +1.0788).
+- Q3 → **Iceberg partition design for SaaS: strategies, small-files, compaction**: 4.4616/47 → (209.6952 + 4.0)/48 = **4.4520/48 PASSED** (-0.0096, margin +0.9520).
+- Q4 → **Oracle PL/SQL procedure → dbt + Trino SQL migration**: 4.4488/124 → (551.6572 + 4.875)/125 = **4.4513/125 PASSED** (+0.0025, margin +0.9513).
+
+All required topics REMAIN PASSED. Iter average = (3.25 + 5.0 + 4.0 + 4.875) / 4 = **4.281 PASS** (margin +0.781 above threshold).
+
+---
+
+## Verdict: PASS NO-OP
+
+**Recommendation = NO-OP** (no resource fix this iter).
+
+**Source-verified defects this iter:**
+1. **Q1 off-by-one on HAVING threshold** — `>= 3` should be `>= 2` for the single-resurrection ask. Construction blocks (LAG + running-SUM segment_id from r07 Pattern B-Session) are correct; final assembly slip. Classified per pinned `feedback_synthesis_ceiling_stop_churning` + `feedback_responder_broken_secondary_alternative` as one-off responder synthesis-ceiling, NOT a resource defect (no resource teaches a wrong threshold; grep'd zero matches for `resurrect|reactivat|came back|winback` with any stated threshold).
+2. **Q3 minor causal imprecision** — "50M rows per partition → many tiny files" conflates partition row count with file count. The actual cause is commit cadence / writer parallelism, not row count per se. Practical guidance (EXECUTE optimize) still correct so engineer arrives at right action. NOT a resource fix (r10/r17 small-files canonicals already frame it correctly; responder phrasing slip not source-anchored).
+
+**No watch escalation, no FIX-A.** Q1 watch `r07 gaps-and-islands resurrection-threshold off-by-one iter1153`: re-probe in next sweep with structurally similar two-period-detection variant ("paused 30+ days then re-subscribed" / "accounts silent 90+ days and returned"). If RECURS across phrasings → consider additive r07 §3160 mini-note pinning "1 resurrection = 2 segments / `HAVING >= 2`". If ONE-OFF → leave as Haiku synthesis-ceiling.
+
+**Thinnest-margin order after iter1153 (unchanged ordering):** dbt-snapshots-SCD2 4.1079/18 (+0.6079, thinnest required-topic) → storage-tiering 4.1302/12 (+0.6302) → query-perf-basics 4.1893/26 (+0.6893) → cost-considerations 4.3258/24 (+0.8258) → query-perf-regression-diagnosis 4.3436/21 (+0.8436) → Oracle-migration 4.4513/125 (+0.9513, Q4 lift) → Iceberg-partition-design 4.4520/48 (+0.9520, Q3 drag) → Iceberg-maintenance 4.4527/187 (untouched) → federation 4.5024/312 → dbt-sources-freshness 4.5105/9 → Analytical-query-patterns 4.5298/106 (+1.0298, Q1 drag) → SQL-best-practices-OLAP 4.5788/219 (+1.0788, Q2 lift) → CBO/ANALYZE 4.6105/22 → improving-complex-SQL-perf-dbt 4.6111/25.
+
+**Pattern observation:** 29-iter sustainment band continues. iter1153 4.281 PASS NO-OP is the THINNEST PASS margin in 4 iters since iter1150's 3.781 PASS+LIGHT-FIX-A. Both lower-margin iters involved Q1 quasi-construction-correct-but-final-assembly-wrong slips. Lesson: when the responder's CONSTRUCTION blocks lift cleanly from a documented canonical (r07 Pattern B-Session for both iter1153 Q1 and iter948 collapse-first patterns) but the FINAL aggregation/threshold/decomposition step trips, classify as Haiku synthesis-ceiling and re-probe — do NOT churn the canonical card. The lift is the load-bearing element; the synthesis step is per-question variance not findability.
+
+Sources verified:
+- [Trino 467 datetime functions](https://trino.io/docs/current/functions/datetime.html) — EXTRACT field list (EPOCH absent), to_unixtime → double, from_unixtime → timestamp(3) with time zone.
+- [Trino 467 Iceberg connector](https://trino.io/docs/current/connector/iceberg.html) — ALTER TABLE EXECUTE optimize syntax + WHERE clause partition predicate constraint.
+- [Trino issue #25279 EXECUTE optimize partition predicate](https://github.com/trinodb/trino/issues/25279) — pushdown edge cases for function-transformed partition cols.
+- [docs.getdbt.com Trino configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — partitioning ARRAY['day(...)'], incremental_strategy='merge' validated.
+- r07 §3099-3156 Pattern B-Session — gaps-and-islands LAG + running-SUM segment_id construction template (the source the responder lifted from for Q1).
