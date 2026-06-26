@@ -1,7 +1,7 @@
 {
-  "iteration": 1121,
+  "iteration": 1122,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1121 multi-column ADD COLUMN watch re-probe (iter1120 Q4 imported-prior slip: 3 ADD COLUMN in one ALTER = parse error). Q1 = schema-evolution question inviting SEVERAL column adds \u2014 confirm responder uses SEPARATE ALTER TABLE ... ADD COLUMN statements (one per column), NOT a Postgres/MySQL multi-clause single statement. If recurs -> LIGHT FIX-A (r17 schema-evolution defang row, inline-WRONG). Q2-Q4 breadth. Federation/CBO untouched."
+  "note": "iter1122 breadth durability sweep (all watch streams cleared: ts-minus-ts, multi-col ADD COLUMN). 4 varied less-recently-probed angles across passed topics. Verify-first; NO-OP expected. Federation/CBO untouched."
 }
