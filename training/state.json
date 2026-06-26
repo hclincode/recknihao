@@ -1,7 +1,7 @@
 {
-  "iteration": 1136,
+  "iteration": 1137,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1136 -> 4.125 PASS + LIGHT FIX-A: percentile-direction slip RECURRED (2nd instance, explicit re-probe). Q1 customer-facing beat-X%-of-peers: responder AGAIN used percent_rank ORDER BY DESC (top team -> 0, OPPOSITE of the explicit top-near-100 requirement) + self-contradictory annotation (95th=beat-95% wrong under DESC) + inverted direction warning. Findability gap: r07 \u00a73939 cume_dist + \u00a73962 percent_rank-direction guardrail exist+correct but the customer-facing leaderboard-message phrasing did not route there. FIX-A: keyword-magnetic LEAD card before r07 \u00a73939 (anchors: you-beat-X%-of-peers / ran-more-than-X%-of-teams / leaderboard percentile / top-near-100 / percentile badge) leading with cume_dist() OVER (ORDER BY metric) [top->100] + percent_rank ASC, INLINE-WRONG defang of the ORDER-BY-DESC form (top->0), forward-ptr to \u00a73962. Q2 COUNT(DISTINCT) per event_type 4.5 / Q3 any_match+array_intersect 4.875 (arrays_overlap completeness opp) / Q4 on-prem-no-per-query-cost 5.0 clean. Re-probe customer-facing percentile next sweep to confirm reach. Federation/CBO untouched."
+  "note": "iter1137 percentile-direction FIX-A re-probe (iter1136 r07 \u00a73939 leaderboard LEAD card). Q1 = customer-facing you-are-more-active-than-X%-of-users badge (top user near 100) \u2014 confirm responder now uses cume_dist() OVER (ORDER BY metric) [top->100] or percent_rank ASC, NOT ORDER BY DESC. If still DESC -> escalate (top-of-file / inline-on-line). Q2-Q4 breadth. Federation/CBO untouched."
 }

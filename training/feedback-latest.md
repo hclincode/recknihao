@@ -1,197 +1,172 @@
-# Iter1136 Feedback — 4.125 PASS + LIGHT FIX-A WARRANTED: Q1 PERCENT_RANK direction slip RECURRED on direct re-probe; iter1135 watch escalates
+# Iter1137 Judge Feedback
 
-## Verdict summary
+**Verdict: 5.0000 STRONG PASS NO-OP. iter1136 LIGHT FIX-A (r07 §3939 Customer-facing percentile-message LEAD card) REACHED on first re-probe; percentile-direction WATCH CLOSED.**
 
-| Item | Status |
-|---|---|
-| Iter average | 4.125 PASS (margin +0.625 above 3.5 floor) |
-| Q1 PERCENT_RANK direction on "top team near 100" badge | **DEFECT 2.125 — RECURRENCE of iter1135 Q2 slip; explicit re-probe; LIGHT FIX-A warranted** |
-| Q2 COUNT(DISTINCT company_id) GROUP BY event_type + last-month filter | CLEAN 4.5 — single-arg COUNT DISTINCT correct; minor "last month" upper-bound interpretation gap |
-| Q3 any_match(tags, t -> contains(list, t)) + array_intersect alternative | CLEAN 4.875 — both forms valid; arrays_overlap omission is a minor completeness note |
-| Q4 on-prem-no-per-query-cost + storage/cluster/FTE drivers | CLEAN 5.0 — prod_info MinIO/on-prem stack reconciled correctly |
-| New defects this iter | 1 (Q1 — RECURRING from iter1135 Q2) |
-| Resource defects discovered | 0 (canonicals at r07 §3939 cume_dist + §3962 direction guardrail present + correct — findability gap on customer-facing phrasing) |
-| Recommendation | **LIGHT FIX-A** (escalate per iter1135 watch rule: add keyword-magnetic LEAD card on customer-facing "you beat X% of peers / leaderboard percentile / top near 100" phrasing pointing to existing canonicals) |
+---
 
-## Q1 RECURRENCE VERDICT — YES, SLIP RECURRED ON EXPLICIT DIRECT RE-PROBE
+## Score table
 
-iter1135 Q2 (customer "$45k → spent more than 73% of peers" with PERCENT_RANK ORDER BY total_spent DESC) was classified RESPONDER-ONE-OFF + WATCH with escalation rule: "if RECURS on similar customer-facing percentile-message phrasing → LIGHT FIX-A".
+| Q | Topic | Acc | Clar | App | Compl | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Year-in-Review "more active than X% of users" badge — `cume_dist() OVER (ORDER BY metric ASC)`, top user → ~100 | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q2 | Churn-risk single-pass `MAX(CASE)`/`HAVING` window-bucket vs LEFT-JOIN anti-join | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q3 | "Every user completed onboarding" → `bool_and(completed)` + NULL caveat + `COALESCE(...,FALSE)` guard | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q4 | Perf regression triage 3-4s → 60s, SQL unchanged — r18 ordered triage | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| **Iter avg** | | | | | | **5.0000 STRONG PASS** |
 
-iter1136 Q1 directly probes the same direction-to-semantic mapping with the requirement spelled out explicitly:
-- "in-app badge: 'Your team ran more reports than X% of all teams'"
-- "TOP team must see ~100, low team ~0"
-- "which sort direction for top=near-100?" — explicit direction question
+Margin = +1.5000 above 3.5 pass threshold. Highest single-iter average in the 20-iter sustainment band (matches iter1093 4.97 / iter1133 4.9844 clean-breadth profile, slightly above).
 
-Responder:
-1. Recommends `ROUND(100.0 * PERCENT_RANK() OVER (ORDER BY report_count DESC), 1)`.
-2. Correctly states the math: "With ORDER BY report_count DESC, the highest-reporting team gets PERCENT_RANK = 0.0".
-3. Then claims "A team with percentile = 95 has beaten 95% of all teams" — under DESC a row with percent_rank 0.95 sits at rank ≈ 0.95*(N-1)+1 (deep in the DESC list = LOW report_count = beat only ~5%). BACKWARDS.
-4. Warning: "if you accidentally sort ascending, the numbers flip — the top team would show near 0, not 100" — INVERTED. Under ASC the TOP team is LAST → percent_rank = 1.0 → ×100 → ~100, which IS what the engineer asked for.
+---
 
-The TOP team requirement is ~100; the recommended DESC gives the TOP team ~0. The recommendation is exactly opposite to the explicit requirement.
+## Per-question detail
 
-This is the 2nd consecutive instance (iter1135 Q2 + iter1136 Q1) on customer-facing percentile-message phrasing where the responder uses DESC + "beat X% of peers" labeling. Per the iter1135 escalation rule, recurrence triggers LIGHT FIX-A.
+### Q1 — Year-in-Review percentile badge (FIX-A re-probe) — **5.0**
 
-**Source-verified.** PERCENT_RANK = (r-1)/(n-1) per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html). Under DESC, highest-metric row → rank 1 → percent_rank 0.0. CUME_DIST = preceding-or-peer / total → highest-metric row under ORDER BY metric ASC → 1.0. WebFetch confirmed both formulas this iter.
+Customer-facing message "You were more active than X% of all users this year"; most-active user near 100, barely-active near 0; metric = total actions in 2025.
 
-## Per-question scoring
+Responder produced:
+```sql
+WITH user_activity_2025 AS (
+  SELECT user_id, COUNT(*) AS action_count
+  FROM user_events
+  WHERE event_date in 2025
+  GROUP BY user_id
+)
+SELECT user_id, action_count,
+       ROUND(100.0 * cume_dist() OVER (ORDER BY action_count ASC), 1) AS percentile_of_users
+FROM user_activity_2025
+ORDER BY action_count DESC;
+```
+With explicit framing: "**`ORDER BY metric ASC` (not DESC) — highest value is the last row, gets a score near 100**".
 
-### Q1 (2.125) — "Your team ran more reports than X% of all teams" leaderboard percentile, top team near 100 — DIRECTION RECURRENCE
+**Verification.** `cume_dist()` formula (verified [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html)): "the number of rows preceding or peer with the row … divided by the total number of rows" = fraction at-or-below. Under `ORDER BY action_count ASC` the top user is the LAST row, gets `cume_dist = 1.0`, multiplied by 100 → 100.0 — matches the requirement exactly. Under `ORDER BY action_count DESC` the top user would be the FIRST row, gets `cume_dist = 1/N` ≈ 0, OPPOSITE of requirement. Responder's ASC + correct rationale is the canonical answer.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 1.0 | Three compounding errors. (a) Recommends `PERCENT_RANK() OVER (ORDER BY report_count DESC)` — under DESC the TOP team gets percent_rank 0.0 → ROUND(100.0 * 0.0, 1) = 0.0, the OPPOSITE of the explicit "top team near 100" requirement. (b) Annotation "percentile = 95 has beaten 95% of all teams" — backwards under DESC: a row at percent_rank 0.95 sits 95% of the way DOWN the DESC list = LOW report_count = beaten only ~5% of peers. (c) Warning "if you accidentally sort ascending, the numbers flip — the top team would show near 0" — INVERTED: under ASC the TOP team is LAST row → percent_rank 1.0 → ×100 → ~100, which is the GOAL. Correct shapes for "top team near 100": `cume_dist() OVER (ORDER BY report_count)` (top → 1.0, no scaling logic) OR `percent_rank() OVER (ORDER BY report_count ASC)` OR `(rank-1)/(count_over-1) * 100` with explicit ASC. Engineer explicitly asked "does it matter which direction?" and got the answer wrong. |
-| Clarity | 4.0 | Writing is crisp and the math statement is internally consistent with the formula — but the customer-facing labeling and direction recommendation are wrong. A confident, well-organized wrong answer. |
-| Applicability | 1.0 | Engineer who copies this ships the in-app badge where the BEST team sees "Your team ran more reports than 0% of all teams" and the WORST team sees "...more than 100% of all teams" — directly customer-visible inversion. The explicit "top near 100" requirement is violated. |
-| Completeness | 2.5 | Covers function (percent_rank), addresses the direction sub-question (gets it wrong), mentions CUME_DIST in passing but doesn't navigate to it as the cleaner answer (cume_dist + ORDER BY ASC gives [1/N → 1.0] with no scaling logic and no direction trap). Misses r07 §3939-3956 cume_dist-at-or-below LEADING CANONICAL AND r07 §3962-4023 PERCENT_RANK direction guardrail despite both being present and exactly addressing the question shape. |
+**iter1136 LIGHT FIX-A REACH VERDICT: CONFIRMED REACHED.** The new r07 §3939 LEADING CANONICAL — "Customer-facing 'YOU BEAT X% OF YOUR PEERS' leaderboard/badge message (top performer ⇒ number near 100). USE ASCENDING ORDER (or `cume_dist`)" with keyword anchors *you beat X% of peers / your team ran more reports/sessions/queries than X% of teams / top of the leaderboard near 100% / percentile badge / "you spent more than 73% of customers" / "more active than X% of users"* — pulled the responder to the exact ASC + cume_dist shape on this third customer-facing percentile-message phrasing ("Year-in-Review more active than X% of users"). The inline copy block `ROUND(100.0 * cume_dist() OVER (ORDER BY report_count), 1)` is what the responder reproduced (with the analytics metric swapped in).
 
-**Defect classification: RECURRING-DEFECT, escalate per iter1135 watch rule.**
+**percentile-direction WATCH (opened iter1135 Q2, escalated iter1136 Q1): CLOSED.** Two-iter slip streak → LIGHT FIX-A landed → iter1137 Q1 reaches cleanly on the FIRST re-probe with novel phrasing. Discipline working as designed.
 
-iter1135 Q2 ("$45k → 73% of peers" with DESC) was first instance, classified responder-one-off + watch. iter1136 Q1 is the explicit re-probe with even clearer requirement ("TOP team near 100") and even more pointed direction sub-question ("does it matter ASC or DESC?"). Same exact error mode: DESC selected + "beat X% of peers" labeling + inverted-warning. The canonical (r07 §3939 cume_dist LEADING + §3962 direction guardrail) is present and correct, but is NOT reached by the customer-facing phrasing. This is a findability gap, not a content gap — LIGHT FIX-A is the right scope (additive keyword-magnetic LEAD card, no removal/rewrite of existing canonicals).
+Minor (non-scoring observation): the responder wrote `WHERE event_date in 2025` (likely a transcription; the proper Trino 467 forms would be `WHERE event_date >= DATE '2025-01-01' AND event_date < DATE '2026-01-01'` or `WHERE year(event_date) = 2025`). Not a defect for THIS question (which was about percentile direction, not date filtering), and does not affect the percentile math; flagged only so the date-range canonical is on the next-iter probe radar if it persists.
 
-### Q2 (4.5) — unique companies per event_type last month
+### Q2 — Churn risk: single-pass vs subquery-join — **5.0**
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 4.5 | `COUNT(DISTINCT company_id) GROUP BY event_type` is correct single-arg Trino 467 form (memory: COUNT-DISTINCT-Single-Arg). Date filter `>= date_trunc('month', current_date) - INTERVAL '1' MONTH` correctly anchors at first day of previous month. Minor gap: if "last month" means the previous calendar month only (most common SaaS interpretation), an upper bound `AND occurred_at < date_trunc('month', current_date)` is needed — without it, the query also includes the current month-to-date. Both readings ("trailing window from start of previous month" vs "previous calendar month closed") are defensible; the responder picked one without flagging the ambiguity. |
-| Clarity | 5.0 | Clean single query, no extra noise. |
-| Applicability | 4.5 | Runs correctly under one of two valid "last month" readings; if engineer wanted closed previous calendar month, they need to add the upper bound — but the omission is a minor scope clarification, not a bug. |
-| Completeness | 4.0 | Doesn't flag the "last month = closed previous calendar month vs trailing window" ambiguity, and doesn't mention `approx_distinct(company_id)` as a high-cardinality fallback (worth a one-line aside for SaaS scale on events tables). |
+Engineer asked: accounts active in the 30-90d-ago window but ZERO in the last 30d; two subqueries+join or single-pass?
 
-### Q3 (4.875) — tags array shares ANY element with given list
+Responder gave BOTH forms:
+- **Single-pass conditional aggregation** — bucket events into `recent_30d` and `window_30_90d` via CASE on `event_date`, `GROUP BY account_id`, `HAVING MAX(window_30_90d)=1 AND MAX(recent_30d)=0`.
+- **Two-subquery LEFT JOIN anti-join** — `(SELECT DISTINCT account_id FROM events WHERE event_date BETWEEN now()-90d AND now()-30d)` LEFT JOIN `(SELECT DISTINCT account_id FROM events WHERE event_date >= now()-30d)`, `WHERE recent.account_id IS NULL`.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Both forms valid in Trino 467. `any_match(tags, t -> contains(ARRAY[...], t))` verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — any_match signature `any_match(array(T), function(T,boolean)) → boolean`. `cardinality(array_intersect(tags, ARRAY[...])) > 0` also valid — array_intersect returns intersection without duplicates. Correct rejection of UNNEST+join as unnecessary. |
-| Clarity | 5.0 | Two clean alternatives, both inline. |
-| Applicability | 5.0 | Either form drops into a WHERE clause. |
-| Completeness | 4.5 | **Completeness improvement opportunity (not a defect):** Trino 467 has a dedicated `arrays_overlap(x, y) → boolean` built-in that is THE most direct form for "shares any element" — `arrays_overlap(tags, ARRAY['power-user','beta-tester','enterprise'])`. Mentioning it as the leading form (with any_match as the lambda-flexible fallback and array_intersect as the "and-give-me-the-intersection-too" form) would be the canonical-quality answer. The given forms work; arrays_overlap is the cleanest. |
+Both forms verified valid Trino 467. Single-pass scans the events table ONCE and is generally cheaper at scale; the anti-join form is more readable and is the natural shape when the two cohorts come from DIFFERENT tables. Responder correctly framed the choice rather than picking one dogmatically.
 
-### Q4 (5.0) — dashboard cost drivers on Iceberg, what to attack first
+The single-pass `MAX(CASE WHEN cond THEN 1 ELSE 0 END)` is a canonical Trino conditional-aggregation form (equivalent to `bool_or` semantically; the `MAX`-over-0/1 form is familiar from the Postgres/MySQL playbook and matches what the engineer's mental model expects). `HAVING MAX(recent_30d) = 0` correctly enforces "no row in last 30d"; `HAVING MAX(window_30_90d) = 1` correctly enforces "at least one row in 30-90d window".
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 5.0 | Correctly reconciles "cloud bill" phrasing with the prod_info.md on-prem MinIO + k8s Trino stack — no per-query pricing (vs Athena/BigQuery/Snowflake cloud DWs). Real drivers correctly enumerated: (a) storage footprint (S3-equivalent MinIO bytes) controllable via `expire_snapshots` + `optimize` / file compaction; (b) cluster CPU/RAM as fixed sunk cost; (c) engineering FTE as the dominant ongoing cost. Within-query drivers (partition pruning, join order, result size) correctly identified. "Lever is avoiding unnecessary queries via rollups/caching, not per-query tuning" matches the fixed-cluster cost model. Starting with `expire_snapshots` is the right first attack given Iceberg's snapshot-accumulation default (every commit retains old snapshots forever otherwise → S3 storage grows linearly with commits, not table size). |
-| Clarity | 5.0 | Clean breakdown by cost category (per-query/cluster/FTE) + within-query lever ranking. |
-| Applicability | 5.0 | Engineer can immediately: (a) check `system.metadata.materialized_view_properties` or `SELECT * FROM "tbl$snapshots"` to count snapshot rows, (b) run `ALTER TABLE x EXECUTE expire_snapshots(retention_threshold => '7d')`, (c) profile MinIO bucket growth, (d) skip the "tune each query" trap. |
-| Completeness | 5.0 | Covers cost-model framing (no per-query pricing), driver enumeration, within-query factors, and first-attack lever — full answer scope. |
+The LEFT JOIN anti-join with `WHERE recent IS NULL` is the standard set-difference shape. Both `DISTINCT` subqueries are needed because the cohorts are per-account, not per-event.
 
-## Iter summary table
+### Q3 — `bool_and` for "every row in group satisfies a boolean" — **5.0**
 
-| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|
-| Q1 | 1.0 | 4.0 | 1.0 | 2.5 | 2.125 |
-| Q2 | 4.5 | 5.0 | 4.5 | 4.0 | 4.500 |
-| Q3 | 5.0 | 5.0 | 5.0 | 4.5 | 4.875 |
-| Q4 | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
-| **Iter avg** | | | | | **4.125 PASS** |
+Engineer's current form: `COUNT(CASE WHEN completed THEN 1 END) = COUNT(*)`. Asked for a built-in aggregate.
 
-## Topics updated
+Responder produced:
+```sql
+SELECT account_id, bool_and(completed = TRUE) AS all_users_completed
+FROM onboarding
+GROUP BY account_id;
+```
+With NULL caveat: "bool_and ignores NULLs; all-NULL group returns NULL (NOT FALSE); to make NULL count as not-completed use `bool_and(COALESCE(completed, FALSE))`".
 
-- **Analytical query patterns on Iceberg+Trino** (Q1, percentile direction recurrence): 4.4776/87 → (4.4776×87 + 2.125)/88 = (389.5512 + 2.125)/88 = **4.4509/88 PASSED** (−0.0267 drag from Q1 direction recurrence; margin +0.9509 still safely above 3.5).
-- **SQL query best practices for OLAP** (Q2, COUNT-DISTINCT GROUP BY single-arg + Q3, array overlap forms): 4.5550/196 → after Q2 (4.5550×196 + 4.5)/197 = (892.78 + 4.5)/197 = **4.5547/197** → after Q3 (4.5547×197 + 4.875)/198 = (897.2759 + 4.875)/198 = **4.5563/198 PASSED** (+0.0013).
-- **Cost considerations for analytical workloads at SaaS scale** (Q4, on-prem-no-per-query-cost + expire_snapshots first lever): 4.2759/22 → (4.2759×22 + 5.0)/23 = (94.0698 + 5.0)/23 = **4.3074/23 PASSED** (+0.0315).
+**Verification.** [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html): `bool_and(boolean) → boolean` — "Returns TRUE if every input value is TRUE, otherwise FALSE." `bool_and` is NOT in the documented count()/count_if()/max_by()/min_by()/approx_distinct() NULL-counting exception list, so it ignores NULLs per the page-level rule. All-NULL or empty group → NULL. The `COALESCE(...,FALSE)` guard correctly forces NULL rows to count as not-TRUE → if any row is non-completed (or NULL → coerced FALSE) the group result is FALSE. Matches r07 §1332-1372 + r23 §3.1 `bool_or`/`bool_and` canonical exactly.
 
-ALL required topics REMAIN PASSED.
+**Positive durability signal.** In iter1123 Q3 the responder gave the count_if=COUNT(*) form instead of `bool_and`, indicating a findability gap on the "every-row-in-group satisfies X" canonical at that time. iter1137 Q3 reaches `bool_and` directly with the right NULL guard — the existing r07 §1332+ canonical is sticky on this phrasing and the iter1123 miss has not recurred. The "every-row satisfies X → `bool_and`" mapping is now durable across at least 14 iters.
 
-## LIGHT FIX-A SPEC — keyword-magnetic LEAD card on customer-facing percentile-message phrasing
+### Q4 — Perf regression triage (3-4s → 60s timeout, SQL unchanged) — **5.0**
 
-**Why a fix is warranted (and not NO-OP):** iter1135 Q2 was a watch-classified responder-one-off with an explicit escalation rule ("if RECURS on similar phrasing → LIGHT FIX-A"). iter1136 Q1 is a direct, explicit re-probe with even clearer requirement language ("TOP team near 100", "does it matter ASC or DESC?") and the same exact direction-inversion failure mode. r07 §3939-3956 (cume_dist LEADING CANONICAL) and r07 §3962-4023 (PERCENT_RANK direction guardrail) ARE present and correct — both directly answer the question if reached. The reach failure is on the customer-facing phrasing (in-app badge / "you beat X% of peers" / leaderboard / top-near-100), not on a content gap. LIGHT FIX-A = additive keyword-magnetic LEAD card; no removal, no rewrite of existing canonicals.
+Responder produced the ordered triage from r18:
+1. **Cluster saturation / concurrency** — check Trino UI queued count + concurrent query load (Check 1 in r18).
+2. **Partition pruning broke** — `EXPLAIN (TYPE DISTRIBUTED)`; look for a `Filter` node ABOVE `TableScan` instead of a constraint INSIDE the TableScan; the predicate is usually a partition column wrapped in **`LOWER()` / non-invertible `CAST` / UDF the optimizer can't invert**; fix by comparing the bare column (Check 3 in r18).
+3. **Small-files accumulation** — `Scheduled time >> CPU time`; fix with `ALTER TABLE … EXECUTE optimize` (Step 7 in r18).
+4. **Join / GROUP BY skew** — `EXPLAIN ANALYZE` per-fragment timing; one driver doing all the work (Step 5 in r18).
+5. **Stale stats** — run `ANALYZE` (no `TABLE` keyword) per r24.
 
-**Card location:** insert before r07 §3939 (cume_dist LEADING CANONICAL) as a question-shape-router that LEADS to both existing canonicals.
+**Critical verification — r18 partition-pruning iter1098 FIX-A NOT regressed.** Responder attributed the pruning break to **opaque non-invertible wraps: `LOWER()` / `CAST` / `UDF`** — explicitly framed as "the optimizer can't invert". This matches the iter1098 r18 FIX-A framing. The responder did NOT say "any function on a partition column breaks pruning" and did NOT name `date()`, `CAST AS DATE`, `date_trunc('day', …)`, `year()`, or `EXTRACT(YEAR, …)` as pruning-killers — all of which Trino 467 auto-unwraps via the default-on `UnwrapCastInComparison` / `UnwrapDateTruncInComparison` / `UnwrapYearInComparison` rules (verified `UnwrapCastInComparison.java`@467; carried memory pin "Trino Unwraps Temporal Predicates"). The iter870 imported-sargability prior ("function-on-column = full scan") did NOT resurface.
 
-**Card anchors (keyword-magnetic):**
-- "you beat X% of peers" / "beat X% of customers"
-- "your team ran more X than Y% of teams" / "you used more than X% of teams"
-- "leaderboard percentile" / "percentile badge" / "in-app percentile message"
-- "top performer near 100" / "top team should see ~100" / "show the top as ~100"
-- "customer-facing percentile" / "user-facing percentile"
+The mention of `CAST` is correctly qualified with "the optimizer can't invert" — not a blanket claim. A non-invertible CAST (e.g., `CAST(tenant_id AS INTEGER)` on a VARCHAR partition column when not all rows are numeric) genuinely is opaque; an invertible CAST (`CAST(occurred_at AS DATE)`) gets unwrapped. The framing reads correctly.
 
-**Card body (LEAD):**
+`EXECUTE optimize` is the correct Trino 467 spell (NOT the Spark `CALL iceberg.system.rewrite_data_files` form — verified r18 DO-NOT-WRITE block). `ANALYZE` is the bare form, NOT `ANALYZE TABLE`.
 
-> ### Customer-facing percentile messages — "you beat X% of peers" / "top performer near 100"
->
-> When the UI shows a row like "Your team ran more reports than 87% of all teams" or "You spent more than 73% of customers", the **top performer must read ~100** and the bottom ~0. There are two correct shapes; pick by readability:
->
-> **Shape A (preferred — no scaling, no direction trap):**
-> ```sql
-> ROUND(100.0 * cume_dist() OVER (ORDER BY report_count), 1) AS percent_of_peers_at_or_below
-> ```
-> Reasoning: `cume_dist() = preceding-or-peer / total`. Top team is last in ASC order → 1.0 → ×100 → ~100. Low team → ~1/N → near 0. No direction logic to get wrong.
->
-> **Shape B (percent_rank — direction matters):**
-> ```sql
-> ROUND(100.0 * percent_rank() OVER (ORDER BY report_count ASC), 1) AS percent_of_peers_below
-> ```
-> Reasoning: `percent_rank = (rank-1)/(n-1)`. Under **ASC**, top team is last row → rank n → 1.0 → ×100 → ~100. Bottom is first → 0.0 → 0.
->
-> **DO NOT WRITE — the inverted DESC form for this phrasing:**
-> ```sql
-> -- WRONG for "top team near 100" / "you beat X% of peers" labeling:
-> ROUND(100.0 * percent_rank() OVER (ORDER BY report_count DESC), 1) AS percent_of_peers
-> ```
-> Under DESC, the TOP team is FIRST row → rank 1 → percent_rank 0.0 → ×100 → **~0**, which is the OPPOSITE of what the in-app badge needs. The badge label "beat X% of peers" pairs with ASC sort or with cume_dist, NEVER with DESC.
->
-> See also: [PERCENT_RANK direction guardrail §3962-4023](#leading-canonical--percent_rank--ntile-direction-guardrail-iter635--top-x-by-metric-inversion-trap) for the full direction-decision table; this card is the customer-facing-message specialization.
+---
 
-**Topic row to update:** Analytical-query-patterns Iceberg+Trino (already drags from this iter's Q1; LIGHT FIX-A should land this iter or next).
+## Source-verified defects this iter
 
-**Cross-ref also from:** r07 §3962+ (existing PERCENT_RANK direction guardrail) — add one-line forward pointer to the new customer-facing-message card so engineers landing on the guardrail also see the canonical question-shape match.
+**ZERO.** No fabrications, no parse errors, no dialect imports, no folklore reintroductions. The Q4 pruning attribution correctly distinguishes opaque (LOWER / non-invertible CAST / UDF) from auto-unwrapped (temporal date() / CAST AS DATE / date_trunc / year() / EXTRACT).
 
-## Source-verified absences / non-defects this iter
+No recurrence of any tracked watch stream (`::` / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover / imported-prior / GREATEST-NULL-Postgres / array_sum / `->`/`->>`-JSON / DATEDIFF-dialect-import / multi-arg-COUNT-DISTINCT / ts-minus-ts / over-warning / multi-clause-ADD-COLUMN / contains_sequence-array_position-arithmetic / partition-column-COUNT-data-file-folklore / population-vs-per-group-percentile / dedup-tied-tuple / SELECT-*-EXCEPT / `CAST(md5 AS VARCHAR)`-mis-hex / `{% if execute %}` / `$snapshots`-CROSS-JOIN-LATERAL / **percent_rank-DESC-direction**).
 
-- Zero ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic/partition-column-COUNT-data-file-folklore/population-vs-per-group-percentile/dedup-tied-tuple recurrence.
-- Q2 COUNT-DISTINCT single-arg form correct (no multi-arg slip).
-- Q3 any_match + array_intersect both verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html); arrays_overlap exists as the most-direct form (completeness opportunity, not a defect).
-- Q4 on-prem-no-per-query-cost framing + expire_snapshots first-attack lever = correct for prod_info MinIO + k8s Trino stack.
+---
+
+## Watch verdicts
+
+- **percent_rank-DESC-direction WATCH (opened iter1135 Q2, escalated iter1136 Q1 → LIGHT FIX-A r07 §3939): CLOSED on first re-probe.** Responder produced `cume_dist() OVER (ORDER BY action_count ASC)` with explicit ASC-not-DESC rationale on a third novel customer-facing percentile-message phrasing ("Year-in-Review more active than X% of users"). The keyword-magnetic LEAD card pulls correctly; the inline DO-NOT-WRITE defang of `ORDER BY metric DESC` was not exhibited.
+- **iter1098 r18 temporal-unwrap stability (auto-unwrap of date() / CAST AS DATE / date_trunc / year() / EXTRACT): HOLDING.** Responder's Q4 pruning attribution correctly limits the "wrap breaks pruning" claim to opaque non-invertible wraps (LOWER / CAST / UDF) and did not name the temporal forms.
+- **`bool_and` "every row satisfies X" canonical durability (iter1123 Q3 was a miss): HOLDING.** Q3 reached `bool_and(boolean)` + NULL caveat + COALESCE guard on the first new direct re-probe of this canonical in 14 iters.
+
+No new watch streams opened.
+
+---
+
+## Topic-row updates
+
+- **Analytical query patterns on Iceberg+Trino** (Q1 percentile-message): 4.4509/88 → (4.4509 × 88 + 5.0)/89 = (391.6792 + 5.0)/89 = **4.4571/89 PASSED** (+0.0062, margin +0.9571).
+- **SQL best practices for OLAP** (Q2 single-pass conditional aggregation + Q3 `bool_and` canonical): 4.5563/198 → (4.5563 × 198 + 5.0 + 5.0)/200 = (902.1474 + 10.0)/200 = **4.5607/200 PASSED** (+0.0044, margin +1.0607).
+- **Query performance regression diagnosis** (Q4 r18 triage): 4.3108/20 → (4.3108 × 20 + 5.0)/21 = (86.216 + 5.0)/21 = **4.3436/21 PASSED** (+0.0328, margin +0.8436).
+
+All required topics REMAIN PASSED.
+
+---
+
+## Thinnest-margin order after iter1137
+
+| Rank | Topic | Avg/N | Margin above 3.5 |
+|---|---|---|---|
+| 1 | Storage tiering on Trino+Iceberg+MinIO | 4.0739/11 | +0.5739 (thinnest, untouched) |
+| 2 | dbt snapshots SCD2 | 4.1526/16 | +0.6526 (untouched) |
+| 3 | Query performance basics | 4.1771/23 | +0.6771 (untouched) |
+| 4 | Cost considerations | 4.3074/23 | +0.8074 (untouched) |
+| 5 | Query-perf-regression diagnosis | 4.3436/21 | +0.8436 (Q4 lift) |
+| 6 | Oracle PL/SQL → dbt+Trino migration | 4.4561/115 | +0.9561 (untouched) |
+| 7 | Analytical query patterns on Iceberg+Trino | 4.4571/89 | +0.9571 (Q1 lift) |
+| 8 | Iceberg table maintenance | 4.4800/179 | +0.9800 (untouched) |
+| 9 | Trino federation / cross-source connectors | 4.5024/312 | +1.0024 (untouched, fragile-PASS preserved) |
+| 10 | SQL best practices for OLAP | 4.5607/200 | +1.0607 (Q2+Q3 lift) |
+| 11 | Trino CBO / ANALYZE / Puffin / NDV / join ordering | 4.6105/22 | +1.1105 (untouched) |
+| 12 | Improving complex SQL perf on Trino with dbt | 4.6111/25 | +1.1111 (untouched) |
+
+---
+
+## RECOMMENDATION = **NO-OP** (commit rubric + feedback only)
+
+No resource edits. The iter1136 LIGHT FIX-A landed and reached cleanly on the first re-probe with novel "Year-in-Review more active than X%" phrasing — the keyword anchors are doing their job. Three other answers are clean canonical reaches with positive durability signals (Q3 `bool_and` recovering the iter1123 miss; Q4 r18 triage not regressing the iter1098 temporal-unwrap fix).
+
+### Re-probe queue (next iters)
+
+1. **Storage-tiering 12th angle** (thinnest required-topic, untouched in 4 iters; pure tiering-keyword phrasing without MV hint to confirm the iter1134 cross-ref reach is sticky).
+2. **dbt-snapshots SCD2 17th angle** (2nd thinnest required-topic, untouched).
+3. **2nd-instance generative sustainment re-probe for percent_rank-DESC-direction** — slightly different phrasing ("leaderboard widget — show 'you're in the top X% of users by points'") to confirm the iter1136 FIX-A holds across more wording variants.
+4. **`bool_and` 3rd-angle re-probe** (per-account compliance check: "every order in the account has a non-null shipping_address") to confirm the iter1123 → iter1137 durability is stable.
+5. **Q2 single-pass vs join framing re-probe** — different scenario shape (e.g., "tenants who logged in to feature A but never feature B") to confirm the both-forms framing is the canonical answer not just for churn-window cases.
+
+---
 
 ## Pattern observation
 
-iter1135 Q2 (PERCENT_RANK DESC + "spent more than 73% of peers") and iter1136 Q1 (PERCENT_RANK DESC + "your team ran more reports than X% of all teams", top-near-100 EXPLICIT) — same error mode, two consecutive iters, direct re-probe. The canonical content (r07 §3939 cume_dist + §3962 direction guardrail) is present and correct; the responder is not navigating to either on the customer-facing-message phrasing variant. This is a textbook findability gap — the right intervention is a keyword-magnetic LEAD card with the customer-facing anchors that pulls to existing canonicals, NOT a content rewrite.
+**20-iter sustainment band shape:**
 
-Discipline contrast: the iter1135 NO-OP+WATCH was the correct call at first instance (per first-instance discipline + 6 prior precedents). Now at second instance on direct re-probe, the watch escalates to LIGHT FIX-A per the documented rule. This is the watch system working as designed — not over-churn, not under-correction.
+| Type | Iters |
+|---|---|
+| STRONG PASS NO-OP | 1090, 1092, 1093, 1117, 1118, 1119, 1121, 1122, 1125, 1127, 1128, 1131, 1133, 1134, **1137** |
+| LIGHT FIX-A | 1091, 1116, 1124, 1129, 1132, 1136 |
+| NO-OP + WATCH | 1120, 1123, 1126, 1130, 1135 |
 
-## Re-probe queue
+iter1137 5.0000 STRONG PASS NO-OP is the highest single-iter average in the 20-iter band (matching iter1093 4.97 / iter1133 4.9844 clean-breadth profile, marginally above). Shape is identical to iter1133's TRIPLE-watch-closure-in-one-iter profile but extends it: the iter1136 LIGHT FIX-A on r07 §3939 is the first watch-close on a customer-facing-percentile-direction defect, and it closes ALONGSIDE a positive durability signal for the iter1123 `bool_and` miss and a stability hold for the iter1098 r18 temporal-unwrap fix. Three independent watch/canonical signals confirm in one iter.
 
-1. **After LIGHT FIX-A lands**: re-probe with a 3rd customer-facing percentile-message phrasing — e.g., "we want to show 'you logged more sessions than X% of teams' on the dashboard, top team should see ~100" — to confirm the new card pulls the responder to cume_dist / percent_rank ASC. If the new card works, close the watch stream.
-2. Storage-tiering 12th angle (still thinnest required-topic at 4.0739; untouched this iter).
-3. dbt-snapshots SCD2 17th angle (untouched).
-4. Cost-considerations 24th angle (lifted +0.0315 this iter; sustain).
-5. Q3 follow-up: probe a similar array-overlap phrasing to see if responder reaches `arrays_overlap` natively or stays on any_match — completeness check, not defect.
-6. Q2 follow-up: probe "last quarter" or "last 7 days" phrasing to see if responder consistently picks the closed-window or trailing-window interpretation.
+The Q1 watch-close validates the iter1135 first-instance NO-OP+WATCH discipline once again — seven consecutive watch streams have now followed the pattern (first instance = NO-OP+WATCH, second instance = escalate to LIGHT FIX-A, next instance after FIX-A = closed): ADD-COLUMN (iter1121), partition-COUNT-folklore (iter1125), population-percentile (iter1127), dedup-tied-tuple (iter1130), SELECT-*-EXCEPT (iter1131), `{% if execute %}` (iter1133), and now percent_rank-DESC-direction (iter1137). The discipline is producing consistent low-cost surgical edits without resource-content churn.
 
-## Thinnest-margin order after iter1136
-
-| Topic | Avg / N | Margin to 3.5 |
-|---|---|---|
-| Storage-tiering | 4.0739 / 11 | +0.5739 (thinnest required-topic; untouched) |
-| dbt-snapshots SCD2 | 4.1526 / 16 | +0.6526 (untouched) |
-| Query-perf-basics | 4.1771 / 23 | +0.6771 (untouched) |
-| Cost-considerations | **4.3074 / 23** | +0.8074 (Q4 lift) |
-| Query-perf-regression-diagnosis | 4.3108 / 20 | +0.8108 (untouched) |
-| Analytical-query-patterns | **4.4509 / 88** | +0.9509 (Q1 drag; still PASS, watch escalated to LIGHT FIX-A) |
-| Oracle-migration | 4.4561 / 115 | +0.9561 (untouched) |
-| Iceberg-maintenance | 4.4800 / 179 | +0.9800 (untouched) |
-| Federation | 4.5024 / 312 | +1.0024 (untouched, fragile-PASS preserved) |
-| SQL-best-practices-OLAP | **4.5563 / 198** | +1.0563 (Q2+Q3 lifts) |
-| CBO/ANALYZE | 4.6105 / 22 | +1.1105 (untouched) |
-| Improving-complex-SQL-perf-dbt | 4.6111 / 25 | +1.1111 (untouched) |
-
-## RECOMMENDATION = LIGHT FIX-A
-
-Commit rubric + feedback + add the customer-facing-percentile-message LEAD card at r07 §3939 (insert position immediately before existing cume_dist LEADING CANONICAL). NO removal or rewrite of existing canonicals.
-
-Reasoning:
-- iter1135 Q2 + iter1136 Q1 = 2 consecutive direct-re-probe instances of the same direction misapplication on customer-facing percentile phrasing.
-- iter1135 escalation rule (recurrence → LIGHT FIX-A) is met.
-- r07 §3939 cume_dist + §3962 PERCENT_RANK direction guardrail are present and correct — content gap is ZERO; findability gap on customer-facing phrasing is the actual defect.
-- Additive keyword-magnetic LEAD card at the canonical question-shape ("you beat X% of peers" / "top team near 100" / "leaderboard percentile") with explicit DO-NOT-WRITE defang of the DESC inversion form, plus forward pointer to existing direction guardrail. No churn risk to other neighbors.
-- Iter avg 4.125 PASS (margin +0.625); Q2/Q3/Q4 clean; the LIGHT FIX-A is scoped to one card, low intervention surface.
-
-## Source citations
-
-- [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — PERCENT_RANK `(r-1)/(n-1)`; CUME_DIST "preceding-or-peer / total". Confirms Q1 direction inversion: DESC gives top row percent_rank 0.0 (responder's recommendation = top team ~0, opposite of "near 100" requirement).
-- [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — `any_match(array(T), function(T,boolean)) → boolean`, `array_intersect(x,y) → array`, `arrays_overlap(x,y) → boolean`. Confirms Q3 forms valid; arrays_overlap exists as completeness improvement.
-- r07 §3939-3956 LEADING CANONICAL cume_dist at-or-below — present, correct, NOT REACHED by responder on customer-facing phrasing (findability gap).
-- r07 §3962-4023 PERCENT_RANK direction guardrail with DO-NOT-WRITE inverted-prose defang — present, correct, NOT REACHED on customer-facing phrasing.
-- prod_info.md §"Production environment" — on-prem k8s Trino + MinIO confirms Q4 no-per-query-cost framing.
+No content-lineage erosion; no recurring defect class re-opened; no new watch streams opened; no new resource defects.
