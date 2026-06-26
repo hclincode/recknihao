@@ -1126,6 +1126,23 @@ SELECT to_base(255, 8)    AS octal;  -- '377'     (integer  -> octal string)
 
 **When `to_hex` / `from_hex` ARE correct: VARBINARY ↔ hex, not integers.** `to_hex(varbinary)` is exactly right for turning a **binary value** into a printable hex string — e.g. a hash digest for a surrogate key: `to_hex(md5(to_utf8(...)))` (see [resource 27 §4.5A surrogate-key pattern](27-oracle-plsql-to-dbt-trino.md)). That usage is correct and stays. The split is simply: **integer ⇄ base-N string → `to_base` / `from_base`; VARBINARY ⇄ hex string → `to_hex` / `from_hex`.**
 
+> **LEADING CANONICAL — HASH / ANONYMIZE / PSEUDONYMIZE A STRING COLUMN (e.g. email) FOR `GROUP BY` / `JOIN` / a reporting table.** *Keyword anchors (READ THIS FIRST):* anonymize email, pseudonymize PII, hash email before writing to reporting table, mask user identifier, group by hashed user without exposing the real value, md5 of a string Trino, sha256 of a varchar Trino, hash a column for join/group, deterministic user hash, count distinct on a hashed id.
+>
+> **THE ONE FACT — Trino's hash functions take and return `VARBINARY`, NOT a string. To get a usable string id you MUST wrap with `to_hex(...)`; you do NOT `CAST(... AS VARCHAR)`.** `md5(x)`, `sha1(x)`, `sha256(x)`, `sha512(x)`, `spooky_hash_v2_64(x)` all have signature `(varbinary) -> varbinary`. A `VARCHAR` column (an email) must first be turned into bytes with **`to_utf8(email) -> varbinary`**. The digest is `varbinary`; render it as a hex `VARCHAR` with **`to_hex(...)`**:
+>
+> ```sql
+> -- ✅ CORRECT — deterministic hex string, safe to GROUP BY / JOIN / store:
+> SELECT to_hex(md5(to_utf8(email)))    AS email_md5_hex,     -- 32-char uppercase hex VARCHAR
+>        to_hex(sha256(to_utf8(email))) AS email_sha256_hex,  -- 64-char uppercase hex VARCHAR (prefer for PII; md5 is weak)
+>        count(*) AS events
+> FROM events
+> GROUP BY to_hex(md5(to_utf8(email)));
+> ```
+>
+> **DO NOT WRITE:**
+> - `CAST(md5(to_utf8(email)) AS VARCHAR)` — does **NOT** produce a hex string. Trino does not give you a hex rendering from a `varbinary→varchar` cast (it is not the printable digest you expect); use **`to_hex(...)`**. (You *can* also just `GROUP BY md5(to_utf8(email))` on the raw `varbinary` — varbinary is groupable/joinable — but for a human-readable / exportable column use `to_hex`.)
+> - "`crc32` returns varbinary like md5/sha256." **FALSE — `crc32(varbinary) -> BIGINT`** (an integer checksum, not a digest). It's fine for cheap bucketing (`crc32(to_utf8(email)) % 100`) but it is NOT a cryptographic hash and is collision-prone — never use it to anonymize PII. **Salt note:** an unsalted hash of a low-entropy value (email) is reversible by dictionary/rainbow attack — for real anonymization concatenate a secret salt before hashing: `to_hex(sha256(to_utf8(email || :secret_salt)))`.
+
 ---
 
 ### Trigonometric functions and degrees ⇄ radians — `radians` / `degrees` / `pi` / `sin` / `cos` / `tan`

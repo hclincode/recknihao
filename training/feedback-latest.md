@@ -1,52 +1,64 @@
-# Iter1131 Feedback — 4.8594 STRONG PASS NO-OP (Q1 iter1130 SELECT-*-EXCEPT watch CLOSES on first re-probe; Q2/Q3/Q4 clean breadth)
+# Iter1132 Feedback — 3.8594 PASS LIGHT FIX-A (SELECT-*-EXCEPT generative RECURRENCE on dbt-dedup-write + hashing CAST-VARCHAR canonical slip) (Q2 clean; Q1 storage-tiering rollup-on-hot completeness shave)
 
 ## Per-question scores
 
-### Q1 — `SELECT * EXCEPT (rn)` BigQuery shorthand availability in Trino + practical alternative (iter1130 watch re-probe) — 4.8750
+### Q1 — YoY report 45min vs 2min after moving >90d data to S3 Glacier; can deep-history queries be made tolerable without pulling everything hot — 3.7500
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Technical accuracy | 5.0 | "Trino 467 does NOT support `SELECT * EXCEPT (col)`; BigQuery/Databricks pattern; parse error" — exactly correct. Verified RAW: trinodb/trino issues #26402 + #26969 (and #23532) all OPEN as feature requests, not implemented as of 467/481. Trino's `EXCEPT` is a SET operator between queries (per trino.io/docs/current/sql/select.html), not a column-exclusion projection. Cross-reference to r23 §3286 is accurate (the iter1130 defang location). |
-| Beginner clarity | 5.0 | Plain framing: "this is a BigQuery/Databricks shorthand, not Trino"; engineer immediately understands the dialect-portability issue. DESCRIBE-the-table-then-spell-out path is unambiguous. |
-| Practical applicability | 5.0 | Hands the engineer the exact workflow: `DESCRIBE iceberg.schema.table` → copy the column list → strike `rn` → paste into the SELECT/INSERT. One-time friction, queries are correct, no dialect risk. Fits the on-prem Trino 467 production stack exactly. |
-| Completeness | 4.5 | Covers the core question and the practical fix. MINOR SHAVE (-0.5): does not mention the experimental `exclude_columns` table function shape (`SELECT * FROM TABLE(exclude_columns(input => TABLE(t), columns => DESCRIPTOR(rn)))`) as a secondary alternative, nor a dbt macro / `dbt_utils.star(except=[...])` approach. The explicit-column-list-via-DESCRIBE is the canonical and most-robust answer; the omission is a per-instance shave, NOT a resource gap. |
+| Technical accuracy | 4.0 | "Trino/Iceberg have no native per-partition tier DDL" CORRECT (verified — Iceberg connector exposes no tier knob in trino.io/docs/current/connector/iceberg.html). "MinIO tiering is ops-layer via `mc ilm`" CORRECT (verified MinIO 2026 admin docs). MINOR ACCURACY SHAVE (−1.0): Glacier framing under-specifies the RESTORE constraint — for **S3 Glacier Flexible Retrieval** or **Deep Archive** (the cheap tiers), objects are NOT readable at all without an async `s3 restore-object` first (minutes to hours), not just "slower". Only **Glacier Instant Retrieval** is directly-readable-but-more-expensive. The responder's "queries spanning old data pay the Glacier penalty once" misframes this as a latency cost when the actual production hit is a "restore-required, query errors out" cost (MinIO ILM tier-target behavior depends on backend; the same async restore semantics apply to the AWS-Glacier-targeted tier). |
+| Beginner clarity | 4.5 | Two-option structure plain; ops-layer vs DDL-layer distinction clearly drawn. |
+| Practical applicability | 3.5 | Engineer can implement two-table UNION ALL view and `mc ilm` policies. But the actual canonical mitigation for "YoY/historical report on 13+ months of data" — a **pre-aggregated rollup/summary table kept on the HOT tier** (monthly/quarterly aggregates from raw events, materialized via dbt; YoY query reads tiny rollup rows, never touches cold archive) — is MISSING. The two-table UNION ALL view alone does NOT speed up a YoY query that **spans** the cold archive: such a query still scans all 13 months of cold raw data and pays the full retrieval penalty. The "BI tool caches the result" handwave doesn't fix the first-run cost or invalidation-staleness. |
+| Completeness | 3.0 | **MAIN COMPLETENESS GAP:** doesn't surface the CANONICAL "hot rollup + cold raw, query the rollup for history" pattern that is the actual answer to "make deep-history queries tolerable without pulling everything hot". Two-table UNION view + MinIO tiering both leave the YoY query slow when it spans the archive; the structural fix is **pre-aggregated dim/fact rollups** (dbt model `fct_revenue_monthly_summary` materialized incremental on a hot-only tier, sourced from raw events). Also misses the Glacier-restore async constraint (minor). |
 
-**Verification (RAW Trino 467 docs + GitHub):** Confirmed `SELECT * EXCEPT (col)` is genuinely absent from Trino 467 SQL grammar. WebSearch returns trinodb/trino issues #26402 ("Feature Request: Support SELECT * EXCEPT") and #26969 ("Support SELECT * EXCEPT / EXCLUDE") and #23532 — all OPEN, not implemented. The iter1130 verification (open feature requests, foreign-projection pattern) holds.
+**Verification:** `mc ilm tier add` MinIO documented per [MinIO Object Lifecycle Management](https://min.io/docs/minio/linux/administration/object-management/object-lifecycle-management.html); Iceberg connector has no per-partition tier DDL per [Trino Iceberg connector](https://trino.io/docs/current/connector/iceberg.html); S3 Glacier Flexible/Deep Archive RESTORE semantics per [AWS S3 restore-object docs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/restoring-objects.html). The "rollup on hot tier" mitigation is the canonical answer for this YoY-after-tier scenario.
 
-**iter1130 watch verdict: CLOSED on first re-probe.** This is the 5th successful first-re-probe watch closure in 13 iters (iter1121 ADD-COLUMN / iter1125 partition-COUNT-folklore / iter1127 population-percentile / iter1130 dedup-tied-tuple / iter1131 SELECT-*-EXCEPT). Foreign-projection-shorthand sub-class of the imported-prior family confirmed first-instance responder one-off, not a structural findability gap. NO FIX-A needed.
-
-### Q2 — Per-signup-month cohort 30/60/90-day retention in one pass — 4.5625
+### Q2 — Per-user current-week activity / FIRST week ratio (window function to reference first row in a partition without self-join) — 4.9375
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Technical accuracy | 5.0 | CTE structure correct: `first_events` collapses earliest signup per user → cohort_month bucket; `cohort_sizes` counts users per cohort; `returns` counts windowed retention via `COUNT(DISTINCT CASE WHEN date_diff('day', first_signup_at, login_at) BETWEEN 1 AND N THEN user_id END)` per window. The cumulative semantics (30d ⊆ 60d ⊆ 90d, since `BETWEEN 1 AND 30` ⊆ `BETWEEN 1 AND 60` ⊆ `BETWEEN 1 AND 90`) is correct for "% who logged in WITHIN N days". `COUNT(DISTINCT user_id)` correctly dedups users with multiple logins in-window (the responder's own SUM(CASE)-overcounts note is right). date_diff verified per trino.io/docs/current/functions/datetime.html (day unit). |
-| Beginner clarity | 4.5 | Three CTEs labeled with intent; per-window CASE explained; the SUM-vs-COUNT-DISTINCT dedup distinction is explicitly called out (good inoculation against overcounting). |
-| Practical applicability | 5.0 | Engineer can paste this into a dbt model as-is; the incomplete-cohort filter `WHERE date_diff('day', cohort_month, current_date) >= 90` keeps the dashboard honest. One pass, no three-separate-queries trap. |
-| Completeness | 3.75 | **MINOR COMPLETENESS GAP (-1.25):** the responder used `JOIN returns r ON cohort_month` (inner join) between `cohort_sizes` and `returns`. Because `returns` is derived from `first_events JOIN login_events`, a cohort where ZERO users ever logged in vanishes from `returns` and the inner join drops it from the output entirely — so the cohort-size dashboard silently omits zero-retention cohorts. Correct shape is `LEFT JOIN returns ... COALESCE(returned_30d, 0)` so 0% cohorts appear as 0% not as missing rows. Real-world hit rate is low (most cohorts will have some retention), but the dashboard correctness gap is real. **Defect classification: RESPONDER ONE-OFF, NOT resource-sourced** — r07/r23 cohort canonicals correctly use LEFT JOIN; this is a per-instance synthesis slip, NOT a canonical defect. No FIX-A. |
+| Technical accuracy | 5.0 | `FIRST_VALUE(activity_count) OVER (PARTITION BY user_id ORDER BY week_started ASC)` CORRECT. **FIRST_VALUE IS safe with the default frame in Trino 467** — default frame when ORDER BY is present is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which INCLUDES the partition's first row, so FIRST_VALUE returns that first row's value. (Contrast with LAST_VALUE, which is NOT safe with the default frame — it returns the current row, not the partition's last row, requiring an explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame.) Verified [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html). NULLIF guard for divide-by-zero in the ratio is the correct shape (`activity_count * 1.0 / NULLIF(first_week_activity, 0)`). |
+| Beginner clarity | 5.0 | Plain decomposition: PARTITION BY user_id, ORDER BY week_started, FIRST_VALUE reaches back to the first row. Engineer needs no window-frame background. |
+| Practical applicability | 5.0 | Engineer can paste it as a `weekly_activity_with_ratio` model and join back to the current-week's activity row. |
+| Completeness | 4.75 | Covers FIRST_VALUE, default-frame safety, NULLIF guard. MINOR SHAVE (−0.25): doesn't explicitly contrast against LAST_VALUE's default-frame trap (the natural "next question" — "what if I want the LATEST week?"). Per-instance, NOT a resource gap. |
 
-**Verification:** date_diff('day', ts1, ts2) returns integer day count, BETWEEN N AND M is inclusive, CASE returns NULL outside the range so COUNT(DISTINCT) excludes the NULLs correctly. All-correct per trino.io/docs/current/functions/datetime.html.
+**Verification:** FIRST_VALUE / LAST_VALUE default-frame asymmetry confirmed per [Trino window functions](https://trino.io/docs/current/functions/window.html) + [Trino window-frame docs](https://trino.io/docs/current/sql/select.html#window-frame). The responder's claim is correct.
 
-### Q3 — `arbitrary` / `any_value` aggregate for 1:1 functionally-dependent column — 5.0000
-
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.0 | "`arbitrary(account_name)` or `any_value(account_name)` — identical" verified against trino.io/docs/current/functions/aggregate.html: "`arbitrary(x)` — Returns an arbitrary non-null value of x, if one exists. Alias for any_value." Both exist in Trino 467. "Faster than MIN/MAX (no comparison)" correct — `arbitrary` short-circuits on first non-null, no ordering scan. The `max_by(account_name, updated_at)` recommendation for "as-of-latest" semantics on non-strictly-1:1 columns is the standard pattern (verified `max_by(x, y)` exists in Trino 467 aggregates). |
-| Beginner clarity | 5.0 | Plain explanation of "functionally dependent" via 1:1 wording. Names the failure mode of arbitrary when column ISN'T truly 1:1 (could return different name per query). |
-| Practical applicability | 5.0 | Engineer knows exactly what to type. Two-line decision tree: 1:1 → `arbitrary`/`any_value`; not 1:1 → `max_by(account_name, updated_at)`. |
-| Completeness | 5.0 | Covers idiomatic choice, the alias relationship, the perf vs MIN/MAX nuance, AND the safety caveat. No padding, no foreign-dialect functions, no broken secondary alternative. |
-
-**Verification:** `arbitrary` ↔ `any_value` alias relationship confirmed in Trino 427/467/478/481 aggregate docs. `max_by(x, y)` for "x corresponding to the maximum value of y" confirmed.
-
-### Q4 — CBO + ANALYZE + join_distribution_type for slow 3-4 table dbt joins — 5.0000
+### Q3 — Anonymize emails before writing to reporting table (count distinct / GROUP BY without exposing real emails); does Trino have MD5/SHA-256, does it return a regular string usable in GROUP BY/JOIN — 3.3750
 
 | Dimension | Score | Notes |
 |---|---|---|
-| Technical accuracy | 5.0 | All-correct, source-verified: (a) Trino has a CBO but needs stats — verified trino.io/docs/current/optimizer/statistics.html: "Trino calculates NDV statistics during analyzing table and writes NDV statistics to the Iceberg puffin file"; (b) bare `ANALYZE iceberg.schema.table` syntax (NO TABLE keyword) — verified against trino.io/docs/current/sql/analyze.html; "ANALYZE TABLE is Spark/Hive parse error" inoculation correct (this is a recurring imported-prior trap); (c) Puffin NDV stats consumed by CBO for join order + broadcast/partitioned choice — verified per the optimizer docs; (d) "stats don't auto-update, re-run after big ingest" correct — confirmed in the Trino statistics doc; (e) `SET SESSION join_distribution_type = PARTITIONED/BROADCAST/AUTOMATIC` — `join_distribution_type` is a real session property in Trino 467 with those three values. |
-| Beginner clarity | 5.0 | Names the root cause ("guesses without stats → backwards order") and the fix in one breath. Plain analogy for ANALYZE-as-statistics-population. |
-| Practical applicability | 5.0 | Engineer leaves with a concrete checklist: (1) run ANALYZE on each large Iceberg table, (2) verify EXPLAIN now picks smallest-first ordering, (3) optionally pin `join_distribution_type=AUTOMATIC` and let CBO pick. Mentions stats-after-big-ingest so the dbt team builds an ANALYZE step into the post-load hook. Fits the on-prem Iceberg+HMS+Trino 467 stack exactly. |
-| Completeness | 5.0 | Covers root-cause diagnosis, exact ANALYZE form, what stats get written, what consumes them, when to re-run, and the session-property escape hatch. No over-warning, no broken secondary alternative, no foreign-dialect import. |
+| Technical accuracy | 2.5 | **TWO REAL DEFECTS, ONE LOAD-BEARING.** (1) **`CAST(md5(to_utf8(email)) AS VARCHAR) AS email_hash`** — claimed to produce a "32-character hex string (safe for GROUP BY and JOIN)". **WRONG.** Trino 467's CAST of `VARBINARY → VARCHAR` does NOT produce a hex string — it either errors with `Cannot cast varbinary to varchar` (depending on operator parse path) or, where the cast resolves, returns the raw bytes interpreted as a character string (mojibake, non-printable bytes, length 16 not 32, NOT hex). The canonical hex form is **`to_hex(md5(to_utf8(email)))`** (returns 32-char uppercase hex VARCHAR — safe for GROUP BY / JOIN / dashboard display). This is the form used in 3+ resources: r05 §995/§1003/§1057 (OPA columnMask), r07 Pattern C3a (hashing for bucket), and r27 §4.5A surrogate-key (`to_hex(md5(to_utf8(concat_ws(...))))`). The responder went OFF-CANONICAL on this one. (2) **"sha256()/sha1()/crc32() all work the same way (take varbinary, return varbinary)"** — **WRONG for crc32.** Per [trino.io/docs/current/functions/binary.html](https://trino.io/docs/current/functions/binary.html): `crc32(binary) → bigint` (NOT varbinary). The bucketing example `CAST(crc32(to_utf8(email)) % 100 AS INTEGER)` HAPPENS to work precisely because crc32 returns bigint (so `bigint % integer = bigint`, then CAST to integer); the responder's stated reason ("returns varbinary") contradicts the working example below it. md5/sha256/sha1 do return varbinary; crc32 alone returns bigint. |
+| Beginner clarity | 4.5 | Code blocks well-organized; the issue is the code is wrong (CAST claim) / internally contradictory (crc32 return type vs bucketing example). |
+| Practical applicability | 2.5 | Engineer pastes `CAST(md5(to_utf8(email)) AS VARCHAR)` into the dbt model — either parse-fails or writes a varbinary-interpreted-as-varchar column that breaks downstream GROUP BY/JOIN matching (different sessions / different engines render the same bytes differently; hash equality across writes is not guaranteed). The bucketing example (`CAST(crc32(...) % 100 AS INTEGER)`) does work for the *cohort-bucket* use case, but the engineer ASKED about anonymization-for-reporting (per-user dedup via GROUP BY), where 100 buckets collide ~all users — not the right tool. |
+| Completeness | 4.0 | Covers function existence (md5/sha256 exist), to_utf8 wrapper (correct), GROUP BY/JOIN usability framing (correct intent). MINOR COMPLETENESS SHAVE: didn't surface that you can `GROUP BY md5(to_utf8(email))` DIRECTLY on the varbinary (Trino allows GROUP BY on varbinary), avoiding any hex conversion if the column is internal-only — `to_hex(...)` is needed for dashboard-display / cross-engine join compatibility. Salt/pepper note also missing (raw `md5(email)` is rainbow-table-trivially-reversible for the email domain). |
 
-**Verification:** Trino 467 Iceberg connector `ANALYZE schema.table` writes Puffin stats files (apache-datasketches-theta sketch) consumed by `iceberg.statistics.* ` session properties and the CBO `JoinReorderingStrategy`. `join_distribution_type` session prop with `AUTOMATIC` (default) / `BROADCAST` / `PARTITIONED` values verified. All-correct.
+**Verification (RAW Trino 467 docs + source canonical):**
+- `md5(binary) → varbinary` confirmed [trino.io/docs/current/functions/binary.html](https://trino.io/docs/current/functions/binary.html).
+- `sha256(binary) → varbinary` confirmed (same source).
+- `crc32(binary) → bigint` confirmed (same source) — **NOT varbinary, contradicts responder claim**.
+- `to_hex(binary) → varchar` returns UPPERCASE hex string, length 2×byte_count (32 chars for md5's 16 bytes, 64 chars for sha256's 32 bytes).
+- `CAST(varbinary AS varchar)` does NOT produce hex — verified via [trinodb/trino#23682](https://github.com/trinodb/trino/issues/23682) (the issue exists precisely because hex conversion requires `to_hex()`, not CAST) + [trinodb/trino discussion#17696](https://github.com/trinodb/trino/discussions/17696) data-masking thread where `cast(to_hex(md5(to_utf8(id))) as varchar(32))` is shown — note the CAST is OUTSIDE `to_hex` (because to_hex already returns varchar), NOT a raw `CAST(md5(...) AS VARCHAR)` form.
+- Resource canonical: r05 §995 uses `to_hex(sha256(to_utf8(email)))` for OPA columnMask — correct form.
+
+**Defect classification: RESOURCE-SOURCED FINDABILITY GAP (partial) + RESPONDER ONE-OFF.** The canonical hex-hash form (`to_hex(<hash_fn>(to_utf8(...)))`) is present in r05/r07/r27 but in CONTEXTUAL framings (OPA-columnMask / cohort-bucket / surrogate-key), NOT in a generic "PII-anonymize-emails-for-reporting" canonical the responder would land on via keyword-match. The "anonymize emails / hash PII for GROUP BY" keyword path doesn't have a single LEAD card in r05's multi-tenant section or r23's best-practices section. The responder ALSO independently slipped on the CAST claim (it could have copied r05's `to_hex(sha256(to_utf8(email)))` but synthesized a different shape).
+
+### Q4 — Iceberg PK/UNIQUE enforcement vs dbt unique test; incremental dedup pattern — 3.3750
+
+| Dimension | Score | Notes |
+|---|---|---|
+| Technical accuracy | 2.5 | **TWO DEFECTS in the recommended dbt-incremental dedup model.** Core claim "Trino+Iceberg do NOT enforce PRIMARY KEY/UNIQUE at write time" is CORRECT (verified r27 §2031 + iter402 canonical). Option A (dbt unique + not_null tests post-build) is correct framing. **DEFECTS in Option B:** (1) **`SELECT * EXCEPT (rn) FROM deduplicated`** — **INVALID Trino 467 SQL**. Parse error: Trino's `EXCEPT` is a SET operator between queries (per [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)), NOT a column-exclusion projection. Open feature requests [trinodb/trino#26402](https://github.com/trinodb/trino/issues/26402) + [#26969](https://github.com/trinodb/trino/issues/26969) confirm still NOT implemented. This is the **2nd UNPROMPTED/GENERATIVE instance in 3 iters** (iter1130 Q2 first generative; iter1131 Q1 correctly answered NO when ASKED DIRECTLY; iter1132 Q4 generates it AGAIN while writing a dbt model). (2) **`{% if execute %}`** — **WRONG jinja guard** for dbt incremental-filter. `execute` is True during both `parse` AND `run` phases (so the filter applies even on first-build, which is wrong) — the canonical guard for incremental-only delta is `{% if is_incremental() %}` (true only when target exists AND not `--full-refresh` AND model configured incremental). Verified [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) + r27 §3.3/§1809/§1885 + r28 §165 + §189 ("`{% if is_incremental() %}` — NEVER `{% if execute %}`"). The ROW_NUMBER + WHERE rn=1 dedup core is correct, but the two surrounding errors break the model. |
+| Beginner clarity | 4.5 | Structure clear (Option A tests vs Option B merge-dedup model). |
+| Practical applicability | 2.5 | Engineer pastes the dbt model and hits two errors: (a) Trino parse error on `SELECT * EXCEPT (rn)`; (b) silent semantic bug from `{% if execute %}` applying the watermark on first-build runs (model never builds the full history). |
+| Completeness | 4.0 | Covers core question (Iceberg no enforcement, dbt tests, incremental dedup pattern). Misses: post-write `dbt test --select unique:user_id` as the "fail-build-if-duplicates-land" guardrail (the canonical iter402 + r27 §2031 framing). |
+
+**Verification (SELECT-*-EXCEPT recurrence + `{% if execute %}` defect):**
+- **SELECT * EXCEPT still NOT supported in Trino 467**: feature requests #26402 + #26969 + #23532 all OPEN as of 2026-06-26. Trino's `EXCEPT` is documented at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) as a SET operator only.
+- **`is_incremental()` is the canonical guard, NOT `execute`** — verified r28 §165 + §189 + r27 §1885 + dbt docs.
+
+**Defect classification:**
+- **`SELECT * EXCEPT (rn)` recurrence — RESOURCE-SOURCED FINDABILITY GAP (escalated from iter1130 RESPONDER ONE-OFF).** The existing r23 §3286 defang is on the keyword path "Trino-vs-foreign-dialect dialect comparison" / "QUALIFY rewrite" — it does NOT fire when the responder is GENERATING a dbt-incremental-dedup model and reaches for "strip the helper column on the rebuilt projection". r27 §1964 Pattern B1 has the canonical EXPLICIT column list comment but does NOT have an INLINE-WRONG `SELECT * EXCEPT (rn)` defang adjacent to the explicit-column form — so the responder synthesizes the foreign-projection form without hitting the defang. **2 generative slips in 3 iters (iter1130 + iter1132)** = pattern, not noise. **LIGHT FIX-A recommended** (see below).
+- **`{% if execute %}` — RESPONDER ONE-OFF** (against existing r28 §189 + r27 §1885 explicit "NEVER `{% if execute %}`" guidance). First instance. NO-OP+WATCH. Re-probe within 2-3 iters with another "dbt incremental dedup model" question to confirm one-off vs pattern.
 
 ---
 
@@ -54,35 +66,41 @@
 
 | Q | Accuracy | Clarity | Applicability | Completeness | Q avg |
 |---|---|---|---|---|---|
-| Q1 SELECT-*-EXCEPT availability (watch re-probe) | 5.0 | 5.0 | 5.0 | 4.5 | 4.8750 |
-| Q2 30/60/90-day cohort retention SQL | 5.0 | 4.5 | 5.0 | 3.75 | 4.5625 |
-| Q3 arbitrary/any_value for 1:1 column | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
-| Q4 CBO + ANALYZE + join_distribution_type | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
+| Q1 storage-tiering YoY 45min vs 2min | 4.0 | 4.5 | 3.5 | 3.0 | 3.7500 |
+| Q2 FIRST_VALUE for partition's first row | 5.0 | 5.0 | 5.0 | 4.75 | 4.9375 |
+| Q3 anonymize emails MD5/SHA-256 for GROUP BY | 2.5 | 4.5 | 2.5 | 4.0 | 3.3750 |
+| Q4 Iceberg PK + dbt unique + incremental dedup | 2.5 | 4.5 | 2.5 | 4.0 | 3.3750 |
 
-**Iter average = (4.8750 + 4.5625 + 5.0000 + 5.0000) / 4 = 4.8594 STRONG PASS** (margin to 3.5 = +1.3594)
+**Iter average = (3.7500 + 4.9375 + 3.3750 + 3.3750) / 4 = 3.8594 PASS** (margin to 3.5 = +0.3594, THIN — driven by Q3 + Q4 double-defect drag)
 
 ---
 
-## iter1130 SELECT-*-EXCEPT watch verdict: CLOSED
+## SELECT-*-EXCEPT recurrence verdict — ESCALATED from RESPONDER ONE-OFF (iter1130) → RESOURCE-SOURCED FINDABILITY GAP (iter1132)
 
-iter1130 Q2 surfaced a `SELECT * EXCEPT (rn)` foreign-projection slip on a dedup CTAS rebuild — classified RESPONDER ONE-OFF (resources r23 §3286 + r27 §1964 Pattern B1 already had the explicit-list canonical + defang). iter1131 Q1 directly re-probed: "does Trino support BigQuery's `SELECT * EXCEPT(col)` shorthand?" Responder correctly answered:
-- Trino 467 does NOT support `SELECT * EXCEPT (col)`
-- It's a BigQuery/Databricks pattern
-- Would parse-fail on Trino
-- Cross-references r23 line 3286
-- Practical fix = DESCRIBE the table, spell out columns explicitly
+iter1130 Q2: **1st generative instance** of `SELECT * EXCEPT (rn)` on dedup CTAS rebuild → classified RESPONDER ONE-OFF, NO-OP+WATCH per first-instance discipline.
 
-No slip recurrence. iter1130 first-instance NO-OP-then-re-probe discipline validated for the 5th successful first-re-probe closure in 13 iters (iter1121 / iter1125 / iter1127 / iter1130 / iter1131).
+iter1131 Q1: **direct re-probe** ("does Trino support BigQuery `SELECT * EXCEPT(col)`?") → responder correctly answered NO, cited r23 §3286 defang. Watch CLOSED on first re-probe.
+
+iter1132 Q4: **2nd generative instance** of `SELECT * EXCEPT (rn)` on dbt incremental dedup model → RECURRENCE confirmed.
+
+**Diagnosis:** the direct-question keyword path (`Trino SELECT * EXCEPT support / column exclusion`) lands on r23 §3286 correctly. The GENERATIVE keyword path (`dbt incremental model dedup ROW_NUMBER drop helper column`) lands on r27 §1962-1972 Pattern B1 / B3 — which has the EXPLICIT column list comment ("`-- EXPLICIT column list — Iceberg has no SELECT * rename safety`") but does NOT have an INLINE-WRONG `SELECT * EXCEPT (rn)` defang directly adjacent. The responder synthesizes the foreign-projection shorthand without ever touching the r23 §3286 defang because the question keyword path doesn't include "Trino dialect" / "BigQuery shorthand" anchors.
+
+**LIGHT FIX-A target:** add an INLINE-WRONG defang row IN r27 Pattern B1 (around line 1964) AND r27 Pattern B3 (around line 1998) where the explicit column list appears — make the explicit-column form COPY-ATTRACTIVE and tag `-- NOT: SELECT * EXCEPT (rn) -- invalid in Trino 467, see r23 §3286`. Optional: extend the same inline-defang to r13 §5266 + r13 §5465 (the dbt-incremental dedup canonicals where engineers will land when writing the same shape).
 
 ---
 
 ## Source-verified defects
 
-None resource-sourced this iter.
+| # | Defect | Q | Classification | Recommendation |
+|---|---|---|---|---|
+| 1 | `SELECT * EXCEPT (rn)` generative slip on dbt-incremental dedup model | Q4 | **RESOURCE-SOURCED FINDABILITY GAP** (escalated from iter1130 RESPONDER ONE-OFF; 2 generative slips in 3 iters) | **LIGHT FIX-A** in r27 §1962-1972 Pattern B1 + §1992-2003 Pattern B3: inline-WRONG defang row "`-- NOT SELECT * EXCEPT (rn) -- invalid Trino 467 parse error`" adjacent to the explicit-column-list canonical |
+| 2 | `CAST(md5(to_utf8(email)) AS VARCHAR)` claimed as 32-char hex string | Q3 | **RESOURCE-SOURCED FINDABILITY GAP (partial) + RESPONDER ONE-OFF** | **LIGHT FIX-A** in r23 §PII-anonymization (NEW LEADING CANONICAL) or r05 §user-anonymization (extend existing OPA columnMask hex form to a generic "PII hash for GROUP BY" canonical): LEAD `to_hex(md5(to_utf8(email)))` + DO-NOT-WRITE row inline-WRONG `CAST(md5(...) AS VARCHAR)` ("returns raw bytes interpreted as varchar, NOT hex; either parse-fails or produces mojibake") + crc32 return-type clarification (bigint NOT varbinary) |
+| 3 | `{% if execute %}` as incremental guard | Q4 | **RESPONDER ONE-OFF** (against r28 §189 + r27 §1885 explicit "NEVER `{% if execute %}`" canonical) | **NO-OP+WATCH** — first generative instance, re-probe within 2-3 iters with another "dbt incremental dedup" question |
+| 4 | YoY/historical-report mitigation = pre-aggregated rollup on hot tier (MISSING) | Q1 | **RESOURCE-SOURCED COMPLETENESS GAP** in r10 / r15 storage-tiering section | **LIGHT FIX-A** in storage-tiering canonical (wherever the two-table UNION-ALL view + MinIO ILM pattern is documented): add a 3rd canonical option "HOT-tier rollup for historical reads" — pre-aggregated dbt incremental model `fct_revenue_monthly_summary` stays on hot tier; YoY query reads tiny rollup never touches cold archive. The two-table UNION-ALL view alone does NOT help a query that SPANS the cold archive. |
+| 5 | Glacier RESTORE async constraint not surfaced | Q1 | **MINOR ACCURACY SHAVE** | Per-instance / sub-shave only, doesn't warrant FIX-A on its own |
 
 **Per-instance shaves:**
-- Q1 -0.5 Compl: didn't mention `exclude_columns` table function or `dbt_utils.star(except=[...])` as secondary alternatives. The explicit-list-via-DESCRIBE is canonical and sufficient. Per-instance, NOT a resource gap.
-- Q2 -1.25 Compl: inner `JOIN returns r` would drop zero-retention cohorts; should be `LEFT JOIN returns + COALESCE(returned_Nd, 0)`. Per-instance synthesis slip, NOT a canonical defect (r07/r23 cohort canonicals correctly use LEFT JOIN). NO FIX-A.
+- Q2 −0.25 Compl: doesn't contrast against LAST_VALUE's default-frame trap. Per-instance.
 
 ---
 
@@ -90,75 +108,125 @@ None resource-sourced this iter.
 
 | Topic | Before | This iter Qs | After | Change |
 |---|---|---|---|---|
-| SQL-best-practices-OLAP | 4.5500/190 | Q1 (4.875) + Q3 (5.0) | (4.5500×190 + 4.875 + 5.0)/192 = 874.375/192 = **4.5540/192 PASSED** | +0.0040 |
-| Analytical-query-patterns-Iceberg+Trino | 4.4826/83 | Q2 (4.5625) | (4.4826×83 + 4.5625)/84 = 376.6183/84 = **4.4836/84 PASSED** | +0.0010 |
-| Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering | 4.5920/21 | Q4 (5.0) | (4.5920×21 + 5.0)/22 = 101.432/22 = **4.6105/22 PASSED** | +0.0185 |
+| Storage tiering on Trino+Iceberg+MinIO | 4.0278/9 | Q1 (3.75) | (4.0278×9 + 3.75)/10 = 40.0002/10 = **4.0000/10 PASSED** | −0.0278 (thinnest-margin topic drag) |
+| Analytical-query-patterns-Iceberg+Trino | 4.4836/84 | Q2 (4.9375) | (4.4836×84 + 4.9375)/85 = 381.5599/85 = **4.4889/85 PASSED** | +0.0053 |
+| SQL-best-practices-OLAP | 4.5540/192 | Q3 (3.375) | (4.5540×192 + 3.375)/193 = 877.743/193 = **4.5479/193 PASSED** | −0.0061 |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.4566/112 | Q4 (3.375) | (4.4566×112 + 3.375)/113 = 502.5142/113 = **4.4470/113 PASSED** | −0.0096 |
 
-ALL required topics REMAIN PASSED. No required topic dropped below threshold; CBO/ANALYZE lifted above its 4.5 elevated threshold by Q4.
+ALL required topics REMAIN PASSED. Storage-tiering DROPS slightly (4.0278 → 4.0000), still well above 3.5 standard threshold. Margin watch: storage-tiering now has the thinnest margin (+0.5000), Oracle-migration −0.0096 drag, SQL-best-practices-OLAP −0.0061 drag from Q3 hashing slip.
 
 ---
 
 ## Recurrence audit
 
-No recurrence of any pinned defect family this iter:
-- `::`/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover — clean
-- imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT — clean
-- ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic — clean
-- partition-column-COUNT-data-file-folklore/population-vs-per-group-percentile/dedup-tied-tuple/SELECT-*-EXCEPT — clean
-
-All watch streams REMAIN CLOSED post-iter1131.
+- **SELECT * EXCEPT generative slip — RECURRENCE CONFIRMED** (iter1130 + iter1132; 2 in 3 iters); watch ESCALATED to LIGHT FIX-A.
+- All other pinned defect families clean: ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic/partition-column-COUNT-data-file-folklore/population-vs-per-group-percentile/dedup-tied-tuple — no recurrence.
+- **NEW WATCH STREAM:** `CAST(varbinary AS VARCHAR)` for hex-string claim (Q3) + `{% if execute %}` as incremental guard (Q4) — both LIGHT FIX-A / NO-OP+WATCH classifications.
 
 ---
 
-## Thinnest-margin order after iter1131
+## Thinnest-margin order after iter1132
 
-1. storage-tiering 4.0278/9 (+0.5278, thinnest required-topic)
+1. **storage-tiering 4.0000/10 (+0.5000, NEW thinnest required-topic)** — Q1 drag took the top spot from 4.0278 → 4.0000
 2. dbt-snapshots SCD2 4.1526/16 (+0.6526)
 3. query-perf-basics 4.1771/23 (+0.6771)
 4. cost-considerations 4.2759/22 (+0.7759)
 5. query-perf-regression-diagnosis 4.3108/20 (+0.8108)
-6. Oracle-migration 4.4566/112 (+0.9566)
+6. Oracle-migration 4.4470/113 (+0.9470, Q4 drag)
 7. federation 4.5024/312 (untouched, fragile-PASS preserved)
-8. SQL-best-practices-OLAP 4.5540/190 (+0.0040)
-9. CBO/ANALYZE 4.6105/22 (+0.0185, lifted)
+8. SQL-best-practices-OLAP 4.5479/193 (+1.0479, Q3 drag)
+9. CBO/ANALYZE 4.6105/22 (untouched)
 
 ---
 
-## Teacher guidance — RECOMMENDATION = NO-OP
+## Teacher guidance — RECOMMENDATION = LIGHT FIX-A (TWO surgical edits)
 
-Commit rubric + feedback only. No resource edits.
+### FIX-A1 — close the SELECT-*-EXCEPT generative gap at the dedup-rebuild keyword path (r27)
 
-**Reasoning:**
-1. iter1130 SELECT-*-EXCEPT watch CLOSED cleanly on first re-probe → first-instance NO-OP discipline validated.
-2. Q2's inner-vs-LEFT-JOIN cohort slip is per-instance synthesis padding — r07/r23 cohort canonicals already use LEFT JOIN; no canonical defect to fix.
-3. Q3 + Q4 reaffirm `arbitrary`/`any_value` alias canonical and CBO+ANALYZE-bare-syntax+Puffin+join_distribution_type canonical durable.
+**Target:** r27 §1962-1972 Pattern B1 (CTAS + rename) AND §1992-2003 Pattern B3 (DELETE by unique row id).
 
-**Re-probe queue:**
-1. **storage-tiering 10th angle** (still thinnest required-topic, NEXT PRIORITY)
-2. dbt-snapshots-SCD2 17th angle (`check_cols` edge cases, `hard_deletes='new_record'` downstream interaction)
-3. cost-considerations 23rd angle (`$manifests` partition-cost attribution / per-tenant cost split)
-4. query-perf-regression-diagnosis 21st angle (concurrent ETL-vs-dashboard contention oncall — re-probe from a different angle than iter1129)
-5. Trino-side EXECUTE optimize after partition evolution (carry from iter1128 + iter1130)
-6. Cohort retention LEFT-JOIN edge — re-probe a "cohort with zero returners" framing to confirm Q2 shave was per-instance (e.g., "I have several cohorts with zero retained users — they're not showing up in my dashboard, what's wrong?")
+**Edit shape (Pattern B1):**
+```sql
+-- Pattern B1 — CTAS + atomic rename (preferred for full-table dedup):
+CREATE TABLE iceberg.analytics.t_dedup AS
+SELECT customer_id, created_at, amount  -- EXPLICIT column list — Iceberg has no SELECT * rename safety
+                                         -- NOT `SELECT * EXCEPT (rn)` — invalid in Trino 467 (parse error)
+                                         -- see r23 §3286 (BigQuery/Databricks shorthand, not implemented; #26402/#26969)
+FROM (...) WHERE rn = 1;
+```
+
+Mirror the same inline-WRONG comment in Pattern B3 right above the SELECT line. Optional: add a 1-row DO-NOT-WRITE table entry adjacent ("WRONG: `SELECT * EXCEPT (rn) FROM (...)` — parse error in Trino 467; RIGHT: spell out columns explicitly").
+
+**Why this placement:** the responder's GENERATIVE keyword path is "dbt incremental dedup ROW_NUMBER drop helper rn" — that lands on r27 Pattern B1/B3, NOT on r23 §3286 (which is the dialect-comparison page). Adding the defang AT the generation point closes the findability gap.
+
+### FIX-A2 — add a PII-hash-for-GROUP-BY LEAD canonical (r23 OR r05 extension)
+
+**Target:** either r23 §SQL-best-practices PII section OR extend r05 §995 OPA columnMask `to_hex(sha256(to_utf8(email)))` form into a section-level LEAD canonical for "anonymize emails / PII for GROUP BY / JOIN".
+
+**Edit shape (LEAD canonical):**
+```sql
+-- ✅ COPY THIS — PII hashing for GROUP BY / JOIN (32-char hex string)
+SELECT to_hex(md5(to_utf8(email))) AS email_hash,  -- 32-char UPPERCASE hex VARCHAR
+       COUNT(*) AS event_count
+FROM iceberg.analytics.events
+GROUP BY 1;
+
+-- (Use sha256 for stronger collision resistance; 64-char hex:
+--  to_hex(sha256(to_utf8(email))) — same shape)
+```
+
+**Inline DO-NOT-WRITE row:**
+| WRONG | Why | RIGHT |
+|---|---|---|
+| `CAST(md5(to_utf8(email)) AS VARCHAR)` claimed as 32-char hex | **Trino 467 CAST(varbinary AS varchar) does NOT produce hex** — either parse-fails or returns raw bytes as mojibake VARCHAR (length 16, not 32; cross-engine GROUP BY/JOIN breaks) | `to_hex(md5(to_utf8(email)))` (returns 32-char uppercase hex VARCHAR) |
+| `crc32(...) returns varbinary` | **WRONG** — `crc32(binary) → bigint` (not varbinary). md5/sha256/sha1 DO return varbinary; crc32 alone is bigint. | For bucketing: `CAST(crc32(to_utf8(email)) % 100 AS INTEGER)` (the bigint return is exactly why `% 100` works on the raw return) |
+
+**Optional addition:** salt/pepper note — raw `md5(email)` is rainbow-table-trivially-reversible for the email-domain space (~10^9 entries); for stronger anonymization use `to_hex(sha256(to_utf8(concat(secret_salt, email))))` with `secret_salt` from k8s secret.
+
+### NO-OP on Q4 `{% if execute %}` slip
+
+First generative instance; r28 §189 + r27 §1885 already explicitly forbid it. Re-probe within 2-3 iters to confirm one-off (re-probe queue item: "dbt incremental dedup model that pulls only new rows since the last build" — must FORCE the incremental-guard choice).
+
+### NO-OP on Q1 storage-tiering rollup-on-hot — DEFER to a separate FIX-A iteration
+
+The "pre-aggregated rollup on hot tier" canonical IS missing from the storage-tiering section, but adding it is a >100-line architectural canonical (worked dbt model + tier-routing strategy). DEFER to a dedicated storage-tiering-FIX-A iter (this is the 10th angle and the topic is at the thinnest margin; one targeted edit suffices). For this iter, accept the Q1 3.75 score; queue as FIX-A3 candidate for next iter.
+
+---
+
+## Re-probe queue (post-iter1132)
+
+1. **`{% if execute %}` GENERATIVE re-probe** (PRIORITY 1, NEW WATCH) — "write a dbt incremental dedup model on customer_profiles" or "the dbt-trino incremental filter syntax for new rows since last build" — must force the jinja guard generation
+2. **`CAST(md5(...) AS VARCHAR)` GENERATIVE re-probe** — after FIX-A2 reaches, "anonymize user emails before writing to the reporting table" / "hash PII for analytics dashboards" framing
+3. **`SELECT * EXCEPT (rn)` GENERATIVE re-probe — 3rd instance check** — after FIX-A1 reaches, another dedup-rebuild-strip-helper-column question on a DIFFERENT domain (e.g., "rebuild fct_orders deduping by order_id keeping latest" — must force the projection-rebuild choice)
+4. **Storage-tiering 11th angle: pre-aggregated rollup framing** (PRIORITY 2, thinnest margin) — "I have raw event data going back 3 years; my YoY dashboards run forever pulling cold data — how do I make this fast without keeping everything hot?" (forces the rollup-on-hot mitigation answer)
+5. dbt-snapshots-SCD2 17th angle (`check_cols` / `hard_deletes='new_record'`)
+6. cost-considerations 23rd angle (`$manifests` partition-cost attribution)
+7. query-perf-regression-diagnosis 21st angle
 
 ---
 
 ## Pattern observation
 
-14-iter sustainment band shape continues:
-- STRONG PASS: iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/**1131**
-- LIGHT FIX-A reaching cleanly: iters 1091/1116/1124/1129
-- NO-OP+WATCH (all CLOSED): iters 1120/1123/1126/1130
+15-iter sustainment band shape:
+- STRONG PASS: iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131
+- LIGHT FIX-A reaching cleanly: iters 1091/1116/1124/1129/**1132**
+- NO-OP+WATCH (all CLOSED on first re-probe): iters 1120/1123/1126/1130
 
-iter1131 4.8594 STRONG PASS reaffirms the 5th successful first-re-probe watch closure (SELECT-*-EXCEPT foreign-projection sub-class confirmed responder one-off, not structural). Q3 + Q4 hold the high-confidence breadth (arbitrary/any_value + CBO/ANALYZE), Q2's cohort retention pattern is mostly correct with a per-instance LEFT-JOIN slip on zero-cohort handling. No content-lineage erosion; no recurring defect class; no new watch streams opened. CBO/ANALYZE topic lifted +0.0185 above its 4.5-elevated threshold by Q4's clean bare-ANALYZE + Puffin + join_distribution_type answer.
+iter1132 3.8594 PASS+LIGHT-FIX-A breaks the 4.0+ STRONG-PASS streak (last 5 iters all 4.5+). The break is informative not concerning: Q3 + Q4 surface RECURRENT generative habits that the existing defang locations don't reach. iter1130 Q2 SELECT-*-EXCEPT was correctly classified as ONE-OFF per first-instance NO-OP discipline; iter1132 Q4 RECURRENCE escalates it to a resource-sourced findability gap precisely as the iter1130 LIGHT-FIX-A threshold ("if RECURS → LIGHT FIX-A at r27 §1962-1972") prescribed. Q3 hashing canonical surfaces a NEW resource-sourced findability gap on the PII-anonymization-for-reporting keyword path — the canonical hex-hash form exists in r05/r07/r27 but not on the responder's question-keyword path. Q2 reaffirms FIRST_VALUE default-frame safety canonical clean. Q1 storage-tiering surfaces a COMPLETENESS gap on the "hot rollup for historical reads" mitigation that the two-table UNION-ALL view + MinIO ILM canonicals don't surface — deferred to a dedicated next-iter FIX-A.
+
+**Bottom line:** two surgical FIX-A edits (SELECT-*-EXCEPT defang in r27 dedup patterns + PII-hash-for-GROUP-BY LEAD canonical) close the two RESOURCE-SOURCED findability gaps surfaced this iter; one NO-OP+WATCH (Q4 `{% if execute %}`) and one DEFERRED FIX-A (Q1 hot-rollup storage-tiering) round out the action items.
 
 ---
 
 ## Sources verified
 
-- [trinodb/trino #26402 — Feature Request: Support SELECT * EXCEPT](https://github.com/trinodb/trino/issues/26402)
-- [trinodb/trino #26969 — Support SELECT * EXCEPT / EXCLUDE](https://github.com/trinodb/trino/issues/26969)
-- [trinodb/trino #23532 — Support BigQuery-style select * exclude](https://github.com/trinodb/trino/issues/23532)
-- [Trino Aggregate functions — arbitrary / any_value](https://trino.io/docs/current/functions/aggregate.html)
-- [Trino Table statistics — ANALYZE / Puffin / NDV](https://trino.io/docs/current/optimizer/statistics.html)
-- [Trino Iceberg connector — ANALYZE / Puffin](https://trino.io/docs/current/connector/iceberg.html)
+- [Trino 467 Binary functions and operators](https://trino.io/docs/current/functions/binary.html) — md5/sha256→varbinary, crc32→bigint, to_hex→varchar
+- [Trino 467 Window functions](https://trino.io/docs/current/functions/window.html) — FIRST_VALUE / LAST_VALUE default-frame semantics
+- [Trino 467 SELECT documentation](https://trino.io/docs/current/sql/select.html) — EXCEPT as set operator (not column-exclusion projection)
+- [trinodb/trino#26402 — Feature Request: Support SELECT * EXCEPT](https://github.com/trinodb/trino/issues/26402)
+- [trinodb/trino#26969 — Support SELECT * EXCEPT / EXCLUDE](https://github.com/trinodb/trino/issues/26969)
+- [trinodb/trino#23682 — Varbinary bit manipulations](https://github.com/trinodb/trino/issues/23682) (varbinary→varchar conversion underdocumented; to_hex is the standard form)
+- [trinodb/trino discussion#17696 — Data masking varbinary](https://github.com/trinodb/trino/discussions/17696) — `cast(to_hex(md5(to_utf8(id))) as varchar(32))` pattern (CAST outside to_hex, NOT on raw varbinary)
+- [dbt docs — Incremental models](https://docs.getdbt.com/docs/build/incremental-models) — `is_incremental()` canonical guard
+- [Trino Iceberg connector](https://trino.io/docs/current/connector/iceberg.html) — no per-partition tier DDL
+- [MinIO Object Lifecycle Management](https://min.io/docs/minio/linux/administration/object-management/object-lifecycle-management.html) — `mc ilm tier add` ops-layer tiering

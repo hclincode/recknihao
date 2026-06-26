@@ -1961,7 +1961,9 @@ SELECT * FROM (
 ```sql
 -- Pattern B1 — CTAS + atomic rename (preferred for full-table dedup):
 CREATE TABLE iceberg.analytics.t_dedup AS
-SELECT customer_id, created_at, amount  -- EXPLICIT column list — Iceberg has no SELECT * rename safety
+SELECT customer_id, created_at, amount  -- LIST the real columns explicitly. To drop the helper `rn`, just OMIT it here.
+                                        -- DO NOT write `SELECT * EXCEPT (rn)` — that BigQuery/Databricks projection is
+                                        -- NOT valid Trino 467 (parse error; see r23 §3286). There is no SELECT-* column-exclusion in Trino.
 FROM (
   SELECT customer_id, created_at, amount,
          ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at) AS rn
@@ -2008,6 +2010,7 @@ WHEN MATCHED THEN DELETE;
 
 | Wrong shape | Why it's wrong |
 |---|---|
+| `SELECT * EXCEPT (rn) FROM (... ROW_NUMBER() ... AS rn ...) WHERE rn = 1` to "rebuild the table minus the helper rn column" | **`SELECT * EXCEPT (col)` is NOT valid Trino 467** — it is a BigQuery / Databricks / Snowflake / DuckDB column-exclusion projection; Trino's `EXCEPT` is a SET operator between queries, not a column filter. Parse error (see r23 §3286). Trino has **no** SELECT-* column-exclusion of any form. | To drop the helper `rn` after a dedup/CTAS rebuild, **list the real columns explicitly and just omit `rn`** (Pattern B1 above) — `SELECT customer_id, created_at, amount FROM (... rn ...) WHERE rn = 1`. (In dbt, `{{ dbt_utils.star(from=ref('x'), except=['rn']) }}` expands to an explicit list at compile time — but the compiled SQL is still an explicit column list, never `* EXCEPT`.) |
 | `DELETE FROM t WHERE ROWID NOT IN (SELECT MIN(ROWID) FROM t GROUP BY k)` on Trino | **No `ROWID` pseudocolumn on Trino 467.** Parse error: `Column 'rowid' cannot be resolved`. This is the Oracle dedup idiom — there is no in-place rewrite; use Pattern B1 (CTAS + rename) or B2 (MERGE + DELETE) above. |
 | `DELETE FROM t WHERE row_id NOT IN (...)` / `$row_id` / `_pos` | **None exists as a user-visible column in Trino 467's Iceberg connector.** Iceberg's internal position/file refs are connector-internal and not exposed in user SELECTs. |
 | `DELETE FROM t WHERE ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts) > 1` | **Window functions are NOT allowed in `WHERE` in ANY SQL dialect, including Trino.** Wrap in a subquery (Pattern A) or push to a MERGE-USING subquery (Pattern B2). |
