@@ -285,6 +285,20 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 >
 > 4. **Resource groups (cluster-level workload throttling — NOT a single-query memory lever)**: resource groups in `etc/resource-groups.properties` control concurrency, CPU, and memory **per workload class** (e.g., "BI dashboards get 30% of cluster memory and max 10 concurrent queries; ad-hoc analyst queries get 20% and max 3 concurrent"). They are NOT a knob you reach for to fix ONE query's OOM — they are a knob to prevent the "noisy neighbor" pattern where one workload starves another. If your OOM root cause is "this query genuinely needs more memory than the cluster has", resource groups are NOT the answer; spill (Step 1) or restructuring (Step 2) is.
 >
+> ### ⚠️ DIAGNOSIS GUARD — `ORDER BY ... LIMIT n` is a bounded-memory **TopN**, NOT a full sort. Don't reflexively blame "spilling" for a slow `ORDER BY + LIMIT`.
+>
+> *(Keyword anchors: ORDER BY LIMIT slow / dies, top-N query slow, "ORDER BY then LIMIT" runs for an hour, is my ORDER BY spilling, sort-then-limit out of memory, why is ORDER BY ... LIMIT slow on a huge table.)*
+>
+> Trino's optimizer rewrites `ORDER BY x LIMIT n` into a **TopN operator that keeps a bounded heap of only the top `n` rows per worker** — it does **NOT** sort all the input rows and then slice off `n`. So per-operator memory for the ordering step is bounded by ~`n` rows, not by the full input. **For a SMALL `n`, a `LIMIT`'d `ORDER BY` will essentially never OOM or spill on the sort itself.** If such a query is slow / dies on a 200M-row table, the dominant cost is almost always the **unfiltered TableScan reading all 200M rows** (and feeding them through the TopN), NOT a spilling sort. **Diagnose with `EXPLAIN`**: look for a `TopN[n]` (or `TopNPartial`) node — if it's there, the ordering is already bounded; chase the `TableScan` (`inputRows` near the full table, no `constraint=` ⇒ no partition pruning). **Fix:** add a time/partition predicate so the scan prunes (`WHERE event_time >= TIMESTAMP '...'`), project only needed columns, and (if it genuinely is a huge sort, e.g. a very large `n` or `ORDER BY` with no `LIMIT`) THEN enable spill per Step 1.
+>
+> **DO-NOT-WRITE (TopN/spill misdiagnosis):**
+> | DO NOT say / write | Why it's wrong | The right framing |
+> |---|---|---|
+> | "`ORDER BY event_time LIMIT 100` sorts all 200M rows then takes 100, so it spills / OOMs on the sort." | Trino rewrites it to a **TopN** with a bounded heap of `n` rows — it does NOT materialize a full sort of the input. Spill on the ordering step is unlikely for a small `n`. | The slowness is the **unfiltered 200M-row TableScan** feeding the TopN. Add a partition/time predicate so the scan prunes; verify the plan shows `TopN[n]` + a pruned `TableScan`. |
+> | "Lower `query_max_memory_per_node` so the query spills EARLIER." | **Backwards.** `query_max_memory_per_node` is a **hard cap** (session form can only LOWER it). Lowering it makes the query **FAIL earlier** with `Query exceeded per-node memory limit`, it does NOT make it spill earlier. The spill *trigger* is the config-only `memory-revoking-threshold`, not a session knob. | To enable spill: `SET SESSION spill_enabled = true;` (Step 1). To make spill trigger sooner, tune the CONFIG `memory-revoking-threshold` (cluster restart) — not the memory cap. |
+>
+> (Cross-ref: the TopN-vs-full-sort distinction and the determinism note also live in [r23 §ORDER BY / TopN](23-sql-best-practices-olap.md).)
+>
 > ### DO-NOT-WRITE — FABRICATED memory/spill session-property names (banned in every Trino 467 resource)
 >
 > | DO NOT write this | Why it's wrong | The right answer |
