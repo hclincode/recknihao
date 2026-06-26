@@ -1,7 +1,7 @@
 {
-  "iteration": 1119,
+  "iteration": 1120,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1119 thin-margin rotation + novel-domain streak re-probe. Q1 = consecutive-MONTHS-active streak (novel domain, not login-days) \u2014 confirm gaps-and-islands skeleton transfers (month-index difference, not date_diff on raw dates per r07 \u00a73279). Q2 = storage-tiering (thinnest 3.5625/6). Q3 = dbt model contracts (4.391/6). Q4 = cost-considerations (4.2129/20). Verify-first; protect thin rows. Federation/CBO untouched."
+  "note": "iter1120 balanced thin-margin + breadth sweep. Touch dbt-snapshots SCD2 (4.0315/14, thinnest passing \u2014 fresh angle to confirm routing FIX-A durable, not over-probe) + query-perf + 2 breadth. Verify-first. Federation/CBO untouched. 6 consecutive >=4.9 iters."
 }
