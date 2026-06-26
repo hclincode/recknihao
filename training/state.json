@@ -1,7 +1,7 @@
 {
-  "iteration": 1130,
+  "iteration": 1131,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1130 dedup-tied-tuple FIX-A re-probe (iter1129 r27 Pattern B3). Q1 = dedup where dupes share the WHOLE key incl timestamp (only surrogate id differs), keep one \u2014 confirm responder uses Pattern B3 (DELETE by UNIQUE id) or B1 (CTAS), NOT the tuple-IN/B2 data-loss form, + a tiebreaker. Q2 = NON-tied dedup (distinguishing newer timestamp, keep latest) \u2014 regression check that the warning does NOT over-steer the safe case (B1/B2/ROW_NUMBER still fine). Q3+Q4 breadth. Federation/CBO untouched."
+  "note": "iter1131 SELECT-*-EXCEPT watch re-probe (iter1130 Q2 slip: SELECT * EXCEPT (rn) is BigQuery/Databricks, not Trino). Q1 = rebuild a table excluding a helper/computed column (e.g. drop the rn column from a dedup rebuild, or all-cols-except-one) \u2014 confirm responder LISTS explicit columns (or restructures), NOT SELECT * EXCEPT. If recurs -> LIGHT FIX-A r27 B1 inline defang + r23 \u00a73286 cross-link. Q2-Q4 breadth. Federation/CBO untouched."
 }
