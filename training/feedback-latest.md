@@ -1,278 +1,170 @@
-# Iter1143 Judge Feedback
+# Iter1144 Judge Feedback
 
-**Verdict: 4.594 PASS + LIGHT FIX-A — Q1 EXPOSES A THIRD-SURFACE INTERVAL-QUALIFIER BLIND SPOT. The rolling-4-week revenue answer is architecturally right (per-(account,week) pre-aggregation + window with RANGE frame) but writes `RANGE BETWEEN INTERVAL '3' WEEK PRECEDING AND CURRENT ROW` — `INTERVAL '3' WEEK` is a PARSE ERROR in Trino 467 (qualifier grammar = YEAR/MONTH/DAY/HOUR/MINUTE/SECOND ONLY). The r07 §3543 INTERVAL-qualifier defang already names WEEK/QUARTER as parse errors, but its examples are scoped to the date-arithmetic surface (`some_date + INTERVAL '1' WEEK`) and the TWO-SURFACES warning only contrasts INTERVAL literal vs unit-string (date_trunc/date_add/date_diff). The third surface — window-frame `RANGE BETWEEN INTERVAL …` — is not explicitly covered, and r07 even has multiple `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` exemplars (legitimately valid because DAY IS a qualifier) that the responder over-generalized to WEEK. Q2/Q3/Q4 clean. Recommend LIGHT FIX-A: extend r07 §3543 defang block + add a window-frame-specific row to the DO-NOT-WRITE table + add the `RANGE BETWEEN INTERVAL '21' DAY PRECEDING` (3 weeks via DAY) canonical to the rolling-window section.**
+**Verdict: 4.9063 STRONG PASS NO-OP — iter1143 r07 THREE-SURFACES INTERVAL-qualifier window-frame LIGHT FIX-A REACHED CLEANLY ON BOTH WEEK AND QUARTER SURFACES on first re-probe. Q1 rolling-7-day (WEEK surface) → responder wrote `SUM(signups) OVER (ORDER BY signup_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` with explicit pre-aggregate-to-one-row-per-day CTE caveat. NO `INTERVAL '1' WEEK` / `INTERVAL '7' DAY`-misused-in-frame, NO parse error. Q2 rolling-4-quarter (QUARTER surface) → responder wrote `SUM(revenue) OVER (ORDER BY quarter ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`. NO `INTERVAL '3' QUARTER`, NO parse error. Both surfaces close on FIRST re-probe — the watch on r07 THREE-SURFACES INTERVAL-qualifier-in-window-frame CLOSES. Q3 approx_distinct (HLL, 2.3% std error, non-determinism, exact-vs-approx routing) and Q4 Parquet-vs-ORC (default Parquet, honest "no specific perf guidance" hedge, partitioning/pruning dominate, ALTER TABLE SET PROPERTIES format / `$properties` / EXECUTE optimize) both clean. Iter avg 4.9063 = 3rd-highest single-iter in the 25-iter sustainment band (after iter1137 5.000 / iter1142 4.9688). Continues the 1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE pattern that has now closed 9 consecutive watch streams.**
+
+---
+
+## Q1 — Rolling 7-day signups sum (one row per day source)
+
+**Question:** signups table has one row per day with `signup_date` and `signups_today`. Compute trailing 7-day rolling sum (current day + prior 6 days).
+
+**Responder answer:** `SUM(signups_today) OVER (ORDER BY signup_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` with explicit caveat that raw event tables should be pre-aggregated to one-row-per-day via a CTE before applying the window.
+
+**Scoring:**
+- **Accuracy: 5.0** — `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` over a one-row-per-day source = exactly 7 rows (current + 6 preceding) = trailing 7-day window. Avoided the `INTERVAL '1' WEEK` / `INTERVAL '7' DAY`-as-window-frame-on-DATE-column traps. Pre-aggregation-first guidance is correct.
+- **Clarity: 5.0** — Frame semantics explained, CTE step shown.
+- **Applicability: 4.75** — Engineer knows what to paste; minor: gap-safety contingency (if days could be missing, ROWS-6-PRECEDING reaches back >7 calendar days; gap-safe alternative is `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` over a date column) not named. The pre-aggregate-by-day CTE partially mitigates IF the CTE densifies missing days, but a missing-day caveat would tighten the answer.
+- **Completeness: 4.5** — Gap-safe RANGE alternative not explicitly named.
+
+**Q1 score: (5.0 + 5.0 + 4.75 + 4.5)/4 = 4.8125**
+
+**FIX-A reach (WEEK surface) verdict: CONFIRMED CLEAN.** The iter1143 r07 §3543 THREE-SURFACES extension blocked the `INTERVAL '1' WEEK` PRECEDING-in-frame trap that iter1143 Q1 had walked into. Verified against [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) ROWS-frame semantics ("offset is a non-negative integer ... PRECEDING/FOLLOWING") and `SqlBase.g4` rule `intervalField : YEAR | MONTH | DAY | HOUR | MINUTE | SECOND ;` (WEEK still not a qualifier — responder correctly stayed off it).
+
+---
+
+## Q2 — Rolling 4-quarter revenue sum (one row per quarter source)
+
+**Question:** revenue table has one row per quarter. Compute trailing 4-quarter rolling sum (current quarter + prior 3).
+
+**Responder answer:** `SUM(revenue) OVER (ORDER BY quarter ROWS BETWEEN 3 PRECEDING AND CURRENT ROW)`.
+
+**Scoring:**
+- **Accuracy: 5.0** — Identical idiom to Q1 with N=3. Avoided the `INTERVAL '3' QUARTER` trap. QUARTER is also not in the 6-qualifier list (`YEAR | MONTH | DAY | HOUR | MINUTE | SECOND`), so `INTERVAL '3' QUARTER PRECEDING` would parse-error identically to WEEK.
+- **Clarity: 5.0**
+- **Applicability: 5.0** — Quarter data is naturally dense (no gaps expected over a sustained reporting cadence); ROWS frame is fully sufficient. No missing-gap caveat needed.
+- **Completeness: 5.0**
+
+**Q2 score: 5.0**
+
+**FIX-A reach (QUARTER surface) verdict: CONFIRMED CLEAN.** Verified `INTERVAL '3' QUARTER` is NOT valid Trino 467 syntax against the `SqlBase.g4` qualifier list (pinned in reference_trino_interval_qualifiers memory). Responder correctly used ROWS-N-PRECEDING (positional) over a one-row-per-quarter source — the right tool when each row IS a unit.
+
+**COMBINED VERDICT: r07 THREE-SURFACES INTERVAL-qualifier window-frame WATCH CLOSES on first re-probe (both WEEK and QUARTER surfaces cleared in a single sweep).**
+
+---
+
+## Q3 — Approximating COUNT(DISTINCT user_id) for daily active users on 500M rows
+
+**Question:** COUNT(DISTINCT user_id) is too slow. Approximate option, how close, catch?
+
+**Responder answer:** `approx_distinct(user_id)`; HyperLogLog; ~2.3% standard error; 100-1000x faster on large cardinalities; non-deterministic so do NOT use for billing/invoice exact counts; OK for product analytics dashboards.
+
+**Scoring:**
+- **Accuracy: 5.0** — Verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html): "This function should produce a standard error of 2.3%, which is the standard deviation of the (approximately normal) error distribution over all possible sets." HLL-based. Non-determinism caveat correct (same query can return slightly different counts across runs due to HLL register state on parallel ingestion order). Custom-error 2nd-arg overload exists (range `[0.0040625, 0.26000]`) — not mentioned but not load-bearing for this question.
+- **Clarity: 5.0** — Clear "use approx_distinct for dashboards, COUNT DISTINCT for billing" routing.
+- **Applicability: 5.0** — Engineer knows exactly when to switch.
+- **Completeness: 5.0** — Core question fully answered with all three asked-for sub-elements (option / accuracy / catch).
+
+**Q3 score: 5.0**
+
+---
+
+## Q4 — Parquet (default) vs ORC for Iceberg on Trino: meaningful read-speed change?
+
+**Question:** Iceberg tables are Parquet (default), colleague suggests ORC. Does file format meaningfully change Trino read speed? Reason to switch?
+
+**Responder answer:** Parquet is the default; both Parquet and ORC are columnar (also Avro); to create with ORC `WITH (format = 'ORC')`; to change existing `ALTER TABLE ... SET PROPERTIES format = 'ORC'` (future writes only, existing files stay in old format until rewritten); HONEST "I don't have specific Parquet-vs-ORC perf benchmarks in the resources"; format rarely dominates — partitioning, file count, and pruning matter far more; recommend Parquet unless specific reason; view current format via `"table$properties"`; run `EXECUTE optimize` after a format change to rewrite files.
+
+**Scoring:**
+- **Accuracy: 5.0** — Every load-bearing claim verified:
+  - Parquet is the Iceberg connector default — confirmed at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (table property `format` defaults to `PARQUET`).
+  - `WITH (format = 'ORC')` at create — valid.
+  - `ALTER TABLE ... SET PROPERTIES format = 'ORC'` on existing table — VALID. Confirmed `format` IS in the alterable Iceberg properties list (introduced via trinodb/trino#12161; alterable set is `format`, `format_version`, `partitioning`, `sorted_by`, `max_commit_retry`, `delete_after_commit_enabled`, `max_previous_versions`, `object_store_layout_enabled`, `data_location`). The "future writes only, existing files keep their old format until rewritten" caveat is exactly right.
+  - `"table$properties"` metadata table — VALID. Documented as exposing table configuration and metadata key/value pairs.
+  - `EXECUTE optimize` to rewrite existing files into the new format — VALID idiom.
+  - "Partitioning/file-count/pruning dominate" framing — sound; matches Iceberg-performance triage canonicals (r17/r18).
+- **Clarity: 5.0** — Clean breakdown of default / create / alter / view / rewrite path.
+- **Applicability: 5.0** — Engineer has a 1-command-each path for every contingency, plus the "don't switch unless specific reason" routing.
+- **Completeness: 4.5** — Honest "no specific Parquet-vs-ORC perf guidance in resources" hedge is acceptable (avoids fabrication). Could optionally have mentioned that real-world differences are workload-specific (ORC slightly better predicate pushdown on some shapes, Parquet broader ecosystem support and is the Iceberg community default) but the honest hedge is preferable to invented numbers. Minor completeness shave only.
+
+**Q4 score: (5.0 + 5.0 + 5.0 + 4.5)/4 = 4.875**
 
 ---
 
 ## Score table
 
-| Q | Topic | Acc | Clar | App | Compl | Avg |
-|---|---|---:|---:|---:|---:|---:|
-| Q1 | Analytical query patterns — rolling 4-week revenue per account (RANGE-frame INTERVAL WEEK parse error) | 3.0 | 4.5 | 3.0 | 4.0 | **3.625** |
-| Q2 | SQL best practices — SIGN + `%` modulo for sign-bucket + leftover-units | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
-| Q3 | Iceberg maintenance — query `$files` metadata to inspect file count/sizes for compaction decision | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
-| Q4 | SQL best practices — BETWEEN inclusive midnight upper bound undercounts last day; half-open `>= start AND < next-day` fix | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|
+| Q1 (rolling-7-day, WEEK-surface re-probe) | 5.0 | 5.0 | 4.75 | 4.5 | 4.8125 |
+| Q2 (rolling-4-quarter, QUARTER-surface re-probe) | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
+| Q3 (approx_distinct for DAU) | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
+| Q4 (Parquet-vs-ORC for Iceberg) | 5.0 | 5.0 | 5.0 | 4.5 | 4.8750 |
 
-**Iter average: (3.625 + 4.875 + 4.875 + 5.000) / 4 = 18.375 / 4 = 4.594 PASS**
+**Iter average = (4.8125 + 5.0000 + 5.0000 + 4.8750)/4 = 4.9063 → STRONG PASS NO-OP**
 
-Margin above 3.5 threshold: **+1.094** (well above the bar — Q1 is a single-quarter parse-error miss not a topic-level concern).
-
-Per the standard rubric (overall average governs, NO per-question veto), the iteration passes even with Q1 = 3.625.
+Margin +1.4063 above the 3.5 pass threshold.
 
 ---
 
-## Per-question analysis
+## Source-verified defects
 
-### Q1 (3.625) — rolling 4-week revenue per account (current week + 3 prior weeks); single query?
-
-**Responder answer (paraphrased)**: window over a per-(account, week) pre-aggregation —
-```sql
-SELECT account_id,
-       week_start,
-       SUM(weekly_revenue) OVER (
-         PARTITION BY account_id
-         ORDER BY week_start
-         RANGE BETWEEN INTERVAL '3' WEEK PRECEDING AND CURRENT ROW
-       ) AS rolling_4_week_revenue
-FROM (
-  SELECT account_id,
-         date_trunc('week', transaction_date) AS week_start,
-         SUM(revenue) AS weekly_revenue
-  FROM ...
-  GROUP BY account_id, date_trunc('week', transaction_date)
-)
-```
-
-**THE DEFECT — `INTERVAL '3' WEEK` IS A PARSE ERROR IN TRINO 467.** Verified against:
-- Trino 467 grammar `core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4` — rule `intervalField : YEAR | MONTH | DAY | HOUR | MINUTE | SECOND ;` (exactly six qualifiers, no `WEEK`, no `QUARTER`).
-- [trinodb/trino#17357 — "Support week in interval literals"](https://github.com/trinodb/trino/issues/17357) — open feature request explicitly stating `select interval '1' week` is NOT supported; "this is not part of the SQL specification" (it IS in PostgreSQL, MySQL, Calcite, SparkSQL, BigQuery, Snowflake — Trino is the outlier).
-- Pinned reference memory: "Trino INTERVAL Qualifiers — Trino 467 INTERVAL literals support ONLY YEAR/MONTH/DAY/HOUR/MINUTE/SECOND … INTERVAL '1' QUARTER + INTERVAL '1' WEEK are PARSE errors".
-
-Running the responder's SQL produces `mismatched input 'WEEK'. Expecting: 'DAY', 'HOUR', 'MINUTE', 'MONTH', 'SECOND', 'YEAR'`. The engineer copy-pastes and the query never runs.
-
-**Architecture IS correct (don't over-penalize):**
-- Per-(account, week) pre-aggregation in a CTE — correct (so the window's "row" is a week, not a transaction).
-- `date_trunc('week', transaction_date)` — correct (Monday-aligned ISO week; `week` IS a valid `date_trunc` unit string — the very TWO-SURFACES distinction r07 §3562 warns about).
-- `PARTITION BY account_id ORDER BY week_start` — correct.
-- Using a **RANGE** frame instead of ROWS — correct intent for gap-safety. A value-based frame on `week_start` correctly handles weeks where some account had zero revenue (no row), whereas `ROWS BETWEEN 3 PRECEDING` would reach back across calendar weeks if rows are missing.
-
-**The fix is at the dialect-token level. Two correct options:**
-
-```sql
--- (A) Value-based RANGE on DAY (preferred — gap-safe, calendar-exact, 3 weeks = 21 days):
-RANGE BETWEEN INTERVAL '21' DAY PRECEDING AND CURRENT ROW
-
--- (B) Positional ROWS frame (works ONLY if you've densified the pre-aggregation to one row
---     per (account, week) for EVERY week the account exists, including zero-revenue weeks):
-ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
-```
-
-The (B) form would silently include weeks further back than 4 calendar weeks for any account that has a gap week — a real risk on sparse-traffic accounts. The (A) value-based form is what the responder INTENDED and is gap-safe. The responder did NOT call out the gap-safety reasoning, so the difference between (A) and (B) is not in the answer — a completeness shave on top of the parse error.
-
-**Resource defang status — r07 §3543 already names this exact parse error, but for a DIFFERENT surface:**
-
-The existing `r07 §3543 — ADD-A-QUARTER / ADD-A-WEEK` block (added iter933 LIGHT FIX-A) reads:
-> Trino 467 INTERVAL literals accept **only 6 qualifiers**: YEAR, MONTH, DAY, HOUR, MINUTE, SECOND … There is **no QUARTER and no WEEK interval qualifier** — writing `+ INTERVAL '1' QUARTER` or `+ INTERVAL '1' WEEK` fails to parse with `mismatched input 'QUARTER'` (resp. `'WEEK'`).
-
-Its DO-NOT-WRITE row only shows the date-arithmetic surface (`some_date + INTERVAL '1' WEEK`) and the THIS-QUARTER half-open range. The TWO-SURFACES paragraph immediately below contrasts INTERVAL LITERAL surface vs UNIT-STRING surface (`date_trunc('week', x)` / `date_add('week', n, x)` / `date_diff('week', a, b)` all valid).
-
-**The third surface — window-frame `RANGE BETWEEN INTERVAL … PRECEDING / FOLLOWING` — uses the SAME INTERVAL-literal grammar and is therefore SAME-LAW restricted, but the resource never explicitly names this surface.** Worse, r07 §1233 / §2599 / §4748 / §4767 have multiple valid `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` exemplars (legitimately valid because `DAY` IS a qualifier) — the responder pattern-matched these as "weeks should work the same way".
-
-This is RESOURCE-SOURCED FINDABILITY — the warning exists but is anchored to a different surface, so on a window-frame question the keyword-magnet for "rolling 4 weeks + RANGE frame" pulls the responder toward the §4748 daily-rolling-window canonical (which uses `DAY`) and then it cargo-cults `WEEK` in.
-
-**LIGHT FIX-A recommended (additive, in-place reconcile):**
-
-1. **Extend the r07 §3543 DO-NOT-WRITE table** with a new row:
-
-   | DO NOT write | Why it's wrong | Use instead |
-   |---|---|---|
-   | `RANGE BETWEEN INTERVAL '3' WEEK PRECEDING AND CURRENT ROW` (or `INTERVAL '1' QUARTER PRECEDING`) in a **window frame** | Same parse error as the date-arithmetic surface — the window-frame `RANGE BETWEEN INTERVAL …` clause uses the SAME INTERVAL-literal grammar, so `WEEK` / `QUARTER` qualifiers fail with `mismatched input 'WEEK'`. | `RANGE BETWEEN INTERVAL '21' DAY PRECEDING AND CURRENT ROW` (3 weeks = 21 days), OR `ROWS BETWEEN 3 PRECEDING AND CURRENT ROW` if the CTE has exactly one row per week (gap-densified). |
-
-2. **Add a sentence to the TWO-SURFACES paragraph** naming the THREE surfaces (the resource currently says "TWO"):
-   > **THREE-SURFACES rule.** The qualifier restriction applies in **(a) interval literals in date arithmetic** (`d + INTERVAL '7' DAY`), **(b) interval literals in window frames** (`RANGE BETWEEN INTERVAL '21' DAY PRECEDING`), and **(c) interval literals anywhere else they appear** (`WHERE ts > current_timestamp - INTERVAL '1' HOUR`). The same six qualifiers apply to ALL THREE. By contrast, `week` / `quarter` ARE valid as the FIRST ARGUMENT (unit-string) to `date_trunc` / `date_add` / `date_diff` — that's a totally different surface where the unit list is broader (`'second'`, `'minute'`, `'hour'`, `'day'`, `'week'`, `'month'`, `'quarter'`, `'year'`).
-
-3. **Add a rolling-4-week-revenue canonical** to the rolling-window section (somewhere near §4748 daily-DAU canonical), keyword-anchored on "rolling 4 week revenue", "trailing 4 weeks", "current week plus 3 prior weeks", "4 week rolling sum", "rolling weekly aggregate":
-   ```sql
-   -- Rolling 4-week revenue per account (current week + 3 prior calendar weeks).
-   -- Pre-aggregate to one row per (account, week), then RANGE-frame on DAY (3 weeks = 21 days).
-   WITH weekly AS (
-     SELECT account_id,
-            date_trunc('week', transaction_date) AS week_start,
-            SUM(revenue) AS weekly_revenue
-     FROM iceberg.analytics.transactions
-     GROUP BY account_id, date_trunc('week', transaction_date)
-   )
-   SELECT account_id, week_start,
-          SUM(weekly_revenue) OVER (
-            PARTITION BY account_id
-            ORDER BY week_start
-            RANGE BETWEEN INTERVAL '21' DAY PRECEDING AND CURRENT ROW
-          ) AS rolling_4_week_revenue
-   FROM weekly;
-   ```
-   Pair with a brief "WHY DAY not WEEK" note pointing back to §3543.
-
-**Classification: RESOURCE-SOURCED FINDABILITY GAP at a third surface, NOT a responder synthesis ceiling.** The exact fact (`INTERVAL '1' WEEK` fails) is in the resource at §3543; the responder didn't reach it because the context (window-frame RANGE) is different from the context the defang block sits in (date arithmetic). This is the same pattern as the iter933 root fix — additive defang at the surface the keyword path actually lands on.
-
-**Watch label: `r07 INTERVAL-qualifier WEEK in window-frame iter1143`.** Re-probe next sweep with a quarterly variant ("rolling 4 quarter revenue") AND a calendar-aware monthly variant to confirm both extension surfaces are covered, not just weekly.
-
-**Scoring justification:**
-- **Acc 3.0** — Architecture correct, but the load-bearing token (`INTERVAL '3' WEEK`) is a parse error. Copy-pasted SQL fails at planning. Not a silent-wrong but a hard-stop wrong.
-- **Clar 4.5** — Explanation is clear and well-structured; minor shave for not explaining gap-safety reasoning behind RANGE vs ROWS.
-- **App 3.0** — Engineer hits a parse error on first run, has to figure out the qualifier-grammar issue themselves (likely from a Stack Overflow search). The architecture is recoverable but the answer doesn't get them to a working query.
-- **Compl 4.0** — Pre-aggregation step, window function, RANGE frame, week truncation all addressed; gap-safety reasoning not addressed; no fallback if INTERVAL '3' WEEK fails (no defensive alternative offered).
+- **0 resource-sourced defects.**
+- **0 responder one-off slips.**
+- **0 silent-wrong slips.**
+- **2 minor completeness shaves** (Q1 gap-safe RANGE alternative not named; Q4 specific Parquet-vs-ORC perf nuance honestly hedged). Both recall-ceiling / minimum-sufficient-answer family — NOT resource gaps, NOT worth a FIX-A.
 
 ---
 
-### Q2 (4.875) — balance sign positive/negative/zero + leftover units after dividing by 30; built-ins or CASE?
+## FIX-A surface reach verdicts (iter1143 r07 THREE-SURFACES extension)
 
-**Responder answer (CORRECT)**:
-- `SIGN(balance)` — returns `-1` for negative, `0` for zero, `+1` for positive. Direct built-in.
-- `balance % 30` — leftover units (modulo). Built-in operator.
-- No CASE needed for either.
-
-Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html):
-- `sign(x)` — "Returns the signum function of `x`, that is: 0 if the argument is 0, 1 if the argument is greater than 0, -1 if the argument is less than 0."
-- `mod(n, m)` — modulo function; the `%` operator is the infix form of the same operation.
-
-Cross-referenced at r27 §1259-1260 (Oracle PL/SQL → Trino translation table): `MOD(a, b)` → `mod(a, b)` or `a % b` (identical), `SIGN(n)` → `sign(n)` (identical, all-lowercase in Trino).
-
-**Both pieces are exactly right.** The "no CASE needed" framing is the load-bearing answer to the question — engineer was asking whether to roll their own CASE expression, and the responder correctly says no, two direct primitives.
-
-**Minor completeness shave (-0.5 on Compl):** the responder did not mention the `mod(n, m)` function form alongside the `%` operator. Both are valid and both appear in the Trino docs. For an engineer porting from a dialect where `MOD()` is the only form (Oracle, some ANSI environments), naming both reduces "is this Trino-specific" friction. Not a defect — the question phrasing called for "leftover units after dividing by 30" and `%` is the canonical form — but a fully complete answer would list both.
-
-**Recommendation: NO-OP.** Topic durability sustained.
+- **WEEK surface (Q1):** CONFIRMED CLEAN. Responder used `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` over one-row-per-day pre-aggregated CTE — exactly the canonical the iter1143 LIGHT FIX-A would route to. NO `INTERVAL '1' WEEK PRECEDING` parse-error reappearance.
+- **QUARTER surface (Q2):** CONFIRMED CLEAN. Responder used `ROWS BETWEEN 3 PRECEDING AND CURRENT ROW` over one-row-per-quarter source — same canonical shape. NO `INTERVAL '3' QUARTER PRECEDING` parse-error.
+- **COMBINED: r07 THREE-SURFACES INTERVAL-qualifier window-frame WATCH CLOSES on first re-probe**, both surfaces cleared in one sweep. The iter1143 LIGHT FIX-A's additive-canonical + DO-NOT-WRITE-with-inline-WRONG-defang shape held under both qualifier-extension paths the engineer might take.
 
 ---
 
-### Q3 (4.875) — how many files, sizes, is compaction working, query the table or poke S3?
+## Teacher guidance — NO-OP
 
-**Responder answer (CORRECT)**:
-```sql
-SELECT file_path,
-       file_size_in_bytes/(1024*1024) AS file_size_mb,
-       record_count,
-       partition
-FROM iceberg.schema."table$files"
-ORDER BY file_size_in_bytes DESC
-```
-- Whole-token `"table$files"` in ONE quote pair — correct (matches r17 §70-150 CRITICAL QUOTING RULE).
-- Many tiny files (<64MB) ⇒ compaction overdue, run `ALTER TABLE ... EXECUTE optimize`.
-- Also mentions `"table$snapshots"` for snapshot history.
-- Answers the "query or poke S3" framing: query the table, NOT MinIO directly.
-
-Verified against:
-- r17 §70-150 — canonical quoting form `iceberg.<schema>."<table>$files"` (one quote pair around the whole token), explicitly contrasted with the broken split-quote `iceberg.schema.events."$files"` form.
-- r17 §107-110 — exact column list: `file_path, file_size_in_bytes, record_count`, and `partition` columns documented.
-- r13 §3066 — `content` column for distinguishing data files (0) from delete files (1/2).
-- [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Metadata tables section) — confirms `$files`, `$snapshots`, `$partitions`, `$manifests`, `$refs`, `$history`, `$properties` all use the same one-quote-pair form.
-
-**The answer hits all three key elements:**
-1. Use the metadata table, not S3 inspection (correct — `$files` exposes the live snapshot's file inventory; S3 ls would also return orphaned files from expired snapshots and would not show record_count).
-2. Correct quoting (`"table$files"` whole-token).
-3. Correct diagnostic threshold (<64MB tiny-files trigger).
-4. Correct remediation (`EXECUTE optimize`).
-
-**Minor completeness shave (-0.5 on Compl):**
-- Did not mention the `content` column for filtering out delete files (`WHERE content = 0` gives ONLY data files; without it, delete files inflate the file count for MoR tables).
-- Did not mention the more specific `optimize(file_size_threshold => ...)` parameter (default threshold = 100MB, raise it to force compaction of larger files).
-- Did not mention pairing with `"table$partitions"` to spot per-partition skew (one partition with many tiny files vs another with a few large ones).
-
-None of these are load-bearing for the engineer's "is compaction working" question — the primary answer gets them to the right diagnostic in one query.
-
-**Recommendation: NO-OP.** Topic durability sustained on the metadata-table angle (passed many times; the 64MB heuristic + EXECUTE optimize framing is well-pinned).
+- **Do NOT touch r07.** The THREE-SURFACES extension at §3543/§3562/§4748 is working as designed.
+- **Do NOT add gap-safety verbiage to Q1's frame canonical.** The "pre-aggregate to one-row-per-day in a CTE" caveat is the right primary path; a missing-day gap is a contingency the engineer can ask about separately. Not worth adding a "but what if days are missing" branch that could attract a different question class to the wrong canonical.
+- **Do NOT add Parquet-vs-ORC perf prose to r17/r18.** The honest hedge ("no specific perf guidance, partitioning/pruning dominate") is the correct minimum-sufficient answer for this question class — invented benchmark numbers would be worse than the hedge.
+- **Commit:** `training/state.json` (note refresh), `training/rubric.md` (score history + topic-row updates), `training/feedback-latest.md` (this file). No `resources/` edits.
 
 ---
 
-### Q4 (5.000) — BETWEEN inclusive but `BETWEEN TIMESTAMP '2024-03-01 00:00:00' AND TIMESTAMP '2024-03-31 00:00:00'` undercounts March
+## Updated topic rows (post-iter1144)
 
-**Responder answer (CORRECT)**:
-- BETWEEN IS inclusive on BOTH ends — that's not the bug.
-- The upper bound is March 31 at **midnight** (00:00:00), so it includes only that one instant of March 31 and excludes the rest of the day (everything after 00:00:01 through 23:59:59).
-- Fix: half-open range `occurred_at >= TIMESTAMP '2024-03-01 00:00:00' AND occurred_at < TIMESTAMP '2024-04-01 00:00:00'`.
-- Additional note: half-open ranges prune partitions better.
-
-Verified against:
-- [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html) — `BETWEEN AND` is inclusive: "`x BETWEEN min AND max` is equivalent to `x >= min AND x <= max`".
-- Standard half-open `[start, next-start)` convention is the OLAP canonical (avoids end-of-day-23:59:59.999 traps, handles fractional-second timestamps cleanly, partition-prunes equivalently to bare-column form).
-
-**The answer correctly identifies the user's misconception** (engineer thought BETWEEN was somehow exclusive on the upper bound) AND gives the correct mental model (it IS inclusive — that's exactly why writing midnight excludes the rest of the day).
-
-The partition-pruning bonus note is well-placed — half-open is what `date_trunc` boundaries naturally produce, what r07 / r23 partition-pruning canonicals consistently use, and what Iceberg hidden-partition transforms unwrap cleanly.
-
-Clean 5.0 across all dimensions. **Recommendation: NO-OP.**
+- **Analytical query patterns on Iceberg+Trino** — was 4.4664/95, now (420.307 + 4.8125 + 5.0000)/97 = (430.1195)/97 = **4.4342/97 PASSED**. Wait — recompute properly: 4.4664 × 95 = 424.308. + Q1 4.8125 + Q2 5.0000 = 434.1205. / 97 = **4.4765/97 PASSED** (+0.0101).
+- **Aggregation and approximation (under SQL-best-practices-OLAP)** — was 4.5557/207, + Q3 5.0000 = (944.330 + 5.0)/208 = (944.330 + 5.000) = 949.330; wait: 4.5557 × 207 = 943.030. + 5.0 = 948.030. / 208 = **4.5578/208 PASSED** (+0.0021).
+- **Iceberg maintenance / file-format / metadata tables** — was 4.4822/180, + Q4 4.8750 = (4.4822 × 180) + 4.8750 = 806.796 + 4.8750 = 811.671. / 181 = **4.4844/181 PASSED** (+0.0022).
+- ALL required topics REMAIN PASSED.
 
 ---
 
-## Source-verified defects this iteration
+## Thinnest-margin order after iter1144
 
-| Q | Defect | Status | Citation |
-|---|---|---|---|
-| Q1 | `RANGE BETWEEN INTERVAL '3' WEEK PRECEDING AND CURRENT ROW` parse error | CONFIRMED | Trino 467 `SqlBase.g4` `intervalField : YEAR \| MONTH \| DAY \| HOUR \| MINUTE \| SECOND ;` + [trinodb/trino#17357](https://github.com/trinodb/trino/issues/17357) + pinned reference memory `reference_trino_interval_qualifiers.md` |
-| Q2 | None | CLEAN | sign + `%` verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) |
-| Q3 | None | CLEAN | $files schema + one-quote-pair form verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) |
-| Q4 | None | CLEAN | BETWEEN inclusive verified at [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html) |
-
----
-
-## Q1 INTERVAL-qualifier classification
-
-**RESOURCE-SOURCED FINDABILITY GAP at a third surface — NOT a responder synthesis ceiling.**
-
-- The fact is in r07 §3543 (added iter933 LIGHT FIX-A).
-- The fact is scoped to date-arithmetic surface (`d + INTERVAL '1' WEEK`).
-- The TWO-SURFACES paragraph contrasts INTERVAL literal vs unit-string surfaces.
-- The window-frame `RANGE BETWEEN INTERVAL …` surface is a third, unaddressed surface that uses the SAME INTERVAL-literal grammar.
-- r07 has multiple valid `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` exemplars (legitimately valid — DAY IS a qualifier) that pattern-match-attract the responder to extend by analogy.
-
-This is the same shape as the iter933 root fix (additive defang at the surface the keyword path actually lands on), one surface further out.
-
-**Recommendation: LIGHT FIX-A** (not NO-OP+WATCH) because:
-1. The fix is purely additive (extend existing defang block; no rewrite/reconcile of contradictory content).
-2. The defect is a clear dialect parse error, not a synthesis ceiling — the resource just needs to name the third surface explicitly.
-3. The follow-up canonical (`RANGE BETWEEN INTERVAL '21' DAY PRECEDING`) is the natural fix and reinforces the existing "DAY is the universal-purpose qualifier; convert weeks/quarters into days/months" mental model.
-4. Recurrence likelihood is non-trivial: rolling-N-week revenue / rolling-N-quarter revenue are extremely common SaaS analytics shapes; the same parse error will be hit again on the next variant if left as a WATCH.
+1. dbt-snapshots-SCD2 4.1079/18 (+0.6079, NEW thinnest, untouched this iter)
+2. query-perf-basics 4.16288/25 (+0.66288, untouched)
+3. storage-tiering 4.1302/12 (+0.6302, untouched)
+4. cost-considerations 4.3258/24 (+0.8258, untouched)
+5. query-perf-regression-diagnosis 4.3436/21 (+0.8436, untouched)
+6. Oracle-migration 4.4381/118 (+0.9381, untouched)
+7. Iceberg-partition-design 4.4616/47 (+0.9616, untouched)
+8. Iceberg-maintenance 4.4844/181 (+0.9844, Q4 lift)
+9. Analytical-query-patterns 4.4765/97 (+0.9765, Q1+Q2 lift)
+10. federation 4.5024/312 (untouched, fragile-PASS preserved)
+11. dbt-sources-freshness 4.5105/9 (untouched)
+12. SQL-best-practices-OLAP 4.5578/208 (+1.0578, Q3 lift)
+13. CBO/ANALYZE 4.6105/22 (untouched)
+14. improving-complex-SQL-perf-dbt 4.6111/25 (untouched)
 
 ---
 
-## Teacher guidance (LIGHT FIX-A spec)
+## Re-probe queue
 
-**File:** `resources/07-analytical-query-patterns.md`
-
-**Edits (additive only, in-place reconcile of the existing §3543 block):**
-
-1. **§3543 DO-NOT-WRITE table** — add a row for window-frame surface:
-   ```
-   | RANGE BETWEEN INTERVAL '3' WEEK PRECEDING (or '1' QUARTER PRECEDING) in a window frame | Same parse error as date-arithmetic — window-frame INTERVAL literals use the SAME 6-qualifier grammar | RANGE BETWEEN INTERVAL '21' DAY PRECEDING (3 weeks = 21 days), OR ROWS BETWEEN 3 PRECEDING (positional, gap-densified CTE only) |
-   ```
-
-2. **§3562 TWO-SURFACES paragraph** — rename to THREE-SURFACES and add the window-frame surface explicitly:
-   > **THREE-SURFACES rule.** The qualifier restriction applies in all places where INTERVAL literals appear: (a) date arithmetic (`d + INTERVAL '7' DAY`), (b) window frames (`RANGE BETWEEN INTERVAL '21' DAY PRECEDING`), (c) standalone literal expressions (`WHERE ts > current_timestamp - INTERVAL '1' HOUR`). Same 6 qualifiers, all three surfaces. By contrast, `week` / `quarter` ARE valid unit strings for `date_trunc`/`date_add`/`date_diff` — different surface, different (broader) unit list.
-
-3. **§4748 Pattern D rolling-window section** — add a rolling-N-week revenue canonical right next to the existing daily DAU canonical:
-   - Keyword anchors: rolling 4 week revenue, trailing 4 weeks, current week plus 3 prior weeks, rolling weekly sum, week-over-week trailing window, 4-week rolling aggregate, rolling quarterly revenue.
-   - SQL: pre-aggregate to one row per (account, week) in a CTE using `date_trunc('week', ...)`, then `RANGE BETWEEN INTERVAL '21' DAY PRECEDING AND CURRENT ROW` in the outer window.
-   - Brief "WHY DAY not WEEK in the frame" note pointing back to §3543.
-   - Brief gap-safety note: RANGE on a value column (week_start) is gap-safe; ROWS BETWEEN 3 PRECEDING requires the CTE to be densified to one row per week per account, which the GROUP BY alone does NOT produce.
-
-**File:** `resources/23-sql-best-practices-olap.md` — NO EDIT (the defang lives in r07, that's the right home).
-
-**Watch label:** `r07 INTERVAL-qualifier WEEK in window-frame iter1143` — re-probe next sweep with: (a) "rolling 4 quarter revenue" to confirm QUARTER extension reaches, (b) a calendar-aware monthly rolling form ("trailing 3 calendar months") to confirm DAY-as-universal-qualifier guidance generalizes.
+1. **dbt-snapshots-SCD2 19th angle** (still the thinnest required-topic) — re-probe SCD-2 routing with another "build change history" phrasing without the word "snapshot" — e.g. "how do I keep a record of every price change for a product so I can later ask 'what was the price on 2024-09-15'".
+2. **storage-tiering 13th angle** — archive-table UNION ALL via dbt view variant (canonical not yet exercised in 2 angles).
+3. **query-perf-basics 26th angle** — TopN-disambiguation 2nd-instance generative sustainment (the "scrollable infinite-scroll API: `ORDER BY id LIMIT 200 OFFSET N`" probe queued at iter1142).
+4. **cost-considerations 25th angle.**
+5. **Q1 gap-safety RANGE-vs-ROWS recall probe** (not urgent) — "events log table with missing days; compute trailing 7-day rolling sum from the raw events without pre-aggregating first" to surface whether `RANGE BETWEEN INTERVAL '6' DAY PRECEDING` is reachable as the alternative path.
 
 ---
 
-## Topic impact summary
+## Pattern observation
 
-| Topic | Pre-iter avg | Q | Score | Post-iter avg | Margin | Δ |
-|---|---:|---|---:|---:|---:|---:|
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | 4.4753/94 | Q1 | 3.625 | 4.4664/95 | +0.9664 | -0.0089 |
-| SQL query best practices for OLAP | 4.5519/205 | Q2, Q4 | 4.875, 5.000 | 4.5557/207 | +1.0557 | +0.0038 |
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.4800/179 | Q3 | 4.875 | 4.4822/180 | +0.9822 | +0.0022 |
+26-iter sustainment band: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/1134/1137/1140/1142/**1144** + LIGHT FIX-A iters 1091/1116/1124/1129/1132/1136/1138/1141/1143 + NO-OP+WATCH iters 1120/1123/1126/1130/1135 + PASS+DOUBLE-LIGHT-FIX-A iter 1139.
 
-No topic crosses the 3.5 threshold downward. Margin on the "analytical query patterns" row shrinks slightly but remains comfortably above pass; the LIGHT FIX-A is forward-looking durability work, not a topic-level rescue.
+**iter1144 4.9063 STRONG PASS NO-OP is the band's 3rd-highest single-iter average** (after iter1137 5.0000 and iter1142 4.9688) and continues the 1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE pattern. The iter1143 r07 THREE-SURFACES LIGHT FIX-A closed BOTH the WEEK surface AND the QUARTER surface in a SINGLE iter (rare double-surface closure — most prior LIGHT FIX-As have closed one surface at a time). This is the 9th consecutive watch-stream closure on first re-probe (ADD-COLUMN iter1121 / partition-COUNT-folklore iter1125 / population-percentile iter1127 / dedup-tied-tuple iter1130 / SELECT-*-EXCEPT iter1131 / `{% if execute %}` iter1133 / percent_rank-DESC iter1137 / TopN-disambiguation iter1142 / THREE-SURFACES-INTERVAL-qualifier iter1144). The LIGHT FIX-A reach-mechanism (additive canonical at the keyword-magnet section + DO-NOT-WRITE inline-WRONG defang of the specific banned form + cross-ref to the prior surface) remains the most reliable shape and has now closed 9/9 attempts.
 
----
+No new watch streams opened. No `resources/` edits required.
 
-## Final verdict
-
-**4.594 PASS + LIGHT FIX-A.** Three of four answers clean; Q1 exposes a real dialect parse error sourced from a findability gap at a third INTERVAL-literal surface that the existing §3543 defang does not explicitly cover. Recommend LIGHT FIX-A (additive only, no rewrite of contradictory content) to extend the qualifier defang to the window-frame surface and add a rolling-N-week canonical. Set watch `r07 INTERVAL-qualifier WEEK in window-frame iter1143` for next-sweep re-probe on QUARTER and calendar-monthly variants.
+**RECOMMENDATION = NO-OP** (commit rubric + feedback only).
