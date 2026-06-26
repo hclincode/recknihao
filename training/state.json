@@ -1,7 +1,7 @@
 {
-  "iteration": 1142,
+  "iteration": 1143,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1142 TopN-disambiguation FIX-A re-probe (iter1141 r18 DIAGNOSIS GUARD card). Q1 = slow ORDER BY ... LIMIT on a huge table, is it spilling / sorting everything? \u2014 confirm responder says it is a bounded TopN (NOT a full sort), chases the unfiltered TableScan / partition-prune, does NOT reflexively blame spill or say lower the memory cap to spill earlier. If still mis-diagnoses -> escalate. Q2-Q4 breadth. Federation/CBO untouched."
+  "note": "iter1143 -> 4.59 PASS + LIGHT FIX-A (interval-qualifier WEEK at a 3rd surface). Q2 sign()+% / Q3 $files metadata / Q4 BETWEEN-midnight-excludes-end-of-day (half-open fix) clean. Q1 rolling-4-week (3.625): correct window structure but RANGE BETWEEN INTERVAL 3 WEEK PRECEDING is a PARSE ERROR (WEEK not a valid Trino interval qualifier; only YEAR/MONTH/DAY/HOUR/MINUTE/SECOND). Resource-sourced findability gap: r07 \u00a73543 defangs INTERVAL WEEK in date arithmetic + WHERE but the iter933 fix did not name the WINDOW-FRAME RANGE surface (valid INTERVAL 6 DAY PRECEDING exemplars pattern-attract over-extension to WEEK). FIX-A (additive r07): \u00a73562 TWO-SURFACES -> THREE-SURFACES naming the window-frame RANGE INTERVAL surface with gap-safe INTERVAL 21 DAY PRECEDING (3wk=21d) vs ROWS 3 PRECEDING (gap-unsafe) forms + \u00a73543 keyword anchors (rolling 4 week / trailing N weeks / RANGE BETWEEN INTERVAL WEEK window frame). NEW WATCH: r07 INTERVAL-qualifier WEEK in window-frame (re-probe rolling-4-week / rolling-4-quarter next sweep). First watch opened after 8 consecutive closures. Federation/CBO untouched."
 }
