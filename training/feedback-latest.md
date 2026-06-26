@@ -1,112 +1,136 @@
-# Iter1114 — Judge Feedback
+# Iter1115 — Judge Feedback
 
-**Overall verdict: 4.6719 STRONG PASS** (margin +1.17). iter1113 r07 two-level-aggregation FIX-A **REACH CONFIRMED on first re-probe**; neighbor period-coverage card NOT over-attracted; one Q2 sub-shave on both-bounds-for-complete-weeks idiom (findability slip within the same card) — re-probe-don't-churn per `feedback_synthesis_ceiling_stop_churning`.
+**Overall verdict: 4.9844 STRONG PASS** (margin +1.48). iter1113 r07 two-level-aggregation FIX-A **REACH CONFIRMED on 3rd consecutive domain** (workspaces/projects after iter1113 account/user + iter1114 region/rep). iter1114 Q2 both-bounds half-pull **DID NOT RECUR** — both lower AND upper bound present this iter on explicit "complete months" wording, confirming per-instance synthesis slip, NOT structural. NO STEP-0 FIX-A needed. Q3 date-parse family-trap + Q4 Iceberg optimize file_size_threshold default both source-verified clean.
+
+---
+
+## Source verifications (Trino 467 docs)
+
+- **Q4 file_size_threshold default**: trino.io/docs/current/connector/iceberg.html — "All files with a size below the optional `file_size_threshold` parameter (default value for the threshold is `100MB`) are merged…" Verbatim confirms responder's "default threshold 100MB" claim.
+- **Q3 date_parse vs parse_datetime**: trino.io/docs/current/functions/datetime.html — `date_parse(string, format) → timestamp(3)` uses MySQL `%`-specifiers (`%m`/`%d`/`%Y`/`%H`/`%i`/`%s`); `parse_datetime(string, format) → timestamp with time zone` uses Joda DateTimeFormat letters (`MM`/`dd`/`yyyy`/`HH`/`mm`/`ss`). Both families incompatible — responder's "never mix families" is correct.
+- **Q4 snapshot isolation**: Iceberg's atomic-snapshot-commit semantic — optimize writes new data files and commits a new snapshot atomically; readers see the old snapshot until commit, then the new one, never a partial state. This is canonical Iceberg behavior on Trino 467 — responder's "table stays queryable via snapshot isolation" is accurate.
+- **Q4 optimize_manifests**: 467 has `optimize` only (data-file compaction); the separate `optimize_manifests` table procedure for manifest compaction was added in later Trino versions (470+), so responder's "manifest compaction is a separate concern" framing is correct for the production 467 stack.
+- **Q1 two-level form**: SELECT.html GROUP BY semantics — inner `GROUP BY workspace_id, project_id HAVING COUNT(*) >= 10` produces one row per qualifying project; outer `GROUP BY workspace_id COUNT(*)` then counts those projects. Responder's note about COUNT(*) being right (not COUNT(DISTINCT project_id)) because inner GROUP BY made projects unique is precisely correct.
+- **Q2 both bounds**: SELECT.html WHERE evaluation — `order_date >= date_add('month', -3, date_trunc('month', current_date))` AND `order_date < date_trunc('month', current_date)` gives a clean half-open window covering exactly the 3 complete prior months and excluding the in-progress month. HAVING `COUNT(DISTINCT date_trunc('month', order_date)) = 3` then requires presence in all three.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Two-level aggregation re-probe (reps closing >= 5 deals per region) — **5.0000**
+### Q1 — Workspaces with count of projects each crossing >= 10 completed tasks (two-level aggregation, 3rd domain)
 
-| Dim | Score | Reasoning |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | Canonical two-level nested form: inner CTE `GROUP BY region, rep_id` with `COUNT(*) AS deals_closed`; outer `SELECT region, COUNT(*) FROM rep_deals WHERE deals_closed >= 5 GROUP BY region`. Per-row threshold applied at the rep level (inner), then count-of-reps-meeting-threshold at the region level (outer). Engineer's instinct "GROUP BY region gives the region total, not what I need; need rep level first then roll up" exactly satisfied. SQL parses on Trino 467. |
-| Clarity | 5.0 | Two-stage CTE + outer GROUP BY structure is exactly the mental model the engineer requested; the responder explicitly named the rep level vs region level transition. |
-| Applicability | 5.0 | Paste-ready, dbt-incremental-friendly (`INTERVAL '90' DAY` lookback parameterizable). |
-| Completeness | 5.0 | Fully answers — both halves (per-rep threshold + per-region count). No padding alternative. |
+| Technical accuracy | 5.0 | Inner CTE `GROUP BY workspace_id, project_id HAVING COUNT(*) >= 10` correctly identifies qualifying projects; outer `GROUP BY workspace_id COUNT(*)` correctly counts them. Spontaneous explanatory note that COUNT(*) is right (not COUNT(DISTINCT project_id)) because inner GROUP BY guarantees one row per project is exactly the load-bearing insight. |
+| Beginner clarity | 5.0 | Clean two-step framing; explicit anti-pattern callout on COUNT(*) vs COUNT(DISTINCT) prevents a reader from "defensively" adding DISTINCT and over-thinking it. |
+| Practical applicability | 5.0 | Copy-paste-ready Trino-valid SQL on a workspace_id/project_id/status/tasks schema the engineer named. No hedges. |
+| Completeness | 5.0 | Both halves of the FIX-A canonical (the nested form + the trap defang on single-level collapse) present in one answer; the COUNT(*) vs COUNT(DISTINCT) clarification covers the natural next question. |
 
-**FIX-A REACH VERDICT: CONFIRMED.** The iter1113 r07 sub-canonical "COUNT entities-meeting-a-per-entity-threshold per parent key" (added between §3694 and §3725 with keyword anchors "count reps with >= N deals per region / two-level GROUP BY / count groups meeting a HAVING" + nested worked example + single-level-collapse DO-NOT-WRITE) reached cleanly on a DIFFERENT domain (region/rep vs iter1113's account/user). No silent single-level collapse this iter. Same shape pattern as iter1099 first re-probe of dbt-snapshot signpost — FIX-A landed durably on attempt 1.
+**Q1 average: 5.0** — Two-level FIX-A reach **CONFIRMED on 3rd consecutive domain** (iter1113 account/user, iter1114 region/rep, iter1115 workspace/project). The iter1113 r07 §3694-3725 sub-canonical with keyword anchors + worked example + single-level-collapse DO-NOT-WRITE remains durable across novel domain phrasings.
 
----
+### Q2 — Customers ordering in every one of last 3 COMPLETE calendar months (excl. current partial month)
 
-### Q2 — Period coverage neighbor (customers active in EACH of last 4 complete weeks) — **3.7500**
-
-| Dim | Score | Reasoning |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 3.5 | Single-level HAVING shape is correct (`GROUP BY customer_id HAVING COUNT(DISTINCT week) = 4`), and per-row date_trunc('week', order_date) bucketing is correct. BUT silent wrong-result on "complete weeks" wording: lower bound `order_date >= current_date - INTERVAL '28' DAY` anchored to bare current_date (not `date_trunc('week', current_date)`), and NO upper bound to exclude the current in-progress week. If today is mid-week N, the weekly_activity CTE includes BOTH (a) the partial Friday-onward portion of week N-4 and (b) the partial Monday-up-to-today portion of week N. A customer active in weeks N-3, N-2, N-1 plus the partial current week N hits `COUNT(DISTINCT week) = 4` and is wrongly classified as "active in each of the last 4 COMPLETE weeks" — partial current week counted as complete. Verified vs r07 period-coverage card §3713/§3721 both-bounds DO-NOT-WRITE: the upper bound `AND order_date < date_trunc('week', current_date)` IS load-bearing and IS already documented in the same card the responder pulled the HAVING shape from. |
-| Clarity | 4.5 | The CTE + outer-HAVING structure clearly communicates the "active in EACH period" semantic; phrasing reads cleanly. |
-| Applicability | 3.75 | Paste-ready BUT silently wrong on "complete weeks" — engineer ships dashboard, mid-week customers wrongly qualify as 4-week-active. Production hazard. |
-| Completeness | 3.25 | Missed the load-bearing both-bounds idiom + week-aligned anchor that IS in the SAME canonical card responder used. |
+| Technical accuracy | 5.0 | BOTH bounds present: lower `order_date >= date_add('month', -3, date_trunc('month', current_date))` (month-aligned anchor, NOT bare current_date), upper `order_date < date_trunc('month', current_date)` (excludes in-progress month). HAVING `COUNT(DISTINCT date_trunc('month', order_date)) = 3` correctly counts distinct complete months. All Trino 467 functions valid (date_add, date_trunc, current_date). |
+| Beginner clarity | 5.0 | Half-open window with the in-progress-month exclusion explained; HAVING semantic for "in EVERY month" via DISTINCT count = N is the idiomatic shape. |
+| Practical applicability | 5.0 | Engineer can paste directly; iter1114's silent over-count on partial-week trap closed by the explicit < upper bound. |
+| Completeness | 5.0 | Period-coverage discipline (both-bounds for "complete months") observed on the explicit "complete" wording — exactly what was missed iter1114. |
 
-**OVER-ATTRACTION VERDICT: NOT OVER-ATTRACTED.** The iter1113 NEW r07 two-level nested-aggregation card did NOT pull this period-coverage Q to a spurious nested form. Responder correctly stayed with the single-level `GROUP BY customer_id HAVING COUNT(DISTINCT week) = N` shape that period-coverage requires. Neighbor card preserved. (The defect that DID occur is a sub-shave on the same canonical, not a card-routing mismatch.)
+**Q2 average: 5.0** — iter1114 both-bounds half-pull **DID NOT RECUR**. Explicit "complete months" wording correctly triggered both-bounds discipline. **Verdict: per-instance synthesis slip iter1114, NOT structural recurrence. NO STEP-0 FIX-A needed on r07 §3713-3721. Watch CLEARED for this defect class.**
 
-**BOTH-BOUNDS SHAVE CLASSIFICATION: findability slip within the same card, NOT a fresh resource defect.** The both-bounds idiom + the `date_trunc('week', current_date)` anchor for "complete weeks" are documented in r07 §3713-3721 (the very card the responder used to retrieve the HAVING shape). Defang of the no-upper-bound form is the SAME card's DO-NOT-WRITE block. Responder pulled the HAVING half but not the both-bounds half — half-pull synthesis ceiling pattern matches `feedback_responder_broken_secondary_alternative` and `feedback_synthesis_ceiling_stop_churning` (canonical correct form is documented; Haiku doesn't durably pair all halves).
+### Q3 — MM/DD/YYYY string to date (MySQL STR_TO_DATE / Python strptime equivalent)
 
----
-
-### Q3 — Zero-padded integer ID formatting (format vs lpad truncation safety) — **5.0000**
-
-| Dim | Score | Reasoning |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | Both load-bearing claims verified vs trino.io 467 docs: (1) `lpad(string, size, padstring)` — quoted from string.html: "If `size` is less than the length of `string`, the result is **truncated** to `size` characters" — so `lpad(CAST(12345678901 AS VARCHAR), 8, '0')` silently returns `'12345678'` losing leading digits, a real data-corruption hazard for invoice IDs that grow past 8 digits; (2) `format(format, args...)` — uses Java Formatter syntax per conversion.html (linked to docs.oracle.com Formatter syntax); `%08d` width specifier is a MINIMUM (Java Formatter spec), so `format('%08d', 12345678901)` returns `'12345678901'` (11 chars, full value preserved). Responder's "format is safer than lpad" claim is technically correct. |
-| Clarity | 5.0 | Contrast framing (lpad-truncates vs format-minimum-width) communicates the failure mode and the fix in one sentence. |
-| Applicability | 5.0 | Paste-ready `format('%08d', invoice_id)`; engineer avoids the silent-truncate landmine for future 8+ digit invoice IDs. |
-| Completeness | 5.0 | Names the trap, gives the canonical preferred form, justifies it. Could have added the trailing point that for FIXED-width displays where the engineer DOES want truncation, `substr(lpad(...), 1, 8)` makes the truncation explicit — but the question asked for zero-pad to 8 chars (= minimum width semantic), so the answer is correctly scoped. |
+| Technical accuracy | 5.0 | `CAST(date_parse(date_str, '%m/%d/%Y') AS DATE)` correct (date_parse uses MySQL %-specifiers per datetime.html, returns timestamp(3), CAST to DATE works). `CAST(parse_datetime(date_str, 'MM/dd/yyyy') AS DATE)` correct (parse_datetime uses Joda letters per datetime.html, returns timestamp with time zone, CAST to DATE works). "Never mix families" is the load-bearing trap warning — both families are incompatible (e.g. `date_parse(s, 'MM/dd/yyyy')` returns wrong values silently because `MM`→literal 'M' twice in MySQL). |
+| Beginner clarity | 5.0 | Two parallel forms shown side-by-side, with explicit family attribution (MySQL %-specifiers vs Joda letters) and explicit mixing trap. The Python/MySQL equivalents the engineer asked about correctly mapped. |
+| Practical applicability | 4.75 | Copy-paste-ready both forms. Minor shave: didn't explicitly call out parse_datetime returning `timestamp with time zone` (vs date_parse returning plain `timestamp(3)`) — immaterial for the DATE CAST but might surprise an engineer using the result without further casting. Not a defect, just a tiny completeness nit. |
+| Completeness | 5.0 | Both canonical forms + mixing trap + MySQL/Python lineage all addressed in one answer. |
 
----
+**Q3 average: 4.9375** — Date-parse family-trap canonical clean. The MM↔%m + MM↔MM-vs-mm family is one of the most-failed angles in SQL training corpora — both correctly attributed.
 
-### Q4 — dbt incremental scan verification + setup (EXPLAIN ANALYZE + watermark + partition) — **4.9375**
+### Q4 — Iceberg optimize for small files; queryability during optimize
 
-| Dim | Score | Reasoning |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | EXPLAIN ANALYZE physicalInputDataSize correctly named (verified vs trino.io/docs/current/sql/explain-analyze.html — this is the metric to confirm partition pruning); `constraint=` predicate-pushdown line on the TableScan operator correctly named (this is where Trino shows the partition-filter pushed down); dbt config `materialized='incremental'` + `partitioning=ARRAY['day(occurred_at)']` + `is_incremental()` block with `WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{this}})` all canonical correct on dbt-trino + Iceberg connector. COALESCE-on-first-run-empty-table-NULL guard is the right defang. |
-| Clarity | 4.75 | Two-pronged verification (EXPLAIN ANALYZE reading) + prevention (dbt config) cleanly separated. Slight density on the EXPLAIN ANALYZE field names without context for an engineer who's never read one before — but the question premise ("seems to re-scan") implies the engineer is already EXPLAIN-curious. |
-| Applicability | 5.0 | Paste-ready dbt config + paste-ready EXPLAIN ANALYZE workflow; engineer knows exactly which two lines to look at. |
-| Completeness | 5.0 | Both verification and prevention covered. No padding alternative slip. |
+| Technical accuracy | 5.0 | `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '256MB')` syntax correct (named parameter, two-arrow-key arg form, table-qualified). Default 100MB **verbatim verified** against iceberg.html. Snapshot-isolation/atomic/stays-queryable claim correct per canonical Iceberg semantic. "Manifest compaction is a separate concern" correctly distinguishes data-file vs manifest compaction on 467 (optimize_manifests is 470+, not 467 — production-stack-accurate). |
+| Beginner clarity | 5.0 | Three load-bearing pieces named cleanly: (1) the EXECUTE optimize syntax with named parameter, (2) snapshot-isolation atomicity (readers see old-or-new, never partial), (3) the data-vs-manifest scope boundary. |
+| Practical applicability | 5.0 | Engineer can run the command immediately; the queryability concern (real for a dbt-run-impacted analytics dashboard) directly answered. |
+| Completeness | 5.0 | Both halves of the asked question (command + queryability) answered with the bonus default-threshold + scope-boundary caveat. |
+
+**Q4 average: 5.0** — Iceberg optimize canonical clean. The production-stack constraint (467, not 470+) correctly observed (no spurious `optimize_manifests` suggestion).
 
 ---
 
 ## Score table
 
-| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|
-| Q1 two-level COUNT-children-meeting-threshold | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q2 period-coverage "active in each of last 4 complete weeks" | 3.5 | 4.5 | 3.75 | 3.25 | **3.7500** |
-| Q3 format('%08d',...) vs lpad-truncation | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q4 EXPLAIN ANALYZE physicalInputDataSize + dbt incremental | 5.0 | 4.75 | 5.0 | 5.0 | **4.9375** |
+| Q | Topic touched | Accuracy | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Analytical query patterns Iceberg+Trino (two-level aggregation, 3rd domain) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
+| Q2 | Analytical query patterns Iceberg+Trino (complete-period coverage, both-bounds discipline) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
+| Q3 | SQL best practices OLAP (date_parse vs parse_datetime family-trap) | 5.0 | 5.0 | 4.75 | 5.0 | **4.9375** |
+| Q4 | Iceberg table maintenance (optimize, file_size_threshold default, snapshot isolation) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
 
-**Iter average = (5.0000 + 3.7500 + 5.0000 + 4.9375) / 4 = 4.6719 STRONG PASS** (margin +1.17).
-
----
-
-## Source-verified defects
-
-1. **Q2 both-bounds-for-complete-weeks SHAVE** — silent wrong-result on "complete weeks" wording. Responder used `WHERE order_date >= current_date - INTERVAL '28' DAY` only, no `AND order_date < date_trunc('week', current_date)` upper bound, and no `date_trunc('week', current_date)` anchor on the lower bound. Per r07 §3713/§3721 (period-coverage card's both-bounds DO-NOT-WRITE block), the upper-bound + week-aligned-lower-bound pair is load-bearing for "complete" semantics. Documented IN THE SAME CARD the responder pulled the HAVING shape from. Classification: **findability slip within the same card (half-pull synthesis ceiling)** — NOT a fresh resource defect, NOT a new defect class. Pattern matches `feedback_responder_broken_secondary_alternative` weakly (responder pulled the primary HAVING shape correctly but missed the in-card both-bounds refinement) and `feedback_synthesis_ceiling_stop_churning` more strongly (canonical correct form already documented; Haiku synthesis ceiling on pairing all in-card halves).
-
-No other defects this iter. No fabricated functions; no parse-error SQL; no QUALIFY/OFFSET-before-LIMIT/INTERVAL-quarter-week/regex-backslash/EXECUTE-rollback-on-467/`::`/Spark-Oracle-spillover/imported-prior.
+**Iter average: (5.0 + 5.0 + 4.9375 + 5.0) / 4 = 4.9844 STRONG PASS** (margin +1.48 above 3.5).
 
 ---
 
-## Q1 FIX-A reach verdict
+## Defect ledger
 
-**REACHED on first re-probe.** iter1113 r07 sub-canonical "COUNT entities-meeting-a-per-entity-threshold per parent key (two-level nested aggregation)" with keyword anchors (count reps with >= N deals per region, two-level GROUP BY, count groups meeting a HAVING, etc.) + nested worked example + single-level-collapse DO-NOT-WRITE — landed cleanly on a DIFFERENT domain (region/rep vs iter1113's account/user). The silent single-level-HAVING collapse did NOT recur. Same shape pattern as iter1099 first re-probe of dbt-snapshot signpost, iter1102 first re-probe of hard_deletes-affirmative hoist — FIX-A pattern of additive-card + keyword anchors + in-card DO-NOT-WRITE defang lands durably on attempt 1 when the failing canonical is a missing-shape gap (not a misleading-resource conflict). **Watch the next 1-2 re-probes** from different two-level domains (top-N customers per workspace, departments with >= N managers each managing >= M reports, products with >= N reviews each averaging >= 4 stars) to confirm durability across keyword variations.
+**Source-verified defects this iter: ZERO.**
 
-## Q2 over-attraction verdict
+- Q1: clean two-level form on 3rd domain — FIX-A REACH **CONFIRMED**.
+- Q2: both bounds present + correct HAVING — iter1114 half-pull **DID NOT RECUR**.
+- Q3: both families correctly attributed; one tiny nit on not mentioning `timestamp with time zone` for parse_datetime (immaterial for DATE CAST).
+- Q4: syntax + default + snapshot isolation + scope boundary all source-verified clean.
 
-**NOT OVER-ATTRACTED.** The iter1113 NEW two-level nested-aggregation card did NOT pull the period-coverage Q to a spurious nested form. Responder correctly stayed with single-level `GROUP BY customer_id HAVING COUNT(DISTINCT week) = N` for "active in EACH period". `feedback_new_card_over_attracts_adjacent` watch CLEARED for this neighbor.
-
-## Q2 both-bounds shave classification
-
-**Findability slip within the same canonical card** (responder pulled the HAVING half but not the both-bounds + week-anchor half from r07 §3713-3721). NOT over-attraction; NOT a fresh resource defect; NOT a missing-canonical gap. The canonical correct form including the upper bound + week-aligned lower bound is already documented in the same card with a DO-NOT-WRITE for the no-upper-bound form. Half-pull synthesis ceiling pattern matches `feedback_responder_broken_secondary_alternative` weakly and `feedback_synthesis_ceiling_stop_churning` strongly.
-
----
-
-## Recommendation: **NO-OP**
-
-No resource edits. No state.json bump beyond iteration counter. Margin +1.17 well above pass; only one sub-shave; the canonical correct form for the shave IS in the same card; per `feedback_synthesis_ceiling_stop_churning` do NOT churn additive content on a half-pull artifact.
-
-**Watch / re-probe queue for next 1-3 iters:**
-- Q1 two-level FIX-A 2nd+3rd re-probes on novel domains (top-N customers per workspace, departments with >= N managers each managing >= M reports, products with >= N reviews each averaging >= 4 stars) to confirm durability of the iter1113 r07 sub-canonical across keyword variations beyond region/rep + account/user.
-- Q2 "complete weeks/months/days" period-coverage re-probe with explicit "complete" wording to confirm the both-bounds half-pull is per-instance vs recurring. If both-bounds defect RECURS, escalate to LIGHT FIX-A: hoist the both-bounds + week-aligned-anchor refinement to a more attention-getting position in r07 §3713-3721 (e.g. a one-line top-of-card guarantee block "Q wording 'complete weeks/days/months' REQUIRES the upper-bound `< date_trunc('week', current_date)` + week-aligned lower bound — without both, partial current period silently counts as complete") with explicit keyword anchors "complete weeks, complete days, complete months, partial current week, in-progress week". Do NOT rewrite §3713-3721 (canonical correct); additive STEP-0-style guarantee block at top of card only.
-- Storage-tiering (3.5625/6 +0.0625 thinnest passing margin), dbt-model-contracts (4.391/6), cost-considerations (4.2129/20) — opportunistic durability probes.
-- Federation 313th angle — only if a bulletproofed pushdown form is available (4.50244/312 fragile-PASS preserved).
+No `::` shorthand cast, no QUALIFY (Trino 467 has none), no false semi-join, no fabricated function, no regex-backslash escape, no INTERVAL quarter/week, no OFFSET-before-LIMIT (Trino requires OFFSET BEFORE LIMIT), no CAST-truncate misread, no EXECUTE rollback-on-467 (CALL is correct), no Spark/Oracle spillover, no imported-prior self-error.
 
 ---
 
-## Teacher guidance
+## Verdicts
 
-1. **No edits this iter.** Two clean 5.0s on canonical traps (Q1 two-level FIX-A reached, Q3 lpad-truncate-vs-format-min-width source-verified), one near-5.0 (Q4 EXPLAIN ANALYZE + dbt incremental), and one half-pull on a documented in-card refinement (Q2 both-bounds). Per `feedback_synthesis_ceiling_stop_churning`, half-pull artifacts on documented canonicals do NOT benefit from additive content — only a re-probe stream confirms whether the half-pull is per-instance or recurring.
-2. **If next "complete weeks/months/days" re-probe shows the both-bounds half-pull recurring**, the FIX-A is NOT a new card — it is a top-of-section guarantee block in r07 §3713-3721 with explicit "complete" keyword anchors and the load-bearing both-bounds form in the most attention-getting position. Inline-mark the no-upper-bound form as WRONG per `feedback_defang_donotwrite_snippets`.
-3. **Continue worked-example mental walkthrough** as standard practice. The Q2 both-bounds shave was caught by walking through a concrete mid-week scenario (today = Friday, customer active in weeks N-3, N-2, N-1, plus partial current week N → COUNT(DISTINCT week) = 4 → wrongly classified as 4-complete-weeks-active). Continue this verify-first style on query-correctness semantics — fluent confident responder delivery would otherwise hide the silent-wrong-result.
-4. **No federation re-probe.** 4.50244/312 fragile-PASS preserved; do not put the raised-threshold row at risk for a breadth datapoint.
-5. **No CBO/ANALYZE re-probe needed.** 4.5716/20 (+0.072 margin to raised 4.5) preserved.
+- **Q1 FIX-A REACH VERDICT: CONFIRMED (3rd consecutive domain).** iter1113 r07 two-level nested aggregation sub-canonical between §3694 and §3725 with keyword anchors + worked example + single-level-collapse DO-NOT-WRITE durably reaches across novel domains (account/user → region/rep → workspace/project). Same first-re-probe-reach pattern as iter1099 dbt-snapshot signpost and iter1102 hard-deletes-affirmative-hoist. Defect class **CLOSED** with 3 datapoints.
+- **Q2 BOTH-BOUNDS RECURRENCE VERDICT: DID NOT RECUR.** iter1114 silent-wrong half-pull on "complete weeks" wording was per-instance synthesis slip — when the wording explicitly emphasized "complete months, exclude the current in-progress month", responder produced both bounds correctly. **STEP-0 FIX-A NOT NEEDED**; r07 §3713-3721 card already documents both-bounds form sufficiently. **Watch CLEARED for this defect class.**
+
+---
+
+## Topic row updates
+
+- Analytical query patterns on Iceberg+Trino: 4.4195/67 → (296.1065 + 5.0 + 5.0)/69 = **4.4363/69 PASSED** (+0.0168, both Q1 and Q2 5.0)
+- SQL best practices OLAP: 4.4993/170 → (764.881 + 4.9375)/171 = **4.5021/171 PASSED** (+0.0028)
+- Iceberg table maintenance: 4.4652/172 → (768.0144 + 5.0)/173 = **4.4683/173 PASSED** (+0.0031)
+
+ALL required topics REMAIN PASSED. Federation untouched (4.50244/312 fragile-PASS preserved). CBO/ANALYZE untouched (4.5716/20, +0.072 margin to raised 4.5 preserved). Storage-tiering untouched (3.5625/6 thinnest passing margin).
+
+---
+
+## Recommendation
+
+**NO-OP.** No resource edits. No state.json bump beyond iteration counter. Commit rubric+feedback only.
+
+Both critical re-probe streams resolved this iter:
+1. **Two-level-aggregation FIX-A**: confirmed durable across 3 domains; close this watch.
+2. **Both-bounds period-coverage**: iter1114 half-pull was per-instance, did not recur on explicit "complete months" wording; close this watch.
+
+### Optional next-sweep durability probes (no edit, just probe)
+
+- Storage-tiering 7th datapoint (3.5625/6 still thinnest required-topic row).
+- dbt-model-contracts 7th angle (4.391/6).
+- dbt-snapshots SCD2 14+th angle (4.0315/14, 2nd-thinnest after storage-tiering).
+- Cost-considerations 21st angle (4.2129/20).
+- Federation 313th angle ONLY if a bulletproofed pushdown form available (4.50244/312 fragile-PASS).
+
+### Pattern observations
+
+- Two consecutive STRONG PASS iters (4.6719 → 4.9844) with two distinct watch-streams both resolving positively: the iter1113 additive sub-canonical card + DO-NOT-WRITE defang pattern is durable when the root cause is a missing-canonical findability gap (not a content conflict).
+- The iter1114 Q2 half-pull was the residual `feedback_synthesis_ceiling_stop_churning` artifact — confirmed per-instance, not structural — consistent with the iter1107→1108 fresh-domain re-probe pattern where 2/4 per-instance synthesis slips DID NOT recur across different domains.
+- Q3 (date_parse vs parse_datetime family trap) producing both families' canonicals + mixing trap + MySQL/Python lineage in one answer signals strong r23 datetime-parse durability — similar to iter1110 Q2 Joda-vs-MySQL format-specifier trap.
+- Q4 (Iceberg optimize) correctly observing the 467 production stack constraint (no spurious optimize_manifests suggestion) signals strong r12/r10 production-version-discipline.
+
+### Teacher guidance
+
+- **NO content edits warranted.** Both watch streams from prior iters resolved positively this iter.
+- Maintain existing canonical cards at r07 §3694-3725 (two-level FIX-A) and §3713-3721 (period-coverage with both-bounds DO-NOT-WRITE) — both passing the FIX-A reach bar.
+- Continue verify-first against trino.io 467 RAW source on dialect facts (file_size_threshold default, date_parse vs parse_datetime return types, optimize snapshot atomicity).
