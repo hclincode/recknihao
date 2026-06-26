@@ -958,6 +958,43 @@ Now the expensive aggregation runs ONCE during `dbt run` (when `int_customer_tot
 >
 > **Cross-ref:** the same four-materialization table appears in [resource 27 § 3.1](27-oracle-plsql-to-dbt-trino.md#31-the-four-materializations-supported-by-dbt-trino) framed for Oracle-procedure migration — same cost model, same DO-NOT-WRITE rules, different question keywords.
 
+> ### LEADING CANONICAL — atomic table SWAP on a `materialized='table'` full rebuild (`on_table_exists`)
+>
+> **Question shape this answers**: "my nightly dbt `table` rebuild causes dashboards to get **`table does not exist`** errors", "dashboard briefly sees **zero rows / an empty table** right as the dbt full rebuild finishes", "how do I make the dbt table rebuild **swap** from old to new **atomic**", "how do I configure how dbt swaps the old table for the new one", "concurrent readers during a `full-refresh` / full rebuild see a missing or half-built table", "make the table replacement invisible to readers", "I do NOT want to switch to incremental — I just want the full rebuild's final swap to be safe."
+>
+> **THE ONE FACT:** the dbt-trino `table` materialization exposes a config knob — **`on_table_exists`** — that controls exactly how the OLD table is replaced by the NEW one. Set **`on_table_exists='replace'`** and dbt emits a single **`CREATE OR REPLACE TABLE`**, which on the Iceberg connector is **ONE atomic metadata commit**: every reader sees either the complete OLD table or the complete NEW table, **never a missing or empty table**. This is the direct fix — you do **NOT** need to re-architect the model into `incremental`.
+>
+> ```sql
+> -- ✅ COPY THIS — atomic full-rebuild swap, safe for 24/7 concurrent dashboard reads
+> {{ config(
+>     materialized = 'table',
+>     on_table_exists = 'replace'   -- single CREATE OR REPLACE TABLE = atomic Iceberg commit
+> ) }}
+>
+> SELECT * FROM {{ ref('stg_products') }}
+> ```
+>
+> **The four `on_table_exists` values (verified against [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)):**
+>
+> | Value | What dbt-trino does | Reader safety during the swap |
+> |---|---|---|
+> | **`replace`** (dbt-trino **1.7.1+**) | A single **`CREATE OR REPLACE TABLE ... AS SELECT`** | **ATOMIC** — one Iceberg metadata commit; readers never see missing/empty. **Recommended.** |
+> | **`rename`** (the **DEFAULT**) | Build a temp table, then a two-step `ALTER TABLE ... RENAME` swap (old out, new in) | Effectively atomic — the target name resolves to a complete table throughout. This is the documented default; it is **NOT** "fragile" or "app-side coordination" — dbt automates it. |
+> | **`drop`** | **`DROP TABLE`** the target, then **`CREATE TABLE`** anew | **UNSAFE** — there is a real window where the table **does not exist** (the `table does not exist` error) or is empty. **This is almost certainly what the symptom-reporter is on.** Do not use with concurrent readers. |
+> | **`skip`** | If the table already exists, do nothing | N/A (no rebuild) |
+>
+> **So the fix for "dashboards see a missing/empty table during the nightly rebuild" is one line:** add `on_table_exists='replace'` (or confirm you are on the default `'rename'`, not `'drop'`). Keep `materialized='table'` — no incremental rewrite required.
+>
+> **DO-NOT-WRITE — banned answers to the atomic-swap question:**
+>
+> | WRONG (do not write) | WHY it's wrong | RIGHT (write this instead) |
+> |---|---|---|
+> | "Switch the model to `materialized='incremental'` with `insert_overwrite`/`delete+insert` so each partition flips atomically." | An **architecture change the engineer did not ask for**, and wrong-shaped for a small non-partitioned dimension full rebuild. The atomicity problem is solved **in place** on the `table` materialization via `on_table_exists`. | "Keep `materialized='table'`; set `on_table_exists='replace'` for a single atomic `CREATE OR REPLACE TABLE` swap." |
+> | "You'll have to do a manual temp-table + `ALTER TABLE RENAME` dance, but it's fragile and needs app-side coordination." | The temp-table-then-rename pattern is **exactly what dbt-trino's default `on_table_exists='rename'` automates** — it is the built-in default, not a fragile hand-rolled workaround. | "dbt-trino's default `on_table_exists='rename'` already does the temp-build-then-atomic-rename for you; or use `'replace'` for a single `CREATE OR REPLACE TABLE`." |
+> | "A `table` full rebuild always has a brief unavailable window — you have to accept it." | Only `on_table_exists='drop'` has that window. `'replace'` and the default `'rename'` do **not**. | "Avoid `on_table_exists='drop'`; `'replace'` (atomic CREATE OR REPLACE) and the default `'rename'` keep the table continuously readable." |
+>
+> **Cross-ref:** Iceberg `CREATE OR REPLACE TABLE` atomicity is documented at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html); the dbt materialization decision tree is in [resource 27 § 3.1](27-oracle-plsql-to-dbt-trino.md#31-the-four-materializations-supported-by-dbt-trino).
+
 ### 3.3A The REAL `ephemeral`-at-scale failure mode — compile-time SQL bloat
 
 > ### LEADING CANONICAL — what actually breaks when an `ephemeral` model is referenced by many downstreams
