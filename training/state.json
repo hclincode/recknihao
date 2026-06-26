@@ -1,7 +1,7 @@
 {
-  "iteration": 1111,
+  "iteration": 1112,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1111 breadth durability sweep. 4 varied less-recently-probed angles (touch Oracle-migration construct + complex-SQL-perf + columnar/Parquet + a correctness bug). Avoid the long recent-coverage list. Verify-first; NO-OP expected. Federation untouched; CBO thin (avoid weak CBO probes)."
+  "note": "iter1112 -> 3.89 PASS + dbt-snapshot FINDABILITY FIX-A. Q1 dedup-incremental (4.875): merge+unique_key+ROW_NUMBER pre-dedup NOW COMPLETE -> iter1111 omission confirmed PER-INSTANCE (watch closed). Q3 GREATEST-NULL (4.94) clean (Trino NULL-if-any-NULL, Postgres outlier). Q2 EXCEPT churn (4.125): correct but \"syntax sugar/compiles-to-LEFT-JOIN\" framing loose (EXCEPT=DISTINCT). Q4 (1.625) dbt-snapshot BAIL = findability miss (responder hit-2/miss-2 on r09 canonical): \"dbt snapshot\" keywords route to dbt-centric r27/r28 where every snapshot=ICEBERG snapshot. FIX-A (3 signposts, content in r09 already correct+untouched): r28 TL;DR disambiguator+forward-pointer to r09 (KEY \u2014 r28 had none), r09 TL;DR top-of-file keyword anchor, r27 TL;DR pt4 SCD-1-vs-SCD-2-history routing. dbt-snapshots-SCD2 now 2nd-thinnest (3.957/13). Re-probe Q4 dbt-snapshot next sweep (route via r28/r27 keywords) to confirm reach. Federation/CBO untouched."
 }

@@ -13,6 +13,7 @@
 - **Denormalize** the columns you group/filter by most often (`plan_type`, `country`, `tenant_id`) directly into the fact table. Skip ones that change often (email, display name).
 - For dimensions that change over time, use **SCD Type 2** (add a new row with `valid_from`/`valid_to`) for things you need to reconstruct historically (plan changes). Use **SCD Type 1** (overwrite) for cosmetic fields (display name).
 - Don't recreate your Postgres 3NF schema in Iceberg. Don't store everything as one JSON blob. Don't make UUIDs your only sort key.
+- **dbt SNAPSHOT / SCD2 history questions land here** — see [§ Slowly Changing Dimensions — Option 1 dbt snapshot](#slowly-changing-dimensions-scd) below (the SINGLE source of truth on this stack). *Keyword anchors: dbt snapshot, what does a dbt snapshot create, store every plan/price/status change with effective dates, history table, what plan was a customer on as of <date>, point-in-time / as-of query, dbt_valid_from / dbt_valid_to / dbt_scd_id / dbt_is_deleted, strategy=timestamp vs check, hard deletes.* A dbt snapshot creates a table with one row per version of each entity (the four `dbt_*` meta-columns track validity windows); the as-of-date lookup is `WHERE dbt_valid_from <= TIMESTAMP '<date>' AND (dbt_valid_to IS NULL OR dbt_valid_to > TIMESTAMP '<date>')`. (NB: this is unrelated to an **Iceberg** snapshot / time travel — that's [resource 17](17-iceberg-table-maintenance.md).)
 
 ---
 
