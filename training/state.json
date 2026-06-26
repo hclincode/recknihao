@@ -1,7 +1,7 @@
 {
-  "iteration": 1141,
+  "iteration": 1142,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1141 -> 4.25 PASS + LIGHT FIX-A (r18 TopN-disambiguation). Q3 CAST-rounds-vs-floor 5.0 / Q4 per-model cost system.runtime 4.75 clean. Q2 longest-streak 4.0 primary correct (date_diff day, not ts-ts) but start/end EXTENSION references undefined streak_id_for_max (broken-secondary padding, no fix). Q1 (3.25) RESOURCE-SOURCED findability defect: responder confirmed coworker spilling hypothesis for ORDER BY event_time LIMIT on 200M rows (\"sorts most of 200M before LIMIT\") -- WRONG: Trino rewrites ORDER BY x LIMIT n to a bounded-heap TopN (not a full sort), so spill on the sort is unlikely for small n; real cost is the unfiltered 200M-row TableScan (fix: partition-prune time range). Also responder said lower query_max_memory_per_node to spill earlier -- BACKWARDS (hard cap -> fails earlier; spill trigger is config-only memory-revoking-threshold). r18 spill canonical was keyword-magnet for spilling Qs but did not disambiguate TopN. FIX-A: r18 new DIAGNOSIS GUARD card (ORDER BY LIMIT = bounded TopN not full sort; chase the TableScan; EXPLAIN shows TopN[n]) + DO-NOT-WRITE defanging the full-sort-spill framing AND the lower-memory-cap-to-spill-earlier misconception + cross-ref r23. NEW WATCH: r18 TopN-disambiguation, re-probe iter1142. query-perf-basics now thinnest 4.1280/24. Federation/CBO untouched."
+  "note": "iter1142 TopN-disambiguation FIX-A re-probe (iter1141 r18 DIAGNOSIS GUARD card). Q1 = slow ORDER BY ... LIMIT on a huge table, is it spilling / sorting everything? \u2014 confirm responder says it is a bounded TopN (NOT a full sort), chases the unfiltered TableScan / partition-prune, does NOT reflexively blame spill or say lower the memory cap to spill earlier. If still mis-diagnoses -> escalate. Q2-Q4 breadth. Federation/CBO untouched."
 }

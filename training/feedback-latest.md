@@ -1,8 +1,6 @@
-# Iter1141 Judge Feedback
+# Iter1142 Judge Feedback
 
-**Verdict: 4.1875 PASS + LIGHT FIX-A (Q1 TopN-vs-spill mechanism gap).** Q1 mis-diagnoses the mechanism of `ORDER BY ts LIMIT N` over 200M rows by reflexively confirming the coworker's "spilling to disk" hypothesis (the question's prompt cue) and framing it as "unsorted buffer can exceed RAM" / "sorting most of the 200M rows before LIMIT". This is FACTUALLY INACCURATE for Trino 467: `ORDER BY + LIMIT` is rewritten by the planner to a **TopN operator** with a bounded heap of size N (verified via trino.io optimizer/pushdown docs + Trino source `core/trino-main/.../operator/TopNOperator.java`), so per-worker memory is bounded by ~N rows, NOT 200M. Spill on the Sort operator is unlikely unless N is huge. The dominant cost for a >1h dying hourly job on 200M rows is almost certainly the **full TableScan** (no time/partition predicate), not a sort spill. The responder's PRACTICAL fixes happen to be right ("reduce input with a WHERE filter", "fewer columns", "more memory is not the fix") so the engineer arrives at the correct action, but they would be misled at EXPLAIN ANALYZE time looking for a "Sort" operator and trying memory knobs. Q2 broken-secondary extension query (references undefined `streak_id_for_max` column) — known Haiku padding pattern per pinned memory, primary 3-layer gaps-and-islands query is correct. Q3 CAST-rounds clean 5.0. Q4 system.runtime + EXPLAIN ANALYZE physicalInputDataSize clean 4.75.
-
-ONE source-verified resource findability defect (r18 §1418-1422 spill-to-disk section answers "what is spill" but doesn't disambiguate `ORDER BY + LIMIT` → TopN, so keyword-magnetic "ORDER BY + spilling" question pulls the responder to the spill section instead of to r23 §2387 which DOES name TopN). **LIGHT FIX-A**: add a brief TopN-disambiguation card in r18 right next to the spill section.
+**Verdict: 4.9688 STRONG PASS NO-OP — iter1141 r18 TopN-disambiguation LIGHT FIX-A REACHED CLEANLY ON FIRST RE-PROBE. Q1 nails the canonical answer the FIX-A card was designed to produce: ORDER BY ... LIMIT 50 → TopN bounded heap of 50 (not full sort), spill on ordering step unlikely for small n, real bottleneck = unfiltered 300M-row TableScan, fix = partition/time predicate, verify via EXPLAIN looking for `TopN[50]` + a `TableScan` with `constraint=` (partition pruning), explicit "Don't do: turn on disk spill or bump cluster memory." The two iter1141 misconceptions (`ORDER BY+LIMIT = full sort`, `lower query_max_memory_per_node to spill earlier`) BOTH absent. Q2/Q3/Q4 clean breadth angles, Q3 a minor completeness shave only (didn't mention `arrays_overlap` direct boolean alternative). r18 TopN-disambiguation WATCH: CLOSED.**
 
 ---
 
@@ -10,148 +8,230 @@ ONE source-verified resource findability defect (r18 §1418-1422 spill-to-disk s
 
 | Q | Topic | Acc | Clar | App | Compl | Avg |
 |---|---|---:|---:|---:|---:|---:|
-| Q1 | Query performance basics — ORDER BY+LIMIT slow / "spilling" diagnosis / is more memory the fix | 2.5 | 4.0 | 3.5 | 3.0 | **3.250** |
-| Q2 | Analytical query patterns on Iceberg+Trino — longest consecutive-active-days streak (gaps & islands) | 4.0 | 4.0 | 4.0 | 4.0 | **4.000** |
-| Q3 | SQL best practices for OLAP — CAST(double AS integer) rounds vs floor() vs truncate() | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
-| Q4 | Cost considerations — which dbt models most expensive (system.runtime.queries+tasks GB scanned + EXPLAIN ANALYZE) | 5.0 | 4.5 | 5.0 | 4.5 | **4.750** |
+| Q1 | Query performance basics — ORDER BY+LIMIT TopN-vs-spill diagnosis (FIX-A re-probe) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q2 | Analytical query patterns / ranking — DENSE_RANK ties-no-skip vs RANK ties-with-skip vs ROW_NUMBER all-distinct | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q3 | SQL best practices for OLAP — array_intersect + cardinality > 0 (share-at-least-one-flag WHERE filter) | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
+| Q4 | dbt sources / source freshness — warn_after/error_after, loaded_at_field required on dbt-trino, separate CI stage gate (does NOT auto-block dbt build DAG) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
 
-**Iter average: (3.250 + 4.000 + 5.000 + 4.750) / 4 = 17.000 / 4 = 4.250 PASS**
+**Iter average: (5.000 + 5.000 + 4.875 + 5.000) / 4 = 19.875 / 4 = 4.96875 → 4.9688 STRONG PASS**
 
-Wait — recomputing: (3.250 + 4.000 + 5.000 + 4.750) = 17.000 → 17.000/4 = **4.2500 PASS**
-Margin above 3.5 threshold: **+0.7500**
+Margin above 3.5 threshold: **+1.4688** (second-highest in the 24-iter sustainment band, after iter1137's 5.000).
 
 ---
 
 ## Per-question analysis
 
-### Q1 (3.250) — `ORDER BY event_time LIMIT` over 200M rows, hourly job >1h sometimes dies, coworker said "spilling to disk", is more memory the fix?
+### Q1 (5.000) — `SELECT * FROM events ORDER BY created_at DESC LIMIT 50` on 300M rows takes 90s; engineer assumes Trino sorts all 300M; teammate says "bump memory / enable spill" — is that the right mental model?
 
-**Responder answer (paraphrased)**: yes spill likely; spill = worker runs out of RAM building the sort buffer for ORDER BY, writes intermediate data to local disk; "with 200M rows an unsorted buffer can exceed worker RAM"; "Sort operator shows large intermediate row count → you're sorting most of the 200M rows before taking the LIMIT"; diagnose via EXPLAIN ANALYZE (Scheduled time >> CPU = I/O-bound, possibly spilling); fix `SET SESSION spill_enabled=true`; if still slow: add WHERE filter, project fewer columns, or lower `query_max_memory_per_node` to spill earlier; "more memory is not really the fix — the real fix is reducing the sort input size."
+**Responder answer (canonical, CORRECT)**:
+- **NO** — Trino does NOT sort all 300M rows. Trino rewrites `ORDER BY ... LIMIT 50` into a **TopN operator** with a bounded heap of only the top 50 rows.
+- Per-worker operator memory for the ordering step is bounded by ~`n=50` rows, NOT by the table size — so spill on the ordering step is unlikely for a small `n`.
+- The actual bottleneck on a 300M-row, 90s `SELECT *` is the **unfiltered TableScan reading all 300M rows** (and 200+ columns via `SELECT *`).
+- Adding cluster memory or enabling spill won't fix it — wrong knob, wrong mechanism.
+- **Fix**: add a partition/time predicate, e.g. `WHERE created_at >= TIMESTAMP '2025-06-01 00:00:00'` so the scan prunes; also drop `SELECT *` for narrow columns.
+- **Verify with `EXPLAIN`**: look for a `TopN[50]` node (or `TopNPartial` + final `TopN`) — that confirms the ordering is already bounded; then on the `TableScan` look for `constraint=` (partition-pruning predicate) and `inputRows` near the filtered range, not near 300M.
+- Explicit defang: **"Don't do: turn on disk spill or bump cluster memory."**
 
-**Source-verified factual gaps**:
+**iter1141 r18 TopN-disambiguation FIX-A REACH VERDICT: CONFIRMED REACHED CLEANLY on first re-probe.**
 
-1. **TopN omitted (major mechanism error).** Trino 467 rewrites `ORDER BY x LIMIT n` into a **TopN operator** with a bounded heap of size N. Verified at:
-   - [trino.io/docs/current/optimizer/pushdown.html](https://trino.io/docs/current/optimizer/pushdown.html) — "the operation is returning the top N rows" / TopN pushdown is a distinct optimization from full-sort.
-   - Trino source `core/trino-main/src/main/java/io/trino/operator/TopNOperator.java` (467 tag) — "Returns the top N rows from the source sorted according to the specified ordering", delegates to `TopNProcessor` with memory tracked via `MemoryTrackingContext`.
-   - r23 §2387 (already in resources): *"`LIMIT` only enables the cheaper TopN operator (heap of size N vs full sort)."*
+The new r18 §288-300 DIAGNOSIS GUARD card (added iter1141, sitting right next to the spill section so the "ORDER BY + spilling" keyword path lands on it before the FTE sidebar) pulled the responder to the canonical TopN framing. Both iter1141 misconceptions are absent:
 
-   For a typical small LIMIT (e.g., 100, 1000), per-worker operator memory is bounded by ~N rows, NOT 200M. Spill on the Sort/TopN operator is unlikely unless N is huge. The responder's "unsorted buffer can exceed RAM" / "sorting most of the 200M rows before LIMIT" framing is wrong mechanism.
+- **No "ORDER BY + LIMIT requires sorting all input rows before the LIMIT cuts"** framing. Responder explicitly states "TopN heap of 50 rows" / "spill on ordering step unlikely for small n" / "memory ~ n=50, not table size" — exact wording cluster from the FIX-A card.
+- **No "lower `query_max_memory_per_node` to spill earlier"** misconception. Responder correctly tells engineer NOT to touch memory caps at all.
 
-2. **Real bottleneck mis-diagnosed.** A 200M-row hourly job that runs >1h and dies almost certainly has NO partition/time predicate — i.e., it's scanning all of history every hour. The dominant cost is the **TableScan** (200M rows of object-storage reads), not a sort spill. The correct EXPLAIN ANALYZE signal to look for is the TableScan's `inputRows` ≈ 200M with no `Filter` pruning above it — not a Sort/TopN operator spill marker. The responder's "Scheduled time >> CPU = I/O-bound" framing accidentally points at the right symptom (I/O dominates) but for the wrong reason (it's TableScan I/O, not spill I/O).
+Verified against:
+- [trino.io/docs/current/optimizer/pushdown.html](https://trino.io/docs/current/optimizer/pushdown.html) — TopN pushdown distinct from full-sort.
+- Trino 467 source `core/trino-main/src/main/java/io/trino/operator/TopNOperator.java` — "Returns the top N rows from the source sorted according to the specified ordering" with memory tracked via `MemoryTrackingContext`.
+- r23 §2387 (already in resources): *"LIMIT only enables the cheaper TopN operator (heap of size N vs full sort)"*.
 
-3. **`query_max_memory_per_node` advice is backwards.** `query_max_memory_per_node` is a *hard cap*, not a spill-trigger knob — lowering it makes the query *fail/kill* earlier, not *spill* earlier (per [trino.io/docs/current/admin/properties-resource-management.html](https://trino.io/docs/current/admin/properties-resource-management.html); r23 §242-244 also confirms session prop is "lower-only" override of the cluster ceiling). Spill is triggered by operator-level memory pressure with `spill_enabled=true`, not by query memory caps. Minor misconception.
+**Watch label "r18 TopN-disambiguation iter1141" → CLOSED.**
 
-**What the responder got right**:
+The EXPLAIN verification step (look for `TopN[50]` + `TableScan` with `constraint=`) is the kind of concrete next-action signal that turns a correct mental model into a debuggable workflow. The `SELECT *` callout for column-pruning is a nice secondary fix on top of the partition predicate. Clean 5.0.
 
-- `spill_enabled` is a real Trino 467 session property (verified at [trino.io/docs/current/admin/spill.html](https://trino.io/docs/current/admin/spill.html) and properties-spilling.html).
-- "More memory is not the fix" — correct conclusion.
-- Practical action items (add WHERE filter on time, project fewer columns, partition-prune) — all correct fixes for the actual problem.
-- EXPLAIN ANALYZE as the diagnostic entry point — correct workflow.
-
-**Net assessment**: Engineer arrives at the right action (partition-prune the time range, don't add memory) despite a wrong mental model of WHY. Practical harm bounded — but they would be misled at EXPLAIN ANALYZE time looking for a "Sort" operator and not finding one (it'll be a TopN with bounded heap), and the `query_max_memory_per_node` advice is a backwards misconception.
-
-**Classification**: **resource-sourced findability defect**, not a pure responder slip. r18 §1418-1422 spill-to-disk section explicitly names "sort buffers" as one of the spillable operator-state categories, which keyword-magnetizes any "ORDER BY + spilling" question to that section. r23 §2387 DOES name TopN ("heap of size N vs full sort") but it's in the *ORDER BY determinism* section, not findable from "spilling" keywords. The disambiguation needs to live where the spill keywords lead — i.e., in r18.
-
-**Recommendation: LIGHT FIX-A in r18 spill-to-disk section.**
-
-Suggested additive disambiguation card (additive — do NOT touch the existing spill-to-disk paragraphs):
-
-> **TopN vs Sort spill — `ORDER BY x LIMIT n` is NOT a full sort.** When the query has a top-level `ORDER BY ... LIMIT N`, the Trino planner rewrites it into a **TopN operator** — a bounded heap of size N, not a full sort. Per-worker operator memory is bounded by ~N rows, NOT by the input row count. A `SELECT ... FROM big_table ORDER BY ts LIMIT 100` over 200M rows does NOT need to sort 200M rows; the TopN heap holds 100 rows and 200M rows stream through it. Spill on the Sort/TopN operator is unlikely unless N is huge (millions). If your `ORDER BY + LIMIT` query is slow on 200M rows, the bottleneck is almost certainly the **TableScan** (no time/partition predicate forcing a full scan of history) — fix that with a partition-pruning WHERE filter, not by enabling spill. EXPLAIN ANALYZE: look for `inputRows ≈ table size` on the TableScan with no `Filter` pruning above it — that's a missing-predicate full scan, not a spill. Cross-ref: r23 §2387 names TopN in the ORDER BY determinism context.
->
-> **DO NOT WRITE.** "ORDER BY + LIMIT requires sorting all input rows before the LIMIT cuts" — FALSE, TopN is bounded by N. "Lower `query_max_memory_per_node` to spill earlier" — FALSE, `query_max_memory_per_node` is a hard cap (lower-only session override of the cluster ceiling); lowering it makes the query *fail* earlier, not *spill* earlier. Spill is triggered by operator-level memory pressure with `spill_enabled=true`, not by query memory caps.
-
-This card lives where the spill keywords lead, defangs the two misconceptions exhibited this iter (TopN-omission + `query_max_memory_per_node` knob misuse), and adds the actionable correction (look at TableScan inputRows, partition-prune the time range).
-
-**Watch label**: r18 TopN-disambiguation card iter1141. Re-probe with a similar "ORDER BY + LIMIT slow / spilling" query next sweep.
+**Recommendation: NO-OP.** FIX-A reach confirmed; watch closes.
 
 ---
 
-### Q2 (4.000) — longest streak of consecutive active days per user; SQL or app code?
+### Q2 (5.000) — leaderboard rank by total revenue; tied accounts get different numbers with ROW_NUMBER; is there a ranking function that gives ties the same rank, and does it skip after a tie?
 
-**Responder primary answer (CORRECT)**: 3-layer gaps-and-islands query —
-- Layer 1: flag `is_new_streak` via `CASE WHEN date_diff('day', LAG(event_date) OVER (PARTITION BY user_id ORDER BY event_date), event_date) = 1 THEN 0 ELSE 1` over `(SELECT DISTINCT user_id, event_date FROM events)`.
-- Layer 2: `SUM(is_new_streak) OVER (...)` AS `streak_id`.
-- Layer 3: `GROUP BY user_id, streak_id COUNT(*)` then `MAX` per user.
-- Correctly noted "can't nest windows" (must be 3 separate layers).
+**Responder answer (CORRECT)**: use `DENSE_RANK()` — same rank for ties, **no skip** in the sequence.
 
-Primary is the canonical pattern. `date_diff('day', LAG, cur) = 1` is the right comparison (NOT raw `ts - ts` subtraction — Trino 467 doesn't support DATE arithmetic without `date_diff` or `INTERVAL`). DISTINCT dedup of `(user_id, event_date)` is correctly placed in the innermost subquery. `SUM(0 or 1) OVER (...)` as streak group key is correct. `COUNT(*)` per streak group then `MAX` per user is correct.
+Comparison table given (paraphrased):
 
-**Responder secondary extension (BROKEN)**: an "ALSO with start/end-dates per longest streak" extension query references a column `t.streak_id_for_max` AND `s2.streak_id = t.streak_id_for_max` that is NOT defined/projected in the subquery. Would throw a column-not-found error at execution.
+| Revenue | ROW_NUMBER | RANK | DENSE_RANK |
+|---|---:|---:|---:|
+| 1000 | 1 | 1 | 1 |
+| 1000 | 2 | 1 | 1 |
+| 800 | 3 | 3 (skips 2) | 2 (no skip) |
+| 500 | 4 | 4 | 3 |
 
-**Classification**: known **responder broken-secondary alternative** pattern (per pinned memory: iter936/943/948/950/954/1013/1019/1020 history). Haiku nails the lead, then appends a broken "for completeness" extension form. Per memory: "scope each as per-instance one-off re-probe NOT a resource defect, don't churn (no single resource fix for responder padding)". 
+Query shape:
 
-**Practical impact**: bounded — engineer will copy-paste the primary 3-layer query (which works) and the extension is clearly labeled as extra. But if engineer tries the extension verbatim it errors. Minor accuracy + completeness shave.
+```sql
+SELECT account_id, total_revenue,
+       DENSE_RANK() OVER (ORDER BY total_revenue DESC) AS leaderboard_rank
+FROM (SELECT account_id, SUM(revenue) AS total_revenue
+      FROM orders GROUP BY account_id) t;
+```
 
-**Recommendation: NO-OP** on this Q. Known responder padding pattern with no single-edit fix.
+For top-10-including-all-ties: wrap and filter `WHERE leaderboard_rank <= 10` (note this returns MORE than 10 rows if there's a tie at rank 10 — which is the desired leaderboard behavior).
 
----
+Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html):
+- `row_number()` — "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition."
+- `rank()` — "Returns the rank of a value in a group of values. The rank is one plus the number of rows preceding the row that are not peer with the row. Thus, tie values in the ordering will produce gaps in the sequence."
+- `dense_rank()` — "Returns the rank of a value in a group of values. This is similar to rank(), except that tie values do not produce gaps in the sequence."
 
-### Q3 (5.000) — `CAST(latency_ms AS INTEGER)` rounds rather than truncates; use floor()?
-
-**Responder answer (CORRECT)**: `CAST(double AS integer)` ROUNDS HALF_UP (47.5→48, 47.89→48), NOT truncate; use `floor()` for always-round-down (`floor(-47.89) = -48` toward -inf); `truncate(x)` for toward-zero (`truncate(-47.89) = -47`); for latency use `floor(latency_ms)`.
-
-Exact match to pinned memory **"Trino CAST-to-integer Rounds"**: "Trino 467 CAST(double/decimal AS integer) ROUNDS half-up (47.89→48), does NOT truncate; toward-zero is truncate(x), floor=-inf, ceil=+inf". Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html). The negative-number boundary cases (floor(-47.89) vs truncate(-47.89)) are particularly well-explained — engineer will not confuse toward-zero with toward-negative-infinity. Iter728 corruption HOLDING (responder no longer claims CAST truncates).
-
-For positive latency_ms values, `floor()` = `truncate()` = `CAST AS INTEGER` minus 0.5 — they all coincide on positives — but the responder correctly picks `floor()` because (a) it gives the "always round down" semantic the engineer asked for regardless of sign, and (b) it's the unambiguous canonical name. Clean 5.0.
+Responder framing matches exactly. The 4-row example table is concrete and the leaderboard wrap-and-filter is the canonical "top-N including ties" idiom. Clean 5.0.
 
 **Recommendation: NO-OP.**
 
 ---
 
-### Q4 (4.750) — which dbt models are most expensive to run; how much data each scans
+### Q3 (4.875) — `feature_flags` array column; find users who share at least one flag with `ARRAY['billing_v2', 'new_dashboard', 'export_csv']`; is there a function that takes two arrays and returns overlapping elements usable in WHERE?
 
-**Responder answer (CORRECT)**: `system.runtime.queries q JOIN system.runtime.tasks t ON t.query_id = q.query_id`, `SUM(t.physical_input_bytes)/1e9 AS gb_scanned + SUM(t.split_cpu_time_ms)`, filter `q.query LIKE '%<catalog>%<schema>%' AND q.state='FINISHED'`, GROUP BY query/query_id ORDER BY gb_scanned DESC; then EXPLAIN ANALYZE each heavy model to read `physicalInputDataSize / inputRows`, look for a residual `Filter` above the `TableScan` (= partition-pruning break = full scan); optimize via partition filter / `ALTER TABLE EXECUTE optimize` / decorrelate / materialize CTE; on-prem MinIO has no per-query dollar charge so GB-scanned is the proxy.
+**Responder answer (CORRECT primary)**: `array_intersect(a, b)` returns the overlapping elements (no duplicates).
 
-**Verification**:
-- `system.runtime.queries` columns include `query_id`, `state`, `user`, `query`, `created`, `started`, `end` (verified at [trino.io/docs/current/connector/system.html](https://trino.io/docs/current/connector/system.html) + GitHub issue references).
-- `physical_input_bytes` and related per-task metrics live on `system.runtime.tasks` (added in Trino release 330) — the JOIN to tasks via `query_id` is the correct way to aggregate per-query I/O. Responder got this right.
-- `split_cpu_time_ms` is a tasks-level CPU-time metric — correct.
-- `physicalInputDataSize` in EXPLAIN ANALYZE output is a real per-operator metric (per [trino.io/docs/current/sql/explain-analyze.html](https://trino.io/docs/current/sql/explain-analyze.html)).
-- On-prem MinIO: no per-query dollar bill, GB-scanned as proxy is the right cost-attribution model — fits prod_info.md (on-prem, no cloud egress charges).
+```sql
+WHERE cardinality(array_intersect(feature_flags,
+                                  ARRAY['billing_v2','new_dashboard','export_csv'])) > 0
+```
 
-Minor completeness shave: did not mention that `system.runtime.queries` only retains *recent* queries (in-memory ring buffer with `query.max-history` and `query.min-expire-age`) — for historical cost analysis longer than a few hours, the engineer needs the JSON event logger (`event-listener.properties`) writing to an audit/Iceberg table. r16 covers this; responder skipped it. Not load-bearing for the immediate question ("which models are most expensive last hour") but worth noting.
+Alternative offered: `WHERE array_intersect(...) != ARRAY[]`.
 
-**Recommendation: NO-OP.**
+Verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html):
+- `array_intersect(x, y) -> array(E)` — "Returns an array of the elements in the intersection of x and y, without duplicates."
+- `cardinality(array(E)) -> bigint` — array length.
+
+Both forms are valid Trino 467 syntax. `cardinality(...) > 0` is the safer canonical because:
+1. It returns a plain `bigint` comparison — no array-equality typing edge cases.
+2. The `!= ARRAY[]` alternative has a minor typing fiddliness: the empty array literal `ARRAY[]` infers as `array(unknown)`, and while Trino will coerce it for the comparison, the safer/more conventional form across dialects is the cardinality check.
+
+**Completeness shave — 4.5 on Compl**: the responder did NOT mention the more direct boolean primitive `arrays_overlap(x, y) -> boolean`, which is the most natural fit for the question's exact phrasing "share at least one flag":
+
+```sql
+WHERE arrays_overlap(feature_flags,
+                     ARRAY['billing_v2','new_dashboard','export_csv'])
+```
+
+`arrays_overlap` returns `true` if the two arrays share any non-null element (with NULL semantics: returns NULL if there are no shared non-nulls AND either array contains NULL). For a non-NULL flag column, this is the simplest and most expressive form. The question explicitly asked for "a function that takes two arrays" and the most direct one-step answer is `arrays_overlap`, not `cardinality(array_intersect(...)) > 0`.
+
+This is NOT a defect — the responder's `array_intersect + cardinality > 0` IS correct and IS the canonical form taught widely. It's just a missed-completeness opportunity on the more idiomatic `arrays_overlap` direct form. Probably ranks alongside the "responder bias toward minimum-sufficient answer" / recall-ceiling pattern from iter1140 Q1, NOT a resource defect.
+
+**Classification**: minor completeness shave, recall ceiling. NOT a defect; NOT a watch-worthy gap. No resource fix recommended — `arrays_overlap` is in the resource catalogue.
+
+**Recommendation: NO-OP** on the resource. Optional re-probe queue idea: probe specifically for "do these two arrays share an element" phrasing to see if `arrays_overlap` lead is reachable (not urgent).
 
 ---
 
-## Topic durability updates
+### Q4 (5.000) — hourly Postgres→Iceberg ETL silently fails occasionally; table goes 4-6h stale; can dbt auto-check source recency and warn / stop downstream if too old?
 
-- **Query performance basics** (4.1771/23 → 4.1280/24 with Q1 3.250): margin shaves from +0.6771 to +0.6280. Still safely above 3.5 threshold but remains the THINNEST required topic. LIGHT FIX-A above directly addresses the underlying findability gap.
-- **Analytical query patterns on Iceberg+Trino** (4.4748/92 → 4.4697/93 with Q2 4.000): margin -0.0051, still +0.9697 above threshold. Broken-secondary padding bounded.
-- **SQL best practices for OLAP** (4.5530/203 → 4.5552/204 with Q3 5.000): margin +0.0022 lift, +1.0552 above threshold. CAST-to-integer pin durability sustaining.
-- **Cost considerations** (4.3074/23 → 4.3258/24 with Q4 4.750): margin +0.0184 lift, +0.8258 above threshold.
+**Responder answer (CORRECT)**:
+
+**Mechanism**: `dbt source freshness` — declared in `sources.yml`:
+
+```yaml
+sources:
+  - name: postgres_raw
+    tables:
+      - name: orders
+        loaded_at_field: ingested_at      # required on dbt-trino
+        freshness:
+          warn_after:  {count: 2, period: hour}
+          error_after: {count: 4, period: hour}
+```
+
+**`loaded_at_field` REQUIRED on dbt-trino** — `ingested_at` (or equivalent) is a timestamp column that advances on each successful load. dbt runs `SELECT MAX(loaded_at_field)` against the source and compares to the thresholds. The metadata-fallback escape hatch (added in dbt 1.7 for adapters that can read freshness from warehouse metadata tables) is supported only on Snowflake, Redshift, BigQuery, and Databricks — NOT on dbt-trino. So the field is genuinely required for this stack.
+
+**CI execution model**: run `dbt source freshness` as a SEPARATE CI stage BEFORE `dbt build`. A freshness check that triggers `error_after` exits with non-zero, and `set -e` halts the pipeline — downstream `dbt build` never runs.
+
+**CRITICAL nuance (correctly stated)**: a freshness failure does NOT auto-block downstream models in a plain `dbt run` / `dbt build` — the DAG runs independently of freshness state. The two commands are separate; `dbt build` does not include freshness checks. You gate operationally via the SEPARATE CI stage:
+
+```bash
+dbt source freshness   # exits non-zero if any source >= error_after
+dbt build              # only runs if previous stage exited 0
+```
+
+Optional `source_status:fresher+` selector (dbt 1.1+) for the more advanced pattern of "build ONLY models downstream of sources that became fresher since last run" — not needed for the simple gate.
+
+**Verified against:**
+- [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness) — config keys, `loaded_at_field` requirement, `warn_after`/`error_after` semantics.
+- [docs.getdbt.com/reference/commands/source](https://docs.getdbt.com/reference/commands/source) — non-zero exit on warn/error.
+- [docs.getdbt.com/docs/deploy/source-freshness](https://docs.getdbt.com/docs/deploy/source-freshness) — separate command, does NOT block `dbt build` DAG by default.
+- [docs.getdbt.com/docs/build/sources](https://docs.getdbt.com/docs/build/sources) — metadata-fallback adapter support list (Snowflake/Redshift/BigQuery/Databricks since 1.7); dbt-trino is NOT in that list, so `loaded_at_field` is required.
+
+Clean 5.0. All four facts correct: config keys, separate CI stage gate, non-zero exit on error_after, accurate nuance that freshness does NOT auto-block the DAG.
+
+**Recommendation: NO-OP.**
 
 ---
 
 ## Source-verified defects this iter
 
-| # | Defect | Source | Classification | Recommendation |
-|---|---|---|---|---|
-| 1 | Q1 TopN omission for `ORDER BY+LIMIT` over 200M rows; spilling-on-sort framing wrong | r18 §1418-1422 spill section is keyword-magnet for "ORDER BY+spilling" queries but does not disambiguate TopN vs full sort | resource-sourced findability gap | **LIGHT FIX-A** — additive TopN-disambiguation card in r18 next to spill section (text drafted above); watch label "r18 TopN-disambiguation iter1141" |
-| 2 | Q1 `query_max_memory_per_node` "lower to spill earlier" advice | r23 §242-244 correctly defines it as lower-only hard cap, but no explicit "this is NOT a spill knob" defang | covered by the same r18 FIX-A above (defang in the same card) | folded into FIX-A #1 |
-| 3 | Q2 broken-secondary extension query referencing undefined `streak_id_for_max` | known Haiku padding pattern (iter936/943/948/950/954/1013/1019/1020) | responder one-off | **NO-OP** per pinned memory directive |
+- **Resource-sourced defects**: 0
+- **Responder one-off defects**: 0
+- **Silent-wrong slips**: 0
+- **Completeness shaves (non-scoring)**: 1 — Q3 didn't mention `arrays_overlap` direct boolean alternative (recall ceiling, not a defect).
 
----
+## Watch verdicts
 
-## Q1 TopN-vs-spill assessment summary
+- **iter1141 r18 TopN-disambiguation FIX-A WATCH: CLOSED on first re-probe.** Responder reached the canonical TopN-bounded-heap framing without recurrence of either iter1141 misconception (`ORDER BY+LIMIT=full sort` or `lower query_max_memory_per_node to spill earlier`). The r18 §288-300 DIAGNOSIS GUARD card is doing exactly what it was designed to do — sits where the spill keywords lead, disambiguates the mechanism, defangs both misconceptions in a DO-NOT-WRITE table. This is the 8th consecutive watch in the 1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE pattern: ADD-COLUMN (iter1121), partition-COUNT-folklore (iter1125), population-percentile (iter1127), dedup-tied-tuple (iter1130), SELECT-*-EXCEPT (iter1131), `{% if execute %}` (iter1133), percent_rank-DESC-direction (iter1137), TopN-disambiguation (iter1142).
+- **No new watch streams opened this iter.**
 
-The responder's answer is **partially mis-diagnosed mechanism + correct practical fix**. ORDER BY + LIMIT is a TopN operator (bounded heap, NOT full sort) per verified Trino 467 source. The "200M rows in a sort buffer" framing is wrong. The real bottleneck is the unfiltered TableScan. The `query_max_memory_per_node` "lower to spill earlier" advice is a backwards misconception. BUT the responder lands on the correct practical fix ("reduce input, don't just add memory") so engineer harm is bounded.
+## Topic-row updates
 
-**LIGHT FIX-A warranted** because:
-1. Findability is the root cause — r18 spill section is the keyword-magnet for "ORDER BY + spilling" but doesn't disambiguate TopN.
-2. The misconception is specific and addressable in a small additive card (no large rewrite needed).
-3. Query-perf-basics is the thinnest required topic — durability matters here.
-4. The defang text is bounded and won't over-attract adjacent questions (no aggregation/join spill questions get confused by a TopN card).
+- **Query performance basics**: 4.1280/24 → (99.072 + 5.0)/25 = **4.16288/25 PASSED** (+0.0349, Q1 FIX-A lift; margin +0.66288, no longer thinnest required-topic).
+- **Analytical query patterns on Iceberg+Trino**: 4.4697/93 → (415.6821 + 5.0)/94 = **4.4753/94 PASSED** (+0.0056, Q2 lift).
+- **SQL best practices for OLAP**: 4.5552/204 → (929.2608 + 4.875)/205 = **4.5519/205 PASSED** (−0.0033, Q3 minor shave).
+- **dbt sources / source freshness**: 4.4493/8 → (35.5944 + 5.0)/9 = **4.5105/9 PASSED** (+0.0612, Q4 lift).
 
----
+ALL required topics REMAIN PASSED.
 
-## Teacher guidance for iter1142
+## Thinnest-margin order after iter1142
 
-1. **LIGHT FIX-A in r18 spill-to-disk section**: add the TopN-disambiguation card drafted above. Place it AFTER the existing spill-to-disk paragraphs (§1418-1422), BEFORE the FTE migration sidebar (§1480-1484). Cross-ref r23 §2387 for the determinism-context TopN mention. Keep the existing spill-to-disk content unchanged — this is an ADD, not a rewrite. The "DO NOT WRITE" block defangs both (a) the "ORDER BY + LIMIT = full sort" framing and (b) the "lower `query_max_memory_per_node` to spill earlier" misconception, in the same card.
-2. **No other resource edits this iter.** Q2 broken-secondary is recurring responder padding, no resource fix; Q3/Q4 clean.
-3. **Re-probe label for iter1142**: "ORDER BY+LIMIT TopN watch — `ORDER BY ts LIMIT 100` over 200M rows slow, is more memory the fix" (or similar). Confirm responder names TopN + points at TableScan inputRows + does NOT recommend lowering `query_max_memory_per_node`.
+1. dbt-snapshots-SCD2 4.1079/18 (+0.6079, untouched, NEW thinnest required-topic)
+2. storage-tiering 4.1302/12 (+0.6302, untouched)
+3. query-perf-basics 4.16288/25 (+0.66288, Q1 FIX-A lift, moved from thinnest)
+4. cost-considerations 4.3258/24 (+0.8258, untouched)
+5. query-perf-regression-diagnosis 4.3436/21 (+0.8436, untouched)
+6. Oracle-migration 4.4381/118 (+0.9381, untouched)
+7. Iceberg-partition-design 4.4616/47 (+0.9616, untouched)
+8. Analytical-query-patterns 4.4753/94 (+0.9753, Q2 lift)
+9. Iceberg-maintenance 4.4800/179 (untouched)
+10. federation 4.5024/312 (untouched, fragile-PASS preserved)
+11. dbt-sources-freshness 4.5105/9 (+1.0105, Q4 lift)
+12. SQL-best-practices-OLAP 4.5519/205 (+1.0519, Q3 minor shave)
+13. CBO/ANALYZE 4.6105/22 (untouched)
+14. improving-complex-SQL-perf-dbt 4.6111/25 (untouched)
 
----
+## Recommendation
 
-**Iter1141 verdict: 4.2500 PASS + LIGHT FIX-A r18 TopN-disambiguation.**
+**NO-OP** — commit rubric + feedback only. iter1141 LIGHT FIX-A reached cleanly; no resource edits needed. Zero defects, zero silent-wrong slips. The only completeness shave (Q3 `arrays_overlap` not mentioned) is a known recall-ceiling pattern, not a resource gap (the function IS in the array.md resource).
+
+## Teacher guidance
+
+**No resource edits this iter.** The r18 §288-300 TopN-disambiguation card from iter1141 worked exactly as designed:
+- The card lives where the keyword path leads ("ORDER BY + spilling" → r18 §spill-to-disk section → §288 DIAGNOSIS GUARD).
+- Both misconceptions are explicitly inline-WRONG-marked in a DO-NOT-WRITE table.
+- The canonical (TopN bounded heap + chase TableScan + partition predicate + EXPLAIN verification) is the copy-attractive form, NOT the defanged misconception.
+
+This is the textbook pattern from the "Defang DO-NOT-WRITE Snippets" memory pin: canonical lives outside the DO-NOT-WRITE table as the copy-attractive form, banned forms inside the table marked WRONG. Worked on first re-probe.
+
+## Re-probe queue (for next sweep)
+
+1. **dbt-snapshots-SCD2 19th angle** (NEW thinnest required-topic, untouched 2 iters since iter1140 Q2 reach — confirm SCD-2 routing durability with another "build change history" phrasing without the word "snapshot").
+2. **storage-tiering 13th angle** (still thin, untouched 2 iters since iter1140 Q4 — try the archive-table UNION ALL via dbt view variant, not the MinIO ILM path that's been probed).
+3. **Q1 TopN-disambiguation 2nd-instance generative sustainment** — different phrasing to confirm durability past first re-probe ("scrollable infinite-scroll API: `ORDER BY id LIMIT 200 OFFSET N` on the events table is 8s; will a bigger node help?").
+4. **Q3 `arrays_overlap` direct-boolean phrasing** — "is there a function that returns true/false if two arrays share any element?" — not urgent, recall-ceiling probe.
+5. **cost-considerations 25th angle** (untouched since iter1141 Q4 reached `system.runtime.queries+tasks` canonical).
+
+## Pattern observation
+
+**24-iter sustainment band:** STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/1134/1137/1140/**1142** + LIGHT FIX-A iters 1091/1116/1124/1129/1132/1136/1138/1141 + NO-OP+WATCH iters 1120/1123/1126/1130/1135 + PASS+DOUBLE-LIGHT-FIX-A iter 1139.
+
+iter1142 4.9688 STRONG PASS NO-OP is the band's second-highest single-iter average (after iter1137's 5.000), and is the recovery iter from iter1141's thin 4.1875 PASS+LIGHT-FIX-A. The pattern of "LIGHT FIX-A reaches cleanly on first re-probe" continues — 8 watch streams in a row have closed on first re-probe with no escalation needed. The fix-mechanism (additive DIAGNOSIS GUARD card placed at the keyword-magnet section + DO-NOT-WRITE inline defang of the two specific misconceptions + cross-ref back to the prior canonical location) is the most reliable shape of LIGHT FIX-A — it doesn't churn existing content (just adds), doesn't introduce new copy-attractive snippets that can backfire (banned forms inside DO-NOT-WRITE marked WRONG), and lives where the broken keyword path lands.
+
+The Q3 `arrays_overlap` shave is the same minimum-sufficient-answer pattern seen in iter1140 Q1 (didn't explicitly name INDF + explain why it would silently filter) and iter1138 Q1 (didn't lead with the direct 2-arg `truncate` form before iter1138 LIGHT FIX-A reconciled r27 §4.4C). It's a recall-ceiling not a resource gap — the more direct form exists in the resource catalogue but the responder defaults to the longer composition when both forms are technically correct. No fix attempt — these are best caught with re-probes targeting the specific phrasing class.
+
+**Federation/CBO/improving-complex-SQL-perf-dbt** untouched this iter — fragile-PASS federation 4.5024/312 preserved with no regression risk introduced.
+
+**Expected next-iter profile**: another breadth STRONG PASS in the 4.6-5.0 band unless a thinnest-row probe (dbt-snapshots-SCD2 or storage-tiering) surfaces a new defect class.
