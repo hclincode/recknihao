@@ -1983,6 +1983,27 @@ USING (
 WHEN MATCHED THEN DELETE;
 ```
 
+> **⚠️ CRITICAL — Pattern B2 (and any "DELETE WHERE (key, order_col) IN (rn>1 rows)" form) is SAFE ONLY when the `ORDER BY` column DIFFERS between the keeper and the duplicates. It DESTROYS DATA when the duplicates share the ORDER BY value (a TIED tuple).** *(Keyword anchors: dedup keep earliest/latest, duplicate rows same timestamp different id, deduplicate keeping first occurrence, retries created duplicates same user_id event_type timestamp, remove duplicate rows by key.)*
+>
+> The trap: Pattern B2 matches dupes by `tgt.customer_id = dup.customer_id AND tgt.created_at = dup.created_at`. If your duplicates share the **whole** dedup tuple — e.g. "same `user_id`, `event_type`, AND `timestamp`, only the auto-generated `event_id` differs" — then the rn=1 **keeper** has the IDENTICAL `(customer_id, created_at)` tuple as the rn>1 dupes, so the `ON` predicate matches the keeper too: `WHEN MATCHED THEN DELETE` deletes **every** copy including the one you meant to keep (or, with multiple matching dup rows, Trino throws `MERGE_TARGET_ROW_MULTIPLE_MATCHES`). The same bug bites the analogous `DELETE FROM t WHERE (user_id, event_type, occurred_at) IN (SELECT those tuples FROM dedup WHERE rn>1)` — that tuple is non-unique, so it nukes the keeper. **Use Pattern B1 or B3 for tied-tuple dedup, NOT B2.**
+>
+> ```sql
+> -- Pattern B3 — in-place DELETE BY UNIQUE ROW ID (use when duplicates share the ORDER BY column).
+> -- Requires a column that is UNIQUE PER PHYSICAL ROW (e.g. the auto-generated event_id).
+> -- Add a tiebreaker to ORDER BY so "earliest" is DETERMINISTIC when the order column ties.
+> DELETE FROM iceberg.analytics.events
+> WHERE event_id IN (
+>   SELECT event_id FROM (
+>     SELECT event_id,
+>            ROW_NUMBER() OVER (PARTITION BY user_id, event_type
+>                               ORDER BY occurred_at, event_id) AS rn   -- event_id tiebreaker = deterministic earliest
+>     FROM iceberg.analytics.events
+>   ) WHERE rn > 1                                                       -- delete ONLY the non-kept copies, BY their unique id
+> );
+> ```
+>
+> **No unique per-row column?** Then in-place DELETE cannot single out one tied copy — use **Pattern B1 (CTAS `WHERE rn = 1` + RENAME)**, which ALWAYS keeps exactly one row per partition regardless of ties (ROW_NUMBER assigns `1` to exactly one of the tied rows), then atomically swaps the table. B1 is the universally-safe full-dedup form; B2 is an optimization that only applies when the order column distinguishes keeper from dupes. **Tiebreaker rule (applies to A/B1/B2/B3 alike):** if the `ORDER BY` column can tie within a partition, append a unique/stable column (`ORDER BY occurred_at, event_id`) or "earliest"/"latest" is non-deterministic across runs.
+
 **DO NOT WRITE:**
 
 | Wrong shape | Why it's wrong |
@@ -1991,6 +2012,7 @@ WHEN MATCHED THEN DELETE;
 | `DELETE FROM t WHERE row_id NOT IN (...)` / `$row_id` / `_pos` | **None exists as a user-visible column in Trino 467's Iceberg connector.** Iceberg's internal position/file refs are connector-internal and not exposed in user SELECTs. |
 | `DELETE FROM t WHERE ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts) > 1` | **Window functions are NOT allowed in `WHERE` in ANY SQL dialect, including Trino.** Wrap in a subquery (Pattern A) or push to a MERGE-USING subquery (Pattern B2). |
 | `SELECT ... FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY k ORDER BY ts) = 1` | **`QUALIFY` is NOT supported in Trino 467** — Snowflake/BigQuery/Databricks/Teradata only. Parse error. Use the subquery form in Pattern A. See §7A.2 QUALIFY landmine + resource 23 §dialect anti-patterns. |
+| `DELETE FROM t WHERE (user_id, event_type, occurred_at) IN (SELECT user_id, event_type, occurred_at FROM dedup WHERE rn > 1)` "to drop the duplicate copies" | **DATA LOSS when duplicates share that tuple** (same user_id+event_type+timestamp, only the row id differs). The tuple is the dedup KEY, so it is identical on the rn=1 keeper and the rn>1 dupes — the `IN` predicate matches the keeper too and DELETEs every copy. Same trap as Pattern B2 on a tied tuple. **Fix:** delete by a UNIQUE per-row column — `DELETE FROM t WHERE event_id IN (SELECT event_id FROM dedup WHERE rn > 1)` (Pattern B3), or rebuild with Pattern B1 (CTAS `WHERE rn = 1` + RENAME). |
 | `DELETE FROM t a WHERE EXISTS (SELECT 1 FROM t b WHERE b.k = a.k AND b.created_at < a.created_at)` "to keep the earliest per group" | Works conceptually but is a **correlated NOT-EXISTS pattern that Trino plans poorly** (LeftJoin + Aggregation, no SemiJoin short-circuit — see resource 23 §10 and trinodb/trino #21859). On a wide table with many duplicates the plan explodes. Prefer the explicit `ROW_NUMBER` rewrite (Pattern A/B1/B2) — it's both faster and clearer. |
 
 **Cross-references.** Pattern A's `ROW_NUMBER` subquery form is the same canonical "top-N-per-group" template from §7A.2 (Oracle analytic → Trino) and resource 23 §"`QUALIFY` rewrite". Pattern B1's CTAS-then-RENAME swap relies on Iceberg's atomic `ALTER TABLE ... RENAME TO` (see resource 17 §"Iceberg RENAME / DROP / table-identity" coverage). For Pattern B2 MERGE syntax constraints (no `UPDATE SET *`, explicit column lists required), see §4.6B Trino MERGE star-shorthand guardrail.

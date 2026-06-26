@@ -1,46 +1,46 @@
-# Iter 1128 — Judge Feedback
+# Iter 1129 — Judge Feedback
 
-**Iter average: 4.8906 STRONG PASS (margin +1.3906).** All four answers clean and source-verified against RAW Trino 467 docs (window.html, math.html, iceberg.html connector). No defects, no new watch streams, no recurring family signatures. Q1/Q2 land 5.00 (RANGE+INTERVAL window frame and width_bucket(bins) array overload both verified correct in 467). Q3 minor completeness shave (-0.3125) for Spark-only re-partition path (Trino EXECUTE optimize alternative not mentioned for re-partitioning OLD data — defensible in this prod stack since Spark is already the ingestion engine, but a Trino-native option is the more natural reach for the queries team). Q4 minor completeness shave (-0.125) for not explicitly flagging the engineer's self-contradictory premise ("NULL rows appearing yet `!= ''` would have already EXCLUDED them — possibly whitespace strings or filter not applied where you think"); the SQL semantics + robust filter recommendations are fully correct. **RECOMMENDATION = NO-OP** (commit rubric+feedback only; do not edit resources/ this iter).
+**Iter average: 4.40625 PASS (margin +0.906).** Q1/Q3/Q4 land clean (4.875 / 5.0 / 4.875). **Q2 = 2.875 REAL CORRECTNESS DEFECT — data-loss DELETE.** Responder's PRIMARY form `DELETE FROM t WHERE (user_id, event_type, occurred_at) IN (SELECT those tuples FROM dedup WHERE rn > 1)` deletes the KEEPER row too because the question's premise (duplicates share user_id+event_type+occurred_at, only event_id differs) means the keeper (rn=1) has the IDENTICAL tuple as the duplicates (rn>1) — the IN predicate matches all copies including the one to keep. Verified data-loss bug, not a parse error, **wrong-result without warning**. Plus: `ORDER BY occurred_at ASC` alone is non-deterministic for "earliest" when all duplicates share occurred_at (needs `ORDER BY occurred_at, event_id` tiebreaker). ALTERNATIVE form (`INSERT INTO new_table SELECT * WHERE rn=1`) is correct (modulo tiebreaker non-determinism). **Defect classification: RESOURCE-SOURCED.** r27 §1976-1983 Pattern B2 (MERGE-with-DELETE on ROW_NUMBER subquery) uses the same `tgt.k = dup.k` join shape on the partition+order columns without warning about the "duplicates share join-key columns" trap, and has no event_id / unique-row-id alternative for this common scenario. The responder mechanically translated Pattern B2 from MERGE-form into DELETE-IN-form, inheriting the trap. **RECOMMENDATION = LIGHT FIX-A at r27 §1976-1983.** Add (a) one-line warning to Pattern B2: "if duplicates share ALL columns in PARTITION BY + ORDER BY, this DELETEs the keeper too — use Pattern B3 below", (b) NEW Pattern B3 — `DELETE FROM t WHERE event_id IN (SELECT event_id FROM dedup WHERE rn > 1)` (DELETE BY UNIQUE-ROW-ID) for the common case where a stable unique column distinguishes duplicates, (c) tiebreaker note on the ORDER BY: when the order column has ties, append the unique-id column (`ORDER BY occurred_at, event_id`) for deterministic "earliest" semantics. Reconcile-in-place per `feedback_reconcile_dont_append`; do not append elsewhere.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — 7-day rolling average of daily signups; cleaner than 7-way self-join; how to look back exactly last 7 days — **5.0000**
+### Q1 — dashboards time out when nightly dbt job runs; memory/worker-slot or Iceberg write conflict; how to stop ETL starving dashboards — **4.8750**
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Acc | 5.0 | `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` is valid Trino 467 (RANGE+INTERVAL window frame added in version 346, verified via trino.io/blog/2021/03/10/introducing-new-window-features.html — "the offset `interval '1' month` applies to `orderdate`, which is the sorting column"; offset must be compatible with sorting column type, DATE+DAY-interval valid). `AVG(COUNT(*)) OVER (...)` over a GROUP BY signup_date is legal SQL standard semantics (window evaluated AFTER aggregation phase; the aggregate's per-group result feeds the window function). Calendar-day claim accurate: RANGE is value-based, so a missing day with no row means the frame averages over fewer present rows (gap-correct — never includes a phantom zero for the missing day) — this is the correct behavior the responder describes. |
-| Clar | 5.0 | Clear ROWS-vs-RANGE distinction, calendar-day framing motivates why the engineer wants RANGE not ROWS. |
-| App | 5.0 | Exact SQL ready to paste; explains why this beats a 7-way self-join. |
-| Compl | 5.0 | Fully addresses both the cleaner-than-7-way-self-join ask and the exactly-last-7-days ask. |
+| Acc | 5.0 | Resource-group/worker-slot contention diagnosis correct; Iceberg snapshot isolation correctly distinguished from blocking (verified iceberg.apache.org/spec/ + jack-vanlightly snapshot isolation analysis — "Readers use the snapshot that was current when they load the table metadata and are not affected by changes until they refresh"; reads NOT blocked by concurrent writes/MERGE/ingest). `system.runtime.queries` columns `queued_time_ms` + `state` verified against trino.io/docs/current/connector/system.html (queries table tracks how long a query was queued; bigint queued_time_ms + varchar state are documented columns). Resource groups + maxRunning (hardConcurrencyLimit) + source-based selectors verified against trino.io/docs/current/admin/resource-groups.html — "source selector field is a Java regex to match against source string". resource-groups.properties + resource-groups.json placement on coordinator correct. |
+| Clar | 5.0 | Clean three-step structure: rule out write conflict → diagnose with system.runtime.queries → fix with resource groups + concrete JSON. |
+| App | 5.0 | maxRunning=20 (dashboards) / maxRunning=5 (etl) concrete numbers + selectors-by-source ready to paste. |
+| Compl | 4.5 | Minor shave: doesn't surface `softCpuLimit`/`hardCpuLimit` CPU-priority or per-query memory caps (query.max-memory-per-node) as adjacent levers for "ETL is starving dashboards" — resource group concurrency alone is the right primary lever but combining with CPU/memory limits is the production-grade configuration. Per-instance completeness, NOT a resource gap. |
 
-### Q2 — histogram of customers by monthly_api_calls into 0-99/100-499/500-999/1000+; built-in bucketing or CASE WHEN — **5.0000**
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Acc | 5.0 | `width_bucket(operand, bins_array)` 0-based per spec — verified against trino.io/docs/current/functions/math.html: returns 0 if x is below the first lower bound, returns cardinality(bins) if x is at or above the last bound. ARRAY[100,500,1000] → bucket 0 for x<100, 1 for 100≤x<500, 2 for 500≤x<1000, 3 for x≥1000. Mapping the responder gave is exactly correct. Bins ARRAY must be sorted ascending DOUBLE (responder used `100.0,500.0,1000.0` literals — correct double typing avoids type-mismatch). |
-| Clar | 5.0 | Explicit bucket-to-label table for non-OLAP engineer. |
-| App | 5.0 | CTE + CASE label wrapper is the canonical pattern; engineer can paste directly. |
-| Compl | 5.0 | Addresses built-in-vs-CASE choice cleanly. |
-
-### Q3 — events partitioned by day; add customer_id partition so per-customer queries prune; drop+recreate or in-place — **4.6250**
+### Q2 — collector retries created duplicates (same user_id+event_type+timestamp, different event_id); keep earliest per user_id+event_type on 400M rows, no self-join — **2.8750 (REAL DEFECT)**
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Acc | 5.0 | `ALTER TABLE events SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(customer_id, 64)']` is correct Trino 467 Iceberg partition evolution syntax (verified via trino.io/docs/current/connector/iceberg.html — partition evolution is metadata-only / atomic metadata swap; old data retains old partition spec, new writes use new spec; queries remain correct because Iceberg's manifests carry per-file partition spec ID). `bucket(customer_id, 64)` correctly chosen over `identity(customer_id)` for high-cardinality customer_id (identity would create one partition per customer — partition explosion / manifest planning catastrophe per the established r10 §1389 partition-explosion canonical). Spark `CALL iceberg.system.rewrite_data_files(...rewrite-all=true...)` correctly attributed to Spark (NOT Trino — Trino has no `rewrite_data_files` procedure; Trino's equivalent is `ALTER TABLE ... EXECUTE optimize`). The `'run in spark-submit, NOT Trino UI'` parenthetical is a true statement. |
-| Clar | 5.0 | Two-step structure (in-place metadata change + optional old-data rewrite) maps cleanly to the engineer's drop-vs-in-place framing. |
-| App | 4.0 | Engineer is on a Trino-primary stack (per prod_info.md: Trino+Iceberg with Hive Metastore is the query engine; Spark is for ingestion). Responder gave ONLY the Spark re-partition path. Trino-native `ALTER TABLE events EXECUTE optimize` (no args) would also work and is the more natural reach for a queries-team workflow — it will rewrite files according to the CURRENT (new) partition spec. Spark CALL `rewrite_data_files` with `rewrite-all=true` is more thorough (forces full rewrite even of already-balanced files) and is a legitimate path given Spark already exists in this stack, but mentioning the Trino-side option would have been ideal. Per-instance shave only. |
-| Compl | 3.5 | Missing Trino EXECUTE optimize alternative for re-partitioning old data; otherwise covers in-place metadata-only nature, old-data behavior, and new-spec semantics correctly. |
+| Acc | 2.0 | PRIMARY form `DELETE FROM large_events_table WHERE (user_id, event_type, occurred_at) IN (SELECT user_id, event_type, occurred_at FROM dedup WHERE rn > 1)` is a **DATA-LOSS BUG** on this question's premise. The question states duplicates share (user_id, event_type, occurred_at) — only event_id differs. So the keeper (rn=1) has the IDENTICAL (user_id, event_type, occurred_at) tuple as its duplicates (rn>1). The IN-subquery returns that shared tuple. The DELETE then matches every row whose tuple matches — INCLUDING the keeper — and removes all copies. Wrong-result without parse/runtime error; the engineer running this on 400M rows would silently lose every keeper for every duplicated key. Secondary issue: `ORDER BY occurred_at ASC` alone is non-deterministic for the tie (all duplicates share occurred_at, so any duplicate could be chosen as rn=1) — "earliest" semantics needs `ORDER BY occurred_at, event_id` tiebreaker. ALTERNATIVE form `INSERT INTO large_events_table_deduplicated SELECT * FROM dedup WHERE rn = 1` is CORRECT shape (CTAS / new-table-rebuild, picks 1 keeper per partition) modulo the same tiebreaker concern. The CORRECT in-place form is DELETE BY UNIQUE ROW ID: `DELETE FROM t WHERE event_id IN (SELECT event_id FROM dedup WHERE rn > 1)` — the question explicitly gives event_id as the unique-per-row column. |
+| Clar | 4.0 | Structure is clear (CTE + two forms); doesn't flag the trap. |
+| App | 2.0 | If the engineer pastes the PRIMARY form, they LOSE DATA on 400M rows. That's worse than getting no answer — it's the failure mode (silent wrong-result) the responder is supposed to prevent. The ALTERNATIVE form salvages the answer if the engineer skips down to it, but PRIMARY-labeled forms are what most engineers reach for. |
+| Compl | 3.5 | Missing event_id-based DELETE (the natural fix when the question highlights event_id as the unique column); missing tiebreaker note; ALTERNATIVE CTAS form is sound and partially salvages the answer. |
 
-### Q4 — `WHERE company_name != ''` but NULL rows still appear; engineer assumed NULL and '' are the same — **4.8750**
+### Q3 — MAP(VARCHAR,BIGINT) column; find map keys appearing in >= 100 rows; built-in to extract keys or unnest? — **5.0000**
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Acc | 5.0 | Three-valued logic explanation correct: NULL ≠ '' evaluates to UNKNOWN (not TRUE, not FALSE), and a WHERE clause keeps rows only when the predicate is TRUE — so NULL rows ARE EXCLUDED by `!= ''`. All three filter forms (`IS NOT NULL AND != ''`, `length(...) > 0`, `COALESCE(...,'') != ''`) are correct and Trino 467-valid. Statement "only IS NULL/IS NOT NULL return TRUE/FALSE against NULL" correct per ANSI three-valued logic. |
-| Clar | 5.0 | Cleanly walks the three-valued logic table (TRUE/FALSE/UNKNOWN cases) — accessible to a non-OLAP engineer. |
-| App | 5.0 | Three robust filter forms; engineer can pick whichever matches their style. |
-| Compl | 4.5 | The engineer's PREMISE was self-contradictory: they claimed NULL rows ARE appearing in their output BUT `!= ''` would have already EXCLUDED them. The semantic explanation is correct (NULLs are excluded by `!= ''`), but the responder didn't flag that the premise is impossible — the engineer's "NULL" rows may actually be whitespace strings (`' '`, `'\t'`) that print as blanks but are NOT NULL, OR the filter isn't running where they think. Naming this contradiction would have helped the engineer find the real bug. Per-instance shave only, NOT a resource gap. |
+| Acc | 5.0 | `map_keys(x(K, V)) → array(K)` verified against trino.io/docs/current/functions/map.html — for `map(varchar, bigint)` returns `array(varchar)`. `CROSS JOIN UNNEST(map_keys(...)) AS u(feature_name)` is the canonical map-key-frequency idiom; `COUNT(*) FROM t CROSS JOIN UNNEST(...) GROUP BY feature_name HAVING COUNT(*) >= 100` correctly counts ROWS (one row contributes one occurrence per distinct key in its map; if a map has the key twice — which `MAP` doesn't allow because keys are unique within a map — that's not a concern). HAVING is the right placement (post-aggregation filter). |
+| Clar | 5.0 | One-sentence concept + one-block SQL = beginner-friendly. |
+| App | 5.0 | Direct copy-paste. |
+| Compl | 5.0 | Fully addresses built-in (map_keys) AND the unnest pattern in one answer. |
+
+### Q4 — 3yr data in MinIO, bill growing; auto-move data older than 6mo to cheaper storage class in Iceberg/MinIO, or archive table? — **4.8750**
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Acc | 5.0 | "No Trino DDL for per-partition tiering" correct (Iceberg connector has no built-in tier-per-partition spec; verified against trino.io/docs/current/connector/iceberg.html — `partitioning`/`format`/`location`/`compression_codec` properties only, no per-partition storage class). Mechanism A `mc ilm tier add` + `mc ilm rule add --transition-days 180 --transition-tier` verified against docs.min.io — "transition-days: The number of calendar days from object creation after which MinIO marks an object as eligible for transition"; age-based (NOT last-access — MinIO ILM is creation-time-based, not access-time-based). Prefix scoping (`data/` not `metadata/`) correct — moving Iceberg metadata files to a slow tier would break query planning. Mechanism B ZSTD via `WITH (compression_codec = 'ZSTD')` is a valid Iceberg connector property. Mechanism C archive table + nightly INSERT/DELETE + UNION ALL view is the canonical workaround pattern. |
+| Clar | 5.0 | Three labeled mechanisms (A/B/C) with clear trade-off notes. |
+| App | 5.0 | Concrete mc commands + Iceberg properties + UNION ALL view DDL all paste-ready. |
+| Compl | 4.5 | Minor shave: doesn't explicitly call out (a) MinIO ILM transitions are one-way (objects don't auto-promote back if a query re-touches them; if cold tier has high egress, hot queries on archive data get expensive), (b) per-tier cost trade-off (S3 Glacier-style tiers add per-request fees and retrieval latency that may surprise dashboards). Per-instance completeness, NOT a resource gap. |
 
 ---
 
@@ -48,40 +48,82 @@
 
 | Q | Acc | Clar | App | Compl | Avg |
 |---|---|---|---|---|---|
-| Q1 (rolling avg + RANGE INTERVAL window frame) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q2 (width_bucket histogram) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q3 (Iceberg partition evolution in-place) | 5.0 | 5.0 | 4.0 | 3.5 | **4.6250** |
-| Q4 (NULL vs '' three-valued logic) | 5.0 | 5.0 | 5.0 | 4.5 | **4.8750** |
-| **Iter average** | | | | | **4.8906** |
+| Q1 (resource groups + Iceberg snapshot isolation + system.runtime.queries) | 5.0 | 5.0 | 5.0 | 4.5 | **4.8750** |
+| Q2 (dedup DELETE — data-loss bug on tied-tuple) | 2.0 | 4.0 | 2.0 | 3.5 | **2.8750** |
+| Q3 (map_keys + UNNEST key-frequency) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q4 (storage tiering — Trino/MinIO/archive table) | 5.0 | 5.0 | 5.0 | 4.5 | **4.8750** |
+| **Iter average** | | | | | **4.40625** |
 
-**Overall: PASS (margin +1.3906 over 3.5 threshold)**
+**Overall: PASS (margin +0.906 over 3.5 threshold)** — Q2's defect is a real correctness bug but the iter average remains above the threshold by ~0.9.
 
 ---
 
 ## Source-verified defects
 
-**NONE.** All four answers verified clean against:
-- trino.io/blog/2021/03/10/introducing-new-window-features.html (RANGE+INTERVAL window frame since 346, DATE+DAY interval supported)
-- trino.io/docs/current/functions/window.html (window over aggregate semantics)
-- trino.io/docs/current/functions/math.html + Trino 367 docs (`width_bucket(x, bins_array)` 0-based: returns 0 below first bound, cardinality(bins) above last)
-- trino.io/docs/current/connector/iceberg.html (ALTER TABLE SET PROPERTIES partitioning = ARRAY[...] is in-place metadata-only; existing data retains old spec; queries remain correct via per-file partition spec ID in manifests)
-- Spark Iceberg procedure docs (`CALL system.rewrite_data_files` is Spark-side, not Trino)
+**Q2 PRIMARY DELETE form — data-loss bug (resource-sourced from r27 §1976-1983 Pattern B2).**
 
-Q3's Spark-only re-partition path and Q4's premise-contradiction omission are PER-INSTANCE COMPLETENESS SHAVES, NOT resource-sourced defects. No FIX-A warranted. No new watch stream opened.
+The trap mechanism, verified by hand-walking the IN-predicate semantics:
+- Question premise: duplicates share `(user_id, event_type, occurred_at)`; only `event_id` differs.
+- `dedup` CTE labels rn=1 (keeper) and rn>1 (duplicates), but all share the same `(user_id, event_type, occurred_at)` tuple.
+- PRIMARY: `DELETE FROM t WHERE (user_id, event_type, occurred_at) IN (SELECT user_id, event_type, occurred_at FROM dedup WHERE rn > 1)` — the subquery returns the shared tuple; the predicate matches **every** row with that tuple, including the keeper.
+- Result: ALL copies deleted, including the row meant to be retained. No error, no warning — silent data loss on 400M rows.
+
+The CORRECT in-place form uses the unique row id directly:
+```sql
+DELETE FROM large_events_table WHERE event_id IN (SELECT event_id FROM dedup WHERE rn > 1);
+```
+
+This works because `event_id` uniquely identifies each row — the IN predicate only matches the duplicates, not the keeper. The question explicitly highlights `event_id` as the per-row unique column, so reaching for it is natural.
+
+Additionally: the responder's `ORDER BY occurred_at ASC` is non-deterministic for the tie scenario (all duplicates share `occurred_at`). For deterministic "earliest" semantics, append a unique tiebreaker: `ORDER BY occurred_at, event_id`.
+
+**Resource root cause:** r27 §1976-1983 Pattern B2 (MERGE-with-DELETE on ROW_NUMBER subquery) uses the same join-on-partition+order-columns shape — `tgt.customer_id = dup.customer_id AND tgt.created_at = dup.created_at` — and has the IDENTICAL trap when partition+order columns don't uniquely identify rows. The canonical doesn't warn about this case and doesn't offer the unique-row-id alternative. The responder almost certainly translated Pattern B2 from MERGE-form into DELETE-IN-form, inheriting the trap.
+
+Verified clean for Q1/Q3/Q4 against:
+- trino.io/docs/current/admin/resource-groups.html (resource groups + selectors-by-source)
+- trino.io/docs/current/connector/system.html (system.runtime.queries columns)
+- iceberg.apache.org/spec/ + jack-vanlightly snapshot isolation analysis (reads not blocked by writes)
+- trino.io/docs/current/functions/map.html (`map_keys(x(K,V)) → array(K)`)
+- docs.min.io mc-ilm-rule-add (`--transition-days` age-based; `--transition-tier` required)
+- trino.io/docs/current/connector/iceberg.html (no per-partition storage tier property; `compression_codec` is valid)
 
 ---
 
 ## Teacher guidance
 
-**NO-OP.** Do not edit resources/ this iter. All four answers are correct on substance; the two minor shaves are per-instance completeness (Spark-only vs Trino-also, and not flagging a self-contradictory premise) — not patterns that recur across iters and not resource-sourced.
+**LIGHT FIX-A at r27 §1976-1983 (Pattern B2 — Oracle ROWID-dedup → Trino "MERGE-with-DELETE" in-place form).** Two surgical additions, reconciled in place per `feedback_reconcile_dont_append`:
 
-**Re-probe queue (carry-forward from iter1127, unchanged ordering):**
-1. storage-tiering 9th angle (still thinnest required-topic row at 3.9219/8, +0.4219 margin)
-2. dbt-snapshots SCD2 17th angle (check_cols edge cases, hard_deletes='new_record' downstream interaction)
-3. cost-considerations 22nd angle (`$manifests` partition-cost attribution, per-tenant cost split)
-4. query-perf-regression-diagnosis 21st angle (concurrent ETL-vs-dashboard contention oncall)
-5. NEW: Trino-side EXECUTE optimize after partition evolution (re-probe Q3 from a Trino-only angle: "I changed partition spec from Trino — how do I re-partition old data from Trino, not Spark?") — would test whether responder reaches the Trino-native compaction path on a direct keyword route; if responder defaults to Spark CALL even when explicitly asked "from Trino," that's a findability boundary worth a one-line cross-ref in r17/r10. First-instance scope only — do NOT preempt.
+1. **Warning at top of Pattern B2** — one paragraph:
+   > **Pattern B2 ONLY works when the PARTITION BY + ORDER BY columns uniquely identify each row.** If duplicates share IDENTICAL values across BOTH the partition columns AND the order columns (the common "collector-retry duplicates" scenario: same business-key + same timestamp + DIFFERENT surrogate id), the MERGE ON clause matches the KEEPER too and DELETEs all copies including the row meant to be kept. **Silent wrong-result, no error.** When a stable unique row id (`event_id`, `request_id`, `_metadata.file_path`, etc.) exists, use **Pattern B3** below instead.
 
-**Watch streams: ALL CLOSED.** No active recurrences. No new watch streams opened this iter.
+2. **NEW Pattern B3 — DELETE BY UNIQUE ROW ID** (insert after Pattern B2):
+   ```sql
+   -- Pattern B3 — DELETE BY UNIQUE ROW ID (preferred when a stable unique column exists):
+   WITH dedup AS (
+     SELECT event_id,
+            ROW_NUMBER() OVER (
+              PARTITION BY user_id, event_type
+              ORDER BY occurred_at, event_id    -- tiebreaker for ties on occurred_at
+            ) AS rn
+     FROM iceberg.analytics.events
+   )
+   DELETE FROM iceberg.analytics.events
+   WHERE event_id IN (SELECT event_id FROM dedup WHERE rn > 1);
+   ```
+   With a note: "This is safe even when `occurred_at` (or any other ORDER BY column) has ties — `event_id` is the unique-per-row column the IN-predicate matches, so only duplicates are removed."
 
-**Pattern observation:** 11-iter sustainment band shape: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/**1128** with LIGHT FIX-A iters 1091/1116/1124 reaching cleanly between and NO-OP+WATCH iters 1120/1123/1126 with all watches CLOSED on first re-probe. iter1128 4.8906 STRONG PASS reaffirms (a) RANGE+INTERVAL window frame is a durable competence (not a synthesis ceiling area), (b) `width_bucket(bins_array)` 0-based array overload is correctly understood (no Postgres-1-based imported-prior trap), (c) Iceberg partition evolution metadata-only semantics + identity-vs-bucket trade-off durable (extends iter1125's bucket fix lineage). Q3's Spark-only re-partition aside matches `feedback_responder_broken_secondary_alternative` shape (primary in-place answer perfect, secondary maintenance aside slightly narrow) — per-instance per the established discipline, no FIX-A. Q4's not-flagging-premise-contradiction is consistent with the responder's general "answer the literal question, don't editorialize on premises" style — not a defect. No content-lineage erosion; no recurring defect class.
+3. **ORDER BY tiebreaker note** to Patterns A / B1 / B2 / B3: "When the ORDER BY column may tie (e.g., multiple events at the same `occurred_at`), append a unique tiebreaker (`ORDER BY occurred_at, event_id`) — without it, `ROW_NUMBER` ties are broken non-deterministically and rerunning the dedup may pick a different keeper."
+
+Defang Pattern B2 with an INLINE WRONG marker for the common-tied-tuple scenario, per `feedback_defang_donotwrite_snippets` — keep the existing Pattern B2 (it's correct when partition+order DOES uniquely identify rows, e.g., (customer_id, created_at) with millisecond timestamps), but front it with the warning so the responder routes to B3 on the tied-tuple scenario.
+
+**Re-probe queue (carry-forward, plus B3 verification):**
+1. **NEW priority**: dedup-tied-tuple re-probe — "duplicates share business-key + timestamp, only surrogate id differs, drop dupes in place" — confirm responder reaches Pattern B3 / `WHERE event_id IN (...)` shape on first instance after FIX-A lands.
+2. storage-tiering 10th angle (now 4.0278/9 after Q4 lift; still thin row, opportunity to push above 4.1)
+3. dbt-snapshots SCD2 17th angle (check_cols edge cases, hard_deletes='new_record' downstream interaction)
+4. cost-considerations 22nd angle (`$manifests` partition-cost attribution, per-tenant cost split)
+5. query-perf-regression-diagnosis 21st angle (this iter's Q1 covered concurrent ETL-vs-dashboard contention oncall — partial coverage)
+6. Trino-side EXECUTE optimize after partition evolution (carry from iter1128 re-probe queue)
+
+**Watch streams: NEW WATCH OPENED.** *Dedup-tied-tuple DELETE-IN trap.* First instance, defect classification RESOURCE-SOURCED. After FIX-A lands, re-probe with: (a) the exact iter1129 framing again to confirm B3 is reached; (b) a near-duplicate framing ("collector retries created dupes with same key + same timestamp but different request_id, drop dupes on 200M rows"); (c) a Pattern-B2-safe framing ("dedup customers with same email but different created_at; keep earliest") to verify Pattern B2 still routes correctly when partition+order DOES uniquely identify rows (regression-check after FIX-A).
+
+**Pattern observation.** 12-iter sustainment band shape continues: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128 with LIGHT FIX-A iters 1091/1116/1124/**1129** reaching between, and NO-OP+WATCH iters 1120/1123/1126 with watches CLOSED. iter1129 4.40625 PASS+LIGHT-FIX-A matches the iter1091 4.40 PASS+LIGHT-FIX-A profile — single Q with a real correctness defect found via the question structure, defect classified resource-sourced, surgical FIX-A targeting the specific canonical with reconcile-in-place + defang. NOT the `feedback_responder_broken_secondary_alternative` shape (that's PRIMARY-correct + secondary-broken; here it's PRIMARY-broken + ALTERNATIVE-correct). NOT the `feedback_synthesis_ceiling_stop_churning` shape (the bug is a specific pattern-translation trap in a canonical, not a multi-step synthesis ceiling). The trap class — "canonical's join-key columns happen to be non-unique in this question's premise, IN/MERGE matches the keeper" — is a NEW defect class worth pinning to MEMORY.md after FIX-A re-probe confirms the fix sticks. Q1 reaffirms resource-groups + Iceberg-snapshot-isolation-vs-blocking durable. Q3 reaffirms map_keys + UNNEST + GROUP BY + HAVING canonical durable (no map-vs-array confusion). Q4 reaffirms three-mechanism storage-tiering (no built-in Trino DDL, MinIO mc ilm age-based, archive-table + UNION ALL view) durable from r17/r24.

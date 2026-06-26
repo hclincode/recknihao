@@ -1,7 +1,7 @@
 {
-  "iteration": 1128,
+  "iteration": 1129,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1128 breadth durability sweep (all watch streams closed). 4 varied less-recently-probed angles across passed topics. Verify-first; NO-OP expected. Federation/CBO untouched."
+  "note": "iter1129 -> 4.41 PASS + LIGHT FIX-A (resource-sourced dedup data-loss bug). Q1 resource-groups ETL-isolation / Q3 map_keys+UNNEST key-frequency / Q4 storage-tiering all clean. Q2 (2.875) DATA-LOSS: dedup-keep-earliest where dupes share (user_id,event_type,timestamp) tuple (only event_id differs) -> responder DELETE WHERE tuple IN (rn>1) deletes the KEEPER too (tuple identical across copies). RESOURCE ROOT CAUSE: r27 Pattern B2 (MERGE matched-DELETE on partition+order cols ~L1974-1983) has the identical trap, unwarned, no unique-row-id alt; responder inherited it. FIX-A (reconcile-in-place): added tied-tuple WARNING above the DO-NOT-WRITE table + NEW Pattern B3 (DELETE WHERE event_id IN (rn>1) by UNIQUE row id, ORDER BY occurred_at,event_id tiebreaker) + route no-unique-id case to B1 CTAS (always safe) + DO-NOT-WRITE row defanging the exact tuple-IN form + tiebreaker rule for A/B1/B2/B3. NEW WATCH: dedup-tied-tuple DELETE-IN trap (re-probe next sweep: same framing B3-confirm + Pattern-B2-safe-non-tied regression). storage-tiering lifted 4.0278/9. Federation/CBO untouched."
 }
