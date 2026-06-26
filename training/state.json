@@ -1,7 +1,7 @@
 {
-  "iteration": 1132,
+  "iteration": 1133,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1132 -> 3.86 PASS (thin) + 2 LIGHT FIX-A. Q2 FIRST_VALUE default-frame-safe 4.94 clean. Q1 storage-tiering 3.75 partial (missed hot-tier ROLLUP mitigation for deep-history YoY; two-table UNION view alone does not speed a query spanning cold archive; Glacier async-restore) -> DEFERRED architectural FIX-A. Q3 hashing 3.375 DEFECT: CAST(md5(to_utf8(email)) AS VARCHAR) does NOT give hex (use to_hex), crc32 returns BIGINT not varbinary -> FIX-A2: new r23 LEADING canonical HASH/ANONYMIZE PII for GROUP BY (to_hex(md5(to_utf8(x))), sha256 preferred, salt note) + CAST-md5-AS-VARCHAR & crc32-varbinary defangs (findability: to_hex(md5) existed only in surrogate-key/OPA framings). Q4 3.375: Iceberg no write-time uniqueness (correct) BUT SELECT * EXCEPT (rn) RECURRED (2nd GENERATIVE instance: iter1130 Q2 + iter1132 Q4; iter1131 direct-question close didnt cover generative emission) -> FIX-A1: inline-WRONG defang at r27 Pattern B1 explicit-column comment + DO-NOT-WRITE row (dbt_utils.star except-list note). Q4 {% if execute %} (should be is_incremental()) responder one-off NO-OP+WATCH (r28/r27 already defang). NEW WATCH: dbt {% if execute %}. Re-probe next: SELECT-*-EXCEPT generative (dedup rebuild) + PII-hash + {% if execute %}. storage-tiering now thinnest 4.0000/10. Federation/CBO untouched."
+  "note": "iter1133 triple re-probe (iter1132 FIX-As + watch). Q1 = dedup CTAS rebuild that ADDS an rn helper then writes the clean table -> confirm responder LISTS explicit columns (omits rn), NOT SELECT * EXCEPT(rn) (generative FIX-A1 r27). Q2 = anonymize/hash email PII for GROUP BY -> confirm to_hex(md5(to_utf8(email))) NOT CAST(md5 AS VARCHAR) (FIX-A2 r23). Q3 = dbt incremental watermark -> confirm {% if is_incremental() %} NOT {% if execute %} (watch). Q4 breadth. Federation/CBO untouched."
 }
