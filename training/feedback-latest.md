@@ -1,63 +1,63 @@
-# Iter1116 — Judge Feedback
+# Iter1117 — Judge Feedback
 
-**Overall verdict: 4.375 PASS** (margin +0.875 above 3.5 threshold). Q2/Q3/Q4 clean (4.875/4.75/4.875). **Q1 sessionization regressed to the iter671 defect class** — responder produced the exact `timestamp - timestamp > INTERVAL '30' MINUTE` form that r07 §3099 PREFERRED CANONICAL and r23 §2311-2313 DO-NOT-WRITE banner explicitly ban. Skeleton (LAG + is_new_session + running-SUM session_id) is correct, but the gap-test inside it is a copy-paste **parse error** on Trino 467. Verified RESPONDER SLIP, not resource defect — canonical and defang are both in place and explicit.
+**Overall verdict: 4.9219 STRONG PASS** (margin +1.42 above 3.5). **iter1116 Q1 ts-minus-ts WATCH STREAM CLOSED — slip DID NOT RECUR.** This iter Q1 (`response_minutes` between `created_at` and `first_response_at`, explicitly tempting the engineer's "Python/Java subtraction instinct") was answered with the CANONICAL `date_diff('minute', earlier, later) -> bigint` form AND an explicit "Trino cannot subtract one timestamp directly from another" framing. Q2/Q3 also 5.00 / 5.00; Q4 4.75 with one minor "zero downside" shave on the expire_snapshots time-travel-loss caveat.
 
 ---
 
 ## Source verifications (Trino 467 docs / RAW 467 source)
 
-- **Q1 ts-minus-ts is a parse error**: trino.io/docs/current/functions/datetime.html documented operators are strictly `timestamp +/- interval -> timestamp` and `interval +/- interval -> interval`. **No `timestamp - timestamp` operator exists.** The docs explicitly direct users to `date_diff(unit, ts1, ts2) -> bigint` for timestamp differences. r23 §2311-2313 DO-NOT-WRITE banner already cites this exact failure: `ts2 - ts1 > INTERVAL '5' SECOND` → "INVALID Trino 467 — the LEFT side ts2 - ts1 is a timestamp - timestamp subtraction that does not parse." r07 §3099 (the LEADING CANONICAL with explicit "iter671 PIN — FIX-A: ts-minus-ts gap test invalid in Trino 467" header) gives the correct form `date_diff('minute', LAG(event_time) OVER (...), event_time) > 30` AND a row at §3164 explicitly defangs `event_time - LAG(event_time) > 30 * INTERVAL '1' MINUTE`. **Both the right form and the explicit defang of the responder's wrong form are present in resources.**
-- **Q2 regexp_replace 3-arg**: trino.io/docs/current/functions/regexp.html — `regexp_replace(string, pattern, replacement) -> varchar` "Replaces every instance of the substring matched by the regular expression pattern." Java regex syntax → `[^0-9]` negated char class is standard. Responder is correct.
-- **Q3 Iceberg sorted_by ALTER + EXECUTE optimize**: 467 docs/src/main/sphinx/connector/iceberg.md — sorted_by IS in the list of properties modifiable via ALTER TABLE SET PROPERTIES (along with format, format_version, partitioning, object_store_layout_enabled, data_location). EXECUTE optimize is supported on Iceberg connector with `file_size_threshold` named parameter (verified verbatim across recent iters incl. iter1114/iter1115). Optimize honors the current sort order on file rewrite per Trino's "sorted writes" support (PR #14891 merged pre-467). Direction + null-ordering inside the array string (`'account_id ASC NULLS LAST'`) is valid Trino syntax. Responder is correct.
-- **Q4 UNION default = UNION DISTINCT**: trino.io/docs/current/sql/select.html — "If the argument DISTINCT is specified only unique rows are included in the combined result set... If the argument ALL is specified all rows are included even if the rows are identical." Bare UNION = UNION DISTINCT. Responder is correct.
+- **Q1 date_diff signature**: trino.io/docs/current/functions/datetime.html — `date_diff(unit, timestamp1, timestamp2) -> bigint` "Returns `timestamp2 - timestamp1` expressed in terms of `unit`". Confirms responder's arg order = (unit, EARLIER, LATER) returns a POSITIVE value, and confirms the "timestamp - timestamp does not parse" framing (no `timestamp - timestamp` operator documented; only `timestamp +/- interval`). Responder is correct.
+- **Q3 trim char-set semantic**: trino.io/docs/current/functions/string.html — `trim([[specification] [string] FROM] source)` documented as "Removes any leading and/or trailing characters as specified... from source"; verbatim example `trim(BOTH '$' FROM '$var$')` returns `'var'`. The `string` arg is a **SET OF CHARACTERS** (any-of), NOT a literal substring. Confirms `trim(BOTH '| ' FROM '| some value |')` strips ANY combination of pipe and space from both ends → `'some value'`. Matches memory pin `reference_trino_trim_charset` (Trino is char-set, NOT single-char or substring). Responder is correct.
+- **Q2 ROW_NUMBER top-N-per-group**: trino.io/docs/current/functions/window.html — `row_number() OVER (PARTITION BY ... ORDER BY ...)` returns sequential within-partition rank; trino.io/docs/current/sql/select.html — Trino has NO `QUALIFY` clause (Snowflake/BigQuery only) so the canonical Trino top-N pattern is CTE/subquery with `WHERE rn <= N`. Responder is correct.
+- **Q4 expire_snapshots syntax + downside**: trino.io/docs/current/connector/iceberg.html — `ALTER TABLE x EXECUTE expire_snapshots(retention_threshold => '7d')` is the canonical 467 form; "removes all snapshots and related metadata and data files" older than the threshold; "regularly expiring snapshots is recommended to delete data files that are no longer needed, and to keep the size of table metadata small"; minimum bounded by `iceberg.expire-snapshots.min-retention` (default `7d`); `retain_last` named param defaults to 1. **However: expiring snapshots DOES remove time-travel / rollback ability for those expired snapshots** (`FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` on expired snapshot IDs/timestamps will fail). Responder's syntax + rationale is correct, but the "safe, zero downside" framing OVERSTATES — the time-travel-loss is real, even if usually acceptable for daily-write tables.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Sessionize page views: new session when idle > 30 min since last event; assign session id per row
+### Q1 — Response time in MINUTES between created_at and first_response_at; "my instinct is to subtract them like Python/Java"
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 2.0 | Skeleton correct (LAG, is_new_session flag, running-SUM session_id is the canonical gaps-and-islands shape). **BUT the gap test `(occurred_at - LAG(occurred_at) OVER (...)) > INTERVAL '30' MINUTE` is a PARSE ERROR on Trino 467** — `timestamp - timestamp` is not a documented operator; query won't compile. This is the exact iter671 defect class explicitly defanged at r07 §3164 and r23 §2311-2313. Load-bearing dialect defect: the queryable result is unusable. |
-| Beginner clarity | 4.0 | The gaps-and-islands skeleton explanation is reasonably clear (flag → running-sum → session_id). No explanation of why ts-minus-ts is wrong, because the responder didn't notice. |
-| Practical applicability | 2.0 | Engineer copies, hits parse error, has to debug and replace the gap test with `date_diff('minute', LAG(...), occurred_at) > 30`. Wasted iteration. |
-| Completeness | 4.0 | All structural pieces named (LAG, flag, running-SUM, partition by user_id, order by event time). Missing: NULL-LAG handling for the first event per user (CASE WHEN LAG IS NULL THEN 1 — covered at r07 §3154). |
+| Technical accuracy | 5.0 | `date_diff('minute', created_at, first_response_at) -> bigint` is the EXACT canonical Trino 467 form. Arg order (unit, earlier, later) gives positive minutes per docs ("Returns timestamp2 - timestamp1"). Explicit "Trino cannot subtract one timestamp directly from another to get an interval" framing is correct (no `ts - ts` operator on datetime.html). Group-by team + AVG aggregate correct. |
+| Beginner clarity | 5.0 | Directly addresses the "Python/Java subtraction instinct" the engineer named; explains the three args (unit string, earlier ts, later ts) explicitly so the engineer can copy-paste without guessing direction. |
+| Practical applicability | 5.0 | Engineer can drop this into a team-SLA dashboard tomorrow: outer `SELECT team, AVG(response_minutes) FROM (...) GROUP BY team`. |
+| Completeness | 5.0 | Covers the question (subtraction doesn't work, use date_diff, arg order, return type bigint, aggregate by team). No tail-padding broken alternative. |
 
-**Q1 average: 3.0** — borderline FAIL on this question alone, but overall iter passes via no-veto rubric. Skeleton-right / dialect-wrong is exactly the iter671 defect class.
+**Q1 average: 5.000** — **iter1116 ts-minus-ts WATCH STREAM CLOSED**.
 
-### Q2 — Normalize phone numbers, strip everything except digits; regex replace?
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | `regexp_replace(phone_raw, '[^0-9]', '')` is canonical Trino 467 — 3-arg form replaces every match; `[^0-9]` is standard Java-regex negated char class; empty-string replacement strips matches. Avoids the single-vs-double backslash trap that `\D` would hit (per `reference_trino_regex_backslash`). |
-| Beginner clarity | 5.0 | Explains the negation (`^` inside `[]` = NOT) and the empty-string replacement; an engineer with no prior regex exposure can follow. |
-| Practical applicability | 5.0 | Copy-pasteable, single-statement fix. |
-| Completeness | 4.5 | Could optionally mention NULL handling (regexp_replace returns NULL on NULL input) or the leading-zero/leading-`+` country-code consideration, but those are edge-cases not asked about. |
-
-**Q2 average: 4.875**
-
-### Q3 — Iceberg events partitioned by day, single account_id filter still reads a lot; sort order via dbt?
+### Q2 — Top 5 users per account by event count (last 30 days), per-account not global
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | `ALTER TABLE ... SET PROPERTIES sorted_by = ARRAY['account_id ASC NULLS LAST']` is valid Trino 467 syntax (sorted_by IS in the modifiable list per 467 docs); `EXECUTE optimize(file_size_threshold => '512MB')` named-param form is correct; optimize honors the current sort order on file rewrite per Trino's sorted-writes support; the "complementary to partitioning, enables file/row-group skipping on non-partition columns" framing is correct (Parquet min/max stats per file + per row-group). |
-| Beginner clarity | 4.5 | Sort-vs-partition complementarity called out clearly; the two-step pattern (set property, then rewrite via optimize) is the right mental model for a beginner. Could clarify that newly-sorted writes only affect new files until optimize runs over historical data. |
-| Practical applicability | 5.0 | dbt post_hook with the two statements is exactly the canonical pattern on this production stack. Engineer can drop this into the model config tomorrow. |
-| Completeness | 4.5 | Could mention that the benefit depends on Parquet column-chunk min/max stats covering the sort column, and that very high cardinality (account_id with millions of distinct values) sorts well while low cardinality (status with 5 values) does not. Not load-bearing for the answer. |
+| Technical accuracy | 5.0 | Canonical Trino top-N-per-group: CTE with inner `GROUP BY account_id, user_id COUNT(*) AS event_count` + `ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY event_count DESC) AS rank` + outer `WHERE rank <= 5`. No QUALIFY misuse (Trino 467 has no QUALIFY). PARTITION BY scoping correctly delivers per-account top-N not global. |
+| Beginner clarity | 5.0 | Explains why PARTITION BY = "restart numbering per account" vs global ordering; explains why the WHERE has to be in the outer block (can't reference window alias in same SELECT's WHERE in Trino). |
+| Practical applicability | 5.0 | Drop-in shape; ORDER BY account_id, rank for stable display order. |
+| Completeness | 4.75 | Could mention DENSE_RANK vs ROW_NUMBER for tie handling (two users with same event_count → ROW_NUMBER arbitrarily breaks the tie, DENSE_RANK keeps both at the same rank), but the question didn't ask about ties. Minor. |
 
-**Q3 average: 4.75**
+**Q2 average: 4.9375**
 
-### Q4 — UNION of US + EU customer tables returns FEWER rows than the sum; expected US+EU exactly
+### Q3 — Strip leading/trailing pipes AND spaces together (`'| some value |'`); can Trino remove multiple different chars in one trim?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Bare UNION = UNION DISTINCT in Trino 467 per SELECT.html ("If neither DISTINCT nor ALL is specified... DISTINCT"). UNION ALL keeps all rows. Correct diagnosis: the "missing" rows are duplicate-key matches across the two source tables that get collapsed. |
-| Beginner clarity | 5.0 | Direct cause-effect explanation, no jargon. |
-| Practical applicability | 5.0 | One-word fix (`ALL`) — engineer knows exactly what to change. Also correctly notes when to keep bare UNION (intentional dedupe across same-key sources). |
-| Completeness | 4.5 | Could mention the performance cost of UNION DISTINCT (sort/hash dedupe step) but not strictly required for the diagnosis question. |
+| Technical accuracy | 5.0 | `trim(BOTH '| ' FROM s)` is the correct one-call form. The `'| '` arg IS a CHARACTER SET (per docs verbatim "Removes any leading and/or trailing characters as specified... from source") — strips any combination of `|` and space from the ends, NOT just literal `'| '` substring. Per memory pin `reference_trino_trim_charset`. Extra example `trim(BOTH '0| ' FROM s)` correctly demonstrates the n-char generalization. |
+| Beginner clarity | 5.0 | Calls out the char-set-vs-substring trap explicitly (the SUBSTRING misreading is the engineer's likely default mental model from Java/Python `String.strip(chars)` analogies); LEADING/TRAILING variants explained. |
+| Practical applicability | 5.0 | Single-call answer; engineer doesn't have to nest `trim(BOTH '|' FROM trim(BOTH ' ' FROM s))`. |
+| Completeness | 5.0 | Addresses the "must I nest?" question (no, one call); the char-set vs substring distinction is load-bearing for correctness intuition; example with `'0| '` reinforces multi-char generalization. |
 
-**Q4 average: 4.875**
+**Q3 average: 5.000**
+
+### Q4 — Hundreds of Iceberg snapshots from daily dbt writes; slow queries / inflate storage? cleanup process?
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.5 | Both rationale claims correct: (a) snapshot accumulation adds manifest planning overhead (Iceberg coordinator reads metadata.json + manifest-list pointer chain; more snapshots → larger metadata.json + longer scan) and (b) old snapshots PIN data files in MinIO (data files referenced by ANY live snapshot can't be GC'd) so storage grows. `ALTER TABLE iceberg.x.y EXECUTE expire_snapshots(retention_threshold => '7d')` syntax verbatim matches 467 docs. **BUT: the "safe, zero downside" framing OVERSTATES.** Expiring snapshots DOES eliminate time-travel / rollback to those expired snapshots — `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` on an expired snapshot ID/timestamp will fail. This is a real (though usually acceptable for daily-batch dbt tables) downside, not zero. |
+| Beginner clarity | 5.0 | Clear two-effects framing (planning overhead + storage pin) + clear cleanup-cadence recommendation. |
+| Practical applicability | 5.0 | Engineer can paste the EXECUTE statement into a weekly dbt post_hook or scheduled maintenance run today. |
+| Completeness | 4.5 | Missing: (a) `iceberg.expire-snapshots.min-retention` catalog default (7d) means you can't set retention below that without raising the catalog property; (b) `retain_last` named param (default 1) preserves the N most recent snapshots regardless of age; (c) the time-travel-loss caveat itself. None are load-bearing for the daily-dbt use case but the "zero downside" overstates the safety property. |
+
+**Q4 average: 4.750**
 
 ---
 
@@ -65,86 +65,83 @@
 
 | Q | Topic | Tech | Clarity | Applic | Complete | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | Sessionization gaps-and-islands | 2.0 | 4.0 | 2.0 | 4.0 | **3.000** |
-| Q2 | regexp_replace digit-strip | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
-| Q3 | Iceberg sorted_by + EXECUTE optimize | 5.0 | 4.5 | 5.0 | 4.5 | **4.750** |
-| Q4 | UNION = UNION DISTINCT, UNION ALL keeps all | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
+| Q1 | date_diff for ts-minus-ts duration | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q2 | ROW_NUMBER top-N-per-group | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
+| Q3 | trim char-set (multi-char one call) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
+| Q4 | expire_snapshots maintenance | 4.5 | 5.0 | 5.0 | 4.5 | **4.750** |
 
-**Iter average: (3.000 + 4.875 + 4.750 + 4.875) / 4 = 4.375 PASS** (margin +0.875 above 3.5 threshold; no-veto applies).
+**Iter average: (5.000 + 4.9375 + 5.000 + 4.750) / 4 = 4.9219 STRONG PASS** (margin +1.42 above 3.5).
 
 ---
 
-## Q1 classification — RESPONDER SLIP from CANONICAL, NOT a resource defect
+## Q1 ts-minus-ts watch verdict — **WATCH CLOSED, DID NOT RECUR**
 
-### Resource audit
+iter1116 Q1 produced the parse-error form `(occurred_at - LAG(occurred_at) OVER (...)) > INTERVAL '30' MINUTE` (the exact iter671 defect class banned at r07 §3164 + r23 §2311-2313). iter1117 Q1 phrased differently (duration between two columns rather than gap-vs-prev-row inside sessionization) and DELIBERATELY tempted the subtraction shape ("my instinct is to subtract them like in Python/Java — is that how, or a function?"). Responder explicitly REJECTED the subtraction form ("Trino cannot subtract one timestamp directly from another to get an interval — use date_diff()") and produced the canonical `date_diff('minute', created_at, first_response_at) -> bigint` with correctly-stated arg order (unit, earlier, later → positive value).
 
-- **r07 §3099 Pattern B-Session LEADING CANONICAL** — explicitly headed "iter671 PIN — FIX-A: ts-minus-ts gap test invalid in Trino 467". Gives the correct form `date_diff('minute', LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30` (§3127-3130) with detailed "Why each piece is what it is" walkthrough (§3151-3156) explaining `date_diff` returns `bigint`, comparison to `30` (plain integer) NOT `INTERVAL '30' MINUTE` (type mismatch).
-- **r07 §3164 DO-NOT-WRITE row** — explicitly lists `event_time - LAG(event_time) OVER (...) > 30 * INTERVAL '1' MINUTE` as WRONG with "the LEFT side is still timestamp - timestamp, which does not parse" reason.
-- **r23 §2311-2313 DO-NOT-WRITE banner** — lists `ts2 - ts1 > INTERVAL '5' SECOND` as "INVALID Trino 467 — same reason as the row above. Even when the comparison is > INTERVAL, the LEFT side ts2 - ts1 is a timestamp - timestamp subtraction that does not parse" → corrected form `date_diff('second', ts1, ts2) > 5`. Also defangs `closed_at - opened_at`, `first_reply_at - created_at` and TIMESTAMPDIFF/DATEDIFF dialect imports.
+**Verdict**: iter1116 ts-minus-ts slip was a per-instance synthesis-ceiling artifact on a multi-step sessionization query (LAG + flag + running-SUM + gap test in one CTE), NOT a structural regression of the iter671 PIN canonical. The PIN canonical (r07 §3099 + r23 §2311-2313) HOLDS on the simpler "duration between two timestamp columns" shape. **Watch CLEARED.** Per `feedback_synthesis_ceiling_stop_churning` and the iter1115/iter1116 closure pattern: single-instance multi-step-query slips that don't recur on a re-probe with the same trap-shape are confirmed per-instance not structural; no FIX-A needed.
 
-**Verdict**: The canonical IS in the right place with the right defang. The responder did NOT pull it — it produced the exact form the defang bans. Skeleton-right (LAG/flag/running-SUM correctly named) but failed to use `date_diff` for the gap test, despite the canonical being headed PREFERRED and explicitly cross-referenced from r23.
+---
 
-### Pattern matching
+## Resource defect audit
 
-This is **NOT** a `feedback_responder_broken_secondary_alternative` (the broken form IS the primary answer, not a trailing "for completeness" alternative). It matches `feedback_synthesis_ceiling_stop_churning` weakly — multi-step query (CTE + window + aggregation), responder got the structural shape right but slipped a dialect detail despite extensive defang. The iter671 fix-A pattern is from 445+ iterations ago and has held for a long time; this is the first sessionization re-probe in many recent iters where I see a regression.
+**NONE.** All four answers source-verified clean against trino.io 467 docs:
+- Q1: date_diff signature + arg order + "no ts-minus-ts operator" framing all match datetime.html.
+- Q2: ROW_NUMBER PARTITION BY + outer-WHERE on rank <= N matches Trino 467 windowing + no-QUALIFY constraint.
+- Q3: trim BOTH char-set semantic matches string.html verbatim example `trim(BOTH '$' FROM '$var$')` → `'var'`.
+- Q4: expire_snapshots syntax + retention_threshold => '7d' matches iceberg.html; the "zero downside" framing is a minor responder shave (NOT a resource defect — r12 already correctly documents the time-travel-loss caveat at the standard expire_snapshots card; the responder just didn't pull that downside note this iter).
 
-### Recommendation: **NO-OP** (with watchlist)
-
-Adding more content to r07/r23 won't help — the canonical is already EXPLICIT, the DO-NOT-WRITE rows are EXPLICIT, the cross-references are EXPLICIT. Per `feedback_synthesis_ceiling_stop_churning`: scope this as a per-instance synthesis slip on a multi-step query, NOT a resource gap. The responder's recall ceiling cannot be fixed by additive content when the canonical is already preferred-and-defanged.
-
-**Watch stream**: Re-probe sessionization (or any other ts-minus-ts gap-test shape — ticket age in hours, time-to-first-response, deal-cycle-duration) in the next 2-3 iters from a different angle. If the ts-minus-ts regression RECURS on the re-probe, consider:
-- **LIGHT FIX-A only on confirmed recurrence**: hoist the `date_diff` form into a top-of-file STEP-0 router in r07 with keyword anchors `sessionize, session id, gap > N minutes, idle for N minutes, new session when, time between consecutive events` and an inline-WRONG defang on the ts-minus-ts form per `feedback_defang_donotwrite_snippets`.
-- Do NOT touch the r07 §3099 canonical or r23 §2311-2313 banner (both are correct and load-bearing).
-- Do NOT add a new file — creates finder-vs-content split per the iter1112 lesson.
-
-If the next re-probe lands clean → iter671 PIN remains durable, this iter is a one-off, no edit needed.
+The Q4 "zero downside" shave is a one-off responder ellipsis on a tail caveat, not a missing canonical or wrong-content. NO FIX-A.
 
 ---
 
 ## Topic rubric updates
 
+Classification:
+- Q1 (date_diff for duration in minutes between two columns) → **Analytical query patterns on Iceberg+Trino** (operational time-difference SQL pattern; same row as iter1116 Q1 sessionization which counted against this topic).
+- Q2 (ROW_NUMBER top-N-per-group windowing) → **Analytical query patterns on Iceberg+Trino** (window-function ranking is a canonical analytical pattern).
+- Q3 (trim char-set string function) → **SQL query best practices for OLAP** (Trino-dialect string-function correctness with dialect-trap awareness).
+- Q4 (expire_snapshots maintenance) → **Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup**.
+
 | Topic | Before | This iter | After |
 |---|---|---|---|
-| Analytical query patterns on Iceberg+Trino (Q1) | 4.4363/69 | 3.000 | (306.1047 + 3.000)/70 = **4.4158/70 PASSED** (-0.0205, margin +0.916 still well above 3.5) |
-| SQL best practices OLAP (Q2 + Q4) | 4.5021/171 | 4.875 + 4.875 | (769.8591 + 4.875 + 4.875)/173 = **4.5064/173 PASSED** (+0.0043, margin +1.006) |
-| Iceberg partition design for SaaS (Q3) | 4.4391/44 | 4.750 | (195.3204 + 4.750)/45 = **4.4460/45 PASSED** (+0.0069, margin +0.946) |
+| Analytical query patterns on Iceberg+Trino (Q1 + Q2) | 4.4158/70 | 5.000 + 4.9375 | (309.106 + 5.000 + 4.9375)/72 = **4.4311/72 PASSED** (+0.0153, margin +0.931) |
+| SQL best practices OLAP (Q3) | 4.5064/173 | 5.000 | (779.6072 + 5.000)/174 = **4.5092/174 PASSED** (+0.0028, margin +1.009) |
+| Iceberg table maintenance (Q4) | 4.4683/173 | 4.750 | (772.9159 + 4.750)/174 = **4.4694/174 PASSED** (+0.0011, margin +0.969) |
 
-ALL required topics REMAIN PASSED. No topic crosses or approaches the 3.5 threshold.
+ALL required topics REMAIN PASSED. No topic approaches the 3.5 threshold.
 
 ---
 
 ## Memory pins reinforced
 
-- `reference_trino_unwrap_temporal_predicates` — not triggered this iter (no function-on-column sargability question), but related discipline (date_diff is the right tool, not arithmetic).
-- `reference_trino_regex_backslash` — Q2 `[^0-9]` correctly avoids the `\d`/`\D` single-vs-double backslash trap; no regression.
-- iter671 PIN (r07 §3099 + r23 §2311-2313 ts-minus-ts ban) — **regression observed THIS iter**; defang in place, watch stream opened.
+- `reference_trino_trim_charset` — Q3 char-set framing correct (Trino is char-set not single-char or substring); pin holds.
+- iter671 PIN (r07 §3099 + r23 §2311-2313 ts-minus-ts ban) — **iter1116 slip DID NOT RECUR on this iter's duration-between-two-timestamps re-probe**; canonical durable on this shape. The slip-shape (gap-test inside sessionization CTE) remains the multi-step-query synthesis-ceiling instance, not a structural canonical failure.
 
 ## Memory pins NOT triggered (clean carry)
 
-- No `::` cast / QUALIFY / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover / imported-prior.
-- No COUNT(DISTINCT a,b) multi-arg / no GREATEST-NULL Postgres-prior / no `<<`/`>>` shift / no array_sum / no `->`/`->>` JSON / no DATEDIFF dialect import.
+- No `::` cast / QUALIFY / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover / GREATEST-NULL-Postgres-prior / `<<` shift / array_sum / `->`/`->>` JSON / DATEDIFF dialect import / multi-arg COUNT DISTINCT.
 
 ---
 
 ## Recommendation: **NO-OP**
 
-- No resource edits.
+- No resource edits. Canonical content is correct and findable on all four shapes.
 - No state.json bump beyond iteration counter (`extended` phase, passed remains true).
 - Commit rubric + feedback only.
-- **Watch stream opened**: Q1 sessionization / ts-minus-ts gap-test regression. Re-probe in next 2-3 iters from a different gap-test angle. LIGHT FIX-A only on confirmed recurrence (additive STEP-0 router in r07, no rewrite of existing canonical).
+- iter1116 Q1 ts-minus-ts watch stream **CLOSED** (re-probe clean on first attempt on a different ts-minus-ts shape).
 - Federation untouched (4.50244/312 fragile-PASS preserved).
 - CBO/ANALYZE untouched (4.5716/20, +0.072 margin to raised 4.5 preserved).
 
 ### Optional next-sweep durability probes (no edit, just probe)
 
-- Sessionization re-probe with different domain (cart-abandonment session, login-session timeout) to confirm Q1 ts-minus-ts regression is per-instance vs structural.
+- Sessionization full-query re-probe (LAG + flag + running-SUM + gap test all in one CTE) 1-2 more iters to confirm the iter1116 multi-step slip stays per-instance — single-pattern shape that closed cleanly this iter doesn't prove the multi-step shape; consider a session-id-assignment query in next 3-5 iters.
 - Storage-tiering 7th datapoint (3.5625/6 still thinnest required-topic row).
 - dbt-model-contracts 7th angle (4.391/6).
-- dbt-snapshots SCD2 15th angle (4.0315/14, 2nd-thinnest after storage-tiering).
+- dbt-snapshots SCD2 15th angle (4.0315/14).
 - Cost-considerations 21st angle (4.2129/20).
 
 ### Pattern observation
 
-iter1116 breadth-sweep mostly clean (3 of 4 questions ≥ 4.75), with one regression on a long-stable defect class. The Q1 ts-minus-ts slip on a question whose canonical is BOTH preferred AND defanged is informative: the iter671 PIN held for 445+ iterations without re-probe stress; this is the first sessionization sweep in many. The skeleton-right / dialect-wrong split (canonical gaps-and-islands shape correctly named but wrong gap-test operator) is the synthesis-ceiling artifact described in `feedback_synthesis_ceiling_stop_churning` — adding more content to an already-explicit canonical does not durably fix a multi-step-query recall slip. Re-probe rather than churn.
+iter1117 is a clean breadth-sweep STRONG PASS (4.9219) with the principal value being **closure of the iter1116 Q1 ts-minus-ts watch on the simpler duration-between-two-timestamps shape**. The deliberately tempting question framing ("my instinct is to subtract them like Python/Java") explicitly invited the iter671 defect class and the responder REJECTED it on the surface form — this is exactly the verification the watch stream was opened to gather. The next-iter discipline is to probe the FULL sessionization multi-step shape (where the iter1116 slip actually occurred) before declaring the synthesis-ceiling artifact fully scoped per-instance; the simpler shape closing cleanly is necessary but not sufficient evidence for the multi-step shape.
 
-Pattern observation 2: Q3's clean handling of `sorted_by` via `ALTER TABLE SET PROPERTIES` plus `EXECUTE optimize` reaffirms the strong Iceberg-maintenance + partition-design content lineage (file_size_threshold default verbatim, optimize honors sort order, dbt post_hook idiom). Q4's UNION default-DISTINCT explanation is textbook-clean and signals durable SQL-set-ops content in r23. Q2's `[^0-9]` instead of `\D` shows the `reference_trino_regex_backslash` defang continues to land cleanly.
+Q4's "zero downside" minor shave is the only flag this iter and is a responder ellipsis on a tail caveat, not a content defect. Continue verify-first against trino.io 467 RAW source on dialect facts (date_diff arg order, trim char-set semantic, expire_snapshots syntax/effects).

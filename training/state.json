@@ -1,7 +1,7 @@
 {
-  "iteration": 1116,
+  "iteration": 1117,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1116 4.375 PASS NO-OP + WATCH STREAM. Q1 sessionization REGRESSED to iter671 ts-minus-ts defect class (responder produced `(occurred_at - LAG(...)) > INTERVAL '30' MINUTE` — exact form r07 §3164 + r23 §2311-2313 ban as PARSE ERROR); Q2 regexp_replace digit-strip / Q3 Iceberg sorted_by+optimize / Q4 UNION-default-DISTINCT all clean. Classified RESPONDER SLIP from CANONICAL not resource defect — canonical+defang both in place; per feedback_synthesis_ceiling_stop_churning, re-probe rather than churn. Watch stream: re-probe sessionization or other ts-minus-ts shape (ticket age in hours, time-to-first-response, deal-cycle-duration) in next 2-3 iters; LIGHT FIX-A only on confirmed recurrence. ALL topics REMAIN PASSED. Federation/CBO untouched."
+  "note": "iter1117 ts-minus-ts watch re-probe (iter1116 Q1 slip). Q1 = duration-between-two-timestamps shape, DIFFERENT angle (time-to-first-response in minutes / ticket age in hours / gap between consecutive events) \u2014 confirm responder uses date_diff(unit, earlier, later) NOT timestamp-minus-timestamp. If ts-ts recurs -> LIGHT FIX-A (STEP-0 router in r07 with inline-WRONG defang). Q2-Q4 breadth."
 }
