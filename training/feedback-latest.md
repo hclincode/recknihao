@@ -1,6 +1,8 @@
-# Iter1138 Judge Feedback
+# Iter1139 Judge Feedback
 
-**Verdict: 4.6875 STRONG PASS LIGHT FIX-A. Q1 surfaced a RESOURCE-SOURCED factual defect in r27 §4.4C — Trino 467 DOES have `truncate(x, n)` 2-arg form (verified at trino.io/docs/current/functions/math.html); resource explicitly asserts it does NOT exist and even fabricates a precise wrong-arity error message. Workaround `truncate(x*100)/100` still produces correct value so user-facing impact is bounded, but the function-inventory claim and fabricated error text are flat false. Q2/Q3/Q4 clean 5.0 breadth angles. Joins memory `Trino starts_with / ends_with` + `Trino to_char Exists` + `Trino listagg Native` + `Trino No array_sum` imported-prior recurring class — this time the wrong direction (assumed absence; the form IS there). NO new watch streams.**
+**Verdict: 3.8750 PASS + DOUBLE LIGHT FIX-A.** Q1 truncate-2-arg FIX-A REACHED CLEANLY (responder used `truncate(amount, 2)` direct 2-arg, no "1-arg only" claim; iter1138 r27 §4.4C correction CLOSES the watch). Q2 clean 5.0 breadth. **Q3 SILENT-WRONG DEFECT (responder one-off + resource-gap defang missing)** — responder recommended `WHERE status IS NOT DISTINCT FROM 'unknown'` and asserted it is "TRUE when status is NULL OR status='unknown'", which is FLAT FALSE: `NULL IS NOT DISTINCT FROM 'unknown'` returns FALSE (verified at trino.io/docs/current/functions/comparison.html), so the recommended form filters OUT all NULL rows and is NOT equivalent to `NVL(status,'unknown')='unknown'`. Engineer who ships this gets a silent-wrong query that misses every NULL-status row. **Q4 SCD-2 FINDABILITY MISS** — responder reached r27, cited SCD-1 merge, then BAILED on SCD-2 with "I DON'T HAVE ENOUGH INFORMATION IN THE RESOURCES" despite the canonical dbt-snapshot pattern existing in r09 §SCD and an explicit signpost from r27 TL;DR pt4. Routing failed because the question phrasing ("build change history", "what plan in February", "Oracle table updated in place no history", "track tier changes over time") did not match the signpost's anchor wording closely enough.
+
+Two LIGHT FIX-As land this iter: (a) r23 §INDF inline-WRONG defang against the NVL-substitute misuse; (b) r27 TL;DR pt4 + r09 SCD anchor keyword-anchor strengthening for SCD-2-need phrasings without the literal word 'snapshot'.
 
 ---
 
@@ -8,198 +10,254 @@
 
 | Q | Topic | Acc | Clar | App | Compl | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | Oracle TRUNC dual-use → Trino (no overloaded TRUNC; `truncate()` numeric + `date_trunc('day',ts)` date — but responder repeats r27's wrong "1-arg only" claim, missing direct `truncate(x, 2)` form) | 3.0 | 4.0 | 4.0 | 4.0 | **3.7500** |
-| Q2 | Running per-customer MIN — `MIN(monthly_spend) OVER (PARTITION BY customer_id ORDER BY month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`, same framing as running SUM | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q3 | Extract '3.12.0' from 'client/v3.12.0/release' — `regexp_extract(str, 'v([0-9.]+)', 1)`, 3-arg form, group 0=whole / 1=first capture | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q4 | Iceberg hidden partitioning by month/day — `WITH (partitioning = ARRAY['day(occurred_at)'])`, filter on raw timestamp auto-prunes, dbt key is `partitioning` (not `partitioned_by`) for Iceberg | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| **Iter avg** | | | | | | **4.6875 STRONG PASS** |
+| Q1 | Oracle `TRUNC(line_amount, 2)` → Trino `truncate(amount, 2)` 2-arg direct (FIX-A re-probe) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q2 | Accounts active 30d-BEFORE cutoff but ZERO events 30d-AFTER — two CTE windows + LEFT JOIN … WHERE IS NULL anti-join | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q3 | Oracle `NVL(status,'unknown')='unknown'` → Trino — responder recommended `IS NOT DISTINCT FROM 'unknown'` (WRONG: filters out NULL rows, NOT NVL-equivalent) | 1.5 | 4.0 | 1.5 | 3.0 | **2.5000** |
+| Q4 | Mutable Oracle dim with no history → dbt SCD-2 change-history pattern — responder BAILED on SCD-2 despite canonical living in r09 with r27 TL;DR pt4 signpost | 3.5 | 4.0 | 2.5 | 2.0 | **3.0000** |
+| **Iter avg** | | | | | | **3.8750 PASS** |
 
-Margin = +1.1875 above 3.5 pass threshold. Q1 drag (3.75) traceable to a SINGLE resource-sourced factual claim that the responder faithfully echoed.
+Margin = +0.3750 above 3.5 pass threshold — thin compared to recent 4.6-4.9 band. Q3 and Q4 both pulled by ~1.5 each off the 5.0 baseline; if either had hit the 5.0 band the iter would have been STRONG PASS.
 
 ---
 
 ## Per-question detail
 
-### Q1 — Oracle TRUNC dual-use → Trino — **3.7500** — RESOURCE-SOURCED FACTUAL DEFECT
+### Q1 — Oracle TRUNC(line_amount, 2) → Trino — **5.0000** — FIX-A CONFIRMED REACHED
 
-Question: "Oracle's `TRUNC(decimal, 2)` truncates decimals; `TRUNC(timestamp)` strips time. Does Trino have one overloaded TRUNC, or separate functions?"
+Question: "Oracle code uses `TRUNC(line_amount, 2)` for numeric truncation. What's the Trino form — a single function or do I have to do `FLOOR(amount*100)/100`?"
 
-Responder answer (correct parts):
-- No overloaded `TRUNC` in Trino — CORRECT.
-- Numeric truncation → `truncate()` — CORRECT (function name).
-- Date truncation → `date_trunc('day', ts)` — CORRECT.
-- These are **separate functions** (not one overload) — CORRECT.
-- `truncate(timestamp)` errors — CORRECT (math fn doesn't accept temporal types).
+Responder answer:
+- **"Use `truncate(amount, 2)` — your one-liner, maps directly to Oracle `TRUNC(amount, 2)`"** — CORRECT, 2-arg direct form.
+- Behavior note: drops digits toward zero without rounding; 12.349 → 12.34; -12.349 → -12.34 (toward-zero on negatives) — CORRECT.
+- Defang against `round()`: explicitly warns it does HALF_UP rounding not truncation — CORRECT.
+- No "1-arg only" claim, no "2-arg form does NOT exist" assertion, no `truncate(amount*100)/100` workaround offered as canonical — CLEAN.
 
-Responder answer (DEFECT):
-> "truncate() which it claims is '1-arg only', so for 2 decimals use `truncate(price*100)/100` (general: `truncate(price*power(10,2))/power(10,2)`)"
+**FIX-A reach verdict: CONFIRMED CLEAN.** iter1138 r27 §4.4C correction (removed the false "1-arg only" claim and the fabricated wrong-arity error message at lines 1628 / 1657 / 1665) has reached the responder's recall. The Oracle-`TRUNC(x,n)`-to-Trino watch **CLOSES** this iter. Joins the closed-watch ledger alongside ADD-COLUMN, partition-COUNT-folklore, population-percentile, dedup-tied-tuple, SELECT-*-EXCEPT, `{% if execute %}`, percent_rank-DESC-direction.
 
-**Trino 467 HAS BOTH `truncate(x)` 1-arg AND `truncate(x, n)` 2-arg forms.** Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html):
-- `truncate(x) → [same as input]` — "Returns `x` rounded to integer by dropping digits after decimal point."
-- `truncate(x, d) → [same as input]` — "Returns `x` truncated to `d` decimal places. `d` can be negative, in which case `d` digits to the left of the decimal point are zeroed out."
+Verified against [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html): `truncate(x, d)` 2-arg signature documented with explicit example `truncate(REAL '12.333', 1) → 12.3`. Decimal overload `function truncate(decimal(p, s), bigint) returns decimal(p, s)` also confirmed.
 
-Trino-481 search hit also confirms decimal signature: `function truncate(decimal(p, s), bigint) returns decimal(p, s)`. Examples per the docs: `truncate(REAL '12.333', -1)` → `10.0`; `truncate(REAL '12.333', 1)` → `12.3`.
+### Q2 — Accounts active before cutoff but ZERO events after — **5.0000**
 
-So the simpler direct form `truncate(price, 2)` produces the same `47.89` result the workaround produces — and the responder's `truncate(price*100)/100` workaround is **functionally correct but unnecessarily verbose**, and the underlying claim that "the 2-arg form does NOT exist" is FACTUALLY WRONG.
+Question (paraphrased): "I want accounts that were active in the 30 days BEFORE a cutoff date but had ZERO events in the 30 days AFTER. How do I structure this on Iceberg+Trino?"
 
-**Severity classification: minor accuracy defect.** The workaround the responder offered produces the correct value, so user-facing breakage is bounded — engineer ships working code, just verbose. BUT:
-1. Function-inventory misrepresentation pollutes the engineer's mental model.
-2. The resource even fabricates a precise wrong-arity error text the engine would purportedly throw (see below) — that's a forward-credibility hit if the engineer ever tests it.
-
-**Source root cause: resource defect, not responder slip.** Greppable to `resources/27-oracle-plsql-to-dbt-trino.md`:
-- **Line 1628** (canonical table row): *"Trino's `truncate` is **1-arg only**; the 2-arg `truncate(n, d)` form **does NOT exist** in Trino 467."* — FLAT FALSE.
-- **Line 1657** (DO-NOT-WRITE entry 2): *"`truncate(n, d)` — the 2-arg numeric truncation form — does NOT exist on Trino. Trino's `truncate` is **1-arg ONLY** … Writing `truncate(12.3456, 2)` produces a wrong-arity / function-resolution error of the form `Unexpected parameters (decimal(6,4), integer) for function truncate. Expected: truncate(<numeric type>)`"* — FABRICATED ERROR MESSAGE; the engine would NOT throw this because the 2-arg overload exists.
-- **Line 1665** (Keyword-trap phrase): *"Anyone who writes `TRUNC(x, 2)` for Trino is using Oracle syntax — Trino has lowercase `truncate(x)` 1-arg only"* — WRONG; the lowercase 2-arg form IS available.
-- **Line 1624** explicitly cites a verification date of 2026-06-05 against `trino.io/docs/current/functions/math.html`, which makes the wrong claim look authoritative.
-
-**Classification: imported-prior recurring class — assumed-absence direction.** This joins the documented memory pins:
-- "Trino starts_with / ends_with" (assumed `starts_with` was a fabrication; it isn't),
-- "Trino to_char Exists" (wrongly called `to_char` a fabrication),
-- "Trino listagg Native" (wrongly lumped `listagg` absent),
-- "Trino No array_sum" (other direction: my pin asserted presence; the form was absent).
-
-The class is "assume foreign-looking forms aren't in Trino without verifying" — this is the 5th instance in the catalogued series. Resource was likely written from an unverified directive prior; trino.io math docs refute it directly.
-
-**LIGHT FIX-A SPEC (single resource, ~10-15 line reconciliation):**
-- `resources/27-oracle-plsql-to-dbt-trino.md` §4.4C — reconcile in-place (do NOT just append per memory pin "Reconcile Don't Append"):
-  - Line 1628 row 1 — change Trino canonical column to: *"`truncate(n, d)` — lowercase, 2-arg (Trino 467 HAS this overload, `truncate(decimal(p,s), bigint) → decimal(p,s)`). Equivalent verbose form: `truncate(n * power(10, d)) / power(10, d)`."* Drop the "1-arg only / does NOT exist" claim.
-  - Line 1639-1642 canonical worked example — LEAD with `truncate(price * 1.0875, 2) AS price_with_tax` (direct 2-arg); keep `truncate(price * 1.0875 * 100) / 100` as an "equivalent verbose form" cross-reference, not the canonical.
-  - Line 1657 DO-NOT-WRITE entry 2 — DELETE this entry entirely (the form is valid; defang is the inverse of truth). Replace with: *"Watch the result type: `truncate(decimal(p,s), n)` returns `decimal(p,s)` not a double; chained string formatting should still wrap in `CAST(... AS DECIMAL(18,2))` or `format()` if a fixed scale is required for display."*
-  - Line 1665 Keyword-trap phrase — rewrite: *"Anyone who writes `TRUNC(x, 2)` for Trino is using Oracle syntax — Trino lowercase form is `truncate(x, 2)` (2-arg form IS supported in 467); if you only have the 1-arg form in mind, `truncate(x*100)/100` is equivalent."*
-- Keep the `TRUNC` (uppercase / non-existent name) defang and the `truncate(date)` defang in entries 1, 3, 4 — those are correct.
-- Add a `verification_date: 2026-06-26` comment with explicit re-verification against `trino.io/docs/current/functions/math.html` two-arg signature.
-- Cross-link from r07 §4528+ (the rounding/truncating canonical) to the corrected r27 §4.4C so the rounding-vs-truncation guidance stays aligned.
-
-After landing, re-probe within 2-3 iters with a different Oracle-TRUNC-to-Trino phrasing (e.g., "Oracle code uses `TRUNC(amount, 4)`; what's the Trino form?") to confirm the responder reaches the direct `truncate(x, n)` form instead of repeating the workaround verbatim.
-
-### Q2 — Running per-customer MIN with OVER framing — **5.0000**
-
-Question: "I have monthly_spend per (customer_id, month). I want to show 'lowest spend ever through this month' running per customer. Does MIN() work with the same OVER (… ROWS UNBOUNDED PRECEDING …) syntax as a running SUM?"
-
-Responder:
+Responder gave the canonical two-window anti-join shape:
 ```sql
-SELECT customer_id, month, monthly_spend,
-       MIN(monthly_spend) OVER (
-         PARTITION BY customer_id
-         ORDER BY month
-         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-       ) AS lowest_spend_through_month
-FROM spend_by_month;
+WITH active_before AS (
+  SELECT DISTINCT account_id
+  FROM events
+  WHERE occurred_at >= DATE '2025-09-01' - INTERVAL '30' DAY
+    AND occurred_at <  DATE '2025-09-01'
+),
+active_after AS (
+  SELECT DISTINCT account_id
+  FROM events
+  WHERE occurred_at >= DATE '2025-09-01'
+    AND occurred_at <  DATE '2025-09-01' + INTERVAL '30' DAY
+)
+SELECT b.account_id
+FROM active_before b
+LEFT JOIN active_after a
+  ON b.account_id = a.account_id
+WHERE a.account_id IS NULL;
 ```
-+ explicit "yes, same positional framing as a running SUM; MIN is an aggregate that also works as a window function — you just add OVER and a frame."
++ NOT EXISTS alternative for the second window + correct callout that the half-open `>=`/`<` bounds on raw `occurred_at` get partition-pruned if the events table is partitioned by `day(occurred_at)`.
 
-Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): "All Aggregate functions can be used as window functions by adding the `OVER` clause. The aggregate function is computed for each row over the rows within the current row's window frame." Documentation provides explicit rolling-sum example using the same `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` framing. MIN/MAX/AVG/SUM all behave identically as aggregates-as-window-functions under explicit ROWS framing.
+This is the canonical "active in window A but not window B" churn/lapsed-user pattern. The LEFT JOIN + WHERE IS NULL anti-join shape is recommended over `NOT IN` because `NOT IN` mis-handles NULLs (any NULL in the inner result returns no rows on the outer side per three-valued logic). The half-open interval form `>= start AND < end + 1` avoids the off-by-one trap of `BETWEEN ... AND ...` on timestamps that include time. Both CTEs use `SELECT DISTINCT account_id` to avoid join-fan-out, which is the right pre-aggregation for anti-join.
 
-Clean canonical answer, correct framing choice (ROWS not RANGE — RANGE on date/timestamp could behave differently with peers, ROWS is the cumulative-by-position framing), correct equivalence statement.
+Clean canonical answer. Partition pruning note bonus.
 
-### Q3 — `regexp_extract` capture-group index — **5.0000**
+### Q3 — Oracle NVL replacement: IS NOT DISTINCT FROM misuse — **2.5000** — SILENT-WRONG DEFECT
 
-Question: "Extract '3.12.0' from 'client/v3.12.0/release'. Does Trino's `regexp_extract` support a capturing-group index?"
+Question: "Oracle code is `WHERE NVL(status, 'unknown') = 'unknown'` — they want to treat NULL rows the same as the literal 'unknown'. The literal Trino rewrite is `WHERE status IS NULL OR status = 'unknown'`. Is `IS NOT DISTINCT FROM` cleaner?"
 
-Responder:
-```sql
-SELECT regexp_extract('client/v3.12.0/release', 'v([0-9.]+)', 1);  -- '3.12.0'
+Responder answer (the DEFECT):
+> "Use `IS NOT DISTINCT FROM` — clean purpose-built operator: `WHERE status IS NOT DISTINCT FROM 'unknown'` -- TRUE when status is NULL OR status = 'unknown'"
+> Calls it idiomatic, says it eliminates the COALESCE sentinel pattern, claims it preserves pruning.
+> Cites r23 §2923-2948.
+
+**THIS IS FACTUALLY WRONG.** Verified at [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html):
+
+| Case | `a IS NOT DISTINCT FROM b` |
+|---|---|
+| a and b non-null and equal | TRUE |
+| a and b non-null and unequal | FALSE |
+| BOTH NULL | TRUE (the one case where INDF differs from `=`) |
+| a IS NULL, b is non-null literal | **FALSE** |
+| a is non-null literal, b IS NULL | **FALSE** |
+
+The Trino docs verbatim: "NULL IS NOT DISTINCT FROM NULL; -- true" and "treat NULL as a known value and both operators guarantee either a true or false outcome even in the presence of NULL input."
+
+With b fixed at the non-null literal `'unknown'`, the both-NULL branch CAN NEVER fire (b is never NULL). So:
+- `status IS NOT DISTINCT FROM 'unknown'` is TRUE iff `status = 'unknown'`.
+- When `status IS NULL`, the result is **FALSE** (NULL is DISTINCT FROM 'unknown' because exactly one side is NULL).
+
+**`IS NOT DISTINCT FROM` against a non-null literal is just `=`. It is NOT NVL-equivalent. It silently FILTERS OUT all NULL-status rows.**
+
+The engineer's intent — match BOTH literal-'unknown' status AND NULL status — is broken. The correct Trino equivalents are:
+- `COALESCE(status, 'unknown') = 'unknown'` (direct NVL → COALESCE rewrite)
+- `status IS NULL OR status = 'unknown'` (the literal expansion the engineer already had)
+
+`IS NOT DISTINCT FROM` is the right operator for null-safe equality between **TWO possibly-NULL operands** — e.g., a join key where both sides can be NULL and you want NULL-vs-NULL to match (the canonical dedup / MERGE-key use case in r23 §2929-2935). It is NOT a substitute for "treat NULL as a chosen literal value".
+
+**Severity classification: silent-wrong correctness defect.** This is materially worse than the iter1138 r27 truncate misclaim:
+- iter1138 truncate workaround `truncate(price*100)/100` was VERBOSE but produced the CORRECT VALUE — user-facing breakage bounded to verbose code.
+- iter1139 INDF misuse produces the WRONG ROW SET — every NULL-status row is silently dropped. No parse error, no warning, just missing rows in downstream reports.
+
+The engineer's question explicitly framed the goal: "treat NULL and the literal the same". The responder's recommendation does the OPPOSITE for NULL rows.
+
+**Source root cause: HYBRID — responder one-off over-extrapolation + resource missing a defang.**
+
+Greppable to `resources/23-sql-best-practices-olap.md` §2923-2947:
+- §2927 explicitly states "NULL IS NOT DISTINCT FROM 'x' → FALSE" — the resource HAS the correct truth-table fact.
+- §2941 worked example correctly uses two-column form `col_a IS NOT DISTINCT FROM col_b` for two-nullable-operands.
+- §2945 "prefer it" guidance is scoped to the "treat NULL as equal to NULL" case — correct.
+- **MISSING: explicit inline-WRONG defang against `col IS NOT DISTINCT FROM 'literal'` as an NVL-substitute pattern.** The resource correctly says NULL-vs-non-null returns FALSE, but does not put up a guard rail against the engineer who reads "null-safe equality" too loosely and applies INDF as a generic "treat NULL as this literal" shortcut.
+
+The responder had the correct truth-table fact available (§2927) but over-extrapolated past it — read "null-safe equality" as "handles NULL same as the other side" without checking the truth table for the asymmetric NULL-vs-literal case. This is a classic over-extrapolation slip; the resource is correct but porous against the specific misuse this question's phrasing invites.
+
+**Classification: responder one-off slip ON a resource-coverage gap.** The resource is technically correct; the missing piece is a positive defang against the named misuse pattern.
+
+**LIGHT FIX-A SPEC (single resource, ~5-8 line addition):**
+
+`resources/23-sql-best-practices-olap.md` §2923-2947 — add an inline-WRONG defang block between §2941 and §2945 (before the "Why not the workarounds?" paragraph):
+
 ```
-+ 2-arg form returns whole match; 3-arg form takes group index (0=whole match, 1=first capture); second example with `'action=(\S+)'` group 1.
+> **DO NOT WRITE — INDF against a non-null literal is NOT an NVL-substitute.**
+> `WHERE col IS NOT DISTINCT FROM 'unknown'` is **equivalent to `WHERE col = 'unknown'`** when the right side is a non-null literal. The `NULL IS NOT DISTINCT FROM <literal>` case returns **FALSE** (not TRUE) — exactly one side is NULL, so the values ARE distinct. This means `col IS NOT DISTINCT FROM 'unknown'` **silently filters out every NULL row**, the opposite of what an Oracle `NVL(col,'unknown')='unknown'` migration needs.
+>
+> Use INDF only when **BOTH sides can be NULL** (the null-safe-equality use case: two nullable columns, a join key, a dedup key).
+>
+> To "treat NULL as a chosen literal value" — Oracle `NVL(col, sentinel) = sentinel` — use one of:
+> - `COALESCE(col, 'unknown') = 'unknown'` (direct NVL → COALESCE rewrite)
+> - `col IS NULL OR col = 'unknown'` (literal expansion)
+>
+> The two patterns produce different rows because INDF's null-rule is **symmetric** (both sides NULL → TRUE) while NVL's null-rule is **asymmetric** (one side is the constant, the other gets NULL-coerced).
+```
 
-Verified at [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html):
-- 2-arg: `regexp_extract(string, pattern) → varchar` — first substring matched by pattern.
-- 3-arg: `regexp_extract(string, pattern, group) → varchar` — capturing group number `group`.
+After landing, re-probe within 2-3 iters with a different NVL-substitute phrasing — e.g., "Oracle code is `WHERE NVL(plan_tier, 'FREE') IN ('FREE', 'TRIAL')`; can I use `IS NOT DISTINCT FROM` for this?" — to confirm the responder reaches the COALESCE form, not INDF.
 
-Pattern `v([0-9.]+)` against `'client/v3.12.0/release'` matches `v3.12.0` at position 7 (the literal `v` anchors, then `[0-9.]+` greedy-captures `3.12.0` until non-matching `/`). Group 1 = `'3.12.0'`. Correct.
+### Q4 — dbt SCD-2 change history for mutable Oracle dim — **3.0000** — FINDABILITY MISS + BAIL
 
-Single-backslash `'\S'` in Trino SQL string literal works per memory pin `Trino Regex Backslash` (RAW git-tag 467 regexp.md verifies single backslash in actual SQL; double backslash is a Sphinx rendering artifact on trino.io HTML). Responder used single backslash — correct.
+Question (paraphrased): "Our Oracle `customer_accounts` is mutable — updated in place, no history. Analysts now want to ask 'what plan was this customer on in February?' and 'how many customers upgraded tier last quarter?'. How does dbt + Trino + Iceberg build that change history?"
 
-Clean canonical answer, both forms covered, correct group-index semantics.
+Responder answer:
+- Correctly diagnosed: this is an SCD-1 (current-state-only) → SCD-2 (full history) shift — CORRECT framing.
+- Showed the SCD-1 dbt incremental merge from r27 §6 (`materialized='incremental'`, `incremental_strategy='merge'`, `unique_key='customer_id'`) — CORRECT but answers only the CURRENT state, not the analyst's "what plan in February" need.
+- Then: **"For building full change history (SCD-2), I DON'T HAVE ENOUGH INFORMATION IN THE RESOURCES"** / **"SCD-2 implementation with dbt on Trino would need... I don't have detailed guidance"** / **"Next step: document this in the resources."**
 
-### Q4 — Iceberg hidden partitioning by month-of-timestamp — **5.0000**
+**The bail is wrong.** The canonical dbt SCD-2 pattern IS in the resources:
+- `resources/09-lakehouse-schema-design.md` §305-450 — full dbt SNAPSHOT canonical:
+  - SCD Type 2 conceptual diagram (§309-337).
+  - Option 1 dbt snapshot (§353-414) with both `strategy='timestamp'` and `strategy='check'` worked examples.
+  - `dbt_valid_from` / `dbt_valid_to` / `dbt_scd_id` metadata columns.
+  - As-of point-in-time query (§341-347): `WHERE TIMESTAMP '2025-08-10' >= valid_from AND (valid_to IS NULL OR TIMESTAMP '2025-08-10' < valid_to)`.
+  - `unique_key` alias rule, `hard_deletes` config, `check_cols` LIST vs `'all'` STRING.
+- `resources/27-oracle-plsql-to-dbt-trino.md` §9 TL;DR pt4 (line 14) — explicit signpost: *"If you instead need SCD-2 HISTORY — keep every change with effective dates and answer 'what plan/price/status was this entity on as of <date>' — that's a **dbt SNAPSHOT**, NOT an incremental merge model: see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot]**"*.
+- This routing signpost was added at **iter1112** as part of the SCD-2 → r09 routing layer.
 
-Question: "Can Iceberg partition by month-of-timestamp WITHOUT a separate date column? How do I define it in Trino + dbt? Does Trino auto-prune when I filter on the raw timestamp column?"
+The question's analyst-need phrasing — **"what plan was this customer on in February?"** — matches the signpost's anchor wording — *"answer 'what plan/price/status was this entity on as of <date>'"* — almost verbatim. The responder reached r27 (cited the SCD-1 merge from §6) but did not follow pt4 of the TL;DR over to r09.
 
-Responder:
-- "Yes, Iceberg HIDDEN PARTITIONING via transforms."
-- DDL: `CREATE TABLE … WITH (partitioning = ARRAY['day(occurred_at)'])` (Trino syntax `day(col)` not `days(col)`).
-- Filter on raw timestamp: `WHERE occurred_at >= TIMESTAMP '…' AND occurred_at < TIMESTAMP '…'` — Iceberg applies the transform to the predicate bounds to prune.
-- Transform names: `day` / `month` / `year` / `hour` / `bucket(col, N)`.
-- dbt config key: `partitioning` (not `partitioned_by`) for Iceberg.
+**Source root cause: findability / routing miss.** The content exists; the responder's keyword-routing didn't land on it. Possible causes (each compounds):
+1. **TL;DR pt4 is BURIED.** It's the 4th of 7 TL;DR sentences in r27. The responder may have skimmed pt4 looking for SCD-1 content (which is there) and not re-read it for SCD-2.
+2. **Signpost wording doesn't include the question's literal phrases.** The question used "**build change history**", "track plan/tier changes **over time**", "Oracle table **updated in place no history**" — none of these appear verbatim in the pt4 signpost. The signpost says "SCD-2 HISTORY" / "keep every change with effective dates" / "what plan/price/status was this entity on as of <date>". The "what plan in February" part of the question matches; the "build change history" framing does not.
+3. **The question does NOT contain the literal word "snapshot".** All of r09's strong keyword anchors (§355) are anchored on the word "snapshot" or on schema field names like `dbt_valid_from`. The question is one level upstream of those anchors — it describes the NEED ("how does dbt build change history") without using the dbt-side noun ("snapshot") that names the solution.
 
-Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html): partition transforms supported include `year(ts)`, `month(ts)`, `day(ts)`, `hour(ts)`, `bucket(x, nbuckets)`, `truncate(s, nchars)`, and identity. Native Trino spelling is **singular** `day` / `month` / `year` / `hour` (Spark/Iceberg Spark uses plural `days` / `months` / `years` / `hours` — common cross-engine confusion; responder correctly distinguishes).
+**Classification: routing/findability miss with no responder-side fix possible — content is correct, anchors are insufficient for the SCD-2-need-without-the-word-snapshot phrasing class.**
 
-Auto-prune on raw-timestamp filter verified at [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html) ("Just the right time date predicates with Iceberg") and Starburst's "Iceberg Partitioning and Performance Optimizations in Trino" — Trino applies constant-replacement optimization that pushes filters down to Iceberg, which uses the transform definition to translate raw-column bounds into partition-value bounds and prune at the metadata layer. Caveat (correctly implicit in the responder's bare-range form): a predicate that doesn't align with the partition granularity (e.g., a sub-day window inside a `day()`-partitioned table) still benefits from file-level min/max stats but not full partition elimination.
+**LIGHT FIX-A SPEC (two-touch keyword-anchor strengthening, ~6-10 lines total):**
 
-dbt-trino Iceberg `partitioning` key: Trino's native CREATE TABLE WITH property for the Iceberg connector is **`partitioning = ARRAY[...]`** (verified at iceberg.html — examples consistently use `partitioning = ARRAY['city', 'bucket(userid, 16)']` / `partitioning = ARRAY['month(order_date)']`). dbt-trino's `properties={...}` dict passes the property name through to Trino's WITH clause unchanged, so for Iceberg the correct key inside `properties` is `partitioning` (not `partitioned_by`, which is the Hive-connector property). dbt docs examples occasionally show `partitioned_by` because they target both Hive and Iceberg; responder's "for Iceberg specifically, use `partitioning`" framing is accurate for the prod_info.md stack (Trino 467 + Iceberg connector + Hive Metastore catalog).
+(a) `resources/27-oracle-plsql-to-dbt-trino.md` TL;DR pt4 (line 14) — extend the parenthetical anchor list. Current end of pt4:
+> *"…that's a **dbt SNAPSHOT**, NOT an incremental merge model: see **[resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd)** (creates `dbt_valid_from`/`dbt_valid_to`/`dbt_scd_id`; as-of query `WHERE dbt_valid_from <= TIMESTAMP '<date>' AND (dbt_valid_to IS NULL OR dbt_valid_to > TIMESTAMP '<date>')`)."*
 
-Clean canonical answer.
+Add an immediately-following keyword-anchor sentence:
+> *"**Keywords this signpost serves**: 'build change history from a mutable source', 'how does dbt build change history', 'track plan/tier/price changes over time', 'version history of a dimension', 'Oracle dimension updated in place no history', 'mutable source no history', 'what was the value on a past date', 'point-in-time dimension lookup', 'as-of query', 'time-travel a dimension', 'how many customers upgraded tier last quarter', 'how many records changed X last month' — ALL of these route to r09 § dbt snapshot, NOT to the SCD-1 incremental merge in §6."*
+
+(b) `resources/09-lakehouse-schema-design.md` §305 (the SCD section opener) — prepend a keyword anchor BEFORE the existing "Dimension tables describe entities…" paragraph:
+> *"**This section answers questions of the shape: 'how does dbt build change history from a mutable source table', 'how do I track plan/tier/status changes over time when the source dimension is updated in place', 'what plan/price/status was customer X on in February / on as-of date Y', 'how many records changed X over a period', 'version history of a dimension', 'Oracle table updated in place no history' — the answer is dbt SNAPSHOTS (the dbt-trino-native SCD-2 mechanism), covered in Option 1 below. The dbt INCREMENTAL MERGE in r27 §6 is SCD-1 only (current state, no history) — if you need point-in-time lookup or change history, you need SNAPSHOT not incremental-merge."*
+
+After landing, re-probe within 2-3 iters with the **without-the-word-snapshot** phrasing — e.g., "Our Postgres `users` table is mutated in place with no audit log; analysts want to query what plan a user was on last quarter. How do we build that on dbt + Trino + Iceberg?" — to confirm routing now lands on r09 §SCD Option 1, NOT bail.
+
+**The bail itself is a partial-credit answer.** The responder DID flag the SCD-1/SCD-2 distinction correctly (engineer is told their problem is well-known and the answer exists in the SCD-2 literature). The applicability dimension is hurt because the engineer can't ship; the completeness dimension is hurt because the second half of the question is unanswered. But the framing-half of the answer was correct, which keeps this from a sub-2.5 score.
 
 ---
 
 ## Topics updated
 
-- **Oracle PL/SQL → dbt + Trino SQL migration**: 4.4561/115 → (512.4515 + 3.75)/116 = **4.4500/116 PASSED** (−0.0061, Q1 drag from r27 §4.4C `truncate(x, n)` non-existence misclaim). Margin +0.9500 — still safely above 3.5 even after the drag.
-- **Analytical query patterns on Iceberg+Trino**: 4.4571/89 → (396.6819 + 5.0)/90 = **4.4631/90 PASSED** (+0.0060, Q2 lift).
-- **SQL query best practices for OLAP**: 4.5607/200 → (912.14 + 5.0)/201 = **4.5629/201 PASSED** (+0.0022, Q3 lift on `regexp_extract` 3-arg canonical).
-- **Iceberg partition design for SaaS**: 4.4499/46 → (204.6954 + 5.0)/47 = **4.4616/47 PASSED** (+0.0117, Q4 lift on hidden-partitioning + `day()` singular + `partitioning` key).
+- **Oracle PL/SQL → dbt + Trino SQL migration** (Q1 + Q3 both touch): 4.4500/116 → (4.4500×116 + 5.0 + 2.5)/118 = (516.20 + 7.5)/118 = **4.4381/118 PASSED** (−0.0119). Margin +0.9381 — still safely above threshold. Q1 was the FIX-A re-probe lift; Q3 was the silent-wrong INDF defect drag.
+- **Analytical query patterns on Iceberg+Trino** (Q2): 4.4631/90 → (4.4631×90 + 5.0)/91 = (401.679 + 5.0)/91 = **4.4690/91 PASSED** (+0.0059, Q2 lift on two-window anti-join canonical).
+- **SQL query best practices for OLAP** (Q3 secondary touch — INDF canonical lives in r23 §2923-2948): 4.5629/201 → (4.5629×201 + 2.5)/202 = (917.143 + 2.5)/202 = **4.5527/202 PASSED** (−0.0102, Q3 INDF-misuse drag).
+- **dbt snapshots / SCD2** (Q4): 4.1526/16 → (4.1526×16 + 3.0)/17 = (66.4416 + 3.0)/17 = **4.0848/17 PASSED** (−0.0678, Q4 routing-miss drag; thinnest-margin required-topic now at +0.5848).
 
-ALL required topics REMAIN PASSED. No topic drops below threshold.
+ALL required topics REMAIN PASSED. No topic drops below threshold. dbt-snapshots SCD2 is now the thinnest required-topic margin (overtaking storage-tiering after this drag).
 
 ---
 
 ## Source-verified defects this iter
 
-**1 resource-sourced (Q1):** `resources/27-oracle-plsql-to-dbt-trino.md` §4.4C (lines 1628, 1657, 1665) asserts `truncate(x, n)` 2-arg form does NOT exist in Trino 467 and fabricates a precise wrong-arity error message. RAW Trino 467 docs at trino.io/docs/current/functions/math.html confirm BOTH 1-arg and 2-arg `truncate` overloads exist. LIGHT FIX-A required (see spec in Q1 detail).
+**1 silent-wrong responder defect on a resource-gap (Q3):** Responder recommended `WHERE status IS NOT DISTINCT FROM 'unknown'` as an NVL-substitute and claimed it is "TRUE when status is NULL OR status='unknown'". Verified WRONG at [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html): `NULL IS NOT DISTINCT FROM <non-null literal>` returns FALSE, so the form filters OUT all NULL rows and is NOT NVL-equivalent. Responder one-off (the resource at r23 §2927 explicitly states "NULL IS NOT DISTINCT FROM 'x' → FALSE") on top of a resource-coverage gap (r23 has no positive defang against the named NVL-substitute misuse). LIGHT FIX-A: add inline-WRONG defang block to r23 §2923-2947.
 
-**0 responder one-off defects.**
+**1 findability / routing miss (Q4):** Responder reached r27 §6 (SCD-1 merge) but did not follow r27 TL;DR pt4 signpost to r09 §SCD Option 1 dbt snapshot. Canonical content EXISTS in r09 §305-450; signpost EXISTS in r27 TL;DR pt4. Routing failed on SCD-2-need-without-the-word-snapshot phrasings ("build change history", "track changes over time", "updated in place no history"). LIGHT FIX-A: extend keyword anchors at r27 TL;DR pt4 and r09 §305 SCD section opener.
 
-No new defect classes; this is the 5th instance of the documented imported-prior recurring class (assumed-absence direction: assume foreign-looking forms aren't in Trino without verifying). Joins memory pins `Trino starts_with / ends_with`, `Trino to_char Exists`, `Trino listagg Native`, `Trino No array_sum`. Pattern: verify both presence and absence of any function-existence claim against trino.io math/datetime/array/regexp pages directly before asserting.
+**0 resource-sourced factual errors this iter.** (Both defects are coverage/routing gaps, not factual errors in existing content.)
 
 ---
 
 ## Watch streams
 
-**No new watch streams opened.** Existing watch streams (all CLOSED as of iter1137): ADD-COLUMN, partition-COUNT-folklore, population-percentile, dedup-tied-tuple, SELECT-*-EXCEPT, `{% if execute %}`, percent_rank-DESC-direction — all remain CLOSED. iter1134 $snapshots-CROSS-JOIN-LATERAL watch: no dbt-table-rebuild Q this iter, watch continues quietly.
+**Q1 truncate-2-arg FIX-A: CLOSED.** iter1138 r27 §4.4C correction reached the responder; iter1139 Q1 used `truncate(amount, 2)` direct form with no "1-arg only" claim. Watch joins the closed-watch ledger.
+
+**No new watch streams opened.** Q3 INDF-misuse and Q4 SCD-2-routing each get a LIGHT FIX-A that is expected to land and self-verify on the re-probe. If either re-probe fails (Q3 INDF reaches the wrong form again post-defang, OR Q4 SCD-2 routing fails to reach r09 post-anchor-strengthening), open a watch then.
 
 ---
 
-## Thinnest-margin order after iter1138
+## Thinnest-margin order after iter1139
 
-1. storage-tiering 4.0739/11 (+0.5739, thinnest required-topic, untouched)
-2. dbt-snapshots SCD2 4.1526/16 (+0.6526, untouched)
+1. **dbt-snapshots SCD2 4.0848/17 (+0.5848, NEW thinnest required-topic, Q4 routing-miss drag)**
+2. storage-tiering 4.0739/11 (+0.5739, untouched — actually still thinnest by 0.011, but Q4 drag puts dbt-snapshots within 0.011 of it)
 3. query-perf-basics 4.1771/23 (+0.6771, untouched)
 4. cost-considerations 4.3074/23 (+0.8074, untouched)
 5. query-perf-regression-diagnosis 4.3436/21 (+0.8436, untouched)
-6. Oracle-migration 4.4500/116 (+0.9500, Q1 drag from r27 §4.4C truncate-2-arg defect)
-7. Iceberg-partition-design 4.4616/47 (+0.9616, Q4 lift)
-8. Analytical-query-patterns 4.4631/90 (+0.9631, Q2 lift)
+6. Oracle-migration 4.4381/118 (+0.9381, Q1 FIX-A reach lift + Q3 INDF drag net negative)
+7. Iceberg-partition-design 4.4616/47 (+0.9616, untouched)
+8. Analytical-query-patterns 4.4690/91 (+0.9690, Q2 lift)
 9. Iceberg-maintenance 4.4800/179 (untouched)
 10. federation 4.5024/312 (untouched, fragile-PASS preserved)
-11. SQL-best-practices-OLAP 4.5629/201 (+1.0629, Q3 lift)
+11. SQL-best-practices-OLAP 4.5527/202 (+1.0527, Q3 INDF drag)
 12. CBO/ANALYZE 4.6105/22 (untouched)
 13. improving-complex-SQL-perf-dbt 4.6111/25 (untouched)
 
+dbt-snapshots SCD2 and storage-tiering are now near-tied for thinnest margin. Re-probe priority should ROTATE between them.
+
 ---
 
-## RECOMMENDATION = LIGHT FIX-A (single surgical reconciliation)
+## RECOMMENDATION = DOUBLE LIGHT FIX-A
 
-**FIX-A spec (~10-15 lines, in-place reconcile, no append):**
-- `resources/27-oracle-plsql-to-dbt-trino.md` §4.4C lines 1628 / 1657 / 1665 — correct the false "Trino `truncate` is 1-arg only / 2-arg form does NOT exist" claim and the fabricated wrong-arity error text. Replace with the verified two-overload signature `truncate(x) → [same as input]` AND `truncate(x, d) → [same as input]`. Keep workaround as "equivalent verbose form" cross-reference, not the canonical. Keep the (correct) `TRUNC` name defang and `truncate(date)` defang in entries 1, 3, 4.
-- Cross-link from r07 §4528+ rounding/truncating canonical to corrected r27 §4.4C.
-- Add `verification_date: 2026-06-26` comment with explicit re-verification against trino.io math docs two-arg signature.
+**FIX-A #1** (Q3 INDF-misuse defang, single-file ~5-8 lines):
+- `resources/23-sql-best-practices-olap.md` §2923-2947 — insert inline-WRONG defang block between §2941 (worked example) and §2945 ("Why not the workarounds?") covering: INDF-against-non-null-literal is `=`, silently filters NULL rows, NOT NVL-equivalent, use `COALESCE(col, lit) = lit` or `col IS NULL OR col = lit`; INDF is for both-sides-nullable null-safe equality only.
+
+**FIX-A #2** (Q4 SCD-2 routing keyword anchors, two-file ~6-10 lines total):
+- `resources/27-oracle-plsql-to-dbt-trino.md` TL;DR pt4 (line 14) — append keyword-anchor sentence covering: "build change history from a mutable source", "track plan/tier/price changes over time", "version history of a dimension", "Oracle dimension updated in place no history", "what was the value on a past date", "point-in-time dimension lookup", "how many records changed X last month".
+- `resources/09-lakehouse-schema-design.md` §305 SCD section opener — prepend keyword-anchor sentence covering the same phrasings, plus an explicit "incremental-merge is SCD-1 only; if you need history use SNAPSHOT" routing line.
 
 **Re-probe queue** (priority order):
-1. Oracle-`TRUNC(x, n)`-to-Trino direct re-probe with a different phrasing after FIX-A lands ("Oracle code has `TRUNC(amount, 4)`; what's the Trino form?") — confirm responder reaches `truncate(x, 4)` direct form not the `*power(10,4)/power(10,4)` workaround verbatim.
-2. Storage-tiering 12th angle (thinnest required-topic, untouched 5 iters; tiering-keyword-only without MV hint).
-3. dbt-snapshots SCD2 17th angle.
-4. Iceberg-partition-design follow-up: month()-partition vs day()-partition decision when query patterns are mixed (carry from Q4 hidden-partitioning canonical).
-5. Q2 running-MIN 2nd-instance generative re-probe ("highest balance ever seen per account through this snapshot") to sustain MIN-as-window-function canonical.
+1. **Q3 INDF NVL-substitute re-probe** with a different literal/IN phrasing — e.g., "Oracle code is `WHERE NVL(plan_tier, 'FREE') IN ('FREE', 'TRIAL')`; can I use `IS NOT DISTINCT FROM`?" — confirm responder reaches COALESCE form, NOT INDF.
+2. **Q4 SCD-2 routing re-probe** with the **without-the-word-snapshot** phrasing — e.g., "Our Postgres `users` table is mutated in place with no audit log; analysts want to query what plan a user was on last quarter on dbt + Trino + Iceberg." — confirm routing lands on r09 §SCD Option 1.
+3. **Q1 truncate sustain re-probe** — third instance with a different decimal-places arg — e.g., "Oracle code uses `TRUNC(amount, 4)`; what's the Trino form?" — confirm the FIX-A reach is durable, not iter-1138-specific.
+4. Storage-tiering 12th angle (now joint-thinnest required-topic, untouched 5 iters).
+5. Q2 two-window anti-join 2nd-instance generative re-probe to sustain the canonical.
 
 ---
 
 ## Pattern observation
 
-21-iter sustainment band: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/1134/1137 + LIGHT FIX-A iters 1091/1116/1124/1129/1132/1136/**1138** + NO-OP+WATCH iters 1120/1123/1126/1130/1135.
+22-iter sustainment band: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/1134/1137 + LIGHT FIX-A iters 1091/1116/1124/1129/1132/1136/1138 + NO-OP+WATCH iters 1120/1123/1126/1130/1135 + **PASS+DOUBLE-LIGHT-FIX-A iter 1139**.
 
-iter1138 4.6875 STRONG PASS + LIGHT FIX-A is a clean breadth-sweep iter that surfaced a SINGLE resource-sourced factual defect on a NEW dimension (Trino function-inventory absence claim) without any responder one-off slip. Three of four answers at 5.0 with canonical reaches verified against trino.io/docs. The defect is INFORMATIVE — it catches a fabricated wrong-arity error message that would have been a forward-credibility hit for any engineer who tested it, and it's the 5th instance in the imported-prior "assumed-absence" recurring class, suggesting the teacher should add a verification-checklist step for any future "form X does NOT exist in Trino 467" claim.
+iter1139 3.8750 is the THINNEST PASS margin in 22 iters (recent band has been 4.4-4.9). The thinness traces to TWO distinct defects on a single iter:
+- Q3 is a NEW dimension defect (silent-wrong NVL-substitute misuse of IS NOT DISTINCT FROM) on a resource (r23 §INDF) that has the correct truth-table fact but no positive defang against the named misuse pattern. This is a NEW micro-class — "responder over-extrapolates a null-handling operator past its truth-table scope".
+- Q4 is a routing/findability miss on a CANONICAL THAT EXISTS in r09 with a signpost in r27 TL;DR pt4. The miss tracks the documented `Responder Findability` memory pin — Haiku routes on keyword overlap, and the question's "build change history / track changes over time / updated in place no history" phrasings did not overlap with the signpost's "SCD-2 HISTORY / keep every change with effective dates / what plan was X on as-of date Y" wording closely enough.
 
-The Q1 defect does NOT regress Oracle-migration below threshold (margin still +0.9500) and the topic-history math absorbs the drag cleanly. LIGHT FIX-A is the scoped correction; no architectural changes needed; no other resources touched.
+Both are LIGHT FIX-A and tractable. Neither suggests a deeper architectural problem; the resources have the right content, they just need (a) a positive defang against a NEW operator-overreach misuse class (Q3) and (b) wider keyword anchors for a SCD-2-need-without-the-word-snapshot phrasing class (Q4).
 
-No content-lineage erosion; no recurring defect class re-opened (this is a NEW dimension of an existing class — different from the absence-of-function-inventory previous instances which were on directives, not resources); no new watch streams opened.
+Q1 FIX-A reach (the truncate-2-arg correction landing cleanly) is the iter-positive — it confirms that iter1138's surgical r27 §4.4C reconciliation worked exactly as designed. The Oracle-TRUNC-to-Trino watch closes after a single re-probe, which is the expected pattern when a resource-sourced factual claim is corrected in-place (vs the longer multi-iter cycles needed when the issue is a Haiku synthesis ceiling).
+
+The iter is informative without being alarming. Margin +0.3750 is thin but the FIX-A spec is concrete and bounded; expectation is iter1140 returns to the 4.4-4.9 band once both FIX-As land.

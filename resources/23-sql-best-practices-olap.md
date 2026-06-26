@@ -2942,7 +2942,14 @@ WHERE col_a IS NOT DISTINCT FROM col_b   -- TRUE when both NULL, or both equal n
 WHERE col_a IS DISTINCT FROM col_b       -- TRUE when they differ, counting NULL-vs-value as different
 ```
 
-**Why not the workarounds?** The COALESCE-to-sentinel form (`COALESCE(a,'__NULL__') = COALESCE(b,'__NULL__')`) is fragile — it silently breaks if the sentinel value can ever collide with real data, and it can defeat index/partition pushdown. The OR-form `(a = b) OR (a IS NULL AND b IS NULL)` is correct but verbose and easy to get wrong. `IS NOT DISTINCT FROM` is the clean, purpose-built form — **prefer it**.
+**Why not the workarounds?** The COALESCE-to-sentinel form (`COALESCE(a,'__NULL__') = COALESCE(b,'__NULL__')`) is fragile — it silently breaks if the sentinel value can ever collide with real data, and it can defeat index/partition pushdown. The OR-form `(a = b) OR (a IS NULL AND b IS NULL)` is correct but verbose and easy to get wrong. `IS NOT DISTINCT FROM` is the clean, purpose-built form — **prefer it** *for comparing TWO (possibly-NULL) operands*.
+
+> **DO-NOT-WRITE — `IS NOT DISTINCT FROM` is NOT a "treat NULL the same as a chosen literal" tool; do NOT use it to translate Oracle `NVL(col, 'x') = 'x'`.** *(Keyword anchors: NVL(col,'x')='x' Trino, treat NULL as a default value in WHERE, match NULL OR a specific string, COALESCE NULL to literal then compare, IS NOT DISTINCT FROM literal.)* Against a **non-NULL literal**, `col IS NOT DISTINCT FROM 'x'` is **just `col = 'x'`** — the both-NULL branch can never fire (the literal isn't NULL), so a row where `col IS NULL` is **DISTINCT FROM** `'x'` and returns **FALSE**, silently filtering NULL rows OUT. That is the OPPOSITE of `NVL(col,'x')='x'` (which is TRUE for NULL rows).
+> | DO NOT write | What it actually does | Correct "treat NULL as 'x'" form |
+> |---|---|---|
+> | `WHERE status IS NOT DISTINCT FROM 'unknown'` (as an NVL substitute) | Equivalent to `WHERE status = 'unknown'` — **excludes** every `status IS NULL` row (NULL is DISTINCT FROM the non-null literal). | `WHERE COALESCE(status, 'unknown') = 'unknown'` — OR — `WHERE status IS NULL OR status = 'unknown'`. (`COALESCE`-to-the-literal here is correct and idiomatic — the "sentinel collision" caveat above only applies when you're faking null-safe equality between two real columns, not when the literal IS your intended NULL replacement.) |
+>
+> Reserve `IS NOT DISTINCT FROM` for **null-safe equality of two operands that can each be NULL** (a nullable join key, a keyed-diff, `col_a IS NOT DISTINCT FROM col_b`). For "fold NULL into a chosen value", use `COALESCE(col, value)`.
 
 **Cross-references**: the sibling operator `IS DISTINCT FROM` is used for null-safe keyed-diff / UPDATE classification ("did this column actually change, counting NULL→value as a change") — see [resource 17 §keyed-diff](17-iceberg-table-maintenance.md). Dynamic filtering supports `IS NOT DISTINCT FROM` as a join predicate, so a null-safe equi-join still gets runtime split pruning — see [resource 22 §5](22-trino-federation-postgresql.md).
 

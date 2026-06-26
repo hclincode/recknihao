@@ -306,6 +306,8 @@ GROUP BY e.event_name;
 
 Dimension tables describe entities, but entities change over time. How you handle that change is the SCD pattern.
 
+> **Routing — this is where "build CHANGE HISTORY from a source that's updated in place" questions land, even when they never say "SCD" or "snapshot".** *Keyword anchors: build change history, track plan/tier/price/status changes over time, "what plan/tier/value was this customer/account on in February / last quarter / on a past date", point-in-time dimension lookup, as-of-date lookup, version history of a dimension, how many accounts upgraded/changed tier last quarter, our Oracle/Postgres table is updated in place with no history / no audit log, reconstruct a past state.* **If you need to keep HISTORY (answer as-of-a-past-date questions), the mechanism is a dbt SNAPSHOT (SCD Type 2) — see [Option 1 — dbt snapshot](#) below. A dbt `incremental` / `merge` model keeps only the CURRENT row (SCD Type 1) and CANNOT answer "what was it on date Y" — do NOT stop at the merge model and do NOT say "SCD-2 isn't covered."**
+
 ### SCD Type 1 — overwrite (lose history)
 - When the column changes, you `UPDATE` the row. The old value is gone.
 - **Use for:** cosmetic fields where history doesn't matter — display name, avatar URL, preference flags.
