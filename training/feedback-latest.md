@@ -1,165 +1,197 @@
-# Iter1135 Feedback — 4.4844 PASS NO-OP+WATCH: Q2 PERCENT_RANK-DESC-direction misapplication = RESPONDER ONE-OFF (canonical present in r07 §3939-3956 + §3962-4023, first-instance on "spent more than X% of peers" phrasing)
+# Iter1136 Feedback — 4.125 PASS + LIGHT FIX-A WARRANTED: Q1 PERCENT_RANK direction slip RECURRED on direct re-probe; iter1135 watch escalates
 
 ## Verdict summary
 
 | Item | Status |
 |---|---|
-| Iter average | 4.4844 PASS (margin +0.9844 above 3.5 floor) |
-| Q1 ADD_MONTHS → date_add + last_day_of_month + clamp wrapper | CLEAN 4.9375 — EXACT r27 §666 LEADING CANONICAL match (clamp-up rule replicated correctly) |
-| Q2 PERCENT_RANK DESC + "spent more than 73% of peers" | DEFECT 3.0000 — direction misapplication; **labeling backwards** |
-| Q3 flatten(array(array(T))) + CROSS JOIN UNNEST | CLEAN 5.0000 — source-verified single-level collapse |
-| Q4 Iceberg time travel FOR VERSION/TIMESTAMP AS OF + `$snapshots` lookup | CLEAN 5.0000 — syntax + retention caveat correct |
-| New defects this iter | 1 (Q2 only — direction misapplication) |
-| Resource defects discovered | 0 (canonicals present and correct) |
-| Recommendation | **NO-OP + WATCH** (Q2 first instance; canonicals present; re-probe next sweep) |
+| Iter average | 4.125 PASS (margin +0.625 above 3.5 floor) |
+| Q1 PERCENT_RANK direction on "top team near 100" badge | **DEFECT 2.125 — RECURRENCE of iter1135 Q2 slip; explicit re-probe; LIGHT FIX-A warranted** |
+| Q2 COUNT(DISTINCT company_id) GROUP BY event_type + last-month filter | CLEAN 4.5 — single-arg COUNT DISTINCT correct; minor "last month" upper-bound interpretation gap |
+| Q3 any_match(tags, t -> contains(list, t)) + array_intersect alternative | CLEAN 4.875 — both forms valid; arrays_overlap omission is a minor completeness note |
+| Q4 on-prem-no-per-query-cost + storage/cluster/FTE drivers | CLEAN 5.0 — prod_info MinIO/on-prem stack reconciled correctly |
+| New defects this iter | 1 (Q1 — RECURRING from iter1135 Q2) |
+| Resource defects discovered | 0 (canonicals at r07 §3939 cume_dist + §3962 direction guardrail present + correct — findability gap on customer-facing phrasing) |
+| Recommendation | **LIGHT FIX-A** (escalate per iter1135 watch rule: add keyword-magnetic LEAD card on customer-facing "you beat X% of peers / leaderboard percentile / top near 100" phrasing pointing to existing canonicals) |
+
+## Q1 RECURRENCE VERDICT — YES, SLIP RECURRED ON EXPLICIT DIRECT RE-PROBE
+
+iter1135 Q2 (customer "$45k → spent more than 73% of peers" with PERCENT_RANK ORDER BY total_spent DESC) was classified RESPONDER-ONE-OFF + WATCH with escalation rule: "if RECURS on similar customer-facing percentile-message phrasing → LIGHT FIX-A".
+
+iter1136 Q1 directly probes the same direction-to-semantic mapping with the requirement spelled out explicitly:
+- "in-app badge: 'Your team ran more reports than X% of all teams'"
+- "TOP team must see ~100, low team ~0"
+- "which sort direction for top=near-100?" — explicit direction question
+
+Responder:
+1. Recommends `ROUND(100.0 * PERCENT_RANK() OVER (ORDER BY report_count DESC), 1)`.
+2. Correctly states the math: "With ORDER BY report_count DESC, the highest-reporting team gets PERCENT_RANK = 0.0".
+3. Then claims "A team with percentile = 95 has beaten 95% of all teams" — under DESC a row with percent_rank 0.95 sits at rank ≈ 0.95*(N-1)+1 (deep in the DESC list = LOW report_count = beat only ~5%). BACKWARDS.
+4. Warning: "if you accidentally sort ascending, the numbers flip — the top team would show near 0, not 100" — INVERTED. Under ASC the TOP team is LAST → percent_rank = 1.0 → ×100 → ~100, which IS what the engineer asked for.
+
+The TOP team requirement is ~100; the recommended DESC gives the TOP team ~0. The recommendation is exactly opposite to the explicit requirement.
+
+This is the 2nd consecutive instance (iter1135 Q2 + iter1136 Q1) on customer-facing percentile-message phrasing where the responder uses DESC + "beat X% of peers" labeling. Per the iter1135 escalation rule, recurrence triggers LIGHT FIX-A.
+
+**Source-verified.** PERCENT_RANK = (r-1)/(n-1) per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html). Under DESC, highest-metric row → rank 1 → percent_rank 0.0. CUME_DIST = preceding-or-peer / total → highest-metric row under ORDER BY metric ASC → 1.0. WebFetch confirmed both formulas this iter.
 
 ## Per-question scoring
 
-### Q1 (4.9375) — Oracle `ADD_MONTHS(invoice_date, 3)` + `LAST_DAY(invoice_date)` → Trino
+### Q1 (2.125) — "Your team ran more reports than X% of all teams" leaderboard percentile, top team near 100 — DIRECTION RECURRENCE
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | `date_add('month', 3, invoice_date)` verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html). `last_day_of_month(x) → date` verified (accepts date/timestamp/timestamp with tz). Oracle ADD_MONTHS clamp-up rule verified at [docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html): "If date is the last day of the month or if the resulting month has fewer days than the day component of date, then the result is the last day of the resulting month." The responder's wrapper `CASE WHEN invoice_date = last_day_of_month(invoice_date) THEN last_day_of_month(date_add('month',3,invoice_date)) ELSE date_add('month',3,invoice_date) END` matches r27 §666-701 LEADING CANONICAL exactly, including the rationale ("Oracle ADD_MONTHS clamps last-day-of-month while Trino preserves day-number"). |
-| Clarity | 4.75 | Clean three-part structure (function 1 / function 2 / wrapper for semantic mismatch). |
-| Applicability | 5.0 | Engineer can drop the wrapper into the migrated SQL verbatim. |
-| Completeness | 5.0 | Covers both functions AND the silent-divergence trap. |
+| Accuracy | 1.0 | Three compounding errors. (a) Recommends `PERCENT_RANK() OVER (ORDER BY report_count DESC)` — under DESC the TOP team gets percent_rank 0.0 → ROUND(100.0 * 0.0, 1) = 0.0, the OPPOSITE of the explicit "top team near 100" requirement. (b) Annotation "percentile = 95 has beaten 95% of all teams" — backwards under DESC: a row at percent_rank 0.95 sits 95% of the way DOWN the DESC list = LOW report_count = beaten only ~5% of peers. (c) Warning "if you accidentally sort ascending, the numbers flip — the top team would show near 0" — INVERTED: under ASC the TOP team is LAST row → percent_rank 1.0 → ×100 → ~100, which is the GOAL. Correct shapes for "top team near 100": `cume_dist() OVER (ORDER BY report_count)` (top → 1.0, no scaling logic) OR `percent_rank() OVER (ORDER BY report_count ASC)` OR `(rank-1)/(count_over-1) * 100` with explicit ASC. Engineer explicitly asked "does it matter which direction?" and got the answer wrong. |
+| Clarity | 4.0 | Writing is crisp and the math statement is internally consistent with the formula — but the customer-facing labeling and direction recommendation are wrong. A confident, well-organized wrong answer. |
+| Applicability | 1.0 | Engineer who copies this ships the in-app badge where the BEST team sees "Your team ran more reports than 0% of all teams" and the WORST team sees "...more than 100% of all teams" — directly customer-visible inversion. The explicit "top near 100" requirement is violated. |
+| Completeness | 2.5 | Covers function (percent_rank), addresses the direction sub-question (gets it wrong), mentions CUME_DIST in passing but doesn't navigate to it as the cleaner answer (cume_dist + ORDER BY ASC gives [1/N → 1.0] with no scaling logic and no direction trap). Misses r07 §3939-3956 cume_dist-at-or-below LEADING CANONICAL AND r07 §3962-4023 PERCENT_RANK direction guardrail despite both being present and exactly addressing the question shape. |
 
-**Source-verified**: r27 §666-701 LEADING CANONICAL "Oracle ADD_MONTHS → Trino (END-OF-MONTH CLAMP SEMANTICS DIFFER)" hit cleanly. The responder reached the canonical via the keyword path and produced its wrapper form. Oracle migration content lineage durable.
+**Defect classification: RECURRING-DEFECT, escalate per iter1135 watch rule.**
 
-### Q2 (3.0000) — "you spent more than 73% of your peers" — DIRECTION MISAPPLICATION
+iter1135 Q2 ("$45k → 73% of peers" with DESC) was first instance, classified responder-one-off + watch. iter1136 Q1 is the explicit re-probe with even clearer requirement ("TOP team near 100") and even more pointed direction sub-question ("does it matter ASC or DESC?"). Same exact error mode: DESC selected + "beat X% of peers" labeling + inverted-warning. The canonical (r07 §3939 cume_dist LEADING + §3962 direction guardrail) is present and correct, but is NOT reached by the customer-facing phrasing. This is a findability gap, not a content gap — LIGHT FIX-A is the right scope (additive keyword-magnetic LEAD card, no removal/rewrite of existing canonicals).
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Accuracy | 2.5 | **Internally inconsistent.** The responder correctly states the math: "PERCENT_RANK = (rank-1)/(rows-1)", "0 for the highest row when sorted DESC and increases toward 1.0". But the example labeling contradicts the math: under `ORDER BY total_spent DESC`, a customer with `percent_rank = 0.73` is at rank ≈ `0.73*(N-1)+1` — that is, 73% of the way DOWN the DESC list, meaning ~73% of peers spent MORE than them, NOT less. The responder labeled this row "spent more than 73% of peers" — that interpretation is BACKWARDS for the DESC ordering they used. For "spent more than X% of peers", the correct shapes are: (a) `percent_rank() OVER (ORDER BY total_spent ASC)` (with ASC, 0.73 means 73% are below = beat 73%); OR (b) `cume_dist() OVER (ORDER BY total_spent ASC)` for the at-or-below fraction; OR (c) keep DESC and change the label to "73% of peers spent MORE than you". |
-| Clarity | 4.0 | Writing is clean; CUME_DIST contrast mentioned. But the labeled example actively misleads. |
-| Applicability | 2.5 | Engineer who copies the answer ships a customer-facing dashboard message saying "you spent more than 73% of peers" to a customer who actually beat only ~27% — a real SaaS-product-shipping bug on the percentile direction. |
-| Completeness | 3.5 | Touches function and ORDER BY shape; misses the direction-to-semantic mapping discipline. Does not engage r07 §3939-3956 at-or-below `cume_dist` canonical or §3962+ direction guardrail. |
-
-**Defect verified.** PERCENT_RANK semantics per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): `(r - 1) / (n - 1)` where r is the rank in window-ordering. Under `ORDER BY metric DESC`: first row (highest metric) gets rank 1 → percent_rank 0.0; last row gets 1.0. A row with percent_rank 0.73 sits at rank ≈ 73% of the way through the DESC ordering = far down the metric distribution = beat only ~27% of peers. Responder's "$45k → 0.73 'spent more than 73% of peers'" annotation under DESC is BACKWARDS.
-
-**Classification: RESPONDER ONE-OFF on direction-to-semantic mapping.** Resource canonicals ARE present and correct:
-- r07 §3939-3956 (LEADING CANONICAL "fraction at or below / what percentile does this value sit at"): "**`cume_dist() OVER (ORDER BY value)`** — fraction of rows AT OR BELOW (lowest ≈ `1/N`, top = `1.0`, ties included). This is the answer for 'fraction at or below / what percentile does this value sit at'." Plus explicit DO-NOT-WRITE: "`percent_rank() OVER (ORDER BY value)` for 'fraction of rows at or below' — **WRONG**: `percent_rank`'s lowest row = `0.0` (it measures rank POSITION `(rank-1)/(n-1)`, NOT the at-or-below fraction); use `cume_dist()` — DO NOT COPY for at-or-below."
-- r07 §3962-4023 LEADING CANONICAL "PERCENT_RANK / NTILE direction guardrail" with decision table + DO-NOT-WRITE inverted-prose defang ("`PERCENT_RANK = 0.0` means the bottom, `1.0` means the top is WRONG in general — it is true only under ORDER BY metric ASC. Under ORDER BY metric DESC, 0.0 is the TOP and 1.0 is the BOTTOM").
-
-The canonical correctly states both the function-choice rule (cume_dist for at-or-below) AND the direction discipline (always pair threshold with sort direction). Responder failed to navigate to either canonical despite the question phrasing ("spent more than 73% of peers" = at-or-below semantics) being keyword-magnetic to the cume_dist canonical AND the direction guardrail. Synthesis slip, not a resource gap.
-
-**First instance on this specific question phrasing.** Memory log enumerates many prior responder-direction slips on percentile (iter635 inversion → resource defangs added; iter1127 population-vs-per-group), but this specific "spent more than X% of peers" customer-facing-percentile-message phrasing has not surfaced before. Per first-instance NO-OP discipline (iter1116/1120/1123/1126/1130/1132 precedent), classify as RESPONDER ONE-OFF and watch.
-
-**Recommendation: NO-OP + WATCH.** Re-probe within 2-3 iters with another "you spent more than X% of your peers" / "you beat X% of customers" / "you're in the top X%" customer-facing-percentile-message phrasing to confirm direction-to-semantic mapping is durable. If RECURS → LIGHT FIX-A adding a keyword-magnetic LEAD card on the "spent more than X% of peers" / "you beat X%" phrasing pointing to the §3939-3956 cume_dist canonical + §3962+ direction guardrail with a question-shape match line ("when the customer-facing message reads 'you spent more / beat X% of peers', you want the AT-OR-BELOW semantic = `cume_dist() OVER (ORDER BY metric ASC)`, NOT `percent_rank DESC`").
-
-### Q3 (5.0000) — flatten(array(array(T))) → array(T)
+### Q2 (4.5) — unique companies per event_type last month
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | `flatten(x) → array` verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html): "Flattens an `array(array(T))` to an `array(T)` by concatenating the contained arrays." Single-level collapse (NOT recursive — fine for the 2-level "permission groups" shape). `CROSS JOIN UNNEST(flatten(...))` correct downstream pattern. |
-| Clarity | 5.0 | Direct, single-built-in answer. |
-| Applicability | 5.0 | Drop-in for the Iceberg array(array(varchar)) → array(varchar) collapse. |
-| Completeness | 5.0 | Covers the flatten + downstream UNNEST flow. |
+| Accuracy | 4.5 | `COUNT(DISTINCT company_id) GROUP BY event_type` is correct single-arg Trino 467 form (memory: COUNT-DISTINCT-Single-Arg). Date filter `>= date_trunc('month', current_date) - INTERVAL '1' MONTH` correctly anchors at first day of previous month. Minor gap: if "last month" means the previous calendar month only (most common SaaS interpretation), an upper bound `AND occurred_at < date_trunc('month', current_date)` is needed — without it, the query also includes the current month-to-date. Both readings ("trailing window from start of previous month" vs "previous calendar month closed") are defensible; the responder picked one without flagging the ambiguity. |
+| Clarity | 5.0 | Clean single query, no extra noise. |
+| Applicability | 4.5 | Runs correctly under one of two valid "last month" readings; if engineer wanted closed previous calendar month, they need to add the upper bound — but the omission is a minor scope clarification, not a bug. |
+| Completeness | 4.0 | Doesn't flag the "last month = closed previous calendar month vs trailing window" ambiguity, and doesn't mention `approx_distinct(company_id)` as a high-cardinality fallback (worth a one-line aside for SaaS scale on events tables). |
 
-### Q4 (5.0000) — Iceberg time travel for "before the bad write 4h ago"
+### Q3 (4.875) — tags array shares ANY element with given list
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Accuracy | 5.0 | `FOR VERSION AS OF <snapshot_id>` and `FOR TIMESTAMP AS OF TIMESTAMP '...'` syntax verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). `"tbl$snapshots"` metadata table with `committed_at` (TIMESTAMP(3) WITH TIME ZONE) verified. `WHERE committed_at < bad-run-time` lookup pattern correct (then ORDER BY committed_at DESC LIMIT 1 gives the latest at-or-before snapshot). Retention caveat ("snapshots past expire_snapshots retention are gone, ~7d typical, 4h is fine") accurate. |
-| Clarity | 5.0 | Clear sequence: find snapshot via metadata table → query at version/timestamp. |
-| Applicability | 5.0 | Engineer runs the lookup, gets snapshot_id, queries with FOR VERSION AS OF — exact recovery path. |
-| Completeness | 5.0 | Both VERSION and TIMESTAMP forms shown, retention boundary called out. |
+| Accuracy | 5.0 | Both forms valid in Trino 467. `any_match(tags, t -> contains(ARRAY[...], t))` verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — any_match signature `any_match(array(T), function(T,boolean)) → boolean`. `cardinality(array_intersect(tags, ARRAY[...])) > 0` also valid — array_intersect returns intersection without duplicates. Correct rejection of UNNEST+join as unnecessary. |
+| Clarity | 5.0 | Two clean alternatives, both inline. |
+| Applicability | 5.0 | Either form drops into a WHERE clause. |
+| Completeness | 4.5 | **Completeness improvement opportunity (not a defect):** Trino 467 has a dedicated `arrays_overlap(x, y) → boolean` built-in that is THE most direct form for "shares any element" — `arrays_overlap(tags, ARRAY['power-user','beta-tester','enterprise'])`. Mentioning it as the leading form (with any_match as the lambda-flexible fallback and array_intersect as the "and-give-me-the-intersection-too" form) would be the canonical-quality answer. The given forms work; arrays_overlap is the cleanest. |
+
+### Q4 (5.0) — dashboard cost drivers on Iceberg, what to attack first
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | Correctly reconciles "cloud bill" phrasing with the prod_info.md on-prem MinIO + k8s Trino stack — no per-query pricing (vs Athena/BigQuery/Snowflake cloud DWs). Real drivers correctly enumerated: (a) storage footprint (S3-equivalent MinIO bytes) controllable via `expire_snapshots` + `optimize` / file compaction; (b) cluster CPU/RAM as fixed sunk cost; (c) engineering FTE as the dominant ongoing cost. Within-query drivers (partition pruning, join order, result size) correctly identified. "Lever is avoiding unnecessary queries via rollups/caching, not per-query tuning" matches the fixed-cluster cost model. Starting with `expire_snapshots` is the right first attack given Iceberg's snapshot-accumulation default (every commit retains old snapshots forever otherwise → S3 storage grows linearly with commits, not table size). |
+| Clarity | 5.0 | Clean breakdown by cost category (per-query/cluster/FTE) + within-query lever ranking. |
+| Applicability | 5.0 | Engineer can immediately: (a) check `system.metadata.materialized_view_properties` or `SELECT * FROM "tbl$snapshots"` to count snapshot rows, (b) run `ALTER TABLE x EXECUTE expire_snapshots(retention_threshold => '7d')`, (c) profile MinIO bucket growth, (d) skip the "tune each query" trap. |
+| Completeness | 5.0 | Covers cost-model framing (no per-query pricing), driver enumeration, within-query factors, and first-attack lever — full answer scope. |
 
 ## Iter summary table
 
 | Q | Accuracy | Clarity | Applicability | Completeness | Avg |
 |---|---|---|---|---|---|
-| Q1 | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
-| Q2 | 2.5 | 4.0 | 2.5 | 3.5 | 3.0000 |
-| Q3 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
-| Q4 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
-| **Iter avg** | | | | | **4.4844 PASS** |
+| Q1 | 1.0 | 4.0 | 1.0 | 2.5 | 2.125 |
+| Q2 | 4.5 | 5.0 | 4.5 | 4.0 | 4.500 |
+| Q3 | 5.0 | 5.0 | 5.0 | 4.5 | 4.875 |
+| Q4 | 5.0 | 5.0 | 5.0 | 5.0 | 5.000 |
+| **Iter avg** | | | | | **4.125 PASS** |
 
 ## Topics updated
 
-- **Oracle PL/SQL → dbt+Trino migration** (Q1, ADD_MONTHS canonical): 4.4519/114 → (4.4519×114 + 4.9375)/115 = (507.5166 + 4.9375)/115 = **4.4561/115 PASSED** (+0.0042, margin +0.9561).
-- **Analytical query patterns on Iceberg+Trino** (Q2, percentile direction): 4.4948/86 → (4.4948×86 + 3.0)/87 = (386.5528 + 3.0)/87 = **4.4776/87 PASSED** (−0.0172, drag from Q2 direction misapplication; margin +0.9776 still safely above 3.5).
-- **SQL query best practices for OLAP** (Q3, array flatten built-in): 4.5527/195 → (4.5527×195 + 5.0)/196 = (887.7765 + 5.0)/196 = **4.5550/196 PASSED** (+0.0023).
-- **Iceberg table maintenance** (Q4, snapshot time travel): 4.4771/178 → (4.4771×178 + 5.0)/179 = (796.9238 + 5.0)/179 = **4.4800/179 PASSED** (+0.0029).
+- **Analytical query patterns on Iceberg+Trino** (Q1, percentile direction recurrence): 4.4776/87 → (4.4776×87 + 2.125)/88 = (389.5512 + 2.125)/88 = **4.4509/88 PASSED** (−0.0267 drag from Q1 direction recurrence; margin +0.9509 still safely above 3.5).
+- **SQL query best practices for OLAP** (Q2, COUNT-DISTINCT GROUP BY single-arg + Q3, array overlap forms): 4.5550/196 → after Q2 (4.5550×196 + 4.5)/197 = (892.78 + 4.5)/197 = **4.5547/197** → after Q3 (4.5547×197 + 4.875)/198 = (897.2759 + 4.875)/198 = **4.5563/198 PASSED** (+0.0013).
+- **Cost considerations for analytical workloads at SaaS scale** (Q4, on-prem-no-per-query-cost + expire_snapshots first lever): 4.2759/22 → (4.2759×22 + 5.0)/23 = (94.0698 + 5.0)/23 = **4.3074/23 PASSED** (+0.0315).
 
 ALL required topics REMAIN PASSED.
 
+## LIGHT FIX-A SPEC — keyword-magnetic LEAD card on customer-facing percentile-message phrasing
+
+**Why a fix is warranted (and not NO-OP):** iter1135 Q2 was a watch-classified responder-one-off with an explicit escalation rule ("if RECURS on similar phrasing → LIGHT FIX-A"). iter1136 Q1 is a direct, explicit re-probe with even clearer requirement language ("TOP team near 100", "does it matter ASC or DESC?") and the same exact direction-inversion failure mode. r07 §3939-3956 (cume_dist LEADING CANONICAL) and r07 §3962-4023 (PERCENT_RANK direction guardrail) ARE present and correct — both directly answer the question if reached. The reach failure is on the customer-facing phrasing (in-app badge / "you beat X% of peers" / leaderboard / top-near-100), not on a content gap. LIGHT FIX-A = additive keyword-magnetic LEAD card; no removal, no rewrite of existing canonicals.
+
+**Card location:** insert before r07 §3939 (cume_dist LEADING CANONICAL) as a question-shape-router that LEADS to both existing canonicals.
+
+**Card anchors (keyword-magnetic):**
+- "you beat X% of peers" / "beat X% of customers"
+- "your team ran more X than Y% of teams" / "you used more than X% of teams"
+- "leaderboard percentile" / "percentile badge" / "in-app percentile message"
+- "top performer near 100" / "top team should see ~100" / "show the top as ~100"
+- "customer-facing percentile" / "user-facing percentile"
+
+**Card body (LEAD):**
+
+> ### Customer-facing percentile messages — "you beat X% of peers" / "top performer near 100"
+>
+> When the UI shows a row like "Your team ran more reports than 87% of all teams" or "You spent more than 73% of customers", the **top performer must read ~100** and the bottom ~0. There are two correct shapes; pick by readability:
+>
+> **Shape A (preferred — no scaling, no direction trap):**
+> ```sql
+> ROUND(100.0 * cume_dist() OVER (ORDER BY report_count), 1) AS percent_of_peers_at_or_below
+> ```
+> Reasoning: `cume_dist() = preceding-or-peer / total`. Top team is last in ASC order → 1.0 → ×100 → ~100. Low team → ~1/N → near 0. No direction logic to get wrong.
+>
+> **Shape B (percent_rank — direction matters):**
+> ```sql
+> ROUND(100.0 * percent_rank() OVER (ORDER BY report_count ASC), 1) AS percent_of_peers_below
+> ```
+> Reasoning: `percent_rank = (rank-1)/(n-1)`. Under **ASC**, top team is last row → rank n → 1.0 → ×100 → ~100. Bottom is first → 0.0 → 0.
+>
+> **DO NOT WRITE — the inverted DESC form for this phrasing:**
+> ```sql
+> -- WRONG for "top team near 100" / "you beat X% of peers" labeling:
+> ROUND(100.0 * percent_rank() OVER (ORDER BY report_count DESC), 1) AS percent_of_peers
+> ```
+> Under DESC, the TOP team is FIRST row → rank 1 → percent_rank 0.0 → ×100 → **~0**, which is the OPPOSITE of what the in-app badge needs. The badge label "beat X% of peers" pairs with ASC sort or with cume_dist, NEVER with DESC.
+>
+> See also: [PERCENT_RANK direction guardrail §3962-4023](#leading-canonical--percent_rank--ntile-direction-guardrail-iter635--top-x-by-metric-inversion-trap) for the full direction-decision table; this card is the customer-facing-message specialization.
+
+**Topic row to update:** Analytical-query-patterns Iceberg+Trino (already drags from this iter's Q1; LIGHT FIX-A should land this iter or next).
+
+**Cross-ref also from:** r07 §3962+ (existing PERCENT_RANK direction guardrail) — add one-line forward pointer to the new customer-facing-message card so engineers landing on the guardrail also see the canonical question-shape match.
+
 ## Source-verified absences / non-defects this iter
 
-- Zero ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic/partition-column-COUNT-data-file-folklore/population-vs-per-group-percentile/dedup-tied-tuple/SELECT-*-EXCEPT/`CAST(md5 AS VARCHAR)`-mis-hex/`{% if execute %}`/$snapshots-CROSS-JOIN-LATERAL recurrence.
-- Q1 r27 §666 ADD_MONTHS LEADING CANONICAL = reach confirmed (clamp-up wrapper verbatim).
-- Q3 flatten() single-level collapse + downstream UNNEST = reach confirmed.
-- Q4 FOR VERSION/TIMESTAMP AS OF + `$snapshots` committed_at lookup + retention caveat = reach confirmed.
+- Zero ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic/partition-column-COUNT-data-file-folklore/population-vs-per-group-percentile/dedup-tied-tuple recurrence.
+- Q2 COUNT-DISTINCT single-arg form correct (no multi-arg slip).
+- Q3 any_match + array_intersect both verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html); arrays_overlap exists as the most-direct form (completeness opportunity, not a defect).
+- Q4 on-prem-no-per-query-cost framing + expire_snapshots first-attack lever = correct for prod_info MinIO + k8s Trino stack.
 
-## NEW WATCH STREAM (Q2)
+## Pattern observation
 
-**Stream**: PERCENT_RANK direction-to-semantic misapplication on customer-facing "spent more than X% of peers" / "you beat X% of customers" phrasing.
+iter1135 Q2 (PERCENT_RANK DESC + "spent more than 73% of peers") and iter1136 Q1 (PERCENT_RANK DESC + "your team ran more reports than X% of all teams", top-near-100 EXPLICIT) — same error mode, two consecutive iters, direct re-probe. The canonical content (r07 §3939 cume_dist + §3962 direction guardrail) is present and correct; the responder is not navigating to either on the customer-facing-message phrasing variant. This is a textbook findability gap — the right intervention is a keyword-magnetic LEAD card with the customer-facing anchors that pulls to existing canonicals, NOT a content rewrite.
 
-**Symptom**: responder uses `PERCENT_RANK() OVER (ORDER BY metric DESC)` and labels the 0.73 row as "spent more than 73% of peers" — under DESC that row beats only ~27%; the label is backwards.
+Discipline contrast: the iter1135 NO-OP+WATCH was the correct call at first instance (per first-instance discipline + 6 prior precedents). Now at second instance on direct re-probe, the watch escalates to LIGHT FIX-A per the documented rule. This is the watch system working as designed — not over-churn, not under-correction.
 
-**Correct shapes**:
-1. `cume_dist() OVER (ORDER BY metric ASC)` — fraction at-or-below; 0.73 → "spent more than ~73% of peers" (this is r07 §3939-3956 LEADING CANONICAL for at-or-below semantics).
-2. `percent_rank() OVER (ORDER BY metric ASC)` — 0.73 → ~73% of peers below.
-3. Keep DESC, flip the label to "73% of peers spent MORE than you".
+## Re-probe queue
 
-**Watch action**: re-probe within 2-3 iters with another customer-facing percentile-message phrasing — e.g., "show each customer 'you beat X% of all customers this month' on the dashboard", or "we want to label users with 'you used the product more than 80% of teams this week'". Force the customer-facing-percentile semantic.
+1. **After LIGHT FIX-A lands**: re-probe with a 3rd customer-facing percentile-message phrasing — e.g., "we want to show 'you logged more sessions than X% of teams' on the dashboard, top team should see ~100" — to confirm the new card pulls the responder to cume_dist / percent_rank ASC. If the new card works, close the watch stream.
+2. Storage-tiering 12th angle (still thinnest required-topic at 4.0739; untouched this iter).
+3. dbt-snapshots SCD2 17th angle (untouched).
+4. Cost-considerations 24th angle (lifted +0.0315 this iter; sustain).
+5. Q3 follow-up: probe a similar array-overlap phrasing to see if responder reaches `arrays_overlap` natively or stays on any_match — completeness check, not defect.
+6. Q2 follow-up: probe "last quarter" or "last 7 days" phrasing to see if responder consistently picks the closed-window or trailing-window interpretation.
 
-**Escalation rule**: if RECURS → LIGHT FIX-A adding a keyword-magnetic LEAD card at r07 (near §3939 or §3962) on the "spent more than X% / beat X% / above X% of peers" customer-facing phrasing, with a one-line question-shape→function-choice→direction mapping. Don't preemptively edit — r07 already has both cume_dist-at-or-below LEADING CANONICAL and PERCENT_RANK direction guardrail; the question is whether the responder navigates there on the customer-facing-message phrasing.
-
-## Thinnest-margin order after iter1135
+## Thinnest-margin order after iter1136
 
 | Topic | Avg / N | Margin to 3.5 |
 |---|---|---|
 | Storage-tiering | 4.0739 / 11 | +0.5739 (thinnest required-topic; untouched) |
 | dbt-snapshots SCD2 | 4.1526 / 16 | +0.6526 (untouched) |
 | Query-perf-basics | 4.1771 / 23 | +0.6771 (untouched) |
-| Cost-considerations | 4.2759 / 22 | +0.7759 (untouched) |
+| Cost-considerations | **4.3074 / 23** | +0.8074 (Q4 lift) |
 | Query-perf-regression-diagnosis | 4.3108 / 20 | +0.8108 (untouched) |
-| Oracle-migration | **4.4561 / 115** | +0.9561 (Q1 lift) |
-| Analytical-query-patterns | **4.4776 / 87** | +0.9776 (Q2 drag, still safely PASS) |
-| Iceberg-maintenance | **4.4800 / 179** | +0.9800 (Q4 lift) |
+| Analytical-query-patterns | **4.4509 / 88** | +0.9509 (Q1 drag; still PASS, watch escalated to LIGHT FIX-A) |
+| Oracle-migration | 4.4561 / 115 | +0.9561 (untouched) |
+| Iceberg-maintenance | 4.4800 / 179 | +0.9800 (untouched) |
 | Federation | 4.5024 / 312 | +1.0024 (untouched, fragile-PASS preserved) |
-| SQL-best-practices-OLAP | **4.5550 / 196** | +1.0550 (Q3 lift) |
+| SQL-best-practices-OLAP | **4.5563 / 198** | +1.0563 (Q2+Q3 lifts) |
 | CBO/ANALYZE | 4.6105 / 22 | +1.1105 (untouched) |
 | Improving-complex-SQL-perf-dbt | 4.6111 / 25 | +1.1111 (untouched) |
 
-## RECOMMENDATION = NO-OP + WATCH
+## RECOMMENDATION = LIGHT FIX-A
 
-Commit rubric + feedback only. No resource edits.
+Commit rubric + feedback + add the customer-facing-percentile-message LEAD card at r07 §3939 (insert position immediately before existing cume_dist LEADING CANONICAL). NO removal or rewrite of existing canonicals.
 
 Reasoning:
-- Q2 defect is RESPONDER ONE-OFF on direction-to-semantic mapping (NOT resource-sourced).
-- r07 §3939-3956 cume_dist-at-or-below LEADING CANONICAL is present AND correct.
-- r07 §3962-4023 PERCENT_RANK direction guardrail is present AND correct (with DO-NOT-WRITE inverted-prose defang).
-- First instance of this specific "spent more than X% of peers" customer-facing-message phrasing → per first-instance NO-OP discipline (iter1116/1120/1123/1126/1130/1132 precedent — 6 prior cases, 5 closed on first re-probe).
-- Q1, Q3, Q4 all clean canonical reaches; content lineage durable.
-- Iter avg 4.4844 well above PASS floor (+0.9844 margin).
-- No new defect classes; no recurring defect class re-opened.
-
-## Re-probe queue
-
-1. **Q2 customer-facing percentile-message** (PRIORITY 1, NEW WATCH): re-probe with phrasing like "we want to label users with 'you logged more sessions than X% of teams this week'" — must FORCE the at-or-below customer-facing-message semantic and see if responder reaches cume_dist or stays on percent_rank DESC.
-2. Storage-tiering 12th angle (thinnest required-topic at 4.0739; tiering-keyword-only phrasing without MV hint — confirm iter1134's LIGHT FIX-A cross-ref reach).
-3. Q4 dbt-table-rebuild generative re-probe to confirm iter1134's $snapshots-CROSS-JOIN-LATERAL broken-secondary was one-off.
-4. dbt-snapshots SCD2 17th angle.
-5. Cost-considerations 23rd angle.
-6. Query-perf-regression-diagnosis 21st angle.
-
-## Pattern observation
-
-18-iter sustainment band shape:
-- STRONG PASS: iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/**1134**
-- LIGHT FIX-A: iters 1091/1116/1124/1129/1132
-- NO-OP + WATCH (this iter pattern): iters 1120/1123/1126/1130/**1135**
-
-iter1135 4.4844 PASS+NO-OP+WATCH matches the iter1130 4.5469 / iter1126 4.5 PASS+NO-OP+WATCH profile — single Q with a real synthesis defect on novel question phrasing, responder-one-off classification, first-instance discipline preserved, three breadth angles clean with two canonical reaches (Q1 r27 §666 ADD_MONTHS clamp, Q4 Iceberg time travel) and one trivial built-in (Q3 flatten). The Q2 defect is informative — the at-or-below cume_dist canonical and the direction guardrail are both present in r07 BUT the customer-facing "you spent more than X% of peers" phrasing variant didn't pull the responder to either canonical. Whether this represents a true findability gap or a per-instance synthesis slip will be settled by the next re-probe on similar phrasing. No content-lineage erosion; no recurring defect class re-opened; one new watch stream opened (Q2 customer-facing percentile-message direction misapplication).
+- iter1135 Q2 + iter1136 Q1 = 2 consecutive direct-re-probe instances of the same direction misapplication on customer-facing percentile phrasing.
+- iter1135 escalation rule (recurrence → LIGHT FIX-A) is met.
+- r07 §3939 cume_dist + §3962 PERCENT_RANK direction guardrail are present and correct — content gap is ZERO; findability gap on customer-facing phrasing is the actual defect.
+- Additive keyword-magnetic LEAD card at the canonical question-shape ("you beat X% of peers" / "top team near 100" / "leaderboard percentile") with explicit DO-NOT-WRITE defang of the DESC inversion form, plus forward pointer to existing direction guardrail. No churn risk to other neighbors.
+- Iter avg 4.125 PASS (margin +0.625); Q2/Q3/Q4 clean; the LIGHT FIX-A is scoped to one card, low intervention surface.
 
 ## Source citations
 
-- [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — PERCENT_RANK `(r-1)/(n-1)` formula; CUME_DIST "preceding or peer ... divided by total" definition. Confirms Q2 direction semantics.
-- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) — `last_day_of_month(x) → date`, `date_add(unit, value, timestamp)`. Confirms Q1 function signatures.
-- [docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html) — Oracle ADD_MONTHS clamp-up rule. Confirms Q1 semantic-difference rationale.
-- [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — `flatten(x) → array` single-level collapse "Flattens an array(array(T)) to an array(T)". Confirms Q3.
-- [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — `FOR VERSION AS OF <snapshot_id>`, `FOR TIMESTAMP AS OF TIMESTAMP '...'`, `"tbl$snapshots"` metadata table with `committed_at` column. Confirms Q4.
-- r07 §3939-3956 LEADING CANONICAL cume_dist at-or-below; §3962-4023 PERCENT_RANK direction guardrail. Resource canonicals confirmed present and correct.
-- r27 §666-701 LEADING CANONICAL "Oracle ADD_MONTHS → Trino (END-OF-MONTH CLAMP SEMANTICS DIFFER)". Resource canonical exactly matches the responder's Q1 wrapper.
+- [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — PERCENT_RANK `(r-1)/(n-1)`; CUME_DIST "preceding-or-peer / total". Confirms Q1 direction inversion: DESC gives top row percent_rank 0.0 (responder's recommendation = top team ~0, opposite of "near 100" requirement).
+- [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — `any_match(array(T), function(T,boolean)) → boolean`, `array_intersect(x,y) → array`, `arrays_overlap(x,y) → boolean`. Confirms Q3 forms valid; arrays_overlap exists as completeness improvement.
+- r07 §3939-3956 LEADING CANONICAL cume_dist at-or-below — present, correct, NOT REACHED by responder on customer-facing phrasing (findability gap).
+- r07 §3962-4023 PERCENT_RANK direction guardrail with DO-NOT-WRITE inverted-prose defang — present, correct, NOT REACHED on customer-facing phrasing.
+- prod_info.md §"Production environment" — on-prem k8s Trino + MinIO confirms Q4 no-per-query-cost framing.

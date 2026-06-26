@@ -3936,6 +3936,21 @@ FROM (
 
 **Sibling: `CUME_DIST` (cumulative distribution).** Trino also supports `CUME_DIST()` which returns `count_of_peers_or_lower / n` — slightly different math (the top row is `1.0`, not `(n-1)/n`). Use `PERCENT_RANK` for "fraction of rows STRICTLY below this one" and `CUME_DIST` for "fraction of rows AT OR BELOW this one." Like `PERCENT_RANK`, `CUME_DIST` is **sort-direction dependent**: under `ORDER BY x DESC`, the row with the LARGEST `x` is the first row and gets `cume_dist = 1/n` (small), the row with the smallest `x` gets `1.0` — see the guardrail immediately below.
 
+> **LEADING CANONICAL — customer-facing "YOU BEAT X% OF YOUR PEERS" leaderboard/badge message (top performer ⇒ number near 100). USE ASCENDING ORDER (or `cume_dist`); `ORDER BY metric DESC` gives the top performer ~0, the OPPOSITE of what you want.** *Keyword anchors (READ THIS FIRST):* you beat X% of peers, your team ran more reports/sessions/queries than X% of teams, top of the leaderboard near 100%, percentile badge, "you spent more than 73% of customers", "more active than X% of users", relative-standing message where the BEST should score HIGH.
+>
+> The trap (the iter1135/1136 slip): for "more than X% of peers", a HIGH metric value must map to a HIGH percent. `percent_rank()`/`cume_dist()` are **sort-direction dependent** and increase from the FIRST row to the LAST. So to make the biggest value score ~100, the biggest value must be the LAST row → **`ORDER BY metric ASC`** (NOT `DESC`).
+>
+> ```sql
+> -- ✅ COPY THIS — "you ran more reports than X% of all teams" (top team -> ~100):
+> SELECT team_id, report_count,
+>        ROUND(100.0 * cume_dist() OVER (ORDER BY report_count), 1) AS pct_of_peers_at_or_below   -- top team -> 100.0
+>        -- (or, for STRICTLY-below: ROUND(100.0 * percent_rank() OVER (ORDER BY report_count), 1) -- ASC, top -> ~100)
+> FROM team_monthly_reports
+> ORDER BY pct_of_peers_at_or_below DESC;
+> ```
+>
+> **DO NOT WRITE** `percent_rank() OVER (ORDER BY report_count DESC)` (or `cume_dist() ... DESC`) for a "beat X% of peers" message — under `DESC` the **top** team is the FIRST row and gets `percent_rank = 0.0` / `cume_dist = 1/n` (≈ **0**, not 100), and a row showing 0.73 is actually NEAR THE BOTTOM (73% of peers scored HIGHER). `cume_dist` ASC (top → 1.0) avoids the trap entirely. Direction guardrail + the general decision table: see the **[PERCENT_RANK / NTILE direction guardrail](#)** below.
+
 **COPY THIS for "fraction at or below / what percentile does this value sit at / cumulative distribution / relative standing":**
 
 ```sql
