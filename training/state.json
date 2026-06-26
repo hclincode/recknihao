@@ -1,7 +1,7 @@
 {
-  "iteration": 1120,
+  "iteration": 1121,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1120 balanced thin-margin + breadth sweep. Touch dbt-snapshots SCD2 (4.0315/14, thinnest passing \u2014 fresh angle to confirm routing FIX-A durable, not over-probe) + query-perf + 2 breadth. Verify-first. Federation/CBO untouched. 6 consecutive >=4.9 iters."
+  "note": "iter1121 multi-column ADD COLUMN watch re-probe (iter1120 Q4 imported-prior slip: 3 ADD COLUMN in one ALTER = parse error). Q1 = schema-evolution question inviting SEVERAL column adds \u2014 confirm responder uses SEPARATE ALTER TABLE ... ADD COLUMN statements (one per column), NOT a Postgres/MySQL multi-clause single statement. If recurs -> LIGHT FIX-A (r17 schema-evolution defang row, inline-WRONG). Q2-Q4 breadth. Federation/CBO untouched."
 }

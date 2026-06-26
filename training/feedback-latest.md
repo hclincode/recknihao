@@ -1,134 +1,165 @@
-# Iter1120 — Judge Feedback
+# Iter1121 Judge Feedback — 4.9844 STRONG PASS NO-OP + WATCH CLEARED
 
-**Overall verdict: 4.7188 STRONG PASS (NO-OP + WATCH STREAM)** (margin +1.22 above 3.5). Three clean STRONG-PASS answers (Q1/Q2/Q3 all 5.0000) plus one Q4 syntax slip on the copy-pasteable DDL: the responder bundled three ADD COLUMN clauses into a single ALTER TABLE statement (Postgres/MySQL-style comma-separated multi-operation), which **is a PARSE ERROR on Trino 467** — `ALTER TABLE ... ADD COLUMN` takes exactly ONE column per statement on Trino 467 per trino.io/docs/current/sql/alter-table.html and github.com/trinodb/trino/blob/467/docs/src/main/sphinx/sql/alter-table.md grammar (single ADD COLUMN clause, no comma list). Conceptual claims in Q4 (metadata-only, instant, no lock, downstream not broken, old rows read NULL, explicit-column queries unaffected, `SELECT *` picks them up) are ALL fully correct — only the DDL example is broken. Q1 nails the dbt `strategy='check' + check_cols` no-`updated_at` pattern with hash-comparison framing; Q2 lands the bare `ANALYZE iceberg.x.y` syntax (no `TABLE` keyword), the NDV → CBO join-order/broadcast logic, the Iceberg auto-min/max-no-NDV distinction, AND a sound realistic-alternative-causes diagnostic list (partition pruning failure / small-files decay / data skew) with `EXPLAIN (TYPE DISTRIBUTED)` as the verification step; Q3 cleanly picks `any_match(arr, x -> starts_with(x, 'beta_'))` with no UNNEST and lists the full higher-order family (all_match/none_match/filter).
+## Verdict: STRONG PASS, NO-OP. Multi-column ADD COLUMN WATCH CLEARED.
 
----
-
-## Source verifications (Trino 467 raw + rendered docs, dbt docs)
-
-- **Q4 ALTER TABLE single-ADD-COLUMN-per-statement** — VERIFIED PARSE ERROR ON RESPONDER'S DDL:
-  - trino.io/docs/current/sql/alter-table.html synopsis quoted verbatim: `ALTER TABLE [ IF EXISTS ] name ADD COLUMN [ IF NOT EXISTS ] column_name data_type [ DEFAULT default ] [ NOT NULL ] [ COMMENT comment ] [ WITH (...) ] [ FIRST | LAST | AFTER after_column_name ]` — grammar is **SINGLE** `ADD COLUMN` clause with NO comma list.
-  - github.com/trinodb/trino/blob/467/docs/src/main/sphinx/sql/alter-table.md (467 git tag) confirms same single-clause grammar.
-  - The responder's `ALTER TABLE iceberg.analytics.events ADD COLUMN feature_1 VARCHAR, ADD COLUMN feature_2 BIGINT, ADD COLUMN feature_3 DOUBLE;` would fail with a parse error at the first comma. Correct Trino 467 form is **three separate `ALTER TABLE` statements** (or run as a multi-statement script). NOTE: Iceberg-Spark SQL extension supports `ALTER TABLE t ADD COLUMNS (a T, b T, c T)` plural-with-parens, and Postgres/MySQL support comma-separated multi-operation `ALTER TABLE` — both are likely importation paths for this slip. Neither is Trino 467 syntax.
-  - **Defect classification: responder one-off, NOT resource-sourced.** Grep of `resources/` for `ADD COLUMN.*,\s*ADD COLUMN` returned ZERO matches. The only place `ADD COLUMNS` (plural) appears in resources is r13 Pattern B Spark-side context (`ALTER TABLE iceberg.analytics.events ADD COLUMNS (referrer_source VARCHAR)`) which is correctly attributed to Iceberg-Spark extension syntax and NOT presented as a Trino form. r17 §603 already defangs the `ADD COLUMN ... FIRST | AFTER` post-467 grammar — a parallel "comma-separated multi-ADD-COLUMN" defang row would be the canonical LIGHT FIX-A site if this slip recurs.
-
-- **Q4 MERGE … UPDATE SET ***: minor secondary slip. Trino 467 MERGE supports `WHEN MATCHED THEN UPDATE SET col1 = expr1, col2 = expr2` (explicit assignments) — there is **no `UPDATE SET *` shortcut** in Trino MERGE syntax (that's a Snowflake/Databricks construct). Responder's phrasing "MERGE … UPDATE SET * includes them next run" is ambiguous (could be read as "any MERGE statement that lists the new columns explicitly"); I am not double-penalizing because the engineer's question was about DDL impact, not MERGE syntax. Note this as a `feedback_responder_broken_secondary_alternative` style tail-shave: the lead answer is right and the trailing alternative drifts.
-
-- **Q1 dbt snapshot check strategy** — VERIFIED CORRECT:
-  - docs.getdbt.com/docs/build/snapshots quoted verbatim: "The `check` strategy is useful for tables which do not have a reliable `updated_at` column. This strategy works by comparing a list of columns between their current and historical values." `check_cols` accepts a LIST of column names OR the string `'all'`. "If `updated_at` isn't set, then dbt automatically falls back to using the current timestamp to track changes." dbt-docs explicitly recommends the list form over `'all'`: "It is better to explicitly enumerate the columns that you want to check."
-  - Responder's recommendation (list over 'all' for performance; hash-compare each run; close old row via dbt_valid_to + insert new version) matches dbt-docs verbatim. No defects.
-
-- **Q2 ANALYZE on Iceberg** — VERIFIED CORRECT:
-  - trino.io/docs/current/sql/analyze.html synopsis: `ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]` — **no `TABLE` keyword**. Responder's `ANALYZE iceberg.analytics.events` form correct.
-  - trino.io/docs/current/connector/iceberg.html: "The Iceberg connector can collect column statistics using ANALYZE statement." `iceberg.extended-statistics.enabled` catalog property controls extended-stats collection (default on).
-  - Iceberg `$files` metadata table exposes `lower_bounds` / `upper_bounds` per data file (auto-collected at WRITE time, not from ANALYZE) — responder's "Iceberg auto-collects min/max per file for skipping but NOT NDV" is accurate (min/max are inherent Iceberg manifest stats; NDV requires ANALYZE → extended statistics → Puffin sidecar files).
-  - Iceberg manifest `record_count` is auto-collected → Trino sees row counts WITHOUT ANALYZE. Responder's "row counts come free from Iceberg metadata" is accurate.
-  - Realistic-alternative-causes list (partition pruning failure on the +80M rows, small-files decay if no `EXECUTE optimize` between, data skew on join keys) is correct diagnostic framing for a 600M→680M event-volume regression that ballooned 1min→20min. CBO stat-staleness alone rarely causes 20× regression unless the new data shifted the broadcast/partitioned crossover threshold.
-  - `EXPLAIN (TYPE DISTRIBUTED)` for inspecting `Join[BROADCAST]` vs `Join[PARTITIONED]` distribution + row estimates is the canonical verification — exactly the right actionable next step.
-
-- **Q3 any_match for array prefix-element search** — VERIFIED CORRECT:
-  - trino.io/docs/current/functions/array.html: `any_match(array(T), function(T, boolean)) → boolean`, `all_match(array(T), function(T, boolean)) → boolean`, `none_match(array(T), function(T, boolean)) → boolean`, `filter(array(T), function(T, boolean)) → array(T)`. All native Trino 467 higher-order array functions accepting lambda predicates.
-  - `starts_with(s, prefix)` is native Trino 467 per `reference_trino_starts_with_ends_with` pin (verified iter1118 Q3) — `any_match(feature_flags, flag -> starts_with(flag, 'beta_'))` is the canonical idiom and avoids the `UNNEST + LATERAL` rewrite.
-  - Responder correctly notes UNNEST is needed only when GROUPING/JOINING on individual elements — a row-level membership predicate is exactly the case where higher-order functions are preferred (single-pass on the array column, no row multiplication).
+Iter average **4.9844** (margin +1.4844 above 3.5 threshold). All four answers technically correct against RAW Trino 467 docs. The iter1120 Q4 imported-prior slip (Postgres-habit multi-clause `ALTER TABLE ... ADD COLUMN a T, ADD COLUMN b T`) DID NOT RECUR on a direct re-probe targeted at the same Postgres-to-Trino syntax-import surface — classified as iter1120 one-off, not a structural resource gap. WATCH closed.
 
 ---
 
-## Per-question scoring
+## Q1 — Multi-column ADD COLUMN to Iceberg (iter1120 Q4 RE-PROBE)
 
-### Q1 — dbt snapshot on customers with no reliable `updated_at`: strategies?
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.00 | `strategy='check'` correct; `check_cols=[...]` list or `'all'` correct; hash-compare semantic correct; `dbt_valid_to` close + insert new version correct (matches dbt docs verbatim). |
-| Beginner clarity | 5.00 | Distinguishes timestamp vs check strategies up-front; explains hash comparison; flags 'all' performance cost. |
-| Practical applicability | 5.00 | Engineer has copy-pasteable `config(strategy='check', check_cols=[...])` block + decision rule (list > 'all') + no-`updated_at` required. |
-| Completeness | 5.00 | Both strategies named, lists vs 'all' tradeoff, hash detection mechanism. |
-| **Q1 average** | **5.0000** | Clean re-probe at the thinnest-margin row. |
+**Score: 5.00** (Accuracy 5.00, Clarity 5.00, Applicability 5.00, Completeness 5.00)
 
-### Q2 — 600M→680M event JOIN ballooned 1min→20min: ANALYZE relevant?
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.00 | Bare `ANALYZE` syntax correct (no `TABLE` keyword); NDV is the key CBO stat; Iceberg auto-min/max in `$files` vs NDV-requires-ANALYZE distinction precise; row-count-from-manifests correct; broadcast vs partitioned crossover hinges on NDV/row-count estimates. |
-| Beginner clarity | 5.00 | "MIGHT fix it" framing avoids overpromising; concrete EXPLAIN command for verification. |
-| Practical applicability | 5.00 | Runbook-quality: run ANALYZE → re-EXPLAIN → check `Join[BROADCAST]` vs `[PARTITIONED]` + row estimates; if not the cause, fall back to partition-pruning / small-files / skew investigation. Three realistic alternative causes are exactly what a senior engineer would suggest. |
-| Completeness | 5.00 | Covers what ANALYZE does, what Iceberg provides for free, when it would fix this, when it wouldn't. |
-| **Q2 average** | **5.0000** | CBO/ANALYZE row strengthened, 4.5-threshold margin widens. |
+### Recurrence verdict: CLEARED. No recurrence.
 
-### Q3 — `array<varchar>` rows where some element starts with `'beta_'`: must I UNNEST?
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.00 | `any_match(arr, x -> starts_with(x, 'beta_'))` is the canonical Trino 467 form; all_match/none_match/filter family correctly listed; "no UNNEST unless grouping/joining on elements" is the precise rule. |
-| Beginner clarity | 5.00 | One copyable WHERE clause + explanation of when UNNEST IS needed. |
-| Practical applicability | 5.00 | Direct copy-paste; single-pass on the array column, no row multiplication. |
-| Completeness | 5.00 | Higher-order family covered; UNNEST trade-off framed. |
-| **Q3 average** | **5.0000** | Clean. |
+The Postgres engineer explicitly invited the multi-clause habit ("in Postgres I'd do one ALTER with all four comma-separated"). Responder correctly redirected to **four SEPARATE `ALTER TABLE iceberg.analytics.events ADD COLUMN <name> <type>;` statements** (one per column, all four shown). No comma-list multi-clause attempted.
 
-### Q4 — Add 3 columns to 18-month Iceberg table: does Trino rewrite files / lock / break downstream?
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 3.25 | Conceptual claims (metadata-only / instant / no rewrite / no lock / old rows NULL / downstream not broken / `SELECT *` picks up) **all correct** per Iceberg semantics; r09 §153 myth-buster verbatim. BUT the copy-pasteable DDL `ALTER TABLE … ADD COLUMN a T1, ADD COLUMN b T2, ADD COLUMN c T3` is a **PARSE ERROR on Trino 467** — `ALTER TABLE` grammar allows exactly ONE `ADD COLUMN` clause per statement (verified raw 467 source and rendered docs). Engineer would copy-paste and hit a syntax error. Minor secondary: `MERGE … UPDATE SET *` is not Trino syntax (Snowflake-ism). |
-| Beginner clarity | 4.75 | Explanation is clear; failure mode is the syntax not the framing. |
-| Practical applicability | 3.25 | Recipe-as-presented errors on copy-paste; engineer must then figure out three separate `ALTER TABLE` statements. Conceptual answer is what was asked, so partial credit. |
-| Completeness | 4.75 | Covers all three engineer concerns (rewrite/lock/downstream) plus SELECT * / explicit-column / MERGE follow-ups. |
-| **Q4 average** | **4.0000** | Conceptual right, copyable DDL wrong. Responder one-off, NOT resource-sourced. |
+Verified against `trino.io/docs/current/sql/alter-table.html` synopsis quoted verbatim:
+```
+ALTER TABLE [ IF EXISTS ] name ADD COLUMN [ IF NOT EXISTS ] column_name data_type
+  [ DEFAULT default ] [ NOT NULL ] [ COMMENT comment ]
+  [ WITH ( property_name = expression [, ...] ) ]
+  [ FIRST | LAST | AFTER after_column_name ]
+```
+SINGLE `ADD COLUMN` clause per statement — confirmed.
+
+Responder also correctly framed the lock/concurrency distinction: each Iceberg `ADD COLUMN` is metadata-only / instant / no table-rewrite, so the Postgres motivation for batching (avoid multiple ACCESS EXCLUSIVE locks) does not apply on Iceberg. Four separate statements = four metadata commits, negligible cost. Clean transfer.
+
+**Watch closed.** The iter1120 slip was a first-instance imported-prior on a copy-pasteable DDL aside; one direct re-probe cleanly avoiding it confirms responder one-off classification, not resource defect. No FIX-A needed.
+
+---
+
+## Q2 — 90-day rolling distinct user count via HLL sketches
+
+**Score: 4.9375** (Accuracy 4.75, Clarity 5.00, Applicability 5.00, Completeness 5.00)
+
+### Architectural pattern: fully correct.
+
+PRIMARY recommendation = build a daily HLL sketch table, then rolling-join the sketch table against itself.
+
+All four core technical claims verified against `trino.io/docs/current/functions/hyperloglog.html`:
+- **(a)** `approx_set(x) -> HyperLogLog`: documented, "Returns the HyperLogLog sketch of the input data set of x. This sketch underlies the approx_distinct function and can be serialized for later use." Castable to varbinary confirmed by docs example: `cast(approx_set(user_id) AS varbinary)`. PASS.
+- **(b)** `merge(HyperLogLog) -> HyperLogLog`: documented as the aggregate that unions sketches. `cardinality(merge(...))` for distinct count: confirmed. PASS.
+- **(c)** Sketch self-join avoids raw-row rescan: correct architectural pattern. 365 days x ~90 sketches/day = ~33K tiny merge operations, vs 500M-row/day raw self-join.
+- **(d)** Correctly did NOT claim COUNT(DISTINCT) can be a window function. Trino 467 has no `COUNT(DISTINCT col) OVER (ORDER BY ... RANGE BETWEEN ... PRECEDING AND CURRENT ROW)` — distinct-aggregate-over-sliding-window is not supported. HLL + sketch-join is the correct architectural workaround. PASS.
+
+SECONDARY exact form (date-spine + `COUNT(DISTINCT s2.user_id)` self-join on raw events) correctly characterized as "exact but rescans 500M/day" — honest performance trade-off.
+
+### Minor accuracy shave: 2.3% figure conflation
+
+Responder cites "~2.3% standard error" on the approx_set-based sketch. Per docs:
+- `approx_distinct(x)` — documented as "2.3%, which is the standard deviation of the (approximately normal) error distribution" (trino.io aggregate.html).
+- `approx_set(x)` — docs do NOT publish a default error figure on the HyperLogLog page itself; mathematically the default precision (b=12, sqrt(1.04/2^12) ~= 1.625%) corresponds to a smaller max standard error than the 2.3% standard-deviation figure used for approx_distinct.
+
+The 2.3% is the figure ENGINEERS will recognize from Trino docs, and `approx_distinct = cardinality(approx_set(x))` so the underlying error characteristics of the sketch are the same engine — the responder's claim is defensible and matches the documented Trino figure. But strictly, `approx_set`'s default error parameter is the 1.625% precision number, not the 2.3% standard-deviation figure. **Minor shave only** (-0.25 on Accuracy); not a resource defect, not worth a FIX-A. Cross-references the `reference_trino_approx_percentile_error` pin (2.3% is for approx_distinct ONLY).
+
+---
+
+## Q3 — `cardinality(feature_flags)` for array length
+
+**Score: 5.00** (Accuracy 5.00, Clarity 5.00, Applicability 5.00, Completeness 5.00)
+
+`cardinality(array(T)) -> bigint` returning element count is native to Trino 467 (trino.io/docs/current/functions/array.html). No UNNEST needed for length-only — UNNEST is for row-multiplication / grouping by element, which is not what the question asks. Clean lead with companion array-function family (contains/array_distinct/element_at) appropriately scoped as "next-step" not "for completeness padding". No over-warning or alternative-form trap.
+
+---
+
+## Q4 — Storage tiering for 3yr Iceberg data, dashboards hit last 6mo, can't delete
+
+**Score: 5.00** (Accuracy 5.00, Clarity 5.00, Applicability 5.00, Completeness 5.00)
+
+### All three mechanisms verified correct.
+
+**Mechanism A — MinIO object-lifecycle tiering:**
+- `mc ilm tier add` + `mc ilm rule add --transition-days <N> --transition-tier <tier>` confirmed against `docs.min.io` object-lifecycle-management page.
+- "Transparent to Trino" confirmed: "MinIO AIStor manages retrieving tiered objects on-the-fly without any additional application-side logic." S3-API access continues to work.
+- Age-based (calendar days from object creation), as iter1100/1102 FIX-A reinforces.
+- "Keep `metadata/` hot" matches the iter1119 Q2 storage-tiering canonical (don't tier Iceberg metadata, it's hot small files Trino reads on every query).
+- Matches production stack (on-prem MinIO from prod_info.md). PASS.
+
+**Mechanism B — archive table + UNION ALL view:**
+- `compression_codec='ZSTD'` is a VALID Trino 467 Iceberg table property in `WITH(...)`. Confirmed against iceberg connector docs: supported values are `NONE | SNAPPY | LZ4 | ZSTD | GZIP`; catalog-level default is `iceberg.compression-codec=ZSTD`. No defect; ZSTD is the connector default for Iceberg.
+- `partitioning month(occurred_at)` is a valid Trino 467 Iceberg transform. PASS.
+- UNION ALL view over hot+archive tables is the standard access-aware workaround in the absence of native per-partition tier DDL.
+
+**Mechanism C — combo:** correct combination of A (storage layer) + B (application-layer access pattern).
+
+**Negative guardrails:**
+- "DO NOT delete" — respects the legal-hold constraint in the question.
+- "DO NOT invent `ALTER TABLE ... SET STORAGE TIER`" — correctly defangs the fabricated-DDL trap that has bitten storage-tiering questions before. Matches the canonical "no built-in per-partition tier DDL in Trino+Iceberg" pin in the rubric row.
+
+Lifts the thinnest required-topic row by ~+0.15 — storage-tiering 8th datapoint clean confirms the iter1100/1102 FIX-A lineage is durable across novel angles (now: 3yr+legal-hold framing was a new shape vs iter1119's flat-volume framing).
 
 ---
 
 ## Score table
 
-| Q | Topic mapping | Accuracy | Clarity | Applicability | Completeness | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | dbt-snapshots-SCD2 | 5.00 | 5.00 | 5.00 | 5.00 | 5.0000 |
-| Q2 | CBO / ANALYZE / Puffin / NDV / join ordering | 5.00 | 5.00 | 5.00 | 5.00 | 5.0000 |
-| Q3 | Analytical query patterns on Iceberg+Trino (array higher-order) | 5.00 | 5.00 | 5.00 | 5.00 | 5.0000 |
-| Q4 | Lakehouse schema design (Iceberg ADD COLUMN metadata-only) | 3.25 | 4.75 | 3.25 | 4.75 | 4.0000 |
+| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
+|---|---|---|---|---|---|
+| Q1 multi-col ADD COLUMN re-probe | 5.00 | 5.00 | 5.00 | 5.00 | **5.0000** |
+| Q2 90-day rolling HLL sketch | 4.75 | 5.00 | 5.00 | 5.00 | **4.9375** |
+| Q3 cardinality(array) | 5.00 | 5.00 | 5.00 | 5.00 | **5.0000** |
+| Q4 MinIO tiering + compression_codec + archive view | 5.00 | 5.00 | 5.00 | 5.00 | **5.0000** |
 
-**Iteration average = (5.0000 + 5.0000 + 5.0000 + 4.0000) / 4 = 4.7500 STRONG PASS** (margin +1.25 above 3.5).
-
----
-
-## Defects, classification, and recommendation
-
-### Defect 1 — Q4 multi-clause `ADD COLUMN` in one `ALTER TABLE`
-
-- **Severity**: significant on the copy-pasteable artifact (DDL); conceptual answer fully correct.
-- **Source**: NOT in `resources/` (grep `ADD COLUMN.*,\s*ADD COLUMN` returns zero hits; r13 uses `ADD COLUMNS (...)` plural correctly attributed to Iceberg-Spark extension; nowhere in the corpus does a Trino-context example use comma-separated multi-clause).
-- **Classification**: **responder one-off, IMPORTED-PRIOR family** — same shape as the recurring Postgres/MySQL multi-operation `ALTER TABLE` habit, parallel to `MEMORY.md` entries for `reference_trino_starts_with_ends_with`, `reference_trino_listagg_native`, `reference_trino_trim_charset`, `reference_trino_bitwise`, `reference_trino_to_char_exists`, `reference_trino_count_distinct_single_arg` (foreign-dialect operator/clause-list habits imported into Trino).
-- **Recommendation**: **NO-OP + WATCH STREAM** (first instance; matches the iter1116 ts-minus-ts / iter1107 half-pull initial-handling pattern).
-  - Re-probe in next 2-3 iters with another "add multiple columns at once" framing (e.g. "we need to backfill 4 nullable columns from Spark — what's the DDL?" or "rename + add in one alter — possible?") to confirm per-instance vs structural.
-  - If RECURS: **LIGHT FIX-A** = add ONE row to the r17 §603 schema-evolution-defang table (already defangs `ADD COLUMN ... FIRST | AFTER` post-467 grammar) with `ALTER TABLE x ADD COLUMN a T1, ADD COLUMN b T2` → "Parse error on Trino 467. ALTER TABLE allows a single ADD COLUMN clause per statement. Use three separate `ALTER TABLE` statements, one per column." Include the inline-WRONG defang per `feedback_defang_donotwrite_snippets` (mark the wrong form un-copyable, keep the three-statement canonical as the copy-attractive block).
-  - Do **NOT** add new content this iter — first-instance imported-prior slips on long-stable canonical territory don't durably benefit from additive content per `feedback_synthesis_ceiling_stop_churning`.
-
-### Defect 2 — Q4 `MERGE … UPDATE SET *`
-
-- **Severity**: minor (trailing parenthetical aside, not the main answer).
-- **Source**: NOT in `resources/`.
-- **Classification**: `feedback_responder_broken_secondary_alternative` — the lead answer is right and the trailing alternative drifts into Snowflake-isms. Single-instance, no edit.
-- **Recommendation**: NO-OP. Per `feedback_responder_broken_secondary_alternative`, these padding slips don't benefit from a single resource fix; re-probe scope is per-instance.
+**Iter average = (5.0000 + 4.9375 + 5.0000 + 5.0000) / 4 = 4.9844 STRONG PASS** (margin +1.4844)
 
 ---
 
-## Topic updates (will be applied to rubric.md)
+## Source-verified defects
 
-- **dbt snapshots SCD2** (was thin-margin re-probe target): 4.0315/14 → (56.441 + 5.0)/15 = **4.0961/15 PASSED** (+0.0646; margin to 3.5 widens from +0.5315 to +0.5961). Confirms iter1112→1113 r27/r28/r09 dbt-snapshot signpost FIX-A continues to land cleanly on a 2nd consecutive re-probe (iter1113 was 1st re-probe). Row no longer the 2nd-thinnest.
-- **CBO / ANALYZE / Puffin / NDV / join ordering** (raised threshold 4.5): 4.5716/20 → (91.432 + 5.0)/21 = **4.5920/21 PASSED** (+0.0204; margin to raised 4.5 widens from +0.0716 to +0.0920). Fragile-PASS row strengthens.
-- **Analytical query patterns on Iceberg+Trino** (Q3 array higher-order): 4.4465/74 → (329.041 + 5.0)/75 = **4.4539/75 PASSED** (+0.0074).
-- **Lakehouse schema design** (Q4 ADD COLUMN metadata-only): 4.5624/15 → (68.436 + 4.0)/16 = **4.5273/16 PASSED** (-0.0351; margin to 3.5 = +1.027 still ample). Q4 syntax slip drags this row but conceptual claims preserve PASSED status comfortably.
+**None warranting a resource edit.**
 
-All required topics REMAIN PASSED. Federation untouched (4.50244/312 fragile-PASS preserved).
+The single minor item (Q2 2.3% standard-error conflation) is:
+1. Defensible — 2.3% is the published Trino figure for `approx_distinct` and matches the engine the engineer will see in docs;
+2. A -0.25 accuracy shave, not a -1.0 factual error;
+3. Already pinned in `reference_trino_approx_percentile_error` memory note (2.3% applies to approx_distinct only);
+4. Not findable in `resources/` as a wrong claim — responder didn't pull from a corrupted source, this is a conventional cross-reference engineers make.
 
----
-
-## Pattern observations & teacher guidance
-
-1. **6 consecutive STRONG-PASS iters (1090, 1092, 1093, 1117, 1118, 1119) now break with iter1120 = 4.7500** — still a STRONG PASS but ends the ≥4.9 run. The break is a first-instance imported-prior responder slip on copy-pasteable DDL, not a content-lineage erosion. The conceptual canonical (`ADD COLUMN is metadata-only`, r09 §153) reaches cleanly; only the example's syntax pattern slipped to Postgres-style multi-clause.
-2. **The CBO/ANALYZE topic answer was textbook** — the responder explicitly distinguished what Iceberg auto-tracks (row counts from manifests, min/max from `$files`) from what requires ANALYZE (NDV / extended stats), and named the actionable verification step (`EXPLAIN (TYPE DISTRIBUTED)` to inspect distribution). This is exactly the depth-of-diagnosis a SaaS engineer needs for a 20× regression and signals the iter160 CBO topic recovery has matured durably.
-3. **Q1 thin-margin re-probe (dbt-snapshots-SCD2)**: clean delivery 2nd re-probe after iter1113 — the dbt-snapshot signpost FIX-A lineage from iter1100/1102/1112/1113 is durable. No edits warranted; row continues to climb. Next probe angle could be `dbt_is_deleted` hard-delete handling (4 docs entries in MEMORY suggest this is the next durability angle), `check_cols` edge case with NULL values, or Type1/Type2 hybrid materialization.
-4. **The Q4 imported-prior slip is the same family as the recurring foreign-dialect-syntax cards in MEMORY.md** (starts_with/ends_with, listagg, trim charset, bitwise, to_char, count-distinct-multi-arg, etc.). Pattern: Haiku responder occasionally imports Postgres/MySQL/Spark/Snowflake DDL/syntax habits into Trino answers when no inline defang exists. The r17 §603 schema-evolution-defang table is the right home for a multi-clause-ADD-COLUMN defang IF this recurs. **Do NOT preemptively edit** — first-instance NO-OP + WATCH, two-instance LIGHT FIX-A per established pattern.
-5. **No defects in the** `reference_trino_*` **pin family this iter** other than the new multi-clause-ADD-COLUMN candidate (which is too early to pin). No QUALIFY/false-semi-join/regex-backslash/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior-GREATEST-NULL/`array_sum`/`->`-`->>`-JSON/DATEDIFF/multi-arg-COUNT-DISTINCT/INTERVAL-quarter-week/OFFSET-before-LIMIT/over-warning slips appeared.
-6. **Recommendation summary**: NO-OP this iter; commit rubric+feedback only. Re-probe queue: (1) multi-column ADD COLUMN re-probe in next 2-3 iters (different framing — backfill multi-add, ALTER+ADD-in-one, ADD with FIRST/AFTER together) to scope the imported-prior slip; (2) dbt-snapshots-SCD2 16th angle (dbt_is_deleted hard-delete CDC); (3) storage-tiering 8th datapoint (3.7679/7, still thinnest); (4) cost-considerations 22nd angle. Federation + CBO/ANALYZE durability preserved.
+Scope: per-instance responder shading, not a resource defect. No FIX-A.
 
 ---
 
-## Verdict
+## Q1 RECURRENCE VERDICT (the central watch from iter1120 + state.json note)
 
-**4.7500 STRONG PASS — NO-OP + WATCH STREAM on Q4 multi-clause ADD COLUMN imported-prior slip.** All four required-topic rows touched this iter REMAIN PASSED. Re-probe the Q4 syntax shape from a different angle in the next 2-3 iters; LIGHT FIX-A (one-row addition to r17 §603 schema-evolution-defang table) ONLY on confirmed recurrence.
+**CLEARED.** Responder produced SEPARATE `ALTER TABLE iceberg.analytics.events ADD COLUMN <name> <type>;` statements (one per column, all four shown) — no comma-separated multi-clause attempted, no Postgres-habit single-statement multi-operation. The Postgres engineer explicitly framed the question to surface the import habit ("in Postgres I'd do one ALTER with all four comma-separated"), and responder correctly redirected to the Trino 467 grammar (single ADD COLUMN clause per statement, verified against trino.io/docs/current/sql/alter-table.html synopsis).
+
+Classification stabilized: iter1120 Q4 multi-clause slip was a **first-instance responder one-off, not a structural resource gap**. The conceptual canonical (r09 §153 "ADD COLUMN is metadata-only on Iceberg") reaches cleanly AND the syntax detail reaches cleanly on the very next direct re-probe. WATCH discipline matching iter1116 ts-minus-ts: NO-OP on first instance + targeted re-probe within 1-2 iters = correct call.
+
+---
+
+## Topic updates (relevant rubric rows)
+
+- **Lakehouse schema design** (Q1 ADD COLUMN schema evolution): 4.5273/16 -> (72.4368 + 5.00)/17 = **4.5551/17 PASSED** (+0.0278; margin to 3.5 = +1.0551, comfortable; iter1120 syntax drag fully recovered).
+- **Analytical query patterns on Iceberg+Trino** (Q2 HLL rolling-distinct sketch): 4.4539/75 -> (334.0425 + 4.9375)/76 = **4.4603/76 PASSED** (+0.0064).
+- **SQL query best practices for OLAP** (Q3 array cardinality / no-UNNEST): 4.5148/176 -> (794.6048 + 5.00)/177 = **4.5175/177 PASSED** (+0.0027).
+- **Storage tiering on Trino+Iceberg+MinIO** (Q4 8th angle, 3yr+legal-hold framing): 3.7679/7 -> (26.3753 + 5.00)/8 = **3.9219/8 PASSED** (+0.1540; margin to 3.5 widens from +0.2679 to **+0.4219** — clear lift off the floor, no longer thinnest).
+
+All required topics REMAIN PASSED.
+
+**New thinnest order after this iter:** dbt-snapshots SCD2 4.0961/15 (+0.5961) -> cost-considerations 4.2504/21 (+0.7504) -> query-perf-regression-diagnosis 4.3108/20 (+0.8108) -> query-perf-basics 4.3629/20 (+0.8629) -> storage-tiering 3.9219/8 (+0.4219, lifted off floor).
+
+Storage-tiering is no longer the thinnest required topic — dbt-snapshots SCD2 inherits that position.
+
+---
+
+## Teacher guidance (RECOMMENDATION = NO-OP)
+
+**Do nothing to resources/.** Commit rubric + feedback only.
+
+Rationale:
+1. Iter average 4.9844 (margin +1.4844) — well above STRONG PASS band.
+2. iter1120 Q4 multi-clause ADD COLUMN watch CLEARED on direct re-probe — first-instance one-off confirmed, no structural defect.
+3. All four answers source-verified against trino.io/docs/current/{alter-table.html, functions/hyperloglog.html, functions/aggregate.html, connector/iceberg.html, functions/array.html} and docs.min.io/object-lifecycle-management.
+4. Storage-tiering row lifted off the floor — iter1100/1102 FIX-A lineage is durable.
+5. No `::` / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover / imported-prior / GREATEST-NULL-Postgres / array_sum / `->`/`->>`-JSON / DATEDIFF-dialect-import / multi-arg-COUNT-DISTINCT / ts-minus-ts / over-warning / multi-clause-ADD-COLUMN recurrence.
+
+**Re-probe queue priorities for next sweep:**
+1. **dbt-snapshots SCD2 16th angle** (now thinnest at 4.0961/15): `dbt_is_deleted` hard-delete CDC behavior in 1.9+ / check_cols 'all' vs explicit list perf edge cases / Type 1+2 hybrid materialization.
+2. **cost-considerations 22nd angle** (4.2504/21): partition-level cost attribution via `$manifests`, multi-tenancy cost split, per-customer storage attribution.
+3. **query-perf-regression-diagnosis 21st angle** (4.3108/20): slow-query oncall workflow with concurrent ETL-vs-dashboard contention.
+4. **query-perf-basics 21st angle** (4.3629/20): EXPLAIN reading basics / dynamic filtering verification / partition pruning diagnosis on new partition transforms.
+5. Continue probing federation 4.5024/312 only on bulletproofed angles (iter170 raised-threshold row stays fragile).
+
+**Pattern observation (continuing the broken-secondary thread):**
+This iter's storage-tiering Q4 also shipped multiple alternative mechanisms (A/B/C) — all three were correct. That contrasts with the iter1120 syntax slip pattern where the multi-mechanism conceptual frame was clean but the DDL example drifted. Today's clean execution on a SAME-shape multi-alternative answer reinforces the responder-broken-secondary-alternative pattern as a per-instance shading issue (high-stakes-detail in copy-pasteable code), NOT a "responder always botches alternatives" rule. Continue NO-OP on first instances + targeted re-probe — the watch-clear approach is working.
+
+6-iter ≥4.7 streak: 1090 (4.91) / 1092 (4.95) / 1093 (4.97) / 1117 / 1118 / 1119 (5.00) -> 1120 (4.75 first-instance ADD-COLUMN slip) -> **1121 (4.9844, watch CLEARED)**. Content lineage durable.
