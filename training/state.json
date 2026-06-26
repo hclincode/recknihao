@@ -1,7 +1,7 @@
 {
-  "iteration": 1123,
+  "iteration": 1124,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1123 4.5469 PASS NO-OP + WATCH STREAM. 8-iter STRONG PASS streak ends at 4.5469 (Q4 first-instance findability miss: filtered COUNT(*) on partition-column metadata-only nuance — wrong claim 'must scan even if partition column' contradicts r10 §995 billing-query-gold). Q1/Q2/Q3 clean 5.0/5.0/4.875. ALL TOPICS REMAIN PASSED. Q4 watch added; re-probe within 2-3 iters from different angle to scope per-instance vs structural. NO resource edits (correct content already present in r10 §995-§1058)."
+  "note": "iter1124 -> 4.64 PASS + LIGHT FIX-A (partition-column COUNT slip RECURRED, 2nd instance). Q2 running-total / Q3 if() / Q4 dbt-snapshot-hard_deletes (iter1112 FIX-A re-confirmed durable) all 5.0. Q1 (3.56): responder AGAIN said COUNT(*) WHERE account_id=42 reads Parquet files (WRONG mechanism \u2014 partition-col-filtered COUNT IS metadata-only per r10 \u00a7995/Starburst/#10974) though it correctly diagnosed partition-explosion + bucket fix. FIX-A (findability + folklore defang, reconcile-in-place): r18 \u00a7Check-2 new SPECIAL-CASE callout (fast unfiltered but slow filtered-by-partition COUNT) with inline-WRONG defang of \"WHERE on partition col reads data files\" + partition-explosion mental model + diagnose  + bucket fix + trade-off; reciprocal r10 \u00a7995 explicit FILTERED-case metadata-only statement + cross-ref to r18. r10 \u00a7995 already correct; r18 \u00a770 was the findability gap (responder reached r10 bucket-vs-identity + r18 partition-explosion but NOT the metadata-only-filtered-COUNT trigger on the perf keyword path). Re-probe next sweep. query-perf-basics narrowed to 4.1425/22 (3rd-thinnest). Federation/CBO untouched."
 }

@@ -1,83 +1,66 @@
-# Iter1123 Judge Feedback — 4.5469 PASS NO-OP + WATCH STREAM (Q4 partition-column-COUNT defect, responder-one-off findability miss)
+# Iter1124 Judge Feedback — 4.6406 PASS + LIGHT FIX-A (iter1123 Q1 watch RECURRED: 2nd instance of "WHERE on partition column reads data files" claim)
 
-## Verdict: PASS, NO-OP + WATCH STREAM
+## Verdict: PASS, LIGHT FIX-A
 
-Iter average **4.5469** (margin +1.0469 above 3.5 threshold). Q1/Q2/Q3 all clean (5.00 / 5.00 / 4.875). Q4 (3.3125) is a real responder ACCURACY+APPLICABILITY defect: the responder claimed filtered `COUNT(*) WHERE account_id=123` must scan data files **"EVEN IF account_id is a partition column"** — this directly contradicts r10 §995 (the "metadata-only `COUNT(*) GROUP BY <partition column>`" / billing-query-gold callout), which establishes that filtered `COUNT(*)` on an **identity-partition column** IS metadata-only and answered from manifest `record_count` per partition, no data-file reads. The 30s slowness diagnostically REVEALS that `account_id` is NOT a partition (or identity-transform) column — the engineer's actionable next step is to check `SHOW CREATE TABLE`, then partition (or sort/bucket) by `account_id` if per-account-id `COUNT(*)` is hot. Responder missed both the corrected explanation AND the actionable fix. Resource content is correct and present (r10 §995-§1058 lay it out in detail); responder findability/synthesis miss, NOT a resource defect. First instance in recent history → NO-OP + WATCH STREAM (re-probe within 2-3 iters from a different angle to scope per-instance vs structural).
+Iter average **4.6406** (margin +1.1406 above 3.5 threshold). Q2/Q3/Q4 all clean (5.00 / 5.00 / 5.00). Q1 (3.5625) RE-PROBES the iter1123 Q4 partition-column COUNT-metadata-only slip and the slip RECURRED — responder again asserts that `COUNT(*) WHERE account_id=42` "falls into NEITHER category — Trino still reads the matching Parquet files" EVEN WHEN the scenario explicitly states `partitioned by identity(account_id)`. The mechanism claim contradicts r10 §995-§1010 trigger conditions (identity-partition filtering + partition pruning + manifest record_count summation is metadata-only). HOWEVER, the responder's actionable pivot to the partition-explosion diagnosis (high-cardinality identity partitioning → millions of partitions → manifest planning overhead → 30s slowness) is the genuinely-correct ROOT CAUSE for the 30s scenario described — bucket(account_id, 64) is the right remediation direction (reduces manifest planning), though the answer misses that bucket transform also gives up metadata-only COUNT for the original-column filter (r10 §1006). **2nd-instance MECHANISM defect — LIGHT FIX-A in r18 §70 perf-regression-diagnosis (the "if COUNT(*) is fast" decision branch) per iter1123 watch playbook**: add a cross-ref to r10 §995 with explicit defang of "WHERE on the partition column still reads the data files" (inline-WRONG per `feedback_defang_donotwrite_snippets`) + the partition-explosion vs data-scan distinction (slow per-account COUNT on identity-partitioned high-cardinality column = manifest planning overhead, NOT data scan).
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Oracle `NVL2(col, 'active', 'inactive')` → Trino (no NVL2); one consistent pattern?
+### Q1 — 500M-row events partitioned by `identity(account_id)`: `COUNT(*) WHERE account_id=42` = 30s vs unfiltered 2s — reads all Parquet for that account or metadata-only via partition key?
+**Score: 3.5625** (Acc 3.0 / Clar 4.5 / App 3.5 / Compl 3.25)
+
+Responder: lists only TWO metadata-only cases — (1) unfiltered whole-table COUNT(*), (2) GROUP BY on identity-partition column — and asserts `WHERE account_id=42` "falls into NEITHER category — Trino still reads the matching Parquet files"; hedges "still a metadata lookup, but no faster than reading a small subset of files"; PIVOTS to partition-explosion diagnosis (high-cardinality identity(account_id) → millions of tiny partitions / manifest bloat → slow planning even on simple filters); recommends FIX = `bucket(account_id, 64)` per r10's bucket-vs-identity canonical.
+
+**Source-verified MECHANISM defect — 2nd instance of iter1123 Q4 slip:**
+
+Verified against trino.io/docs/current/connector/iceberg.html + Starburst blog "Iceberg Partitioning and Performance Optimizations in Trino" (verbatim: "these metadata-driven optimizations make COUNT(*) queries with WHERE clauses on partition columns particularly fast, as Trino can determine the result using manifest statistics without reading the actual data files") + r10 §995-§1024 trigger conditions + GitHub issue #10974 (Min/Max/Count metadata-utilization, partial coverage; still OPEN for the broader optimization but identity-partition filter pruning + manifest record_count IS the established path):
+
+- **Unfiltered `COUNT(*)`: CORRECT (metadata-only).** Trino sums `record_count` across manifest entries (or reads snapshot summary `total_records`); no Parquet file open. ~2s on 500M rows matches manifest-list traversal.
+- **Filtered `COUNT(*) WHERE <identity-partition column> = X`: ALSO metadata-only IN PRINCIPLE.** Partition pruning eliminates all non-matching partitions (manifest stores the actual partition value for identity transform per r10 §1005), then sum `record_count` of the surviving manifest entries → result. r10 §1024 condition (2) explicitly says "no per-row predicates on **non-partition** columns" — a predicate on the partition column itself does NOT disqualify the optimization.
+- **Therefore the responder's claim "WHERE account_id=42 falls into NEITHER metadata category, Trino still reads the matching Parquet files" is WRONG on the MECHANISM** — it's the EXACT inverted framing from iter1123 Q4 ("EVEN IF account_id is a partition column [it must scan]"). Same defect class, different question shape.
+
+**HOWEVER — responder's actionable DIAGNOSIS is approximately CORRECT for the actual 30s scenario:**
+
+The 30s/2s gap on a 500M-row identity-partitioned table with high-cardinality `account_id` is REALISTICALLY explained by **partition-explosion / manifest-planning overhead**, not by data-file scanning. With (say) 1M accounts → 1M identity-partitions → giant manifest list. Unfiltered COUNT(*) can short-circuit via snapshot summary (`total_records`) in ~2s. Filtered COUNT(*) must traverse the manifest list to evaluate the partition predicate (`account_id=42`) — at million-partition scale, manifest-list traversal can take 30s. This matches r10 §1389 / §1393 / §1406 partition-explosion content verbatim (manifest size grows linearly with partition count; query *planning* becomes the slow part before any data scan).
+
+- Responder's pivot to partition-explosion as the REAL diagnosis: CORRECT and well-aligned with r10's over-partitioning canonical (§1389 "126M partitions = catastrophic; query planning alone can take minutes").
+- Responder's `bucket(account_id, 64)` fix: PARTIALLY CORRECT — bucket reduces partitions from millions to 64, fixing manifest planning overhead and write-balance. BUT misses that bucket transform also LOSES metadata-only COUNT for the original-column filter (per r10 §1006 "manifest stores the bucket number, not the original tenant_id string"). So bucket fixes the planning problem but the per-account COUNT(*) is still NOT metadata-only (it would now do file open + filter inside, not manifest sum). The fix is therefore a partition-explosion remedy, not a true metadata-only fast-path.
+
+**Hybrid scoring justification:**
+
+- **Acc 3.0** — mechanism claim is wrong (filtered COUNT on identity partition CAN be metadata-only in principle; r10 §995/§1024 establish this); diagnosis pivot to partition explosion is right; bucket fix is partially right. Mixed signal.
+- **Clar 4.5** — well-organized (lists rules, hedges, pivots to diagnosis, gives fix). Easy to follow but the WRONG rule is stated confidently in the framework section, which will mislead a future reader who isn't deep on Iceberg internals.
+- **App 3.5** — engineer gets actionable partition-explosion diagnosis + bucket fix recommendation; partial credit. But the wrong framework rule ("WHERE on partition column reads files") will cause the engineer to misdiagnose future cases (e.g., if they ever see a per-tenant COUNT slowness, they'll think "expected, partition filter reads files" and miss real fixes).
+- **Compl 3.25** — missed: (1) that COUNT(*) WHERE on identity-partition CAN be metadata-only (the r10 §1024 condition 2 framing — "no predicate on NON-partition columns" — partition-column predicate is fine); (2) that bucket loses metadata-only too (per r10 §1006); (3) `SHOW CREATE TABLE` + `EXPLAIN` to verify what the planner actually does on the production table.
+
+**Defect classification: 2nd INSTANCE of iter1123 Q4 "WHERE on partition column scans data files" MECHANISM defect.** The actionable diagnosis pivot is correct, but the wrong mechanism rule is stated as a general framework — same defect family as iter1123. Per the iter1123 watch playbook: "If RECURS, LIGHT FIX-A = add a one-paragraph cross-ref in r18 perf-regression-diagnosis §70 area (the 'if COUNT(*) is fast' decision branch)."
+
+### Q2 — Cumulative revenue running total per account/month: `SUM(revenue) OVER (PARTITION BY account_id ORDER BY month_start ROWS UNBOUNDED PRECEDING..CURRENT ROW)` over pre-aggregated CTE
 **Score: 5.0000** (Acc 5 / Clar 5 / App 5 / Compl 5)
 
-Responder: `CASE WHEN some_column IS NOT NULL THEN 'active' ELSE 'inactive' END`. No NVL2 in Trino. Uniform template.
-
-- `NVL2(a, b, c)` Oracle semantics = return `b` if `a` IS NOT NULL else `c`. Responder mapping CORRECT (`some_column IS NOT NULL → 'active'` matches the "not-null → b" branch).
-- Trino 467 has NO `NVL2()` built-in. Verified against r27 §362 + r27 §1687 corpus + trino.io/docs/current/functions/list.html (no `nvl2` in conditional functions list).
-- `CASE WHEN col IS NOT NULL THEN b ELSE c END` IS the canonical translation; `IF(col IS NOT NULL, b, c)` is an equivalent two-arg form (both shown in r27 §362). Responder picked the more uniform CASE form — correct choice for "one consistent pattern" framing.
-- Zero fabrications. Zero NULL-semantics traps (NULL comparison via `IS NOT NULL`, not `<> NULL`).
+Standard single-query running-total shape — pre-aggregate to (account_id, month_start, monthly_revenue) in a CTE, then `SUM(monthly_revenue) OVER (PARTITION BY account_id ORDER BY month_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` for cumulative. No self-join. Verified against trino.io/docs/current/functions/window.html (`SUM` is a valid window aggregate; `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is standard SQL frame syntax supported in Trino 467). PARTITION BY resets per account_id. ORDER BY month_start ensures cumulative-by-time direction. The frame spec is technically redundant (default frame on ORDER BY is `RANGE UNBOUNDED PRECEDING` which gives same result as `ROWS UNBOUNDED PRECEDING..CURRENT ROW` for non-tied keys) but explicit is good defensive practice and standard idiom for cumulative running totals.
 
 No defects.
 
-### Q2 — Segment customers into 4 equal-size groups by total spend; manual percentile cut points or a function?
+### Q3 — Is `if(condition, true_value, false_value)` a real Trino function or do you need CASE WHEN?
 **Score: 5.0000** (Acc 5 / Clar 5 / App 5 / Compl 5)
 
-Responder: `NTILE(4) OVER (ORDER BY total_spend DESC)` → bucket 1 = highest spenders, 4 = lowest; count-based equal buckets, not threshold-based; no manual percentiles needed.
+Trino 467 HAS native `if(condition, true_value, false_value)` as a conditional EXPRESSION (not a SQL routine) — verified against trino.io/docs/current/functions/conditional.html ("The IF expression has two forms... It evaluates and returns `true_value` if condition is `true`, otherwise evaluates and returns `false_value`"). Example from docs: `SELECT orderkey, totalprice, IF(totalprice >= 150000, 'High Value', 'Low Value') FROM tpch.sf1.orders;`. Equivalent to `CASE WHEN condition THEN true_value ELSE false_value END`. Both forms valid; `if(...)` is more compact for binary branching. Distinct from the SQL routine `IF THEN...END IF` block syntax (used inside UDFs, not as a value expression).
 
-- Trino 467 HAS `NTILE(n)` window function — verified against trino.io/docs/current/functions/window.html (`ntile(n)` returns "the bucket number for each row in a group" where "n must be a positive integer constant"; rows split into n buckets as evenly as possible per the standard NTILE semantics).
-- Equal-COUNT bucketing semantics correctly stated (NTILE distributes rows by count, not value-range — this is the EXACT distinction the engineer asked about: NTILE is count-based, NOT threshold-based like `approx_percentile`).
-- `ORDER BY total_spend DESC` → bucket 1 = highest correctly explained (without DESC, bucket 1 would be lowest).
-- Top-vs-bottom comparison naturally follows from filtering `WHERE quartile IN (1, 4)`.
+No defects.
 
-No defects. NTILE is the textbook answer; manual percentile cut points (`approx_percentile`-then-CASE-WHEN) would be objectively worse for this use-case (rebalancing required, threshold drift over time).
+### Q4 — dbt snapshot `hard_deletes='new_record'` re-confirm iter1112 FIX-A: dbt_is_deleted column, 3 options (ignore/invalidate/new_record), dbt_is_deleted is NOT default
+**Score: 5.0000** (Acc 5 / Clar 5 / App 5 / Compl 5)
 
-### Q3 — Per workflow, is EVERY step done? Currently `SUM(CASE WHEN step_status='done' THEN 1 ELSE 0 END)=COUNT(*)`; cleaner aggregation?
-**Score: 4.875** (Acc 5 / Clar 5 / App 5 / Compl 4.5)
+Verified against docs.getdbt.com/reference/resource-configs/hard-deletes:
+- `hard_deletes` config (dbt 1.9+) has THREE valid values: `'ignore'` (default — no action, `dbt_valid_to` stays NULL on deletes), `'invalidate'` (sets `dbt_valid_to` to current_timestamp on deletes), `'new_record'` (inserts a new row marked deleted via `dbt_is_deleted`).
+- `dbt_is_deleted` column is **only added with `hard_deletes: 'new_record'`** — NOT a default snapshot column. Default snapshot columns are `dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`, `dbt_updated_at`.
+- `dbt_is_deleted` takes boolean-style values per docs example (`True` on delete, `False` on restore). In dbt-trino's Iceberg materialization this serializes to `VARCHAR 'True'/'False'` (matches iter1112 FIX-A); other adapters store BOOLEAN. The string-vs-boolean distinction is adapter-dependent. dbt-trino + Iceberg = `VARCHAR 'True'/'False'`, consistent with the iter1112 FIX-A canonical.
+- 3-options enumeration + `dbt_is_deleted` conditional addition + iter1112 FIX-A re-confirms reaching cleanly. Lineage durable.
 
-Responder: `count_if(step_status='done') = COUNT(*) AS all_steps_complete` GROUP BY workflow_id; also `COUNT(*) FILTER (WHERE step_status='done') = COUNT(*)`; `count_if` is idiomatic.
-
-- Trino 467 HAS `count_if(boolean) → bigint` — verified against trino.io/docs/current/functions/aggregate.html ("Returns the number of TRUE input values"). Idiomatic Trino aggregate.
-- Trino 467 HAS `COUNT(*) FILTER (WHERE …)` — verified against trino.io/docs/current/functions/aggregate.html (FILTER clause "filters the values that are passed to the aggregate function"). ANSI-SQL standard form.
-- Both forms equivalent to the engineer's `SUM(CASE WHEN … THEN 1 ELSE 0 END)` and cleaner. `count_if` is the most concise Trino-native idiom.
-- NULL handling correctly implicit: a `step_status IS NULL` row counts toward `COUNT(*)` but NOT toward `count_if(step_status='done')` (because `NULL='done'` is NULL → not TRUE), so the `=` test fails — i.e. a NULL-status row is treated as "not done" (defensive default). This matches the engineer's existing `SUM(CASE…)` semantics.
-
-**Minor completeness shave (−0.25):** the most LITERAL answer to "aggregate a boolean to one yes/no" is `bool_and(step_status = 'done')` (verified in Trino 467 aggregate.html, "Returns TRUE if every input value is TRUE, otherwise FALSE"). `bool_and` returns a single boolean directly — exactly what the engineer's words asked for. It also has a slightly different NULL profile: `bool_and` IGNORES rows where the condition is NULL (returns TRUE if all non-NULL rows match), whereas `count_if = COUNT(*)` treats NULL-status rows as NOT done. This is a meaningful design choice (which semantics does the engineer want?) and naming `bool_and` would have made the trade-off explicit. NOT a content gap in resources (bool_and is mentioned in r23/r07 corpus); per-instance enumeration shave only. NO FIX-A.
-
-Responder's choice (`count_if = COUNT(*)`) is correct and idiomatic for the engineer's existing pattern (preserves the SUM-CASE-style NULL-as-not-done semantics).
-
-### Q4 — Iceberg `COUNT(*)` = 2s vs `COUNT(*) WHERE account_id=123` = 30s — reading all 500M in 2s or something else?
-**Score: 3.3125** (Acc 2.75 / Clar 4.5 / App 2.75 / Compl 3.25)
-
-Responder: Unfiltered COUNT(*) = Iceberg manifest row-count metadata only (~2s, no data scan). Filtered COUNT(*) must open+scan data files to evaluate the predicate **"EVEN IF account_id is a partition column"** (~28s for 500M rows). Check partition pruning via EXPLAIN. Time difference is expected Iceberg behavior.
-
-**Source-verified ACCURACY defect on the "EVEN IF account_id is a partition column [it must scan]" claim:**
-
-Verified against trino.io/docs/current/connector/iceberg.html + repository content (r10 §995-§1058 "Bonus: metadata-only `COUNT(*) GROUP BY <partition column>` (billing-query gold)") + WebFetch of trinodb/trino issue #10974 (Iceberg metadata-only aggregation optimization, implemented for COUNT/MIN/MAX from manifest `record_count`):
-
-- **Unfiltered `COUNT(*)` metadata-only path: CORRECT.** Trino sums `record_count` across all manifest entries; no data file open. The ~2s timing matches manifest-list traversal on a 500M-row table.
-- **Filtered `COUNT(*) WHERE <identity-partition column> = X`: ALSO metadata-only on Trino 467 + Iceberg.** Per r10 §999-§1010: "the partition tuple literally IS the column value... Trino reads the manifest summaries... sums the per-file `record_count`... No row data is read. No Parquet file is opened." Per r10 §1021-§1024 trigger conditions: (1) GROUP/filter column is partition spec as identity transform, (2) simple `COUNT(*)`, no per-row predicates on non-partition columns. Both conditions hold for `COUNT(*) WHERE account_id = 123` IF `account_id` is identity-partitioned.
-- **Therefore: if `account_id` IS a partition column (identity transform), the filtered query SHOULD ALSO complete in seconds via partition pruning + manifest record_count summation — NOT 30s scanning 500M rows.** The 30s slowness diagnostically REVEALS that `account_id` is NOT a partition column (or is partitioned via `bucket(account_id, N)` / `truncate(account_id, K)` — bucket/truncate transforms are NOT metadata-only for the original-column filter per r10 §1006-§1007 callout).
-
-**Responder's diagnostic framing inverted.** The 30s/2s gap is the SIGNAL that account_id is non-partition, not a fact about Iceberg's "expected behavior with partition columns." 
-
-**Missed actionable fix:** the engineer's next step should be:
-1. `SHOW CREATE TABLE iceberg.analytics.<table>` to see the actual partition spec.
-2. If `account_id` is NOT in the partitioning, options are (a) partition by `account_id` (identity), (b) add `account_id` to the sort order (`WITH (sorted_by=ARRAY['account_id'])`), or (c) bucket-partition `bucket(account_id, N)` for write-balance — bucket gives partition PRUNING for equality filters (so 30s drops dramatically) even though it does NOT give metadata-only COUNT-by-account-id.
-3. `EXPLAIN` to verify partition pruning is firing post-change.
-
-**Responder's "check partition pruning via EXPLAIN" is a correct partial step** but framed under the wrong premise (responder said it would still scan all files — actually it would fire metadata-only on partition columns).
-
-**Defect classification: RESPONDER ONE-OFF synthesis/findability miss (not resource-sourced).**
-
-- grep `resources/` for the wrong claim ("EVEN IF.*partition column.*scan", "partition column.*must scan", "scan.*even.*partition"): r10 §995-§1058 lay out the OPPOSITE (metadata-only) clearly with trigger conditions, transform-by-transform table, identity-vs-bucket trade-off explanation, and a "Verifying it actually fired" diagnostic section. NO resource asserts the wrong claim.
-- r18 (perf regression diagnosis) §63-§70 has the unfiltered-COUNT-fast-path canonical, used as a "Check 2" in the runbook. r18 does NOT explicitly cover the filtered-on-partition-column case — could be a findability gap if the responder consulted r18 first for "slow COUNT diagnosis" without crossing to r10 §995.
-- Family: responder synthesis miss — the resource has the canonical answer (r10 §995) but the responder did not surface/use it when the question's keywords ("COUNT(*) WHERE account_id", "even if partition column", timing comparison) point more naturally to r18 (perf runbook) than r10 (partition design billing-query bonus).
-
-**Recommendation: NO-OP + WATCH STREAM.** Re-probe within 2-3 iters from a different angle to scope per-instance vs structural:
-- e.g. "I see fast COUNT(*) but slow COUNT(*) WHERE tenant_id=X; tenant_id is in my partition spec — why?" (forces direct engagement with r10 §995 + bucket-vs-identity transform distinction).
-- e.g. "Will partitioning by account_id make my per-account COUNT(*) metadata-only?" (forces direct citation of r10 §1021-§1024 trigger conditions).
-- If RECURS, LIGHT FIX-A = add a one-paragraph cross-ref in r18 perf-regression-diagnosis §70 area (the "if COUNT(*) is fast" decision branch): "If unfiltered COUNT(*) is fast but `COUNT(*) WHERE <col> = X` is slow, the slowness is a SIGNAL that `<col>` is not partitioned (or is partitioned via bucket/truncate transform). See r10 §995 'metadata-only COUNT(*) GROUP BY partition column' for the partition-transform → metadata-only trigger table; check `SHOW CREATE TABLE` to confirm the partition spec." Do NOT preemptively edit per first-instance NO-OP + WATCH discipline matching iter1116/1120 handling.
+No defects. iter1112 FIX-A confirmed durable on 2nd direct re-probe.
 
 ---
 
@@ -85,21 +68,21 @@ Verified against trino.io/docs/current/connector/iceberg.html + repository conte
 
 | Q | Topic touched | Acc | Clar | App | Compl | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | Oracle PL/SQL→dbt/Trino migration (NVL2) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q2 | Analytical query patterns (NTILE quartile bucketing) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q3 | SQL best practices OLAP (count_if/FILTER boolean aggregation) | 5.0 | 5.0 | 5.0 | 4.5 | **4.8750** |
-| Q4 | Query performance basics (Iceberg metadata-only COUNT, partition pruning) | 2.75 | 4.5 | 2.75 | 3.25 | **3.3125** |
+| Q1 | Query performance basics (Iceberg metadata-only COUNT, partition pruning, partition explosion) | 3.0 | 4.5 | 3.5 | 3.25 | **3.5625** |
+| Q2 | Analytical query patterns (SUM OVER PARTITION BY running total) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q3 | SQL best practices OLAP (`if()` function existence + CASE equivalence) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q4 | dbt snapshots SCD2 (hard_deletes='new_record', dbt_is_deleted column) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
 
-**Iter average = (5.0000 + 5.0000 + 4.8750 + 3.3125) / 4 = 4.5469 PASS** (margin +1.0469 above 3.5 threshold).
+**Iter average = (3.5625 + 5.0000 + 5.0000 + 5.0000) / 4 = 4.6406 PASS** (margin +1.1406 above 3.5 threshold).
 
 ---
 
 ## Topic updates (rubric)
 
-- **Oracle PL/SQL→dbt/Trino migration** (Q1 NVL2 translation): 4.4673 × 107 = 478.0011 → (478.0011 + 5.00) / 108 = **4.4724/108 PASSED** (+0.0051). Margin to 3.5 widens to +0.9724.
-- **Analytical query patterns on Iceberg+Trino** (Q2 NTILE quartile segmentation): 4.4686 × 77 = 344.0822 → (344.0822 + 5.00) / 78 = **4.4754/78 PASSED** (+0.0068). Margin to 3.5 widens to +0.9754.
-- **SQL query best practices for OLAP** (Q3 count_if/FILTER idiomatic boolean aggregation): 4.5225 × 179 = 809.5275 → (809.5275 + 4.875) / 180 = **4.5245/180 PASSED** (+0.0020). Margin to 3.5 widens to +1.0245.
-- **Query performance basics** (Q4 Iceberg metadata-only COUNT + partition pruning, partial defect): 4.3629 × 20 = 87.258 → (87.258 + 3.3125) / 21 = **4.3129/21 PASSED** (−0.0500). Margin to 3.5 narrows to +0.8129 but row remains comfortably PASSED.
+- **Query performance basics** (Q1 Iceberg filtered-COUNT mechanism slip, partial — actionable diagnosis correct): 4.3129 × 21 = 87.5709 → (87.5709 + 3.5625) / 22 = **4.1425/22 PASSED** (−0.1704). Margin to 3.5 narrows from +0.8129 to +0.6425. Still comfortably PASSED but the 2nd-instance defect drags the row.
+- **Analytical query patterns on Iceberg+Trino** (Q2 cumulative running total): 4.4754 × 78 = 349.0812 → (349.0812 + 5.0000) / 79 = **4.4814/79 PASSED** (+0.0060).
+- **SQL query best practices for OLAP** (Q3 `if()` function existence): 4.5245 × 180 = 814.4100 → (814.4100 + 5.0000) / 181 = **4.5278/181 PASSED** (+0.0033).
+- **dbt snapshots SCD2** (Q4 hard_deletes='new_record' re-confirm): 4.0961 × 15 = 61.4415 → (61.4415 + 5.0000) / 16 = **4.1526/16 PASSED** (+0.0565). Margin to 3.5 widens from +0.5961 to +0.6526. iter1112 FIX-A durable.
 
 ALL required topics REMAIN PASSED.
 
@@ -107,50 +90,73 @@ ALL required topics REMAIN PASSED.
 
 ## Watch streams + recurrence checks
 
-- **NEW WATCH STREAM (Q4):** Iceberg filtered `COUNT(*)` on partition-column claim ("must scan even if partition column"). First instance. Re-probe queue priorities (1)/(2) added:
-  - (1) "tenant_id IS in my partition spec, why is per-tenant COUNT(*) still slow?" — forces direct engagement with r10 §995 bucket-vs-identity distinction.
-  - (2) "Will partitioning by account_id make my COUNT(*) WHERE account_id metadata-only?" — forces direct citation of r10 §1021-§1024 trigger conditions.
+- **iter1123 Q4 partition-column COUNT-metadata-only WATCH: RECURRED — 2nd instance.** This iter's Q1 explicitly tested the same defect family on a more direct angle ("partitioned by identity(account_id)") and responder reproduced the WRONG MECHANISM claim ("WHERE account_id=42 falls into NEITHER metadata category, still reads Parquet files"). The pivot to partition-explosion diagnosis is correct but the framework rule is wrong. **2nd instance triggers LIGHT FIX-A per the iter1123 watch playbook.**
+- **iter1112 FIX-A dbt_is_deleted column (hard_deletes='new_record'):** RE-CONFIRMED CLEAN this iter. Durable.
 - No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic recurrence.
-- iter1120 Q4 ADD-COLUMN multi-clause syntax watch remains CLOSED (cleared iter1121).
-- iter1116 Q1 ts-minus-ts watch remains CLOSED (cleared iter1117/iter1118).
 
 ---
 
-## Thinnest-margin order (after iter1123 updates)
+## Thinnest-margin order (after iter1124 updates)
 
 1. storage-tiering 3.9219/8 (+0.4219) — unchanged
-2. dbt-snapshots SCD2 4.0961/15 (+0.5961) — unchanged
-3. cost-considerations 4.2504/21 (+0.7504) — unchanged
-4. query-perf-regression-diagnosis 4.3108/20 (+0.8108) — unchanged
-5. query-perf-basics 4.3129/21 (+0.8129) — narrowed by Q4 (was 4.3629/20 +0.8629); still comfortable margin
+2. dbt-snapshots SCD2 4.1526/16 (+0.6526) — strengthened by Q4 (was 4.0961/15 +0.5961)
+3. query-perf-basics 4.1425/22 (+0.6425) — narrowed by Q1 defect (was 4.3129/21 +0.8129); now 3rd-thinnest
+4. cost-considerations 4.2504/21 (+0.7504) — unchanged
+5. query-perf-regression-diagnosis 4.3108/20 (+0.8108) — unchanged
 
 Federation 4.50244/312 untouched (fragile-PASS preserved). CBO/ANALYZE 4.5920/21 untouched.
 
 ---
 
+## Q1 mechanism-vs-diagnosis breakdown (key analytical framing)
+
+The Q1 answer has TWO distinguishable parts that score differently:
+
+**Part 1 — Mechanism framework (WRONG):**
+- Responder asserts only 2 metadata-only cases exist: unfiltered COUNT(*), GROUP BY on identity-partition column
+- Asserts `WHERE <identity-partition-column> = X` is NEITHER and "Trino still reads the matching Parquet files"
+- This contradicts r10 §995-§1024 (filtered COUNT on identity partition + partition pruning + manifest record_count sum IS metadata-only — condition (2) excludes only "predicates on **non-partition** columns") AND the Starburst blog ("metadata-driven optimizations make COUNT(*) queries with WHERE clauses on partition columns particularly fast... without reading the actual data files")
+- 2nd instance of iter1123 Q4 slip — SAME DEFECT CLASS
+
+**Part 2 — Actionable diagnosis (CORRECT for THIS scenario):**
+- Pivots to partition-explosion: high-cardinality identity(account_id) = millions of partitions = giant manifest list = slow manifest planning
+- This IS the actual root cause for the 30s timing on a high-cardinality identity-partitioned table (matches r10 §1389/§1393/§1406 over-partitioning canonical)
+- Recommends bucket(account_id, 64) — partially correct (fixes manifest planning + write balance), but misses that bucket transform LOSES metadata-only COUNT for original-column filter (r10 §1006)
+
+**Score impact:** Part 1's wrong mechanism rule is the dominant defect (will mislead future questions); Part 2's correct diagnosis saves applicability partially. Net: 3.5625 — passes the iter average but drags the query-perf-basics topic row by 0.17 across 22 datapoints.
+
+---
+
 ## Recommendation
 
-**NO-OP + WATCH STREAM.**
+**LIGHT FIX-A in r18 (query-performance-regression) §70 area, cross-ref to r10 §995.**
 
-- No resource edits this iter. r10 §995-§1058 already lays out the correct partition-column metadata-only COUNT(*) semantics with full trigger conditions, transform-by-transform table, and diagnostic section. The Q4 defect is a responder findability/synthesis miss, NOT a resource gap. Per first-instance discipline matching iter1116 ts-minus-ts and iter1120 ADD-COLUMN handling, do not preemptively edit resources; re-probe within 2-3 iters to scope per-instance vs structural recurrence.
-- Commit rubric (score-history append + 4 topic rows updated) + feedback only.
-- Re-probe queue refresh (Q4 watch takes priority slot 1):
-  1. Iceberg partition-column COUNT metadata-only re-probe (Q4 watch scoping)
-  2. storage-tiering 9th angle (still thinnest required-topic row at 3.9219/8)
-  3. dbt-snapshots-SCD2 16th angle (dbt_is_deleted hard-delete CDC, check_cols edge cases)
-  4. cost-considerations 22nd angle ($manifests partition-cost attribution / per-tenant split)
+Specifically: add a one-paragraph callout in the r18 "if unfiltered COUNT(*) is fast but COUNT(*) WHERE col=X is slow" decision branch:
+
+> **If unfiltered `COUNT(*)` returns fast (~seconds) but `COUNT(*) WHERE <col>=X` is slow (tens of seconds), it is NOT a data-file scan — it is most often manifest-planning overhead from partition explosion.**
+>
+> **The wrong mental model** (do NOT use): *"WHERE on the partition column still reads the data files, that's why it's slow"* — INCORRECT on Trino 467 + Iceberg. Filtered `COUNT(*)` on an identity-partition column is metadata-only IN PRINCIPLE (partition pruning + manifest record_count summation; r10 §995-§1024 trigger conditions). The slow query is NOT scanning Parquet data.
+>
+> **The right mental model**: the slowness is **manifest planning overhead**. With high-cardinality identity partitioning (e.g., `identity(account_id)` on 1M+ accounts), you get 1M+ partition entries in the manifest list. Unfiltered `COUNT(*)` can short-circuit via the snapshot summary (`total_records`); filtered `COUNT(*) WHERE account_id=X` must traverse the manifest list to evaluate the partition predicate, which is what takes 30s. r10 §1389/§1393/§1406 covers this over-partitioning pattern.
+>
+> **Diagnose**: `SHOW CREATE TABLE` to see the partition spec; `SELECT COUNT(*) FROM <tbl>$partitions` to see partition count. If partition count >> 100K on a high-cardinality identity column, partition explosion is the cause.
+>
+> **Fix**: switch to a bounded transform (`bucket(account_id, 64)` reduces partitions from millions to 64). NOTE the trade-off (r10 §1006): bucket gives up metadata-only per-account-id `COUNT(*)` since the manifest stores the bucket number not the original value — per-account COUNT(*) under bucket partitioning requires file scan + filter. You're trading "slow metadata-only-in-principle (manifest planning)" for "fast partition-pruned scan (bucket pruning + small file read)."
+
+Use the iter1123 FIX-A draft text in the watch entry as the starting template. Inline-WRONG defang the "EVEN IF account_id is a partition column, it must scan data files" framing (per `feedback_defang_donotwrite_snippets`) so the responder can't re-grab the wrong claim. Cross-link to r10 §995 callout as the canonical authority on metadata-only triggers.
+
+Optional: also add a parallel one-line cross-ref in r10 §995 callout area pointing to r18 perf-regression-diagnosis: "If `COUNT(*) WHERE <partition col>=X` is slow despite identity partitioning, see r18 §70 — manifest planning overhead from partition explosion is the most likely cause, NOT a data-file scan."
+
+Q2/Q3/Q4 clean — no edits needed. Commit FIX-A + rubric + feedback in one iter.
 
 ---
 
 ## Pattern observation
 
-8-iter STRONG PASS streak (1090/1092/1093/1117/1118/1119/1121/1122 all ≥4.75 — many at 5.00) ends at **4.5469 PASS** on iter1123. Break = first-instance responder findability miss on a less-recently-probed angle (Iceberg metadata-only optimization for filtered COUNT on partition column). The conceptual canonical (unfiltered COUNT(*) = metadata-only) reaches cleanly; the partition-column nuance does NOT. This matches the `feedback_responder_broken_secondary_alternative` + `feedback_synthesis_ceiling_stop_churning` family — the responder has the primary lead right but synthesizes a wrong nuance on the secondary "even if X" qualifier without consulting r10's billing-query-gold callout.
+iter1123 NO-OP + WATCH STREAM call validated by this iter's RECURRENCE on direct re-probe. Per the watch playbook, first-instance NO-OP + targeted re-probe is the right gate — it scopes per-instance vs structural. Here the recurrence on a more direct framing ("partitioned by identity(account_id)" explicitly in the question) confirms the defect is NOT pure per-instance noise — it's a findability boundary: the responder reaches r10's bucket-vs-identity content (correct diagnosis) and r18's partition-explosion content (correct on planning overhead) but does NOT reach r10 §995's "filtered COUNT on partition col IS metadata-only" trigger table. The wrong framework rule wins out because no resource explicitly defangs it in the perf-regression-diagnosis path (r18 §70 decision branch is the natural keyword route for "slow COUNT, fast unfiltered COUNT").
 
-Per `feedback_trace_recurring_folklore_to_resource_root_cause`: BEFORE treating as a pure responder slip, grep'd `resources/` for the wrong claim — r10 contains only the OPPOSITE (metadata-only IS the case on identity partition); r18 perf-regression-diagnosis runbook covers the unfiltered-fast-path but does NOT explicitly cross-ref to r10 for the filtered-on-partition-column case. **Findability boundary identified** — if the re-probe RECURS, the LIGHT FIX-A target is a one-paragraph cross-ref insert in r18 §70 area pointing to r10 §995. Hold for first-instance NO-OP-then-re-probe per established discipline.
+LIGHT FIX-A target is r18 §70 decision branch (NOT r10 §995 — that's already correct). Add an explicit "wrong-mental-model" defang at the keyword-route entry point so the responder is steered to the metadata-only-in-principle framing AND to the partition-explosion diagnosis on the same path. Inline-WRONG defang per `feedback_defang_donotwrite_snippets`. Reconcile-in-place per `feedback_reconcile_dont_append` — don't just append a new section, defang the wrong claim where keywords land.
 
-Q1/Q2/Q3 reinforce content-lineage durability:
-- Q1 NVL2 → CASE: r27 §362 table content reached cleanly (Oracle-migration row +0.0051).
-- Q2 NTILE quartile: native Trino 467 NTILE used correctly with DESC ordering and equal-COUNT semantics distinguished from threshold-based percentiles.
-- Q3 count_if/FILTER: both Trino-native forms correctly given; bool_and minor enumeration shave is a per-instance per-`feedback_responder_broken_secondary_alternative` artifact, NOT a resource gap.
+Pattern signal: this is also adjacent to the `feedback_responder_broken_secondary_alternative` family (responder has the actionable pivot right but the framework rule wrong — the wrong rule is a confidently-stated "secondary explanation" before the right pivot), and to `feedback_responder_overwarning_folklore` (the "still reads data files" rule is a folklore-style assertion not actually grounded in r10). FIX-A at r18 perf-regression-diagnosis §70 area addresses the findability route + defangs the folklore in one targeted edit. Hold the line on iter1123 watch playbook discipline — re-probe + LIGHT FIX-A on 2nd instance is the established protocol matching iter893/iter941-948 trace-to-resource-root-cause pattern.
 
-Federation/CBO untouched this iter; fragile-PASS rows preserved.
+Q2/Q3/Q4 strong: running-total ROWS UNBOUNDED PRECEDING canonical clean, `if()` existence + CASE equivalence clean (no imported-prior trap of suspecting `if()` is missing from Trino like the iter954 `to_char` slip), dbt hard_deletes='new_record' iter1112 FIX-A durable on 2nd direct re-probe. Three clean breadth probes reinforce content lineage durability outside the Q1 defect family.

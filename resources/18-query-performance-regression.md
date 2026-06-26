@@ -69,6 +69,12 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 > - If `COUNT(*)` is also slow → table itself is the problem (metadata bloat, manifest list explosion). Jump to Step 7 (small files / manifest bloat).
 > - If `COUNT(*)` is fast (<1s) → query-specific issue. Continue to Check 3.
 >
+> > **SPECIAL CASE — "unfiltered `COUNT(*)` is fast (~2s) but `COUNT(*) WHERE <partition_col> = X` is slow (~30s)" on a table partitioned by `<partition_col>`.** *(Keyword anchors: per-account COUNT slow, per-tenant COUNT slow, filtered count on the partition column slow, COUNT WHERE partition key slow but unfiltered fast, billing-dashboard per-account count slow.)*
+> >
+> > **DO NOT conclude "the `WHERE` on the partition column forces Trino to read the Parquet data files."** That is FALSE. A `COUNT(*)` whose predicate is **fully on an identity-partition column** is answered **METADATA-ONLY** in Trino 467 — partition pruning selects the matching files and the count is summed from their manifest `record_count`s, **no Parquet data is opened** (same fast path as the unfiltered count; see [r10 §metadata-only COUNT on a partition column](10-lakehouse-partitioning.md)). *(Caveat: this metadata-only fast path is disabled if the table has merge-on-read position-delete files — but then the UNfiltered count would also be slow, which it isn't here.)*
+> >
+> > So the slowness is **NOT a data scan** — it is almost always **PARTITION-COUNT EXPLOSION / manifest-planning overhead**: the table is identity-partitioned on a **high-cardinality** column (e.g. `account_id` with tens of thousands of values × day = millions of tiny partitions), so even a metadata-only count pays a huge **planning** cost walking an enormous manifest set. **Diagnose:** `SHOW CREATE TABLE <t>` (confirm it's `identity(account_id)` on a high-cardinality column) + `SELECT COUNT(*) FROM iceberg.<schema>."<t>$partitions"` (millions of partitions = the smoking gun). **Fix:** re-partition with `bucket(account_id, N)` (e.g. 32–64) to bound the partition count — see [r10 §bucket vs identity](10-lakehouse-partitioning.md). **Trade-off to state honestly:** the `bucket()` transform means a `WHERE account_id = X` count is no longer purely a partition predicate, so it gives up the metadata-only fast path for that filter (it prunes to one bucket's files but counts them) — usually a good trade because it eliminates the planning blow-up, but say so.
+>
 > ### Check 3 (≈20s): Did partition pruning silently break? — `EXPLAIN` and look at the TableScan
 >
 > ```sql
