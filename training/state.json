@@ -1,7 +1,7 @@
 {
-  "iteration": 1117,
+  "iteration": 1118,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1117 ts-minus-ts watch re-probe (iter1116 Q1 slip). Q1 = duration-between-two-timestamps shape, DIFFERENT angle (time-to-first-response in minutes / ticket age in hours / gap between consecutive events) \u2014 confirm responder uses date_diff(unit, earlier, later) NOT timestamp-minus-timestamp. If ts-ts recurs -> LIGHT FIX-A (STEP-0 router in r07 with inline-WRONG defang). Q2-Q4 breadth."
+  "note": "iter1118 breadth + sessionization shape re-probe (judge note: the iter1116 ts-minus-ts slip occurred in a MULTI-STEP sessionization window, not the clean-duration shape which cleared iter1117). Q1 = full sessionization/streak gaps-and-islands (gap test buried in a window) \u2014 confirm responder uses date_diff(unit, LAG, cur) NOT ts-ts in the multi-step context. Q2-Q4 breadth. If ts-ts recurs in the multi-step shape -> LIGHT FIX-A. Federation/CBO untouched."
 }

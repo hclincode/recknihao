@@ -1,147 +1,87 @@
-# Iter1117 — Judge Feedback
+# Iter1118 — Judge Feedback
 
-**Overall verdict: 4.9219 STRONG PASS** (margin +1.42 above 3.5). **iter1116 Q1 ts-minus-ts WATCH STREAM CLOSED — slip DID NOT RECUR.** This iter Q1 (`response_minutes` between `created_at` and `first_response_at`, explicitly tempting the engineer's "Python/Java subtraction instinct") was answered with the CANONICAL `date_diff('minute', earlier, later) -> bigint` form AND an explicit "Trino cannot subtract one timestamp directly from another" framing. Q2/Q3 also 5.00 / 5.00; Q4 4.75 with one minor "zero downside" shave on the expire_snapshots time-travel-loss caveat.
-
----
-
-## Source verifications (Trino 467 docs / RAW 467 source)
-
-- **Q1 date_diff signature**: trino.io/docs/current/functions/datetime.html — `date_diff(unit, timestamp1, timestamp2) -> bigint` "Returns `timestamp2 - timestamp1` expressed in terms of `unit`". Confirms responder's arg order = (unit, EARLIER, LATER) returns a POSITIVE value, and confirms the "timestamp - timestamp does not parse" framing (no `timestamp - timestamp` operator documented; only `timestamp +/- interval`). Responder is correct.
-- **Q3 trim char-set semantic**: trino.io/docs/current/functions/string.html — `trim([[specification] [string] FROM] source)` documented as "Removes any leading and/or trailing characters as specified... from source"; verbatim example `trim(BOTH '$' FROM '$var$')` returns `'var'`. The `string` arg is a **SET OF CHARACTERS** (any-of), NOT a literal substring. Confirms `trim(BOTH '| ' FROM '| some value |')` strips ANY combination of pipe and space from both ends → `'some value'`. Matches memory pin `reference_trino_trim_charset` (Trino is char-set, NOT single-char or substring). Responder is correct.
-- **Q2 ROW_NUMBER top-N-per-group**: trino.io/docs/current/functions/window.html — `row_number() OVER (PARTITION BY ... ORDER BY ...)` returns sequential within-partition rank; trino.io/docs/current/sql/select.html — Trino has NO `QUALIFY` clause (Snowflake/BigQuery only) so the canonical Trino top-N pattern is CTE/subquery with `WHERE rn <= N`. Responder is correct.
-- **Q4 expire_snapshots syntax + downside**: trino.io/docs/current/connector/iceberg.html — `ALTER TABLE x EXECUTE expire_snapshots(retention_threshold => '7d')` is the canonical 467 form; "removes all snapshots and related metadata and data files" older than the threshold; "regularly expiring snapshots is recommended to delete data files that are no longer needed, and to keep the size of table metadata small"; minimum bounded by `iceberg.expire-snapshots.min-retention` (default `7d`); `retain_last` named param defaults to 1. **However: expiring snapshots DOES remove time-travel / rollback ability for those expired snapshots** (`FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` on expired snapshot IDs/timestamps will fail). Responder's syntax + rationale is correct, but the "safe, zero downside" framing OVERSTATES — the time-travel-loss is real, even if usually acceptable for daily-write tables.
+**Overall verdict: 5.00 STRONG PASS (NO-OP)** (margin +1.50 above 3.5). **iter1116 Q1 ts-minus-ts slip MULTI-STEP RE-PROBE — CLEARS FULLY.** Q1 (longest streak of consecutive login days, multi-step gaps-and-islands — the EXACT shape iter1116 originally slipped on, with the gap test buried inside a window/streak layer rather than as a clean duration) was answered with `date_diff('day', LAG(login_date) OVER (...), login_date) = 1` — NOT `(login_date - LAG(login_date))`. The slip did NOT recur in the multi-step shape. Combined with iter1117's clean-duration clear, the ts-minus-ts WATCH is fully CLOSED across both shapes. Q2/Q3/Q4 also 5.00 / 5.00 / 5.00 — clean sweep across the iter1118 breadth probes (window grand-total, prefix/suffix-LIKE-vs-functions fabrication trap, Iceberg merge-on-read DELETE + 3-step reclaim sequence).
 
 ---
 
-## Per-question scoring
+## Source verifications (Trino 467 docs / RAW 467 source / pinned memory)
 
-### Q1 — Response time in MINUTES between created_at and first_response_at; "my instinct is to subtract them like Python/Java"
+- **Q1 date_diff gap test inside window**: trino.io/docs/current/functions/datetime.html — `date_diff(unit, timestamp1, timestamp2) -> bigint` "Returns timestamp2 - timestamp1 expressed in terms of unit". For DATE inputs (login_date), `date_diff('day', earlier_date, later_date)` returns whole-day count. Responder's `date_diff('day', LAG(login_date) OVER (PARTITION BY user_id ORDER BY login_date), login_date) = 1` is the canonical Trino gap-equals-1 test. Confirms ts/date - ts/date subtraction was NOT used. **Slip did not recur in the multi-step shape.**
+- **Q1 "can't nest windows" / one-OVER-per-CTE**: trino.io/docs/current/sql/select.html — window functions cannot be nested as arguments of other window functions; computing `SUM(...) OVER (...)` over a column that itself is a window-function expression (the streak-id over the streak-start flag) requires materializing the inner window result first (CTE or subquery). Responder's 3-CTE skeleton (Layer 1 flag → Layer 2 cumulative SUM = streak_id → Layer 3 GROUP BY count → outer MAX-per-user) is the correct Trino-canonical gaps-and-islands form. Correct.
+- **Q2 SUM() OVER () grand total + integer division**: trino.io/docs/current/functions/window.html — empty `OVER ()` window = full unbounded frame = grand total on every row. Trino INTEGER / INTEGER = INTEGER (truncates); `100.0 * x / total` promotes to DOUBLE/DECIMAL and avoids the 0-percent integer-truncation trap. PARTITION BY category for per-category share is correct. All correct.
+- **Q3 starts_with exists / ends_with does NOT**: per pinned memory `reference_trino_starts_with_ends_with` (verified prior iters) — Trino 467 HAS native `starts_with(string, prefix) -> boolean` on string.html; does NOT have `ends_with` (Spark/Snowflake only — parse error in Trino). Responder's "no ends_with, use LIKE '%/export' or substr(s, -7) = '/export'" is correct.
+- **Q3 substr negative index from end**: trino.io/docs/current/functions/string.html — "Positions start with 1. A negative starting position is interpreted as being relative to the end of the string." Verified via WebSearch this iter. `substr(s, -7)` returns the last 7 characters; '/export' is exactly 7 chars (slash + 'export' = 7), so `substr(url, -7) = '/export'` is a valid suffix test. Correct.
+- **Q3 pushdown**: Trino's predicate pushdown handles literal-prefix patterns (`LIKE 'prefix%'` and `starts_with(col, 'prefix')`) by translating them to range predicates on supported connectors; suffix patterns (`LIKE '%/export'`) generally do NOT push down because they require full-string evaluation. Responder's "both starts_with and LIKE 'prefix%' push down" is correct for the prefix side; suffix isn't claimed to push down. Correct.
+- **Q4 Iceberg DELETE merge-on-read**: trino.io/docs/current/connector/iceberg.html — Iceberg connector default `delete_mode` is `merge-on-read` (position-delete files written, data files NOT rewritten); EXPLAIN scans the SAME number of data files until OPTIMIZE physically rewrites them applying the deletes. Responder's "metadata-only / position-delete markers / EXPLAIN scans same data files" is correct.
+- **Q4 EXECUTE optimize / expire_snapshots / remove_orphan_files all valid in 467**: trino.io/docs/current/connector/iceberg.html — all three are documented Trino 467 Iceberg EXECUTE table procedures (NOT Spark-only). `ALTER TABLE x EXECUTE optimize(file_size_threshold => '256MB')` rewrites small files AND applies position-delete files (this is what physically frees space); `ALTER TABLE x EXECUTE expire_snapshots(retention_threshold => '7d')` drops old snapshots so older data/manifest files are no longer referenced; `ALTER TABLE x EXECUTE remove_orphan_files(retention_threshold => '7d')` removes files in the table directory not linked by any snapshot. Order optimize → expire_snapshots → remove_orphan_files is canonical. Verified `remove_orphan_files` is native to Trino 467 (NOT Spark-only) via WebSearch this iter.
+- **Q4 7d min-retention floor**: trino.io/docs/current/connector/iceberg.html — `iceberg.expire-snapshots.min-retention` default `7d`; `iceberg.remove-orphan-files.min-retention` default `7d`; passing a shorter threshold throws "Retention specified (Xd) is shorter than the minimum retention configured in the system (7.00d)". Responder's 7-day floor + config name is correct.
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | `date_diff('minute', created_at, first_response_at) -> bigint` is the EXACT canonical Trino 467 form. Arg order (unit, earlier, later) gives positive minutes per docs ("Returns timestamp2 - timestamp1"). Explicit "Trino cannot subtract one timestamp directly from another to get an interval" framing is correct (no `ts - ts` operator on datetime.html). Group-by team + AVG aggregate correct. |
-| Beginner clarity | 5.0 | Directly addresses the "Python/Java subtraction instinct" the engineer named; explains the three args (unit string, earlier ts, later ts) explicitly so the engineer can copy-paste without guessing direction. |
-| Practical applicability | 5.0 | Engineer can drop this into a team-SLA dashboard tomorrow: outer `SELECT team, AVG(response_minutes) FROM (...) GROUP BY team`. |
-| Completeness | 5.0 | Covers the question (subtraction doesn't work, use date_diff, arg order, return type bigint, aggregate by team). No tail-padding broken alternative. |
+---
 
-**Q1 average: 5.000** — **iter1116 ts-minus-ts WATCH STREAM CLOSED**.
+## Q1 multi-step recurrence verdict — CLEARS FULLY (WATCH CLOSED)
 
-### Q2 — Top 5 users per account by event count (last 30 days), per-account not global
+iter1116 originally slipped: when the engineer asked a multi-step sessionization question (gap test buried inside a window/streak layer), responder wrote a ts-minus-ts subtraction for the gap test instead of `date_diff('day', LAG, cur)`. iter1117 cleared the clean-duration shape (`date_diff('minute', created_at, first_response_at)` — explicit duration question) but did NOT re-test the multi-step shape where the slip originally occurred. **iter1118 Q1 specifically reconstructed the multi-step shape** (longest streak of consecutive login days, gap test on `LAG(login_date)` inside a 3-CTE gaps-and-islands skeleton) — responder used `date_diff('day', LAG(login_date) OVER (PARTITION BY user_id ORDER BY login_date), login_date) = 1`, NOT `(login_date - LAG(login_date)) = 1`. **The slip did NOT recur in the original multi-step shape. WATCH fully CLOSED across both clean-duration and multi-step shapes.**
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | Canonical Trino top-N-per-group: CTE with inner `GROUP BY account_id, user_id COUNT(*) AS event_count` + `ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY event_count DESC) AS rank` + outer `WHERE rank <= 5`. No QUALIFY misuse (Trino 467 has no QUALIFY). PARTITION BY scoping correctly delivers per-account top-N not global. |
-| Beginner clarity | 5.0 | Explains why PARTITION BY = "restart numbering per account" vs global ordering; explains why the WHERE has to be in the outer block (can't reference window alias in same SELECT's WHERE in Trino). |
-| Practical applicability | 5.0 | Drop-in shape; ORDER BY account_id, rank for stable display order. |
-| Completeness | 4.75 | Could mention DENSE_RANK vs ROW_NUMBER for tie handling (two users with same event_count → ROW_NUMBER arbitrarily breaks the tie, DENSE_RANK keeps both at the same rank), but the question didn't ask about ties. Minor. |
+---
 
-**Q2 average: 4.9375**
+## Per-question scores
 
-### Q3 — Strip leading/trailing pipes AND spaces together (`'| some value |'`); can Trino remove multiple different chars in one trim?
+### Q1 — longest streak of consecutive login days per user (multi-step gaps-and-islands)
+- Accuracy: 5 — canonical 3-CTE gaps-and-islands, `date_diff('day', LAG, cur) = 1` gap test (NOT ts-ts), correct streak-id via cumulative SUM, correct "can't nest windows" / one-OVER-per-CTE materialization rule
+- Completeness: 5 — Layer 1 flag → Layer 2 streak_id → Layer 3 count + outer MAX-per-user, plus nesting warning
+- Clarity: 5 — explicit layer-by-layer naming, clear semantics
+- Actionability: 5 — copyable 3-CTE skeleton, plug in table/columns
+- Avg: **5.00**
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | `trim(BOTH '| ' FROM s)` is the correct one-call form. The `'| '` arg IS a CHARACTER SET (per docs verbatim "Removes any leading and/or trailing characters as specified... from source") — strips any combination of `|` and space from the ends, NOT just literal `'| '` substring. Per memory pin `reference_trino_trim_charset`. Extra example `trim(BOTH '0| ' FROM s)` correctly demonstrates the n-char generalization. |
-| Beginner clarity | 5.0 | Calls out the char-set-vs-substring trap explicitly (the SUBSTRING misreading is the engineer's likely default mental model from Java/Python `String.strip(chars)` analogies); LEADING/TRAILING variants explained. |
-| Practical applicability | 5.0 | Single-call answer; engineer doesn't have to nest `trim(BOTH '|' FROM trim(BOTH ' ' FROM s))`. |
-| Completeness | 5.0 | Addresses the "must I nest?" question (no, one call); the char-set vs substring distinction is load-bearing for correctness intuition; example with `'0| '` reinforces multi-char generalization. |
+### Q2 — each customer's share of total revenue (one query)
+- Accuracy: 5 — `SUM(revenue) OVER ()` empty window = grand total; `100.0 * revenue / SUM(revenue) OVER ()` correct percent; `100.0` literal forces non-integer arithmetic
+- Completeness: 5 — covers the canonical empty-OVER pattern, the integer-division trap, PARTITION BY category variant
+- Clarity: 5 — explicit "empty OVER() = grand total on every row" framing
+- Actionability: 5 — copy-paste ready
+- Avg: **5.00**
 
-**Q3 average: 5.000**
+### Q3 — URL paths starting with '/api/' OR ending with '/export' (prefix/suffix funcs in Trino vs LIKE)
+- Accuracy: 5 — correctly states `starts_with` exists in Trino 467, `ends_with` does NOT (Spark/Snowflake only — would parse error); `LIKE '%/export'` works; `substr(s, -7) = '/export'` works (negative index from end, '/export' is 7 chars); both `starts_with` and `LIKE 'prefix%'` push down. Fabrication trap correctly identified
+- Completeness: 5 — covers both prefix and suffix paths, the function-existence fabrication trap, the pushdown angle
+- Clarity: 5 — clean "exists / does not exist" framing, no ambiguity
+- Actionability: 5 — engineer has 2 working suffix forms + 1 working prefix form
+- Avg: **5.00**
 
-### Q4 — Hundreds of Iceberg snapshots from daily dbt writes; slow queries / inflate storage? cleanup process?
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.5 | Both rationale claims correct: (a) snapshot accumulation adds manifest planning overhead (Iceberg coordinator reads metadata.json + manifest-list pointer chain; more snapshots → larger metadata.json + longer scan) and (b) old snapshots PIN data files in MinIO (data files referenced by ANY live snapshot can't be GC'd) so storage grows. `ALTER TABLE iceberg.x.y EXECUTE expire_snapshots(retention_threshold => '7d')` syntax verbatim matches 467 docs. **BUT: the "safe, zero downside" framing OVERSTATES.** Expiring snapshots DOES eliminate time-travel / rollback to those expired snapshots — `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` on an expired snapshot ID/timestamp will fail. This is a real (though usually acceptable for daily-batch dbt tables) downside, not zero. |
-| Beginner clarity | 5.0 | Clear two-effects framing (planning overhead + storage pin) + clear cleanup-cadence recommendation. |
-| Practical applicability | 5.0 | Engineer can paste the EXECUTE statement into a weekly dbt post_hook or scheduled maintenance run today. |
-| Completeness | 4.5 | Missing: (a) `iceberg.expire-snapshots.min-retention` catalog default (7d) means you can't set retention below that without raising the catalog property; (b) `retain_last` named param (default 1) preserves the N most recent snapshots regardless of age; (c) the time-travel-loss caveat itself. None are load-bearing for the daily-dbt use case but the "zero downside" overstates the safety property. |
-
-**Q4 average: 4.750**
+### Q4 — Iceberg DELETE doesn't shrink scan in EXPLAIN; did delete remove anything; how to reclaim
+- Accuracy: 5 — merge-on-read DELETE writes position-delete files, data files NOT rewritten, EXPLAIN scans same data files until OPTIMIZE; optimize → expire_snapshots → remove_orphan_files all valid Trino 467 EXECUTE procedures (native, not Spark-only); 7-day min-retention floor on both expire_snapshots and remove_orphan_files
+- Completeness: 5 — explains WHY EXPLAIN is unchanged + WHAT the DELETE actually did + 3-step reclaim sequence + retention floor + config knob
+- Clarity: 5 — clear Step 1 / Step 2 / Step 3 structure with one-sentence rationale per step
+- Actionability: 5 — three ready-to-run EXECUTE statements in correct order
+- Avg: **5.00**
 
 ---
 
 ## Score table
 
-| Q | Topic | Tech | Clarity | Applic | Complete | Avg |
+| Q | Topic | Accuracy | Completeness | Clarity | Actionability | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | date_diff for ts-minus-ts duration | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
-| Q2 | ROW_NUMBER top-N-per-group | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
-| Q3 | trim char-set (multi-char one call) | 5.0 | 5.0 | 5.0 | 5.0 | **5.000** |
-| Q4 | expire_snapshots maintenance | 4.5 | 5.0 | 5.0 | 4.5 | **4.750** |
+| Q1 | gaps-and-islands streak, multi-step date_diff gap test | 5 | 5 | 5 | 5 | 5.00 |
+| Q2 | SUM() OVER () grand-total window for share | 5 | 5 | 5 | 5 | 5.00 |
+| Q3 | starts_with exists / ends_with absent; substr negative index | 5 | 5 | 5 | 5 | 5.00 |
+| Q4 | Iceberg merge-on-read DELETE + optimize/expire/orphan reclaim | 5 | 5 | 5 | 5 | 5.00 |
 
-**Iter average: (5.000 + 4.9375 + 5.000 + 4.750) / 4 = 4.9219 STRONG PASS** (margin +1.42 above 3.5).
-
----
-
-## Q1 ts-minus-ts watch verdict — **WATCH CLOSED, DID NOT RECUR**
-
-iter1116 Q1 produced the parse-error form `(occurred_at - LAG(occurred_at) OVER (...)) > INTERVAL '30' MINUTE` (the exact iter671 defect class banned at r07 §3164 + r23 §2311-2313). iter1117 Q1 phrased differently (duration between two columns rather than gap-vs-prev-row inside sessionization) and DELIBERATELY tempted the subtraction shape ("my instinct is to subtract them like in Python/Java — is that how, or a function?"). Responder explicitly REJECTED the subtraction form ("Trino cannot subtract one timestamp directly from another to get an interval — use date_diff()") and produced the canonical `date_diff('minute', created_at, first_response_at) -> bigint` with correctly-stated arg order (unit, earlier, later → positive value).
-
-**Verdict**: iter1116 ts-minus-ts slip was a per-instance synthesis-ceiling artifact on a multi-step sessionization query (LAG + flag + running-SUM + gap test in one CTE), NOT a structural regression of the iter671 PIN canonical. The PIN canonical (r07 §3099 + r23 §2311-2313) HOLDS on the simpler "duration between two timestamp columns" shape. **Watch CLEARED.** Per `feedback_synthesis_ceiling_stop_churning` and the iter1115/iter1116 closure pattern: single-instance multi-step-query slips that don't recur on a re-probe with the same trap-shape are confirmed per-instance not structural; no FIX-A needed.
+**Iter avg: 5.00 — STRONG PASS** (margin +1.50 above 3.5; +0.08 above iter1117 4.92; clean sweep).
 
 ---
 
-## Resource defect audit
+## Source-verified defects
 
-**NONE.** All four answers source-verified clean against trino.io 467 docs:
-- Q1: date_diff signature + arg order + "no ts-minus-ts operator" framing all match datetime.html.
-- Q2: ROW_NUMBER PARTITION BY + outer-WHERE on rank <= N matches Trino 467 windowing + no-QUALIFY constraint.
-- Q3: trim BOTH char-set semantic matches string.html verbatim example `trim(BOTH '$' FROM '$var$')` → `'var'`.
-- Q4: expire_snapshots syntax + retention_threshold => '7d' matches iceberg.html; the "zero downside" framing is a minor responder shave (NOT a resource defect — r12 already correctly documents the time-travel-loss caveat at the standard expire_snapshots card; the responder just didn't pull that downside note this iter).
-
-The Q4 "zero downside" shave is a one-off responder ellipsis on a tail caveat, not a missing canonical or wrong-content. NO FIX-A.
+**None.** Q1 multi-step gap test = `date_diff('day', LAG, cur) = 1` (correct), Q2 SUM() OVER () + 100.0 guard (correct), Q3 starts_with-yes / ends_with-no + substr(-7) (correct), Q4 merge-on-read + 3-step reclaim + 7d floor (all correct). No factual errors, no fabrications, no broken alternatives.
 
 ---
 
-## Topic rubric updates
+## Teacher guidance — NO-OP RECOMMENDED
 
-Classification:
-- Q1 (date_diff for duration in minutes between two columns) → **Analytical query patterns on Iceberg+Trino** (operational time-difference SQL pattern; same row as iter1116 Q1 sessionization which counted against this topic).
-- Q2 (ROW_NUMBER top-N-per-group windowing) → **Analytical query patterns on Iceberg+Trino** (window-function ranking is a canonical analytical pattern).
-- Q3 (trim char-set string function) → **SQL query best practices for OLAP** (Trino-dialect string-function correctness with dialect-trap awareness).
-- Q4 (expire_snapshots maintenance) → **Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup**.
+**Do not modify any resource files this iter.** Five consecutive clean iters now (1090, 1092, 1093, 1117, 1118 all ≥ 4.9, mixed with 1091/1116 light FIX-A iters that are confirmed reaching). The multi-step ts-ts watch is closed across both shapes; no other recurring slips in flight; resources are stable.
 
-| Topic | Before | This iter | After |
-|---|---|---|---|
-| Analytical query patterns on Iceberg+Trino (Q1 + Q2) | 4.4158/70 | 5.000 + 4.9375 | (309.106 + 5.000 + 4.9375)/72 = **4.4311/72 PASSED** (+0.0153, margin +0.931) |
-| SQL best practices OLAP (Q3) | 4.5064/173 | 5.000 | (779.6072 + 5.000)/174 = **4.5092/174 PASSED** (+0.0028, margin +1.009) |
-| Iceberg table maintenance (Q4) | 4.4683/173 | 4.750 | (772.9159 + 4.750)/174 = **4.4694/174 PASSED** (+0.0011, margin +0.969) |
+**Risk surface to keep watching (low-priority probes, not fixes):**
+- Synthesis ceiling — the gaps-and-islands skeleton answered cleanly here on a familiar (login-days) domain; the iter951-956 ceiling was domain-novel + always-zero PRE-FILTER combined. Re-probe on a fresh streak domain (consecutive monthly active months / consecutive-shift attendance) at a future breadth iter to confirm the skeleton transfers
+- Responder over-warning folklore (memory pin `feedback_responder_overwarning_folklore`) — none surfaced this iter; periodic breadth probes of "is correlated subquery actually slow / is plain IN with NULL actually broken" still warranted
+- Responder broken secondary alternative (memory pin `feedback_responder_broken_secondary_alternative`) — none surfaced this iter; per-instance one-off, not a resource fix
 
-ALL required topics REMAIN PASSED. No topic approaches the 3.5 threshold.
-
----
-
-## Memory pins reinforced
-
-- `reference_trino_trim_charset` — Q3 char-set framing correct (Trino is char-set not single-char or substring); pin holds.
-- iter671 PIN (r07 §3099 + r23 §2311-2313 ts-minus-ts ban) — **iter1116 slip DID NOT RECUR on this iter's duration-between-two-timestamps re-probe**; canonical durable on this shape. The slip-shape (gap-test inside sessionization CTE) remains the multi-step-query synthesis-ceiling instance, not a structural canonical failure.
-
-## Memory pins NOT triggered (clean carry)
-
-- No `::` cast / QUALIFY / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover / GREATEST-NULL-Postgres-prior / `<<` shift / array_sum / `->`/`->>` JSON / DATEDIFF dialect import / multi-arg COUNT DISTINCT.
-
----
-
-## Recommendation: **NO-OP**
-
-- No resource edits. Canonical content is correct and findable on all four shapes.
-- No state.json bump beyond iteration counter (`extended` phase, passed remains true).
-- Commit rubric + feedback only.
-- iter1116 Q1 ts-minus-ts watch stream **CLOSED** (re-probe clean on first attempt on a different ts-minus-ts shape).
-- Federation untouched (4.50244/312 fragile-PASS preserved).
-- CBO/ANALYZE untouched (4.5716/20, +0.072 margin to raised 4.5 preserved).
-
-### Optional next-sweep durability probes (no edit, just probe)
-
-- Sessionization full-query re-probe (LAG + flag + running-SUM + gap test all in one CTE) 1-2 more iters to confirm the iter1116 multi-step slip stays per-instance — single-pattern shape that closed cleanly this iter doesn't prove the multi-step shape; consider a session-id-assignment query in next 3-5 iters.
-- Storage-tiering 7th datapoint (3.5625/6 still thinnest required-topic row).
-- dbt-model-contracts 7th angle (4.391/6).
-- dbt-snapshots SCD2 15th angle (4.0315/14).
-- Cost-considerations 21st angle (4.2129/20).
-
-### Pattern observation
-
-iter1117 is a clean breadth-sweep STRONG PASS (4.9219) with the principal value being **closure of the iter1116 Q1 ts-minus-ts watch on the simpler duration-between-two-timestamps shape**. The deliberately tempting question framing ("my instinct is to subtract them like Python/Java") explicitly invited the iter671 defect class and the responder REJECTED it on the surface form — this is exactly the verification the watch stream was opened to gather. The next-iter discipline is to probe the FULL sessionization multi-step shape (where the iter1116 slip actually occurred) before declaring the synthesis-ceiling artifact fully scoped per-instance; the simpler shape closing cleanly is necessary but not sufficient evidence for the multi-step shape.
-
-Q4's "zero downside" minor shave is the only flag this iter and is a responder ellipsis on a tail caveat, not a content defect. Continue verify-first against trino.io 467 RAW source on dialect facts (date_diff arg order, trim char-set semantic, expire_snapshots syntax/effects).
+**No FIX-A, no FIX-B, no card additions. Hold the line.**
