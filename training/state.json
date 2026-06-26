@@ -1,7 +1,7 @@
 {
-  "iteration": 1139,
+  "iteration": 1140,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1139 -> 3.875 PASS + DOUBLE LIGHT FIX-A. Q1 truncate(amount,2) FIX-A REACHED -> truncate-2-arg watch CLOSED. Q2 active/absent LEFT-JOIN+NOT-EXISTS 5.0 clean. Q3 (2.5) SILENT-WRONG: responder used status IS NOT DISTINCT FROM \"unknown\" as an NVL(status,unknown)=unknown substitute and claimed it matches NULL -- FALSE (INDF vs a NON-NULL literal is just =, NULL is DISTINCT FROM the literal -> excludes NULL rows). Hybrid (responder over-extrapolation + r23 had no NVL-substitute defang). FIX-A1: r23 \u00a72945 inline DO-NOT-WRITE -- INDF-against-literal = just =, NOT NVL-equivalent, use COALESCE(col,x)=x; reserve INDF for two-nullable-operands. Q4 (3.0) SCD-2 FINDABILITY MISS: responder reached r27 SCD-1 merge then BAILED \"SCD-2 not covered\" despite r09 dbt-snapshot canonical + iter1112 signposts -- the build-change-history / what-was-X-on-date-Y phrasing (no word snapshot) did not route. FIX-A2 (2-touch): r27 TL;DR pt4 + r09 SCD opener -- added change-history/point-in-time/as-of-date/version-history keyword anchors + explicit do-NOT-bail routing. NEW WATCHES: INDF-as-NVL-substitute (re-probe NVL(col,x) IN/= phrasing); SCD-2-change-history-without-snapshot-word (re-probe). dbt-snapshots-SCD2 now thinnest 4.0848/17. Federation/CBO untouched."
+  "note": "iter1140 DOUBLE FIX-A re-probe (iter1139). Q1 = Oracle NVL(col, default) treat-NULL-as-a-literal migration -> confirm responder uses COALESCE(col,x)=x / col IS NULL OR col=x, NOT IS NOT DISTINCT FROM literal (which excludes NULL). Q2 = SCD-2 change history WITHOUT the word snapshot (mutable source, what-was-X-on-past-date) -> confirm responder routes to r09 dbt snapshot, does NOT bail. Q3+Q4 breadth. If either recurs -> escalate. Federation/CBO untouched."
 }
