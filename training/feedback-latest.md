@@ -1,145 +1,165 @@
-# Iter1134 Feedback — 4.7969 STRONG PASS LIGHT FIX-A (cross-ref only): storage-tiering DEFERRED gap RESOLVED via r25-MV PATH / Q4 broken-secondary $snapshots-CROSS-JOIN-LATERAL = responder one-off NO-OP
+# Iter1135 Feedback — 4.4844 PASS NO-OP+WATCH: Q2 PERCENT_RANK-DESC-direction misapplication = RESPONDER ONE-OFF (canonical present in r07 §3939-3956 + §3962-4023, first-instance on "spent more than X% of peers" phrasing)
 
 ## Verdict summary
 
-| Item | iter origin | iter1134 result |
-|---|---|---|
-| **DEFERRED FIX-A**: storage-tiering Mechanism D = pre-aggregated rollup / MV on hot tier for deep-history reports | iter1132 Q1 (3.7500, missed canonical hot-rollup mitigation) | **RESOLVED via r25 MV path on direct re-probe** — responder reached r25 from the MV keyword (not the tiering keyword), produced valid Trino 467 DDL `CREATE MATERIALIZED VIEW ... GRACE PERIOD INTERVAL '24' HOUR WHEN STALE INLINE WITH (...)` against a 24-month cold base, explicit "storage table on fast MinIO + k8s CronJob refresh + dashboard reads MV in seconds + cold scan happens only at refresh". Mitigation surfaced cleanly. **Downgrade verdict: full architectural rollup canonical in r16 NOT needed; LIGHT cross-ref from r16 §"tiering decision rule" → r25 MV-on-hot-tier suffices for findability robustness** (so the next storage-tiering probe that doesn't keyword-hit MV still reaches the mitigation). |
-| **NEW responder slip**: Q4 "extra-conservative" CROSS JOIN LATERAL `"$snapshots"` SELECT — garbled / non-parseable | iter1134 Q4 (first instance) | **Responder broken-secondary-alternative pattern (per memory log: window-in-GROUP-BY / PERCENTILE_CONT / TO_CHAR / ORDER-BY-ungrouped / regexp_extract-comma)** — primary atomic-swap answer is correct (Iceberg CAS metadata-pointer swap, readers see old until commit then new, no empty window/error). Garbled "$snapshots LATERAL" alt is the recurring "for completeness" secondary padding. **Per-instance one-off NO-OP**; carry as watch only if recurs on a similar dbt-table-rebuild keyword path within 2-3 iters. |
+| Item | Status |
+|---|---|
+| Iter average | 4.4844 PASS (margin +0.9844 above 3.5 floor) |
+| Q1 ADD_MONTHS → date_add + last_day_of_month + clamp wrapper | CLEAN 4.9375 — EXACT r27 §666 LEADING CANONICAL match (clamp-up rule replicated correctly) |
+| Q2 PERCENT_RANK DESC + "spent more than 73% of peers" | DEFECT 3.0000 — direction misapplication; **labeling backwards** |
+| Q3 flatten(array(array(T))) + CROSS JOIN UNNEST | CLEAN 5.0000 — source-verified single-level collapse |
+| Q4 Iceberg time travel FOR VERSION/TIMESTAMP AS OF + `$snapshots` lookup | CLEAN 5.0000 — syntax + retention caveat correct |
+| New defects this iter | 1 (Q2 only — direction misapplication) |
+| Resource defects discovered | 0 (canonicals present and correct) |
+| Recommendation | **NO-OP + WATCH** (Q2 first instance; canonicals present; re-probe next sweep) |
 
-## Per-question scores
+## Per-question scoring
 
-### Q1 — 6mo+ events on cheaper MinIO tier; YoY exec dashboard 30+ min from cold scans; standard Trino+Iceberg+dbt pattern to keep recurring historical reports fast WITHOUT un-tiering — 4.8125
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | **DDL verified valid Trino 467** against [trino.io/docs/current/sql/create-materialized-view.html](https://trino.io/docs/current/sql/create-materialized-view.html): grammar is `CREATE [OR REPLACE] MATERIALIZED VIEW [IF NOT EXISTS] view_name [GRACE PERIOD interval] [WHEN STALE (INLINE \| FAIL)] [COMMENT string] [WITH properties] AS query`. Responder's clause order `GRACE PERIOD INTERVAL '24' HOUR WHEN STALE INLINE WITH (partitioning=ARRAY['year_quarter'], format='PARQUET') AS SELECT...` matches the official order exactly. `WHEN STALE INLINE` is the DEFAULT and is the documented valid option (the other is `FAIL`). Mitigation is the canonical answer: storage table lives on the catalog's warehouse location (hot MinIO by default) → dashboard reads small pre-aggregated MV → cold base scan happens once per refresh, not per dashboard hit. Underlying SELECT (DATE_TRUNC quarter bucket + tenant_id + event_type + COUNT(*) + COUNT(DISTINCT user_id) + SUM(amount)) is valid Trino 467. k8s CronJob `REFRESH MATERIALIZED VIEW` correct — Trino has no built-in scheduler ([trino.io/docs/current/sql/refresh-materialized-view.html](https://trino.io/docs/current/sql/refresh-materialized-view.html)), refresh must be externally triggered. Cited r25. **Zero fabrication.** |
-| Beginner clarity | 4.5 | Walks through the gap (cold scan = 30 min) → mitigation (MV on hot tier, read MV in seconds) → trade-off (refresh moves cold scan to nightly cron). Could be slightly clearer on WHY the storage table ends up on hot MinIO (it's because the Iceberg catalog's warehouse location IS the hot MinIO bucket — the MV storage table doesn't get auto-tier-routed; it just lives wherever the catalog points, which on this stack is hot). Minor only. |
-| Practical applicability | 5.0 | Copy-pasteable DDL + k8s CronJob refresh pattern fits the prod stack (Trino 467 + Iceberg + MinIO + k8s on-prem). Engineer can deploy this verbatim. |
-| Completeness | 4.75 | Surfaces the canonical mitigation cleanly. Minor compl shave (−0.25): doesn't explicitly contrast with the iter1132 "two-table UNION ALL view" Mechanism C from r16 (which alone would NOT have solved the YoY query — both tables get scanned for the deep-history range). Per-instance, NOT a resource gap. |
-
-**iter1132 DEFERRED FIX-A verdict: RESOLVED via r25 MV path.** The responder reached the correct canonical mitigation on first re-probe. The architectural "Mechanism D = hot-tier rollup" canonical in r16 is NOT needed; the answer is correct as-is.
-
-### Q2 — Classify each order as new-customer vs returning-customer, breakdown per month, two columns — 5.0000
+### Q1 (4.9375) — Oracle `ADD_MONTHS(invoice_date, 3)` + `LAST_DAY(invoice_date)` → Trino
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY created_at ASC) AS customer_order_num` correctly identifies the first order per customer (rn=1 = new) and all subsequent orders (rn>1 = returning). `SUM(CASE WHEN customer_order_num=1 THEN 1 ELSE 0 END) AS new_customer_orders` + `SUM(CASE WHEN customer_order_num>1 THEN 1 ELSE 0 END) AS returning_customer_orders` is the canonical conditional-aggregate pattern. GROUP BY `date_trunc('month', created_at)` correct. Valid Trino 467 throughout. |
-| Beginner clarity | 5.0 | CTE + GROUP BY structure is standard; explains the row-number-per-customer first-order classification clearly. |
-| Practical applicability | 5.0 | Two-column dashboard breakdown directly answers the question. |
-| Completeness | 5.0 | Fully addresses the question. |
+| Accuracy | 5.0 | `date_add('month', 3, invoice_date)` verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html). `last_day_of_month(x) → date` verified (accepts date/timestamp/timestamp with tz). Oracle ADD_MONTHS clamp-up rule verified at [docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html): "If date is the last day of the month or if the resulting month has fewer days than the day component of date, then the result is the last day of the resulting month." The responder's wrapper `CASE WHEN invoice_date = last_day_of_month(invoice_date) THEN last_day_of_month(date_add('month',3,invoice_date)) ELSE date_add('month',3,invoice_date) END` matches r27 §666-701 LEADING CANONICAL exactly, including the rationale ("Oracle ADD_MONTHS clamps last-day-of-month while Trino preserves day-number"). |
+| Clarity | 4.75 | Clean three-part structure (function 1 / function 2 / wrapper for semantic mismatch). |
+| Applicability | 5.0 | Engineer can drop the wrapper into the migrated SQL verbatim. |
+| Completeness | 5.0 | Covers both functions AND the silent-divergence trap. |
 
-### Q3 — Extract just the domain/host from a full referrer URL for GROUP BY; built-in or regex? — 5.0000
+**Source-verified**: r27 §666-701 LEADING CANONICAL "Oracle ADD_MONTHS → Trino (END-OF-MONTH CLAMP SEMANTICS DIFFER)" hit cleanly. The responder reached the canonical via the keyword path and produced its wrapper form. Oracle migration content lineage durable.
 
-| Dim | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | **Verified Trino 467** has `url_extract_host(url) -> varchar` — returns the host component cleanly (strips protocol/port/path/query/fragment), per Trino URL functions docs. Family `url_extract_path / url_extract_query / url_extract_parameter / url_extract_protocol / url_extract_fragment / url_extract_port` all confirmed valid. Responder correctly steered AWAY from hand-rolled `split_part('//', 2)` regex/split kludges. |
-| Beginner clarity | 5.0 | Clean one-liner answer + family. |
-| Practical applicability | 5.0 | Engineer can `GROUP BY url_extract_host(referrer)` immediately. |
-| Completeness | 5.0 | Full family surfaced. |
-
-### Q4 — dbt materialized='table' rebuild takes 20 min; what do analysts see during the window — error/empty/old data; atomic swap or gap? — 4.3750
+### Q2 (3.0000) — "you spent more than 73% of your peers" — DIRECTION MISAPPLICATION
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | **Primary answer correct** — Iceberg uses snapshot isolation via atomic compare-and-swap on the catalog's metadata pointer ([iceberg.apache.org/docs/latest/reliability/](https://iceberg.apache.org/docs/latest/reliability/) + [github.com/apache/iceberg](https://github.com/apache/iceberg)): readers loading metadata before commit pin the OLD snapshot for the duration of their query; the commit either succeeds (CAS swap) and subsequent loads see the NEW snapshot, or it fails (writer retries). No empty window, no error, no partial state. dbt `materialized='table'` on Iceberg behaves this way (CREATE OR REPLACE TABLE AS / CTAS-with-RTAS commit). **Defect: garbled "extra-conservative" secondary alternative** — responder offered a `SELECT ... CROSS JOIN LATERAL "$snapshots"` snippet that is not parseable as valid Trino 467 SQL (Iceberg metadata table queries use `iceberg.schema."table$snapshots"` as a read-only table reference, not LATERAL-joined; the snippet appears to conflate "look at history table to confirm there's no gap" with a different operation). Recurring "Responder Broken Secondary Alternative" pattern per memory log (iter936/943/948/950/954/1013/1019/1020) — primary atomic-swap framing is correct, the secondary "for completeness" form is garbled. Per-instance one-off. |
-| Beginner clarity | 4.5 | "Old data until commit then new, no downtime/empty/error, snapshot isolation" framing is clean; the garbled $snapshots secondary muddies the close. |
-| Practical applicability | 4.0 | Primary answer fully usable (engineer can confidently tell analysts "you'll see yesterday's table until commit"). Garbled secondary could waste cycles if copied verbatim. Incremental+merge LEAD for zero-downtime long rebuilds is a valid pointer. |
-| Completeness | 4.5 | Core question answered (no error / no empty / atomic / no gap). Per-instance shave for the broken secondary, NOT a resource defect. |
+| Accuracy | 2.5 | **Internally inconsistent.** The responder correctly states the math: "PERCENT_RANK = (rank-1)/(rows-1)", "0 for the highest row when sorted DESC and increases toward 1.0". But the example labeling contradicts the math: under `ORDER BY total_spent DESC`, a customer with `percent_rank = 0.73` is at rank ≈ `0.73*(N-1)+1` — that is, 73% of the way DOWN the DESC list, meaning ~73% of peers spent MORE than them, NOT less. The responder labeled this row "spent more than 73% of peers" — that interpretation is BACKWARDS for the DESC ordering they used. For "spent more than X% of peers", the correct shapes are: (a) `percent_rank() OVER (ORDER BY total_spent ASC)` (with ASC, 0.73 means 73% are below = beat 73%); OR (b) `cume_dist() OVER (ORDER BY total_spent ASC)` for the at-or-below fraction; OR (c) keep DESC and change the label to "73% of peers spent MORE than you". |
+| Clarity | 4.0 | Writing is clean; CUME_DIST contrast mentioned. But the labeled example actively misleads. |
+| Applicability | 2.5 | Engineer who copies the answer ships a customer-facing dashboard message saying "you spent more than 73% of peers" to a customer who actually beat only ~27% — a real SaaS-product-shipping bug on the percentile direction. |
+| Completeness | 3.5 | Touches function and ORDER BY shape; misses the direction-to-semantic mapping discipline. Does not engage r07 §3939-3956 at-or-below `cume_dist` canonical or §3962+ direction guardrail. |
 
-**Defect classification: RESPONDER ONE-OFF.** Recurring broken-secondary-alternative pattern (memory log catalogs 8 prior instances; this is the 9th). Per established memory: "leads pass, scope each as per-instance one-off re-probe NOT a resource defect, don't churn (no single resource fix for responder padding)." NO-OP.
+**Defect verified.** PERCENT_RANK semantics per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): `(r - 1) / (n - 1)` where r is the rank in window-ordering. Under `ORDER BY metric DESC`: first row (highest metric) gets rank 1 → percent_rank 0.0; last row gets 1.0. A row with percent_rank 0.73 sits at rank ≈ 73% of the way through the DESC ordering = far down the metric distribution = beat only ~27% of peers. Responder's "$45k → 0.73 'spent more than 73% of peers'" annotation under DESC is BACKWARDS.
 
-## Iter score table
+**Classification: RESPONDER ONE-OFF on direction-to-semantic mapping.** Resource canonicals ARE present and correct:
+- r07 §3939-3956 (LEADING CANONICAL "fraction at or below / what percentile does this value sit at"): "**`cume_dist() OVER (ORDER BY value)`** — fraction of rows AT OR BELOW (lowest ≈ `1/N`, top = `1.0`, ties included). This is the answer for 'fraction at or below / what percentile does this value sit at'." Plus explicit DO-NOT-WRITE: "`percent_rank() OVER (ORDER BY value)` for 'fraction of rows at or below' — **WRONG**: `percent_rank`'s lowest row = `0.0` (it measures rank POSITION `(rank-1)/(n-1)`, NOT the at-or-below fraction); use `cume_dist()` — DO NOT COPY for at-or-below."
+- r07 §3962-4023 LEADING CANONICAL "PERCENT_RANK / NTILE direction guardrail" with decision table + DO-NOT-WRITE inverted-prose defang ("`PERCENT_RANK = 0.0` means the bottom, `1.0` means the top is WRONG in general — it is true only under ORDER BY metric ASC. Under ORDER BY metric DESC, 0.0 is the TOP and 1.0 is the BOTTOM").
 
-| Q | Acc | Clar | App | Compl | Avg |
+The canonical correctly states both the function-choice rule (cume_dist for at-or-below) AND the direction discipline (always pair threshold with sort direction). Responder failed to navigate to either canonical despite the question phrasing ("spent more than 73% of peers" = at-or-below semantics) being keyword-magnetic to the cume_dist canonical AND the direction guardrail. Synthesis slip, not a resource gap.
+
+**First instance on this specific question phrasing.** Memory log enumerates many prior responder-direction slips on percentile (iter635 inversion → resource defangs added; iter1127 population-vs-per-group), but this specific "spent more than X% of peers" customer-facing-percentile-message phrasing has not surfaced before. Per first-instance NO-OP discipline (iter1116/1120/1123/1126/1130/1132 precedent), classify as RESPONDER ONE-OFF and watch.
+
+**Recommendation: NO-OP + WATCH.** Re-probe within 2-3 iters with another "you spent more than X% of your peers" / "you beat X% of customers" / "you're in the top X%" customer-facing-percentile-message phrasing to confirm direction-to-semantic mapping is durable. If RECURS → LIGHT FIX-A adding a keyword-magnetic LEAD card on the "spent more than X% of peers" / "you beat X%" phrasing pointing to the §3939-3956 cume_dist canonical + §3962+ direction guardrail with a question-shape match line ("when the customer-facing message reads 'you spent more / beat X% of peers', you want the AT-OR-BELOW semantic = `cume_dist() OVER (ORDER BY metric ASC)`, NOT `percent_rank DESC`").
+
+### Q3 (5.0000) — flatten(array(array(T))) → array(T)
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | `flatten(x) → array` verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html): "Flattens an `array(array(T))` to an `array(T)` by concatenating the contained arrays." Single-level collapse (NOT recursive — fine for the 2-level "permission groups" shape). `CROSS JOIN UNNEST(flatten(...))` correct downstream pattern. |
+| Clarity | 5.0 | Direct, single-built-in answer. |
+| Applicability | 5.0 | Drop-in for the Iceberg array(array(varchar)) → array(varchar) collapse. |
+| Completeness | 5.0 | Covers the flatten + downstream UNNEST flow. |
+
+### Q4 (5.0000) — Iceberg time travel for "before the bad write 4h ago"
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Accuracy | 5.0 | `FOR VERSION AS OF <snapshot_id>` and `FOR TIMESTAMP AS OF TIMESTAMP '...'` syntax verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html). `"tbl$snapshots"` metadata table with `committed_at` (TIMESTAMP(3) WITH TIME ZONE) verified. `WHERE committed_at < bad-run-time` lookup pattern correct (then ORDER BY committed_at DESC LIMIT 1 gives the latest at-or-before snapshot). Retention caveat ("snapshots past expire_snapshots retention are gone, ~7d typical, 4h is fine") accurate. |
+| Clarity | 5.0 | Clear sequence: find snapshot via metadata table → query at version/timestamp. |
+| Applicability | 5.0 | Engineer runs the lookup, gets snapshot_id, queries with FOR VERSION AS OF — exact recovery path. |
+| Completeness | 5.0 | Both VERSION and TIMESTAMP forms shown, retention boundary called out. |
+
+## Iter summary table
+
+| Q | Accuracy | Clarity | Applicability | Completeness | Avg |
 |---|---|---|---|---|---|
-| Q1 storage-tiering MV mitigation | 5.0 | 4.5 | 5.0 | 4.75 | 4.8125 |
-| Q2 ROW_NUMBER new-vs-returning monthly | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
-| Q3 url_extract_host | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
-| Q4 dbt table on Iceberg atomic swap | 4.5 | 4.5 | 4.0 | 4.5 | 4.3750 |
+| Q1 | 5.0 | 4.75 | 5.0 | 5.0 | 4.9375 |
+| Q2 | 2.5 | 4.0 | 2.5 | 3.5 | 3.0000 |
+| Q3 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
+| Q4 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 |
+| **Iter avg** | | | | | **4.4844 PASS** |
 
-**Iter average = (4.8125 + 5.0 + 5.0 + 4.375)/4 = 4.7969 STRONG PASS** (margin to 3.5 = +1.2969).
+## Topics updated
 
-## Topic updates
-
-| Topic | Prior | New count | New avg | Δ |
-|---|---|---|---|---|
-| Storage tiering Trino+Iceberg+MinIO | 4.0000/10 | 11 | (40.000 + 4.8125)/11 = **4.0739/11 PASSED** | +0.0739 (Q1 lift, ~0.07 raise on thinnest required-topic) |
-| Analytical query patterns on Iceberg+Trino | 4.4889/85 | 86 | (376.5565 + 5.0)/86 = **4.4948/86 PASSED** | +0.0059 (Q2 lift) |
-| SQL best practices for OLAP | 4.5499/194 | 195 | (882.6806 + 5.0)/195 = **4.5527/195 PASSED** | +0.0028 (Q3 lift) |
-| Iceberg table maintenance | 4.4777/177 | 178 | (792.5529 + 4.375)/178 = **4.4771/178 PASSED** | −0.0006 (Q4 minor drag, broken-secondary one-off) |
+- **Oracle PL/SQL → dbt+Trino migration** (Q1, ADD_MONTHS canonical): 4.4519/114 → (4.4519×114 + 4.9375)/115 = (507.5166 + 4.9375)/115 = **4.4561/115 PASSED** (+0.0042, margin +0.9561).
+- **Analytical query patterns on Iceberg+Trino** (Q2, percentile direction): 4.4948/86 → (4.4948×86 + 3.0)/87 = (386.5528 + 3.0)/87 = **4.4776/87 PASSED** (−0.0172, drag from Q2 direction misapplication; margin +0.9776 still safely above 3.5).
+- **SQL query best practices for OLAP** (Q3, array flatten built-in): 4.5527/195 → (4.5527×195 + 5.0)/196 = (887.7765 + 5.0)/196 = **4.5550/196 PASSED** (+0.0023).
+- **Iceberg table maintenance** (Q4, snapshot time travel): 4.4771/178 → (4.4771×178 + 5.0)/179 = (796.9238 + 5.0)/179 = **4.4800/179 PASSED** (+0.0029).
 
 ALL required topics REMAIN PASSED.
 
-## Source-verified defects this iter
+## Source-verified absences / non-defects this iter
 
-| Defect | Loc | Source | Verdict |
-|---|---|---|---|
-| `WHEN STALE INLINE` clause claim in Q1 DDL | responder Q1 | Verified VALID against [trino.io/docs/current/sql/create-materialized-view.html](https://trino.io/docs/current/sql/create-materialized-view.html) — grammar `[WHEN STALE (INLINE \| FAIL)]`, INLINE is documented default. NOT a defect. | Not a defect; my initial worry that `WHEN STALE INLINE` was fabricated is REFUTED — grammar confirms it's valid syntax (verified r25 §62 + Trino docs both agree). |
-| `GRACE PERIOD INTERVAL '24' HOUR` clause in Q1 DDL | responder Q1 | Verified VALID — `GRACE PERIOD interval` is documented. INTERVAL '24' HOUR is a valid Trino 467 INTERVAL literal. | Not a defect. |
-| Q4 `$snapshots CROSS JOIN LATERAL` garbled secondary | responder Q4 | Iceberg metadata table reference is `"table$snapshots"` as a read-only relation, not LATERAL-joined for atomic-swap verification. Snippet does not parse cleanly. | RESPONDER ONE-OFF, broken-secondary-alternative pattern (9th instance per memory log). NO-OP. |
+- Zero ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/Spark-Oracle-spillover/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic/partition-column-COUNT-data-file-folklore/population-vs-per-group-percentile/dedup-tied-tuple/SELECT-*-EXCEPT/`CAST(md5 AS VARCHAR)`-mis-hex/`{% if execute %}`/$snapshots-CROSS-JOIN-LATERAL recurrence.
+- Q1 r27 §666 ADD_MONTHS LEADING CANONICAL = reach confirmed (clamp-up wrapper verbatim).
+- Q3 flatten() single-level collapse + downstream UNNEST = reach confirmed.
+- Q4 FOR VERSION/TIMESTAMP AS OF + `$snapshots` committed_at lookup + retention caveat = reach confirmed.
 
-**Zero new accuracy defects in primary answers.** Zero fabrication. Zero parse-error-on-Trino-467 in any LEAD clause.
+## NEW WATCH STREAM (Q2)
 
-## Storage-tiering DEFERRED FIX-A verdict
+**Stream**: PERCENT_RANK direction-to-semantic misapplication on customer-facing "spent more than X% of peers" / "you beat X% of customers" phrasing.
 
-**RESOLVED on first re-probe.** The iter1132 Q1 gap (responder missed the hot-tier rollup / MV mitigation; gave only two-table UNION ALL + MinIO mc ilm) is closed because iter1134 Q1 responder reached r25 from the materialized-view keyword path and produced a valid Trino 467 MV mitigation pattern with copy-pasteable DDL. **Full architectural rollup canonical in r16 is NOT needed.**
+**Symptom**: responder uses `PERCENT_RANK() OVER (ORDER BY metric DESC)` and labels the 0.73 row as "spent more than 73% of peers" — under DESC that row beats only ~27%; the label is backwards.
 
-**Findability robustness gap remains (LIGHT FIX-A only):** the responder reached r25 because the question phrasing made MV a natural keyword hit ("standard Trino+Iceberg+dbt pattern to keep recurring historical reports fast"). A future tiering probe phrased purely on "tiering" / "cold storage" keywords may NOT hit r25 and would fall back to r16's three mechanisms (A=MinIO lifecycle, B=ZSTD compression, C=recent+archive UNION ALL view), none of which alone solves the deep-history-query-against-cold-tier problem. To make the mitigation findable from the tiering keyword path, add a LIGHT cross-reference in r16 §"Picking the mechanism — decision rule" (after the existing 4 rows, ~line 613):
+**Correct shapes**:
+1. `cume_dist() OVER (ORDER BY metric ASC)` — fraction at-or-below; 0.73 → "spent more than ~73% of peers" (this is r07 §3939-3956 LEADING CANONICAL for at-or-below semantics).
+2. `percent_rank() OVER (ORDER BY metric ASC)` — 0.73 → ~73% of peers below.
+3. Keep DESC, flip the label to "73% of peers spent MORE than you".
 
-> | "Deep-history report still slow because it reads cold-tier old partitions, even after Mechanism A+C" | **Pre-aggregated rollup or materialized view on the HOT tier** — dashboard reads the small summary, cold scan happens once at refresh. See **r25 § CREATE MATERIALIZED VIEW** for the canonical Iceberg MV pattern (storage table lives on the catalog's warehouse location = hot MinIO by default). |
+**Watch action**: re-probe within 2-3 iters with another customer-facing percentile-message phrasing — e.g., "show each customer 'you beat X% of all customers this month' on the dashboard", or "we want to label users with 'you used the product more than 80% of teams this week'". Force the customer-facing-percentile semantic.
 
-That's ~3 lines of addition to an existing table. No new section, no rewriting. **LIGHT FIX-A, ~3-5 lines added.**
+**Escalation rule**: if RECURS → LIGHT FIX-A adding a keyword-magnetic LEAD card at r07 (near §3939 or §3962) on the "spent more than X% / beat X% / above X% of peers" customer-facing phrasing, with a one-line question-shape→function-choice→direction mapping. Don't preemptively edit — r07 already has both cume_dist-at-or-below LEADING CANONICAL and PERCENT_RANK direction guardrail; the question is whether the responder navigates there on the customer-facing-message phrasing.
 
-## Recommendation
+## Thinnest-margin order after iter1135
 
-**LIGHT FIX-A (cross-ref only)** — single 3-5 line addition to r16 §"Picking the mechanism — decision rule" table at line ~613, linking to r25 MV pattern as the "Mechanism D" mitigation for deep-history-on-cold-tier queries. NO churn to r25 (canonical there is already correct).
+| Topic | Avg / N | Margin to 3.5 |
+|---|---|---|
+| Storage-tiering | 4.0739 / 11 | +0.5739 (thinnest required-topic; untouched) |
+| dbt-snapshots SCD2 | 4.1526 / 16 | +0.6526 (untouched) |
+| Query-perf-basics | 4.1771 / 23 | +0.6771 (untouched) |
+| Cost-considerations | 4.2759 / 22 | +0.7759 (untouched) |
+| Query-perf-regression-diagnosis | 4.3108 / 20 | +0.8108 (untouched) |
+| Oracle-migration | **4.4561 / 115** | +0.9561 (Q1 lift) |
+| Analytical-query-patterns | **4.4776 / 87** | +0.9776 (Q2 drag, still safely PASS) |
+| Iceberg-maintenance | **4.4800 / 179** | +0.9800 (Q4 lift) |
+| Federation | 4.5024 / 312 | +1.0024 (untouched, fragile-PASS preserved) |
+| SQL-best-practices-OLAP | **4.5550 / 196** | +1.0550 (Q3 lift) |
+| CBO/ANALYZE | 4.6105 / 22 | +1.1105 (untouched) |
+| Improving-complex-SQL-perf-dbt | 4.6111 / 25 | +1.1111 (untouched) |
 
-**NO-OP** on:
-- Q4 broken-secondary-alternative ($snapshots CROSS JOIN LATERAL garbled) — recurring responder padding pattern, per memory log already classified as per-instance one-off NOT resource defect.
-- r25 MV canonical — verified clean against Trino 467 docs.
-- All other Q1 DDL clauses — verified valid.
+## RECOMMENDATION = NO-OP + WATCH
 
-## Teacher guidance — exact edit
+Commit rubric + feedback only. No resource edits.
 
-**File:** `/Users/hclin/github/recknihao/resources/16-cost-considerations.md`
+Reasoning:
+- Q2 defect is RESPONDER ONE-OFF on direction-to-semantic mapping (NOT resource-sourced).
+- r07 §3939-3956 cume_dist-at-or-below LEADING CANONICAL is present AND correct.
+- r07 §3962-4023 PERCENT_RANK direction guardrail is present AND correct (with DO-NOT-WRITE inverted-prose defang).
+- First instance of this specific "spent more than X% of peers" customer-facing-message phrasing → per first-instance NO-OP discipline (iter1116/1120/1123/1126/1130/1132 precedent — 6 prior cases, 5 closed on first re-probe).
+- Q1, Q3, Q4 all clean canonical reaches; content lineage durable.
+- Iter avg 4.4844 well above PASS floor (+0.9844 margin).
+- No new defect classes; no recurring defect class re-opened.
 
-**Location:** at line ~613, INSIDE the existing "Picking the mechanism — decision rule" table, AFTER the "Per-partition storage-tier DDL like Snowflake/Redshift" row and BEFORE the "DO-NOT-WRITE — banned tiering forms" subsection.
+## Re-probe queue
 
-**Add this single new table row:**
-
-```markdown
-> | "Deep-history report (YoY, multi-quarter aggregates) still slow because it reads cold-tier old partitions even after A+C" | **D. Pre-aggregated rollup or materialized view on the HOT tier** — dashboard reads the small summary; the cold-tier scan happens ONCE per refresh, not per dashboard hit. The Iceberg-MV storage table lives on the catalog's warehouse location (= hot MinIO by default). See **`25-trino-materialized-views-iceberg.md` § "CREATE MATERIALIZED VIEW — syntax"** for the canonical DDL pattern (`CREATE MATERIALIZED VIEW ... GRACE PERIOD INTERVAL '<n>' HOUR WHEN STALE INLINE WITH (partitioning=ARRAY[...], format='PARQUET') AS SELECT date_trunc('quarter', ...), tenant_id, ... FROM cold_base WHERE ts >= CURRENT_DATE - INTERVAL '24' MONTH GROUP BY 1,2,...`). Refresh from k8s CronJob via `REFRESH MATERIALIZED VIEW` — no Trino-side scheduler exists. |
-```
-
-That's the entire LIGHT FIX-A. No other resource changes needed.
-
-## Re-probe queue (post-FIX-A)
-
-1. **Storage-tiering 12th angle** — tiering-keyword-only phrasing (NO "MV" or "materialized view" hint in the question) to confirm the new r16 §D cross-ref pulls the responder to r25 on first try. Within 2-3 iters of FIX-A landing. **PRIORITY 1 — confirms FIX-A reach.**
-2. **dbt-snapshots SCD2 17th angle** (still 4.1526/16, 2nd-thinnest required-topic). PRIORITY 2.
-3. **query-perf-basics 24th angle** (4.1771/23). PRIORITY 3.
-4. **cost-considerations 23rd angle** (4.2759/22). PRIORITY 4.
-5. **query-perf-regression-diagnosis 21st angle** different from iter1129 resource-groups. PRIORITY 5.
-6. **NEW**: dbt-table-rebuild generative re-probe to confirm Q4 $snapshots-LATERAL slip is a one-off (not a recurring "for completeness" alt pattern on the dbt-table-mat keyword path). Within 2-3 iters.
-
-## Thinnest-margin order after iter1134
-
-1. **storage-tiering 4.0739/11** (+0.5739, **STILL thinnest** but lifting; LIGHT FIX-A reach should sustain)
-2. dbt-snapshots SCD2 4.1526/16 (+0.6526, untouched)
-3. query-perf-basics 4.1771/23 (+0.6771, untouched)
-4. cost-considerations 4.2759/22 (+0.7759, untouched)
-5. query-perf-regression-diagnosis 4.3108/20 (+0.8108, untouched)
-6. Oracle-migration 4.4519/114 (+0.9519, untouched)
-7. Iceberg-maintenance 4.4771/178 (+0.9771, Q4 minor drag)
-8. federation 4.5024/312 (+1.0024, untouched, fragile-PASS preserved)
-9. SQL-best-practices-OLAP 4.5527/195 (+1.0527, Q3 lift)
-10. CBO/ANALYZE 4.6105/22 (+1.1105, untouched)
-11. improving-complex-SQL-perf-dbt 4.6111/25 (+1.1111, untouched)
-12. Analytical-query-patterns 4.4948/86 (+0.9948, Q2 lift)
+1. **Q2 customer-facing percentile-message** (PRIORITY 1, NEW WATCH): re-probe with phrasing like "we want to label users with 'you logged more sessions than X% of teams this week'" — must FORCE the at-or-below customer-facing-message semantic and see if responder reaches cume_dist or stays on percent_rank DESC.
+2. Storage-tiering 12th angle (thinnest required-topic at 4.0739; tiering-keyword-only phrasing without MV hint — confirm iter1134's LIGHT FIX-A cross-ref reach).
+3. Q4 dbt-table-rebuild generative re-probe to confirm iter1134's $snapshots-CROSS-JOIN-LATERAL broken-secondary was one-off.
+4. dbt-snapshots SCD2 17th angle.
+5. Cost-considerations 23rd angle.
+6. Query-perf-regression-diagnosis 21st angle.
 
 ## Pattern observation
 
-17-iter sustainment band shape: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133 + LIGHT FIX-A iters 1091/1116/1124/1129/1132/**1134** + NO-OP+WATCH iters 1120/1123/1126/1130. iter1134 4.7969 STRONG PASS+LIGHT-FIX-A profile matches the iter1091 (4.40) / iter1116 / iter1124 LIGHT-FIX-A pattern but with a notably higher iter average (4.7969 vs the 4.40-4.55 typical LIGHT-FIX-A iter avg) because three of four answers are 4.8-5.0 and the LIGHT FIX-A target (storage-tiering cross-ref) is reached BY THE ANSWER ITSELF — the gap was closed by the responder reaching r25 directly, only findability robustness (for differently-phrased future questions) needs the surgical cross-ref edit. This is the FIRST iter where a deferred FIX-A resolves on direct re-probe WITHOUT requiring the planned architectural edit — only a downgrade to a cross-ref. iter1132's deferred-FIX-A queueing was conservative (correctly so — iter1132 Q1 missed the canonical); iter1134 demonstrates the responder reaches the canonical when the question phrasing offers a keyword hit on the canonical resource (r25). The findability gap is real but minor — a single-row cross-reference edit covers it without churn.
+18-iter sustainment band shape:
+- STRONG PASS: iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/**1134**
+- LIGHT FIX-A: iters 1091/1116/1124/1129/1132
+- NO-OP + WATCH (this iter pattern): iters 1120/1123/1126/1130/**1135**
 
-No content-lineage erosion. No recurring defect class re-opened. No new watch streams beyond the per-instance Q4 broken-secondary one-off.
+iter1135 4.4844 PASS+NO-OP+WATCH matches the iter1130 4.5469 / iter1126 4.5 PASS+NO-OP+WATCH profile — single Q with a real synthesis defect on novel question phrasing, responder-one-off classification, first-instance discipline preserved, three breadth angles clean with two canonical reaches (Q1 r27 §666 ADD_MONTHS clamp, Q4 Iceberg time travel) and one trivial built-in (Q3 flatten). The Q2 defect is informative — the at-or-below cume_dist canonical and the direction guardrail are both present in r07 BUT the customer-facing "you spent more than X% of peers" phrasing variant didn't pull the responder to either canonical. Whether this represents a true findability gap or a per-instance synthesis slip will be settled by the next re-probe on similar phrasing. No content-lineage erosion; no recurring defect class re-opened; one new watch stream opened (Q2 customer-facing percentile-message direction misapplication).
+
+## Source citations
+
+- [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — PERCENT_RANK `(r-1)/(n-1)` formula; CUME_DIST "preceding or peer ... divided by total" definition. Confirms Q2 direction semantics.
+- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) — `last_day_of_month(x) → date`, `date_add(unit, value, timestamp)`. Confirms Q1 function signatures.
+- [docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/ADD_MONTHS.html) — Oracle ADD_MONTHS clamp-up rule. Confirms Q1 semantic-difference rationale.
+- [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — `flatten(x) → array` single-level collapse "Flattens an array(array(T)) to an array(T)". Confirms Q3.
+- [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — `FOR VERSION AS OF <snapshot_id>`, `FOR TIMESTAMP AS OF TIMESTAMP '...'`, `"tbl$snapshots"` metadata table with `committed_at` column. Confirms Q4.
+- r07 §3939-3956 LEADING CANONICAL cume_dist at-or-below; §3962-4023 PERCENT_RANK direction guardrail. Resource canonicals confirmed present and correct.
+- r27 §666-701 LEADING CANONICAL "Oracle ADD_MONTHS → Trino (END-OF-MONTH CLAMP SEMANTICS DIFFER)". Resource canonical exactly matches the responder's Q1 wrapper.

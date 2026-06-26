@@ -1,7 +1,7 @@
 {
-  "iteration": 1134,
+  "iteration": 1135,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1134 -> 4.80 STRONG PASS + LIGHT cross-ref FIX-A. Q1 storage-tiering deep-history gap RESOLVED: responder reached the hot-tier pre-aggregation mitigation via Trino MATERIALIZED VIEW (r25). My WHEN-STALE-INLINE suspicion WRONG -- judge verified it IS valid Trino (WHEN STALE (INLINE|FAIL), INLINE default) -- hedged so no false flag. Deferred architectural FIX-A DOWNGRADED to light cross-ref: added r16 tiering TL;DR point 4 (deep-history/YoY report slow after tiering -> pre-aggregate ROLLUP/MV on hot tier, NOT un-tier; dbt rollup model OR Trino MV; cross-ref r25 + r07) so the mitigation is findable from tiering-keyword-only phrasings. Q2 new-vs-returning ROW_NUMBER (5.0) / Q3 url_extract_host (5.0) clean. Q4 dbt-table Iceberg atomic-swap (4.375) core correct, garbled CROSS-JOIN-LATERAL  broken-secondary (one-off, no fix). storage-tiering lifted 4.0739/11. Federation/CBO untouched."
+  "note": "iter1135 breadth durability sweep (all watch streams closed). 4 varied less-recently-probed angles across passed topics. Verify-first; NO-OP expected. Federation/CBO untouched."
 }
