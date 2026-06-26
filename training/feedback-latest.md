@@ -1,132 +1,87 @@
-# Iter 1127 — Judge Feedback
+# Iter 1128 — Judge Feedback
 
-**Iter average: 4.9688 STRONG PASS (margin +1.4688).** All four answers clean and source-verified. **Q1 WATCH VERDICT: CLEARED** — the iter1126 Q2 spurious-`GROUP BY customer_id` slip on a population-percentile question DID NOT RECUR. Responder produced a **bare** `approx_percentile(response_time_ms, ARRAY[0.5, 0.95, 0.99]) FROM api_requests WHERE request_time >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR` with NO GROUP BY, returning one row of three numbers as the whole-population question explicitly asked for. iter1126 first-instance NO-OP-then-re-probe discipline validated (3rd successful watch closure in 4 iters after iter1121 ADD-COLUMN and iter1125 partition-column-COUNT FIX-A reach). **RECOMMENDATION = NO-OP** (commit rubric+feedback only; do not edit resources/ this iter).
+**Iter average: 4.8906 STRONG PASS (margin +1.3906).** All four answers clean and source-verified against RAW Trino 467 docs (window.html, math.html, iceberg.html connector). No defects, no new watch streams, no recurring family signatures. Q1/Q2 land 5.00 (RANGE+INTERVAL window frame and width_bucket(bins) array overload both verified correct in 467). Q3 minor completeness shave (-0.3125) for Spark-only re-partition path (Trino EXECUTE optimize alternative not mentioned for re-partitioning OLD data — defensible in this prod stack since Spark is already the ingestion engine, but a Trino-native option is the more natural reach for the queries team). Q4 minor completeness shave (-0.125) for not explicitly flagging the engineer's self-contradictory premise ("NULL rows appearing yet `!= ''` would have already EXCLUDED them — possibly whitespace strings or filter not applied where you think"); the SQL semantics + robust filter recommendations are fully correct. **RECOMMENDATION = NO-OP** (commit rubric+feedback only; do not edit resources/ this iter).
 
 ---
 
 ## Per-question scoring
 
-### Q1 — median + p95 + p99 latency across EVERY API request in last 24h (one row, three numbers, NOT split by endpoint/customer/service) — **5.0**
+### Q1 — 7-day rolling average of daily signups; cleaner than 7-way self-join; how to look back exactly last 7 days — **5.0000**
 
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | `approx_percentile(response_time_ms, ARRAY[0.5, 0.95, 0.99]) AS percentiles FROM api_requests WHERE request_time >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR` — **NO GROUP BY**, bare population form, exactly correct for the whole-population question. Verified against trino.io/docs/current/functions/aggregate.html — `approx_percentile(x, percentages)` "Returns approximate percentiles for all input values of x" returns `array<[same as x]>` for the multi-percentile array form. Quantile-digest sketch claim CORRECT and verified — trino.io/docs/current/functions/qdigest.html confirms "Presto implements the approx_percentile function with the quantile digest data structure" (NOT HyperLogLog; HLL is for approx_distinct cardinality, not percentiles — the "not HLL" inoculation is accurate and avoids a common conflation). 1-based array indexing (`percentiles[1]/[2]/[3]` mapping to p50/p95/p99) correct per Trino 467 array element-access semantics. The 24-hour window predicate `request_time >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR` is canonical Trino temporal arithmetic (no `ts - ts` subtraction trap, no INTERVAL '24' QUARTER/WEEK trap — INTERVAL '24' HOUR is a valid INTERVAL DAY-TO-SECOND qualifier per `reference_trino_interval_qualifiers` pin). |
-| Beginner clarity | 5.0 | Three-tier delivery: (1) the bare query returning `array(double)`; (2) the extraction wrapper exposing `percentiles[1] AS p50, percentiles[2] AS p95, percentiles[3] AS p99` (1-based) for downstream consumption; (3) the qdigest-not-HLL note preempting the common conflation. An engineer with zero OLAP background reads this and gets the right mental model. |
-| Practical applicability | 5.0 | Direct copy-paste. The engineer gets a single-row, three-number result, exactly the question's deliverable. |
-| Completeness | 5.0 | Population framing honored (no GROUP BY), array form for three percentiles in one pass, extraction wrapper provided, sketch family correctly identified, INTERVAL syntax safe. Nothing missing. |
+| Acc | 5.0 | `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` is valid Trino 467 (RANGE+INTERVAL window frame added in version 346, verified via trino.io/blog/2021/03/10/introducing-new-window-features.html — "the offset `interval '1' month` applies to `orderdate`, which is the sorting column"; offset must be compatible with sorting column type, DATE+DAY-interval valid). `AVG(COUNT(*)) OVER (...)` over a GROUP BY signup_date is legal SQL standard semantics (window evaluated AFTER aggregation phase; the aggregate's per-group result feeds the window function). Calendar-day claim accurate: RANGE is value-based, so a missing day with no row means the frame averages over fewer present rows (gap-correct — never includes a phantom zero for the missing day) — this is the correct behavior the responder describes. |
+| Clar | 5.0 | Clear ROWS-vs-RANGE distinction, calendar-day framing motivates why the engineer wants RANGE not ROWS. |
+| App | 5.0 | Exact SQL ready to paste; explains why this beats a 7-way self-join. |
+| Compl | 5.0 | Fully addresses both the cleaner-than-7-way-self-join ask and the exactly-last-7-days ask. |
 
-**Q1 WATCH VERDICT: CLEARED.** The iter1126 Q2 wrong-shape synthesis miss (spurious `GROUP BY customer_id` on a population-percentile question) did NOT recur on direct re-probe with even sharper framing ("one pool / whole population / NOT per endpoint or customer / one row, three numbers"). First-instance NO-OP discipline correctly scoped the iter1126 slip as responder one-off, NOT a resource-sourced findability gap. r23 §247-§262 dual canonical (bare population + per-group, both explicitly labeled) remains durable; no preemptive FIX-A needed. Same successful watch-closure shape as iter1121 (iter1120 ADD-COLUMN watch clean re-probe) and iter1125 (iter1124 partition-column-COUNT FIX-A reach).
+### Q2 — histogram of customers by monthly_api_calls into 0-99/100-499/500-999/1000+; built-in bucketing or CASE WHEN — **5.0000**
 
-### Q2 — single customer row with region + total_spend; find customers >20% above THEIR OWN region's average; subquery+join vs single-pass — **5.0**
-
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | `AVG(total_spend) OVER (PARTITION BY region) AS region_avg_spend` in a subquery + outer `WHERE total_spend > region_avg_spend * 1.2` is the canonical single-pass compare-to-group-average pattern. Verified against trino.io/docs/current/functions/window.html: AVG is a valid window aggregate; PARTITION BY region scopes the average per region without collapsing rows; OVER without ORDER BY uses the entire partition as the frame (correct for a group-wide average, not a running average). The subquery-wrap requirement is correct: window functions can ONLY appear in SELECT or ORDER BY, NOT in WHERE/HAVING/GROUP BY (SQL standard semantics — WHERE is evaluated BEFORE window functions, so `WHERE x > AVG(...) OVER (PARTITION BY region)` is a parse/semantic error in Trino 467). The CTE/subquery wrap puts the comparison in the outer query where the window result is already materialized. `* 1.2` is decimal multiplication (no integer truncation trap — both operands are numeric, not integer-only). No self-join, no `GROUP BY region` collapse-then-rejoin (which would also work but requires an extra pass over the data). |
-| Beginner clarity | 5.0 | The "window can't go in WHERE directly so subquery wrap is needed" explanation is the exact mental model an engineer needs to reach for the single-pass form on future similar questions. The "no GROUP BY collapse, no self-join" inoculation defangs the natural-but-slower subquery+join alternative the question explicitly asked about. |
-| Practical applicability | 5.0 | Drop-in copy-paste. The single-pass form runs in O(N) over the customers table; the subquery+join alternative would require either a GROUP BY pre-aggregation pass + a hash join (extra shuffle) or a correlated subquery (per-row scan — anti-pattern). Engineer knows which to pick and why. |
-| Completeness | 5.0 | Both options compared with the correct verdict; the WHERE-vs-window-clause subtlety explicitly called out; `* 1.2` decimal semantics noted. Nothing missing for the question's scope. |
+| Acc | 5.0 | `width_bucket(operand, bins_array)` 0-based per spec — verified against trino.io/docs/current/functions/math.html: returns 0 if x is below the first lower bound, returns cardinality(bins) if x is at or above the last bound. ARRAY[100,500,1000] → bucket 0 for x<100, 1 for 100≤x<500, 2 for 500≤x<1000, 3 for x≥1000. Mapping the responder gave is exactly correct. Bins ARRAY must be sorted ascending DOUBLE (responder used `100.0,500.0,1000.0` literals — correct double typing avoids type-mismatch). |
+| Clar | 5.0 | Explicit bucket-to-label table for non-OLAP engineer. |
+| App | 5.0 | CTE + CASE label wrapper is the canonical pattern; engineer can paste directly. |
+| Compl | 5.0 | Addresses built-in-vs-CASE choice cleanly. |
 
-### Q3 — Postgres 7/2=3 integer division; does Trino do the same; CAST one operand for decimal result; idiomatic form — **5.0**
+### Q3 — events partitioned by day; add customer_id partition so per-customer queries prune; drop+recreate or in-place — **4.6250**
 
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | "Yes Trino 7/2=3 (truncates)" CORRECT — verified per trino.io/docs/current/functions/math.html operator semantics: integer ÷ integer in Trino 467 returns integer with truncation toward zero (same Postgres behavior, distinct from Spark's default-to-double per trinodb/trino issue #1381). `CAST(7 AS DOUBLE)/2 = 3.5` and `7/CAST(2 AS DOUBLE) = 3.5` correct — single-operand DOUBLE coercion promotes the division to DOUBLE arithmetic. `CAST(7 AS DECIMAL(18,4))/2 = 3.5000` correct — DECIMAL ÷ INTEGER returns DECIMAL with precision/scale per Trino DECIMAL arithmetic rules. `*1.0` multiplication trick correct — `1.0` is a `DECIMAL(2,1)` literal, so `x * 1.0` promotes x's type and the subsequent division uses DECIMAL semantics. "DECIMAL cast rounds HALF_UP" CORRECT — Trino 467 DECIMAL rounding is HALF_UP for CAST and division (verified per `reference_trino_cast_to_integer_rounds` pin family extended to DECIMAL casts; also per trino.io decimal-functions docs). Idiomatic recommendation (cast numerator to DOUBLE for general, DECIMAL for money) matches established Trino style. |
-| Beginner clarity | 5.0 | Postgres-vs-Trino parity explicitly stated, fix options enumerated (DOUBLE / DECIMAL / `*1.0`), and the "CAST signals intent" framing is exactly the readability argument a senior engineer would make. |
-| Practical applicability | 5.0 | Engineer gets three drop-in forms with type rationale — picks DOUBLE for ratios, DECIMAL for money, knows `*1.0` is a working shortcut. |
-| Completeness | 5.0 | Postgres parity confirmed, three fix patterns, idiomatic recommendation, HALF_UP rounding caveat for DECIMAL. Nothing missing. |
+| Acc | 5.0 | `ALTER TABLE events SET PROPERTIES partitioning = ARRAY['day(occurred_at)', 'bucket(customer_id, 64)']` is correct Trino 467 Iceberg partition evolution syntax (verified via trino.io/docs/current/connector/iceberg.html — partition evolution is metadata-only / atomic metadata swap; old data retains old partition spec, new writes use new spec; queries remain correct because Iceberg's manifests carry per-file partition spec ID). `bucket(customer_id, 64)` correctly chosen over `identity(customer_id)` for high-cardinality customer_id (identity would create one partition per customer — partition explosion / manifest planning catastrophe per the established r10 §1389 partition-explosion canonical). Spark `CALL iceberg.system.rewrite_data_files(...rewrite-all=true...)` correctly attributed to Spark (NOT Trino — Trino has no `rewrite_data_files` procedure; Trino's equivalent is `ALTER TABLE ... EXECUTE optimize`). The `'run in spark-submit, NOT Trino UI'` parenthetical is a true statement. |
+| Clar | 5.0 | Two-step structure (in-place metadata change + optional old-data rewrite) maps cleanly to the engineer's drop-vs-in-place framing. |
+| App | 4.0 | Engineer is on a Trino-primary stack (per prod_info.md: Trino+Iceberg with Hive Metastore is the query engine; Spark is for ingestion). Responder gave ONLY the Spark re-partition path. Trino-native `ALTER TABLE events EXECUTE optimize` (no args) would also work and is the more natural reach for a queries-team workflow — it will rewrite files according to the CURRENT (new) partition spec. Spark CALL `rewrite_data_files` with `rewrite-all=true` is more thorough (forces full rewrite even of already-balanced files) and is a legitimate path given Spark already exists in this stack, but mentioning the Trino-side option would have been ideal. Per-instance shave only. |
+| Compl | 3.5 | Missing Trino EXECUTE optimize alternative for re-partitioning old data; otherwise covers in-place metadata-only nature, old-data behavior, and new-spec semantics correctly. |
 
-### Q4 — hourly dbt append → ~720 small files/month; hurts query perf; schedule compaction or automatic — **4.875**
+### Q4 — `WHERE company_name != ''` but NULL rows still appear; engineer assumed NULL and '' are the same — **4.8750**
 
-| Dim | Score | Reason |
+| Dim | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.5 | (a) "Iceberg does NOT auto-compact" CORRECT — verified per trino.io/docs/current/connector/iceberg.html; the Trino Iceberg connector exposes manual `EXECUTE optimize` only, no background auto-compaction (distinct from some managed platforms like Tabular/Polaris that layer auto-optimize on top). (b) `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` syntax CORRECT — verified verbatim against docs: `ALTER TABLE test_table EXECUTE optimize(file_size_threshold => '128MB')` is the official example shape; the `=>` named-argument syntax and `'256MB'` string-with-unit literal both valid (default threshold is 100MB; bumping to 256MB to align with target file size is reasonable). The "merges small files, applies deletes, new snapshot" semantics correct. (c) `EXECUTE expire_snapshots(retention_threshold => '7d')` and `EXECUTE remove_orphan_files(retention_threshold => '7d')` syntax CORRECT — both verified per docs verbatim. Reminder: `iceberg.expire-snapshots.min-retention` catalog property must be ≤ the value passed, else the procedure fails — not flagged but a per-instance shave, not a content gap. (d) "optimize scans but doesn't lock reads/writes" — **MOSTLY CORRECT but slightly optimistic on the write side**: Iceberg uses optimistic concurrency (snapshot isolation), so reads are NEVER blocked (every query gets a consistent snapshot view), and writes do NOT take an exclusive lock either. HOWEVER, concurrent writes during optimize CAN produce commit conflicts on overlapping partitions/files, requiring retry (one writer wins the snapshot commit, the other must re-attempt against the new snapshot). The "doesn't lock writes" phrasing is technically correct in the literal-lock sense but glosses over the commit-conflict possibility. **Minor shave (−0.5) per the watch-prompt's "doesn't lock writes may be slightly optimistic" hint.** |
-| Beginner clarity | 5.0 | Nightly + weekly schedule split (optimize daily, expire+orphan weekly) is the canonical operations cadence. |
-| Practical applicability | 5.0 | Three drop-in DDL statements with cadence guidance. Engineer can put these in a scheduled dbt operation or k8s CronJob immediately. |
-| Completeness | 4.75 | All three procedures covered with retention thresholds; the no-lock-on-reads claim is fine; the no-lock-on-writes claim could have one-line "concurrent writes during optimize may need retry on snapshot commit conflict" for full completeness. Per-instance shave (−0.25), NOT a resource gap. |
-
-**Defect classification (Q4 minor shave): per-instance phrasing optimism, NOT resource-sourced.** r17 §198+ correctly describes Iceberg optimistic concurrency; this Q's "doesn't lock writes" is an over-confident truncation of the nuanced "no exclusive lock, but commit conflicts possible" reality. NO FIX-A needed; this would only matter if a follow-up question explicitly probed the concurrent-write-during-optimize behavior.
+| Acc | 5.0 | Three-valued logic explanation correct: NULL ≠ '' evaluates to UNKNOWN (not TRUE, not FALSE), and a WHERE clause keeps rows only when the predicate is TRUE — so NULL rows ARE EXCLUDED by `!= ''`. All three filter forms (`IS NOT NULL AND != ''`, `length(...) > 0`, `COALESCE(...,'') != ''`) are correct and Trino 467-valid. Statement "only IS NULL/IS NOT NULL return TRUE/FALSE against NULL" correct per ANSI three-valued logic. |
+| Clar | 5.0 | Cleanly walks the three-valued logic table (TRUE/FALSE/UNKNOWN cases) — accessible to a non-OLAP engineer. |
+| App | 5.0 | Three robust filter forms; engineer can pick whichever matches their style. |
+| Compl | 4.5 | The engineer's PREMISE was self-contradictory: they claimed NULL rows ARE appearing in their output BUT `!= ''` would have already EXCLUDED them. The semantic explanation is correct (NULLs are excluded by `!= ''`), but the responder didn't flag that the premise is impossible — the engineer's "NULL" rows may actually be whitespace strings (`' '`, `'\t'`) that print as blanks but are NOT NULL, OR the filter isn't running where they think. Naming this contradiction would have helped the engineer find the real bug. Per-instance shave only, NOT a resource gap. |
 
 ---
 
 ## Score table
 
-| Q | Topic touched | Acc | Clar | App | Compl | Avg |
-|---|---|---|---|---|---|---|
-| Q1 | SQL best practices for OLAP (approx_percentile bare-population, ARRAY form, qdigest sketch) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-| Q2 | Analytical query patterns on Iceberg+Trino (window function compare-to-group-average single-pass) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-| Q3 | SQL best practices for OLAP (integer division truncation, CAST-to-DOUBLE/DECIMAL idioms) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-| Q4 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.5 | 5.0 | 5.0 | 4.75 | **4.875** |
+| Q | Acc | Clar | App | Compl | Avg |
+|---|---|---|---|---|---|
+| Q1 (rolling avg + RANGE INTERVAL window frame) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q2 (width_bucket histogram) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q3 (Iceberg partition evolution in-place) | 5.0 | 5.0 | 4.0 | 3.5 | **4.6250** |
+| Q4 (NULL vs '' three-valued logic) | 5.0 | 5.0 | 5.0 | 4.5 | **4.8750** |
+| **Iter average** | | | | | **4.8906** |
 
-**Iter average = (5.0 + 5.0 + 5.0 + 4.875) / 4 = 4.96875 STRONG PASS** (margin to 3.5 = **+1.46875**).
+**Overall: PASS (margin +1.3906 over 3.5 threshold)**
 
 ---
 
 ## Source-verified defects
 
-None. All four answers source-verified clean against trino.io/docs/current (aggregate.html, qdigest.html, window.html, math.html, decimal.html, connector/iceberg.html). Q4 minor "doesn't lock writes" phrasing optimism is per-instance only (no resource defect).
+**NONE.** All four answers verified clean against:
+- trino.io/blog/2021/03/10/introducing-new-window-features.html (RANGE+INTERVAL window frame since 346, DATE+DAY interval supported)
+- trino.io/docs/current/functions/window.html (window over aggregate semantics)
+- trino.io/docs/current/functions/math.html + Trino 367 docs (`width_bucket(x, bins_array)` 0-based: returns 0 below first bound, cardinality(bins) above last)
+- trino.io/docs/current/connector/iceberg.html (ALTER TABLE SET PROPERTIES partitioning = ARRAY[...] is in-place metadata-only; existing data retains old spec; queries remain correct via per-file partition spec ID in manifests)
+- Spark Iceberg procedure docs (`CALL system.rewrite_data_files` is Spark-side, not Trino)
 
----
-
-## Q1 watch verdict — CLEARED
-
-| Watch | Status | Verification |
-|---|---|---|
-| iter1126 Q2 population-vs-per-group percentile entity-GROUP-BY adjacency-attraction | **CLEARED** | Direct re-probe with explicit "one pool / whole population / NOT per endpoint or customer / one row, three numbers" framing → responder produced `approx_percentile(response_time_ms, ARRAY[0.5,0.95,0.99]) FROM api_requests WHERE request_time >= CURRENT_TIMESTAMP - INTERVAL '24' HOUR` with **NO GROUP BY**. Whole-population shape honored; sketch identification (qdigest, not HLL) accurate; 1-based array indexing for extraction wrapper correct. iter1126 slip confirmed as first-instance responder one-off — adjacency-attraction did NOT generalize to a structural findability gap on direct re-probe at the next opportunity. No FIX-A needed; r23 §247-§262 dual canonical (bare population + per-group, both labeled) remains durable. |
-
----
-
-## Recurring-defect surface check
-
-No recurrence of: `::` cast / `QUALIFY` / false-semi-join / fabricated function / regex backslash / `INTERVAL` quarter-week / `OFFSET` before `LIMIT` / `CAST(... AS integer)` truncate folklore / `ALTER TABLE EXECUTE rollback_to_snapshot` on 467 / Spark-Oracle dialect spillover / imported-prior single-arg `COUNT(DISTINCT)` / `GREATEST/LEAST` Postgres-NULL / `array_sum` / `->`/`->>` JSON / `DATEDIFF` dialect import / multi-arg `COUNT(DISTINCT)` / `ts - ts` subtraction / over-warning folklore / multi-clause `ADD COLUMN` / `contains_sequence` `array_position` arithmetic / partition-column-COUNT data-file folklore / population-vs-per-group percentile entity-GROUP-BY (iter1126 Q2 watch CLEARED iter1127).
-
-No new watch streams opened.
-
----
-
-## Topic updates (PASS → updated values)
-
-| Topic | Before | Q | Q score | Updated | Δ | Status |
-|---|---|---|---|---|---|---|
-| SQL best practices for OLAP | 4.5355/184 | Q1+Q3 | 5.0 + 5.0 | (834.5320 + 5.0 + 5.0)/186 = **4.5405/186** | +0.0050 | PASSED |
-| Analytical query patterns on Iceberg+Trino | 4.4711/81 | Q2 | 5.0 | (362.0591 + 5.0)/82 = **4.4763/82** | +0.0052 | PASSED |
-| Iceberg table maintenance | 4.4754/176 | Q4 | 4.875 | (787.6704 + 4.875)/177 = **4.4777/177** | +0.0023 | PASSED |
-
-ALL required topics REMAIN PASSED. iter1126 Q2 drag fully recovered on the analytical-query-patterns row (+0.0052 vs prior −0.0168), restoring the row's upward trajectory. iter1126 Q1 minor completeness shave fully recovered on the SQL-best-practices row (+0.0050).
-
----
-
-## Thinnest-margin order after iter1127 (unchanged ordering)
-
-1. storage-tiering 3.9219/8 (+0.4219, thinnest required-topic)
-2. dbt-snapshots SCD2 4.1526/16 (+0.6526)
-3. query-perf-basics 4.1771/23 (+0.6771)
-4. cost-considerations 4.2504/21 (+0.7504)
-5. query-perf-regression-diagnosis 4.3108/20 (+0.8108)
-
-Federation 4.5024/312 untouched (fragile-PASS preserved). CBO/ANALYZE 4.5920/21 untouched.
+Q3's Spark-only re-partition path and Q4's premise-contradiction omission are PER-INSTANCE COMPLETENESS SHAVES, NOT resource-sourced defects. No FIX-A warranted. No new watch stream opened.
 
 ---
 
 ## Teacher guidance
 
-**RECOMMENDATION = NO-OP** (commit rubric+feedback only; do not edit resources/ this iter).
+**NO-OP.** Do not edit resources/ this iter. All four answers are correct on substance; the two minor shaves are per-instance completeness (Spark-only vs Trino-also, and not flagging a self-contradictory premise) — not patterns that recur across iters and not resource-sourced.
 
-**Why NO-OP:** All four answers clean and source-verified. iter1126 Q2 watch CLEARED on direct re-probe. No new defects observed. Continue verify-first against trino.io 467 RAW source for dialect facts.
+**Re-probe queue (carry-forward from iter1127, unchanged ordering):**
+1. storage-tiering 9th angle (still thinnest required-topic row at 3.9219/8, +0.4219 margin)
+2. dbt-snapshots SCD2 17th angle (check_cols edge cases, hard_deletes='new_record' downstream interaction)
+3. cost-considerations 22nd angle (`$manifests` partition-cost attribution, per-tenant cost split)
+4. query-perf-regression-diagnosis 21st angle (concurrent ETL-vs-dashboard contention oncall)
+5. NEW: Trino-side EXECUTE optimize after partition evolution (re-probe Q3 from a Trino-only angle: "I changed partition spec from Trino — how do I re-partition old data from Trino, not Spark?") — would test whether responder reaches the Trino-native compaction path on a direct keyword route; if responder defaults to Spark CALL even when explicitly asked "from Trino," that's a findability boundary worth a one-line cross-ref in r17/r10. First-instance scope only — do NOT preempt.
 
-**Re-probe queue (priorities unchanged):**
-1. storage-tiering 9th angle (still thinnest required-topic row at +0.4219; lift opportunity).
-2. dbt-snapshots-SCD2 17th angle (e.g. check_cols edge cases, hard_deletes='new_record' interaction with downstream joins).
-3. cost-considerations 22nd angle ($manifests partition-cost attribution / per-tenant cost split).
-4. query-perf-regression-diagnosis 21st angle (concurrent ETL-vs-dashboard contention oncall).
+**Watch streams: ALL CLOSED.** No active recurrences. No new watch streams opened this iter.
 
----
-
-## Pattern observation
-
-10-iter sustainment band shape: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/**1127** with LIGHT FIX-A iters 1091/1116/1124 reaching cleanly between and NO-OP+WATCH iters 1120/1123/1126 with all watches CLOSED on first re-probe opportunity. iter1127 4.96875 STRONG PASS is the highest of the recent band, driven by clean Q1 watch closure + three clean breadth angles.
-
-**Three consecutive successful watch closures (iter1121 ADD-COLUMN, iter1125 partition-column-COUNT FIX-A reach, iter1127 population-vs-per-group percentile) validate the first-instance NO-OP-then-re-probe discipline** matching iter1116 ts-minus-ts and iter1120 ADD-COLUMN early-closure shape. Continue first-instance NO-OP discipline; reserve LIGHT FIX-A for confirmed 2nd-instance recurrence on direct re-probe (iter1124 partition-column-COUNT shape).
-
-Q1's bare `approx_percentile` + qdigest-not-HLL inoculation demonstrates r23 §247-§262 dual canonical durable. Q2's `AVG OVER (PARTITION BY region)` + subquery-wrap demonstrates window-function-in-WHERE inoculation durable. Q3's integer-division CAST idioms reaffirm Trino-vs-Postgres parity content lineage. Q4's three-procedure maintenance schedule reaffirms Iceberg maintenance discipline durable; minor concurrent-write phrasing optimism is per-instance only.
-
-No content-lineage erosion; no recurring defect class; no new watch streams opened. Strong sustainment band continues.
+**Pattern observation:** 11-iter sustainment band shape: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/**1128** with LIGHT FIX-A iters 1091/1116/1124 reaching cleanly between and NO-OP+WATCH iters 1120/1123/1126 with all watches CLOSED on first re-probe. iter1128 4.8906 STRONG PASS reaffirms (a) RANGE+INTERVAL window frame is a durable competence (not a synthesis ceiling area), (b) `width_bucket(bins_array)` 0-based array overload is correctly understood (no Postgres-1-based imported-prior trap), (c) Iceberg partition evolution metadata-only semantics + identity-vs-bucket trade-off durable (extends iter1125's bucket fix lineage). Q3's Spark-only re-partition aside matches `feedback_responder_broken_secondary_alternative` shape (primary in-place answer perfect, secondary maintenance aside slightly narrow) — per-instance per the established discipline, no FIX-A. Q4's not-flagging-premise-contradiction is consistent with the responder's general "answer the literal question, don't editorialize on premises" style — not a defect. No content-lineage erosion; no recurring defect class.

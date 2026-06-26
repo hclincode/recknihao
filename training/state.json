@@ -1,7 +1,7 @@
 {
-  "iteration": 1127,
+  "iteration": 1128,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1127 population-vs-per-group percentile watch re-probe (iter1126 Q2 slip: added spurious GROUP BY customer_id to a population-percentile question). Q1 = percentile with EXPLICIT whole-population framing (one set of numbers across ALL users, median+IQR of the whole table) \u2014 confirm responder uses bare approx_percentile WITHOUT a spurious per-entity GROUP BY. If recurs -> LIGHT FIX-A r23 \u00a7247 population-vs-per-group disambiguator. Q2-Q4 breadth. Federation/CBO untouched."
+  "note": "iter1128 breadth durability sweep (all watch streams closed). 4 varied less-recently-probed angles across passed topics. Verify-first; NO-OP expected. Federation/CBO untouched."
 }
