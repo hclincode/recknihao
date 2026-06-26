@@ -394,6 +394,38 @@ You pay the sketch-building cost once per day (a single GROUP BY on the new part
 
 ---
 
+## 3.1·STR. Trino `VARCHAR` comparison is EXACT — trailing/leading spaces silently break `=` filters (NOT space-padded; only `CHAR(n)` pads)
+
+**Keyword anchors (READ THIS FIRST):** `WHERE status = 'active'` drops rows that look like they match, filter silently excludes rows, `SELECT DISTINCT` shows the value but the equality filter misses it, trailing space in a string column, leading/trailing whitespace from the source system, Oracle/legacy column has padded spaces, does Trino treat `'active'` and `'active '` as equal, space-padded string comparison, CHAR vs VARCHAR comparison, my join on a string key silently drops rows.
+
+**THE ONE FACT — Trino compares `VARCHAR` values EXACTLY (byte/character-for-character). `'active'` and `'active '` (one trailing space) are DIFFERENT strings, so `'active' = 'active '` returns `FALSE`.** Trino does NOT pad-blank-compare `VARCHAR` the way fixed-width `CHAR(n)` does under SQL's PAD SPACE rule. So if a column carries trailing (or leading) whitespace from a source system — common when migrating an Oracle/legacy `CHAR(n)` column, or from a flat-file import — then `WHERE status = 'active'` silently excludes every `'active '` row, and a string JOIN key with stray spaces silently drops matches. `SELECT DISTINCT status` *looks* like it contains `'active'` because the trailing space isn't visible. (Verified at [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html): `CAST('Test' AS varchar(20)) = CAST('Test ' AS varchar(25))` is `FALSE`; only `CHAR(n)` applies PAD SPACE.)
+
+**Diagnose it** — make the invisible spaces visible:
+
+```sql
+-- Wrap the value in delimiters and show its length; a length > the visible chars = stray spaces.
+SELECT '[' || status || ']' AS bracketed, length(status) AS len, COUNT(*) AS n
+FROM iceberg.analytics.accounts
+GROUP BY status
+ORDER BY n DESC;
+-- '[active ]' with len = 7 (not 6) is the smoking gun.
+```
+
+**Fix — normalize with `trim()`:**
+
+```sql
+-- Ad-hoc query fix — trim BOTH sides at compare time:
+WHERE trim(status) = 'active'                       -- matches 'active', 'active ', ' active', etc.
+-- (trim(NULL) = NULL, so NULL rows are still excluded — that's correct for an equality filter.)
+```
+
+> **DO-NOT-WRITE / nuance:**
+> - `WHERE status LIKE 'active%'` to "tolerate the trailing space" — **over-matches** (`'activended'`, `'activation'` also pass) and still misses a LEADING space. Use `trim(status) = 'active'`, not a `LIKE` prefix.
+> - `WHERE CAST(status AS CHAR(6)) = 'active'` to force PAD-SPACE equality — **fragile and lossy** (truncates anything longer than 6, and `CHAR` round-trips re-introduce padding). Don't emulate CHAR semantics; just `trim()`.
+> - `trim(status)` on a **partition/sort column** wraps the column in a function — for a *one-off* it's fine, but for a recurring filter it can hurt pruning. The durable fix is to **`trim()` once at ingest** (in the dbt **staging** model: `trim(status) AS status`) so the stored values are already clean and every downstream `=` filter and JOIN just works. (Trino `trim(BOTH chars FROM s)` also strips a custom char-set — see [resource 27 §trim](27-oracle-plsql-to-dbt-trino.md) — but plain `trim(s)` removes whitespace.)
+
+---
+
 ## 3.1A. Trino string-split family reference — `split` / `split_part` / `split_to_map` / `split_to_multimap`
 
 **Keyword anchor:** split_to_map, split_to_multimap, split_part, SPLIT function Trino, split comma-separated string, key=value string parse, extract value by key from delimited string, parse key-value pairs from string, MAP from delimited string, tags array count per tag (SPLIT then UNNEST).
