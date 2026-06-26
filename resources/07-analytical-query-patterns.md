@@ -3724,6 +3724,38 @@ The phrases you would type into a search bar for this pattern: **year over year*
 
 > **Cross-references.** Same DISTINCT-over-period idiom but counting DISTINCT user_ids in [§3 cohort retention](#3-cohort-analysis-retention-over-time) above. The half-open window pattern `[lo, hi)` is the same `[start, end)` half-open convention used for [interval-overlap range joins](#leading-canonical--count-activeopen-intervals-on-each-day-interval-overlap-range-join--not-forward-fill-not-a-current_date-snapshot) — both rely on the upper bound being EXCLUSIVE to avoid boundary double-count / partial-month leak.
 
+#### Sub-canonical — COUNT the entities-per-parent that EACH meet a per-entity threshold (TWO-LEVEL nested aggregation — a single GROUP BY is the WRONG answer) (iter1113 FIX-A)
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** engaged users per account, count users with at least N active days per account, power users per tenant, how many users per account did X at least N times, distinct users meeting a threshold per group, count the users (per account) who were active on >= N days, users who logged in on at least N separate days, two levels of grouping, group by account and user then count, nested aggregation, count-of-groups-that-meet-a-HAVING, count entities that each satisfy a per-entity condition, count subscribers with >= N orders per region.
+
+> **The fact in one sentence.** When the metric is "**per PARENT, how many CHILDREN each satisfy a condition measured across the child's own rows**" (per account, how many USERS each had activity on ≥ 3 distinct days), the per-child test must be evaluated **one level down** — you need **TWO levels of `GROUP BY`**: an INNER `GROUP BY parent, child` with a `HAVING` on the per-child measure, then an OUTER `GROUP BY parent` that **counts the surviving children**. A single `GROUP BY parent` is a **different, wrong** computation — `HAVING` there tests the PARENT's combined rows (all children pooled), not each child individually. The engineer's "two levels of grouping" instinct is correct — do NOT collapse it to one.
+
+> **CANONICAL — per account, count distinct users who were each active on ≥ 3 different calendar days last month:**
+>
+> ```sql
+> SELECT account_id, COUNT(*) AS engaged_users          -- outer: count the surviving users per account
+> FROM (
+>   SELECT account_id, user_id                           -- inner: one row per (account, user) that qualifies
+>   FROM iceberg.analytics.user_events
+>   WHERE event_date >= date_trunc('month', current_date) - INTERVAL '1' MONTH
+>     AND event_date <  date_trunc('month', current_date)
+>   GROUP BY account_id, user_id
+>   HAVING COUNT(DISTINCT date(event_date)) >= 3          -- per-USER test: this user's own distinct active days
+> ) t
+> GROUP BY account_id;
+> ```
+>
+> The inner query emits exactly one row per user who individually hit ≥ 3 active days; the outer `COUNT(*)` (NOT `COUNT(DISTINCT user_id)` — the inner GROUP BY already made users unique) counts them per account.
+
+> **DO-NOT-WRITE — the single-level collapse (silent wrong result):**
+>
+> | DO NOT write | Why it's wrong / silently-wrong | Correct form |
+> |---|---|---|
+> | `SELECT account_id, COUNT(DISTINCT user_id) FROM user_events ... GROUP BY account_id HAVING COUNT(DISTINCT date(event_date)) >= 3`  ❌ **single level** | The `HAVING COUNT(DISTINCT date(...)) >= 3` tests **the account's pooled rows** — i.e. "did this ACCOUNT have activity on ≥ 3 distinct days across ALL its users" (almost always TRUE) — NOT "did each user." Then `COUNT(DISTINCT user_id)` counts **every** user in the surviving accounts, including users who were active on a single day. Returns a wildly inflated number. | The TWO-LEVEL nested form above: inner `GROUP BY account_id, user_id HAVING COUNT(DISTINCT date(...)) >= 3`, outer `GROUP BY account_id COUNT(*)`. |
+> | `SELECT account_id, COUNT(DISTINCT CASE WHEN <per-user condition> THEN user_id END) ...` trying to inline the per-user threshold into one aggregate | A per-user measure that itself needs `COUNT(DISTINCT day) >= 3` cannot be expressed as a row-level `CASE` — the threshold is over a GROUP of the user's rows, which only exists after an inner `GROUP BY account_id, user_id`. There is no single-level aggregate that computes "users whose own distinct-day-count ≥ 3". | Same two-level nested form above. |
+
+> **Router — which "per group" card do I want?** (a) "entities active in EVERY one of the last N months" → the [period-coverage card just above](#sub-canonical--active-in-every-one-of-the-last-n-full-calendar-months-both-bounds-window--having-countdistinct-date_truncmonth-d--n-iter640-fix-b) (one level: `GROUP BY entity HAVING COUNT(DISTINCT month) = N`). (b) "per PARENT, COUNT the CHILDREN that each meet a threshold" → THIS card (two levels). The difference: (a) tests ONE entity against a period set and returns the entities; (b) tests each child, then counts surviving children **per parent** — the extra outer count is what forces the second level.
+
 ### Pattern B3: LEADING CANONICAL — `first_value` / `last_value` / `nth_value` (the default-frame footgun)
 
 > **Keyword anchors so the responder lands here:** first_value last_value Trino, last value per group, last value per session, last value per partition, nth_value window function, last_value returns current row not last, window frame default RANGE UNBOUNDED PRECEDING CURRENT ROW, first event per session, first row per group window function, unbounded following frame, value window function. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) (Value functions + Window frames sections).
