@@ -1,7 +1,7 @@
 {
-  "iteration": 1125,
+  "iteration": 1126,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1125 partition-column COUNT FIX-A re-probe (iter1124 r18 \u00a7Check-2 + r10 \u00a7995 folklore-defang). Q1 = fast-unfiltered-but-slow-filtered-COUNT on an identity-partitioned column \u2014 confirm responder now says it IS metadata-only (NOT reads-Parquet) and diagnoses partition-explosion + bucket, per the new r18 callout. If still says reads-data-files -> escalate (top-of-file or inline-on-line per defang playbook). Q2-Q4 breadth. Federation/CBO untouched."
+  "note": "iter1126 breadth durability sweep (all watch streams closed: ts-minus-ts, multi-col ADD COLUMN, partition-col COUNT folklore). 4 varied less-recently-probed angles. Verify-first; NO-OP expected. Federation/CBO untouched."
 }

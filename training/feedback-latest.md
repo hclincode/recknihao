@@ -1,134 +1,151 @@
-# Iter 1125 — Judge Feedback
+# Iter 1126 — Judge Feedback
 
-**Iter average: 4.9219 STRONG PASS (margin +1.4219).** Q1 FIX-A REACHED, **WATCH CLOSED**. NO-OP recommended.
+**Iter average: 4.5000 PASS (margin +1.0000).** Q1/Q3/Q4 clean; **Q2 (3.125) is a real correctness defect — `GROUP BY customer_id` on a population-wide percentile question gives degenerate per-customer percentiles, defeating the "ACROSS ALL customers" intent.** Defect classification: **responder one-off, NOT resource-sourced** (r23 §247-§262 has the correct bare-population canonical AND the per-group variant clearly distinguished). **RECOMMENDATION = NO-OP + WATCH STREAM** (re-probe within 2-3 iters with sharper "one set of three numbers, the population-wide thresholds" framing; if RECURS, LIGHT FIX-A in r23 §253 area with explicit "POPULATION vs PER-GROUP percentile" disambiguator above the per-store example).
 
 ---
 
 ## Per-question scoring
 
-### Q1 — identity-partitioned events on tenant_id, 40k tenants; slow filtered COUNT vs fast unfiltered COUNT — **4.9375**
+### Q1 — Oracle `TO_CHAR(revenue, 'FM999,990.00')` → Trino comma+2dp; SQL vs app-layer — **4.875**
 
 | Dim | Score | Reason |
 |---|---|---|
-| Technical accuracy | 4.75 | FIX-A REACHED cleanly: responder (a) explicitly negates the iter1123/1124 folklore — "root cause is NOT about reading Parquet files"; (b) diagnoses partition-METADATA / manifest-planning explosion; (c) recommends `bucket(tenant_id, 64)`; (d) correctly states the trade-off — with identity, per-tenant COUNT WAS metadata-only; with bucket, multiple tenants per bucket so per-tenant COUNT must open data files (matches r10 §1006: manifest stores bucket number, not original tenant_id). Minor shave: `40k × 365 ≈ 14.6M` assumes the table is ALSO partitioned by day, which the question does not state (it only mentions identity-partitioned by tenant_id). 40k partitions alone would not normally cause 30-40s manifest planning, so the responder is implicitly inferring a typical events layout (tenant_id, day) — defensible but the assumption is unflagged. |
-| Beginner clarity | 5.0 | Explicit "metadata not data" framing; concrete numbers (40k × 365 → 14.6M → 23k after bucket) make the explosion tangible; trade-off clearly stated. |
-| Practical applicability | 5.0 | Engineer knows exactly what to do: switch to `bucket(tenant_id, 64)` for ingestion balance + manifest planning; keep a summary table if per-tenant COUNT is frequent (because bucket loses the metadata-only optimization for original-column filter). |
-| Completeness | 5.0 | Mechanism + numeric diagnosis + concrete fix + trade-off + summary-table fallback — no missing nuance. |
+| Technical accuracy | 5.0 | `format('%,.2f', revenue)` is the canonical Trino 467 form for comma-thousands + 2dp. Verified against trino.io/docs/current/functions/conversion.html — official doc example reads `SELECT format('%,.2f', 1234567.89); -- '1,234,567.89'` essentially verbatim. Java-Formatter semantics correctly recalled: `%,` = locale grouping separator, `.2f` = 2 decimals, `%%` = literal percent sign. Companion patterns (`%d`, `%05d`, `%.1f%%`) all correct. "TO_CHAR for numbers does NOT exist in Trino" correct — Trino's `to_char` is timestamp-formatting only per the iter954 pin `reference_trino_to_char_exists`. |
+| Beginner clarity | 5.0 | Three-tier explanation: pattern → meaning → companion forms. The `%%` escape note is a real footgun preempted. The Oracle `FM` flag (suppress leading zero / blank) correctly understood to be already covered by `%,.2f` (no leading-zero padding by default). |
+| Practical applicability | 5.0 | Engineer can copy `format('%,.2f', revenue)` directly into a Trino query OR push to the app layer per the displayed/SQL guidance. Both correct framings offered. |
+| Completeness | 4.5 | Minor shave: does NOT explicitly note that for `DECIMAL` revenue columns the format `%f` specifier typically works via Trino's auto-coercion to double, but a strict-typing concern *could* require `CAST(revenue AS double)` if Trino fails to coerce. The official doc example uses a double literal `1234567.89` — the question's "revenue" column type (decimal vs double vs bigint) is unspecified. A one-line "for a `DECIMAL` revenue column, `format('%,.2f', CAST(revenue AS double))` is the safe form" would have closed this completeness gap. Per-instance, NOT a resource gap. |
 
-**Q1 FIX-A REACH VERDICT: REACHED. WATCH CLOSED.** 3rd touch (iter1123 first slip → iter1124 2nd slip + LIGHT FIX-A → iter1125 direct re-probe): the iter1124 r18 §Check-2 + r10 §995 cross-ref with inline-WRONG defang of "WHERE on partition col reads data files" is now reaching the responder cleanly. The responder (1) correctly DISTINGUISHES metadata-explosion (the actual cause at 14.6M partitions) from data-file-scan (the wrong iter1123/1124 framing), (2) lands the bucket fix, and (3) lands the bucket trade-off (loses metadata-only for original-column filter). This is the highest-quality reach signal the watch could gather. Close.
-
-### Q2 — side-by-side plan-tier counts per account (pivot) — **5.0000**
+### Q2 — population p25/p50/p75 of revenue ACROSS ALL customers for a given month — **3.125** ⚠ REAL DEFECT
 
 | Dim | Score | Reason |
 |---|---|---|
-| Technical accuracy | 5.0 | `SUM(CASE WHEN plan_type='starter' THEN 1 ELSE 0 END)` works identically; `COUNT(*) FILTER (WHERE plan_type='starter')` is the Trino-native ANSI-standard cleaner form. Both verified in Trino 467 (aggregate.html FILTER clause + standard CASE expression). GROUP BY account_id correct, no join needed. |
-| Beginner clarity | 5.0 | Both forms shown side-by-side with "same plan, no join" intuition. |
-| Practical applicability | 5.0 | Copy-pasteable Trino 467 SQL for both forms; engineer can pick either. |
-| Completeness | 5.0 | Both canonical forms named; no missing nuance for a wide-format pivot. |
+| Technical accuracy | 2.5 | **Right function (`approx_percentile`), right multi-percentile array form (`ARRAY[0.25, 0.5, 0.75]`), right "no PERCENTILE_CONT / no MEDIAN in Trino 467" inoculation — BUT `GROUP BY customer_id` on BOTH variants is WRONG for the question's intent.** The question explicitly asks for THE THRESHOLD VALUES of revenue across the customer population for the month (one set of three numbers describing the customer-distribution-wide cutoffs). With `GROUP BY customer_id`, Trino computes the percentile PER customer; if `monthly_revenue` has one row per customer per month (the natural shape for that table name), each group has a SINGLE value, so `approx_percentile` returns that customer's own revenue three times — degenerate and meaningless. Even on a many-row-per-customer-per-month table, the result is each customer's PRIVATE p25/p50/p75 of their own purchase distribution, not the population cutoffs across the customer base. The CORRECT query is **no GROUP BY** (or `GROUP BY month` only when scanning multiple months): `SELECT approx_percentile(revenue, ARRAY[0.25, 0.5, 0.75]) FROM monthly_revenue WHERE month='2026-06';` — returns one array of three numbers, the population thresholds. |
+| Beginner clarity | 4.5 | The mechanism explanation (multi-percentile array form, T-Digest sketch, no PERCENTILE_CONT trap) is clear. The "across all customers" misframing reduces clarity for the actual question asked — an engineer would copy the query and get the wrong shape of output. |
+| Practical applicability | 2.5 | An engineer copying either variant gets meaningless output for the stated question — single percentiles of single-row groups (single-row repeat) or per-customer distributions (not the population cutoffs). Both miss the "THRESHOLD VALUES, not bucket numbers" intent. |
+| Completeness | 3.0 | Function family identified, array form identified, PERCENTILE_CONT/MEDIAN absence noted — but the actual population-wide query the question asks for is NEVER produced. Missing the core deliverable. |
 
-### Q3 — date spine between two dates for zero-fill LEFT JOIN — **5.0000**
+**Defect classification: RESPONDER ONE-OFF, NOT resource-sourced.** Verify-first against r23 §247-§262 (`approx_percentile` canonical section):
+- §249-§251 has the correct **bare population form**: `SELECT approx_percentile(latency_ms, 0.99) AS p99 FROM api_logs;` and `SELECT approx_percentile(latency_ms, ARRAY[0.5, 0.95, 0.99]) AS percentiles FROM api_logs;` — NO GROUP BY.
+- §253-§256 has the explicitly labeled **PER GROUP** form: `SELECT store_id, approx_percentile(order_amount, 0.90) AS p90_order_amount FROM orders GROUP BY store_id;` with the heading "Percentile PER GROUP (e.g. p90 order amount per store) — just add GROUP BY".
+- §258-§262 has the **ARRAY form per group**: `SELECT store_id, approx_percentile(order_amount, ARRAY[0.5, 0.9, 0.99]) AS p50_p90_p99 FROM orders GROUP BY store_id;`.
+
+The resource correctly distinguishes population-wide vs per-group; both canonical forms are present and labeled. The responder pulled the per-group shape (with the entity-keyword "customer" mapping to the example's "store") onto a population question. **Likely root cause = `feedback_new_card_over_attracts_adjacent` adjacency-attraction**: the §253-§262 "per store" example has high keyword affinity with the question's "per customer" framing (entity-keyword similarity), pulling GROUP BY into the answer even though the question literally says "ACROSS ALL customers". This is a findability/disambiguation slip, not a missing canonical.
+
+Additional contrasting reference: r07 §3911-§3914 explicitly addresses "PERCENT_RANK over computing percentiles directly" and frames percentiles for the whole table vs per-row — but does NOT have an inline disambiguator for the population-vs-per-group GROUP BY decision. The §247-§262 dual examples in r23 are the load-bearing disambiguator, and they ARE correctly labeled, so the responder slip is a synthesis/keyword-match miss not a content gap.
+
+**Recommendation on this defect: NO-OP + WATCH STREAM** (first-instance discipline matching iter1116 ts-minus-ts / iter1120 ADD-COLUMN / iter1123 partition-column-COUNT handling). Re-probe in next 2-3 iters with explicit population-framing variants:
+- "What are the p25/p50/p75 of `total_purchases` across ALL users in 2026-06 (one set of three numbers)?" (force "ALL users" + "one set of three numbers")
+- "Give me the median + IQR of order_amount across the whole orders table for last month" (force "across the whole table")
+- "What revenue dollar values mark the top-quartile cutoff across my customer base?" (force "customer BASE" not "per customer")
+
+If RECURS → **LIGHT FIX-A** at r23 §247-§253 boundary: insert a one-paragraph disambiguator above the "PER GROUP" example with INLINE-WRONG defang per `feedback_defang_donotwrite_snippets`:
+
+> **POPULATION-wide vs PER-GROUP percentile — pick the right shape.** When the question asks for THE p25/p50/p75 values across an entire population (e.g. "across all customers", "across the customer base", "the threshold values for the month"), the answer is the BARE form with **NO GROUP BY on the entity**: `SELECT approx_percentile(revenue, ARRAY[0.25, 0.5, 0.75]) FROM monthly_revenue WHERE month='2026-06';` — returns one row, one array of three numbers, the population cutoffs. **DO NOT** `GROUP BY customer_id` here — that would compute each customer's PRIVATE p25/p50/p75 (single-value-repeat if one row per customer per month), defeating the across-population intent. Add `GROUP BY <entity>` ONLY when the question explicitly asks for a percentile PER entity (e.g. "p90 order amount per store").
+>
+> ```sql
+> -- ❌ DO NOT WRITE — population threshold question, do NOT add GROUP BY on the entity
+> SELECT approx_percentile(revenue, ARRAY[0.25, 0.5, 0.75])
+> FROM monthly_revenue WHERE month='2026-06'
+> GROUP BY customer_id;   -- WRONG: returns per-customer triples, not population thresholds
+> ```
+
+Do NOT preemptively edit on first-instance per the established NO-OP-then-re-probe playbook.
+
+### Q3 — `array(double)` of response times in ms → divide every element by 1000 to seconds, same shape, no `unnest` — **5.0**
 
 | Dim | Score | Reason |
 |---|---|---|
-| Technical accuracy | 5.0 | `sequence(DATE a, DATE b, INTERVAL '1' DAY)` returns ARRAY(DATE); `UNNEST(...) AS d(day)` materializes it to rows; bounds INCLUSIVE on both ends (Jan1..Jan5 = 5 days correct per trino.io array.html). LEFT JOIN to daily aggregate ON `a.day = d.day` with COALESCE(count, 0) zero-fill is canonical. Correctly noted Trino has no `generate_series`. |
-| Beginner clarity | 5.0 | Postgres-to-Trino translation map explicit (sequence → array → UNNEST → row spine). |
-| Practical applicability | 5.0 | Drop-in pattern; engineer can plug in real table names. |
-| Completeness | 5.0 | Inclusive-bounds clarification + COALESCE zero-fill + UNNEST mechanics — covers the full spine assembly. |
+| Technical accuracy | 5.0 | `transform(response_times, ms -> ms / 1000.0)` is exactly correct Trino 467. Verified against trino.io/docs/current/functions/array.html: `transform(array(T), function(T, U)) → array(U)` applies the lambda element-wise. Lambda syntax `ms -> ms / 1000.0` correct (`->` lambda operator). Division by `1000.0` (double literal) ensures `double / double → double` so the result type is `array(double)`, preserving the input shape exactly. No NULL-shape concerns (transform preserves NULL elements as NULL in the output). |
+| Beginner clarity | 5.0 | Clean signature explanation; the `1000.0` (vs `1000`) note implicit but the type-preservation works either way for a `double` input. |
+| Practical applicability | 5.0 | Direct copyable single-expression solution. |
+| Completeness | 5.0 | Defanged the `UNNEST + array_agg` round-trip anti-pattern (which would multiply rows, then re-aggregate — wrong tool, expensive). The "no unnest" framing in the question is directly addressed. |
 
-### Q4 — dbt incremental rebuild on 500M-row events_summary — **4.7500**
+### Q4 — `CROSS JOIN UNNEST(tags) AS t(tag)` drops accounts with empty/NULL tags; want them with NULL tag — **5.0**
 
 | Dim | Score | Reason |
 |---|---|---|
-| Technical accuracy | 4.5 | dbt incremental CORE fully correct: `materialized='incremental'`, `unique_key='event_id'`, `incremental_strategy='merge'`, `on_schema_change='append_new_columns'`, `partitioning=ARRAY['day(updated_at)']` (correctly noted Iceberg uses `partitioning` not Spark's `partitioned_by`), `is_incremental()` guard with `WHERE updated_at > (SELECT COALESCE(MAX(updated_at), TIMESTAMP '1970-01-01') FROM {{this}})` watermark pattern. Default 'append' note correct (verified via docs.getdbt.com/reference/resource-configs/trino-configs — without explicit `incremental_strategy='merge'`, dbt-trino defaults to append which would cause dupes on re-run). **MINOR SLIP**: side-note "schedule compaction (`rewrite_data_files`) nightly" — `rewrite_data_files` is the Spark `CALL iceberg.system.rewrite_data_files(...)` procedure name; the Trino 467 form is `ALTER TABLE ... EXECUTE optimize`. r17 §198 explicitly flags this confusion as "the single most common load-bearing inaccuracy" historically. Side-note, not core dbt incremental answer. |
-| Beginner clarity | 5.0 | "Not auto, you specify a watermark" framing is on-point for a Postgres engineer thinking auto-detect; `is_incremental()` guard + COALESCE-fallback explained. |
-| Practical applicability | 4.5 | Engineer copy-pasting the `rewrite_data_files` line into a Trino client would get "procedure not found" — but it's flagged as a "schedule X nightly" operational suggestion (would be done via Trino client / dbt operation), so the dialect slip surfaces at execution time. Core dbt incremental config is fully actionable. |
-| Completeness | 5.0 | All required config knobs covered + `is_incremental()` watermark + `on_schema_change` + Iceberg partitioning syntax. |
-
-**Q4 minor slip classification:** *responder one-off, NOT resource-sourced.* r17 §198 + §225-§229 explicitly defang exactly this Spark-CALL-named-as-Trino-EXECUTE confusion with copyable Trino 467 form. The slip is the well-documented `feedback_responder_broken_secondary_alternative` pattern — primary answer (dbt incremental) reaches cleanly, broken syntax appears on a TRAILING operational aside (compaction scheduling). r17 already defangs at the keyword route; no resource gap. Per `feedback_synthesis_ceiling_stop_churning`, this is per-instance noise — re-probe Q4 from a compaction-in-Trino-context angle next sweep to scope vs structural.
+| Technical accuracy | 5.0 | `LEFT JOIN UNNEST(tags) AS t(tag) ON TRUE` is the correct Trino 467 form to preserve parent rows when the array is empty or NULL. Verified against trino.io/docs/current/sql/select.html (UNNEST clause semantics) and community guides: `CROSS JOIN UNNEST` is inner-join semantics — zero array elements → zero rows for that parent → parent dropped. `LEFT JOIN UNNEST(...) ON TRUE` keeps every parent and pads the unnested column with NULL when the array yields no elements. Both NULL-array and empty-array cases are handled identically by LEFT JOIN UNNEST ON TRUE. |
+| Beginner clarity | 5.0 | The "CROSS JOIN UNNEST is semantically INNER" insight is the precise mental model that explains the surprise. |
+| Practical applicability | 5.0 | One-line drop-in replacement (swap `CROSS JOIN` for `LEFT JOIN ... ON TRUE`) — the engineer knows exactly what to change. |
+| Completeness | 5.0 | Both the empty-array and NULL-array cases addressed; the `ON TRUE` clause (required since LEFT JOIN syntax requires a join condition) explicitly called out. |
 
 ---
 
 ## Score table
 
-| Q | Acc | Clar | App | Compl | Avg | Notes |
+| Q | Topic touched | Acc | Clar | App | Compl | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | 4.75 | 5.0 | 5.0 | 5.0 | 4.9375 | FIX-A REACHED, watch CLOSED; minor 14.6M extrapolation unflagged |
-| Q2 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 | SUM(CASE) + COUNT FILTER pivot, both Trino-valid |
-| Q3 | 5.0 | 5.0 | 5.0 | 5.0 | 5.0000 | sequence+UNNEST date spine, inclusive bounds |
-| Q4 | 4.5 | 5.0 | 4.5 | 5.0 | 4.7500 | dbt incremental core clean; `rewrite_data_files` Spark-name slip on operational aside |
+| Q1 | Oracle PL/SQL → dbt+Trino migration (TO_CHAR numeric formatting) | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
+| Q2 | Analytical query patterns on Iceberg+Trino (population vs per-group percentile) | 2.5 | 4.5 | 2.5 | 3.0 | **3.125** ⚠ |
+| Q3 | SQL best practices for OLAP (array `transform` higher-order function) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
+| Q4 | SQL best practices for OLAP (UNNEST inner vs LEFT semantics) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
 
-**Iter average = (4.9375 + 5.0000 + 5.0000 + 4.7500) / 4 = 4.9219 STRONG PASS (margin +1.4219)**
+**Iter average = (4.875 + 3.125 + 5.0 + 5.0) / 4 = 4.5000 PASS** (margin to 3.5 = **+1.0000**).
 
 ---
 
 ## Source-verified defects
 
-1. **Q4 — `rewrite_data_files` named in Trino context (instead of `ALTER TABLE ... EXECUTE optimize`).** Source: r17 §198 explicitly identifies "naming a Spark `CALL iceberg.system.<proc>` procedure as if it were a Trino `ALTER TABLE ... EXECUTE` form" as the most common historical inaccuracy. **Classification: responder one-off, NOT resource-sourced** — r17 contains the correct Trino form clearly. Side note, not core answer. Per-instance shave only, no FIX-A.
-
-2. **Q1 — 14.6M figure assumes day-partitioning not stated in question.** 40k tenants × 365 days/year = 14.6M only if events is partitioned (tenant_id, day) not just identity(tenant_id). Defensible inference (events tables are conventionally also time-partitioned) but unflagged assumption. Minor accuracy shave only — diagnosis and fix are sound.
-
-No other defects. No ::/QUALIFY/false-semi-join/fabricated-fn/regex-backslash/INTERVAL-quarter-week/OFFSET-before-LIMIT/CAST-truncate/EXECUTE-rollback-on-467/imported-prior/GREATEST-NULL-Postgres/array_sum/`->`/`->>`-JSON/DATEDIFF-dialect-import/multi-arg-COUNT-DISTINCT/ts-minus-ts/over-warning/multi-clause-ADD-COLUMN/contains_sequence-array_position-arithmetic recurrence.
-
----
-
-## Q1 FIX-A REACH VERDICT
-
-**iter1124 LIGHT FIX-A REACHED. WATCH CLOSED.**
-
-Timeline:
-- **iter1123 Q4**: first instance of the "WHERE on partition-col still reads data files" folklore (synthesis miss on a less-recently-probed angle). NO-OP + WATCH STREAM.
-- **iter1124 Q1**: 2nd instance of the same folklore on a MORE direct re-probe ("partitioned by identity(account_id)" explicit). LIGHT FIX-A added: r18 §Check-2 callout cross-ref + r10 §995 reciprocal pointer + inline-WRONG defang of "reads data files" + bucket trade-off note.
-- **iter1125 Q1 (this iter)**: direct re-probe with 40k tenants + slow filtered vs fast unfiltered COUNT. **Folklore did NOT recur.** Responder now:
-  - (a) Explicitly negates the data-scan framing — "root cause is NOT about reading Parquet files"
-  - (b) Diagnoses partition-metadata / manifest-planning explosion (matches r10 §1389/§1393/§1406 over-partitioning canonical)
-  - (c) Recommends `bucket(tenant_id, 64)` with explicit math (14.6M → 23k)
-  - (d) States the bucket trade-off correctly (per-tenant COUNT loses metadata-only because manifest stores bucket number, not original tenant_id — matches r10 §1006)
-
-This is the highest-quality reach signal the watch could gather (perfect compliance with FIX-A intent across all four checkpoints). **Close the watch.**
-
----
-
-## Topic-row deltas
-
-| Topic | Before | Delta | After | Margin |
+| Defect | Source | Verification | Classification | Action |
 |---|---|---|---|---|
-| Query-perf-basics | 4.1425/22 | (91.135 + 4.9375)/23 | **4.1771/23 PASSED** | +0.6771 (Q1 FIX-A reach lifts row +0.0346) |
-| Analytical-query-patterns-Iceberg+Trino | 4.4814/79 | (354.0306 + 5.00)/80 | **4.4879/80 PASSED** | +0.9879 (Q3 date spine) |
-| Complex-SQL-perf-on-Trino-with-dbt | 4.5694/22 | (100.5268 + 4.75)/23 | **4.5773/23 PASSED** | +1.0773 (Q4 dbt incremental) |
-| SQL-best-practices-OLAP | 4.5278/181 | (819.5318 + 5.00)/182 | **4.5304/182 PASSED** | +1.0304 (Q2 pivot FILTER form) |
+| Q2 `GROUP BY customer_id` on population p25/p50/p75 across customers — gives degenerate per-customer percentiles | trino.io/docs/current/functions/aggregate.html — `approx_percentile(x, percentages) → array<[same as x]>` "for all input values of x" with no GROUP BY = bare-population semantics; r23 §249-§251 has CORRECT bare-population canonical + §253-§262 has explicitly-labeled per-group variant | RESPONDER ONE-OFF — resource is correct (both shapes labeled); responder pulled the per-store-shape per-entity pattern onto a question whose "ACROSS ALL customers" wording requires the bare form. Likely entity-keyword adjacency attraction per `feedback_new_card_over_attracts_adjacent` | **NO-OP + WATCH STREAM**; re-probe in 2-3 iters with explicit "one set of 3 numbers across ALL users" framing; if RECURS → LIGHT FIX-A r23 §247-§253 with population-vs-per-group inline disambiguator + INLINE-WRONG defang per `feedback_defang_donotwrite_snippets` |
 
-All required topics REMAIN PASSED. Q1 reach lifts query-perf-basics row by +0.0346 (margin widens from +0.6425 to +0.6771).
+---
+
+## Recurring-defect surface check
+
+No recurrence of: `::` cast / `QUALIFY` / false-semi-join / fabricated function / regex backslash / `INTERVAL` quarter-week / `OFFSET` before `LIMIT` / `CAST(... AS integer)` truncate folklore / `ALTER TABLE EXECUTE rollback_to_snapshot` on 467 / Spark-Oracle dialect spillover / imported-prior single-arg `COUNT(DISTINCT)` / `GREATEST/LEAST` Postgres-NULL / `array_sum` / `->`/`->>` JSON / `DATEDIFF` dialect import / multi-arg `COUNT(DISTINCT)` / `ts - ts` subtraction / over-warning folklore / multi-clause `ADD COLUMN` / `contains_sequence` `array_position` arithmetic / partition-column-COUNT data-file folklore (iter1124 FIX-A REACHED iter1125, REMAINS CLOSED).
+
+**NEW WATCH STREAM (Q2):** Population-wide percentile question + entity GROUP BY adjacency-attraction. First instance, re-probe 2-3 iters from sharper "ACROSS ALL X" framings.
+
+---
+
+## Topic updates (PASS → updated values)
+
+| Topic | Before | Q | Q score | Updated | Δ | Status |
+|---|---|---|---|---|---|---|
+| Oracle PL/SQL → dbt+Trino migration | 4.4724/108 | Q1 | 4.875 | (483.0192 + 4.875)/109 = **4.4761/109** | +0.0037 | PASSED |
+| Analytical query patterns on Iceberg+Trino | 4.4879/80 | Q2 | 3.125 | (359.032 + 3.125)/81 = **4.4711/81** | −0.0168 | PASSED (margin +0.9711 preserved) |
+| SQL best practices for OLAP | 4.5304/182 | Q3+Q4 | 5.0 + 5.0 | (824.5328 + 10.0)/184 = **4.5355/184** | +0.0051 | PASSED |
+
+ALL required topics REMAIN PASSED. Q2's 3.125 drags the analytical-query-patterns row by −0.0168 but the row's margin to 3.5 (+0.9711) is comfortable; no PASS status change risk.
+
+---
+
+## Thinnest-margin order after iter1126 (unchanged ordering)
+
+1. storage-tiering 3.9219/8 (+0.4219, thinnest required-topic)
+2. dbt-snapshots SCD2 4.1526/16 (+0.6526)
+3. query-perf-basics 4.1771/23 (+0.6771)
+4. cost-considerations 4.2504/21 (+0.7504)
+5. query-perf-regression-diagnosis 4.3108/20 (+0.8108)
+
+Federation 4.5024/312 untouched (fragile-PASS preserved). CBO/ANALYZE 4.5920/21 untouched.
 
 ---
 
 ## Teacher guidance
 
-**RECOMMENDATION = NO-OP** (no resource edits; commit rubric+feedback only).
+**RECOMMENDATION = NO-OP + WATCH STREAM** (commit rubric+feedback only; do not edit resources/ this iter).
 
-Rationale:
-1. **iter1124 LIGHT FIX-A REACHED on direct re-probe** — content lineage durable, watch closes cleanly. r18 §Check-2 + r10 §995 cross-ref is the correct shape; do NOT churn.
-2. **Q4 `rewrite_data_files` side-note slip = responder one-off** — r17 §198 + §225-§229 already defang the Spark-CALL-vs-Trino-EXECUTE confusion canonically. Per `feedback_responder_broken_secondary_alternative` + `feedback_synthesis_ceiling_stop_churning`, this is per-instance shading on an operational aside, NOT a resource gap. Scope as one-off; re-probe from a compaction-in-Trino-context angle in 2-3 iters to scope vs structural.
-3. **Q1 14.6M figure unflagged assumption** — minor; no resource edit needed.
+**Why NO-OP on first instance:** Q2 wrong claim is NOT in resources — r23 §247-§262 has the correct dual canonical (bare population + per-group, both labeled). The slip is responder-side disambiguation, not resource-side absence. Matches iter1116/iter1120/iter1123 first-instance handling discipline.
 
-**Thinnest-margin queue after iter1125** (ordering unchanged):
-1. storage-tiering 3.9219/8 (+0.4219) — still thinnest required-topic row
-2. dbt-snapshots-SCD2 4.1526/16 (+0.6526)
-3. query-perf-basics 4.1771/23 (+0.6771, lifted by Q1 FIX-A reach)
-4. cost-considerations 4.2504/21 (+0.7504)
-5. query-perf-regression-diagnosis 4.3108/20 (+0.8108)
+**WATCH STREAM probe queue:**
+1. Population-percentile re-probe (PRIORITY 1, NEW): explicit "one set of three numbers across ALL users" framing — e.g. "Give me the p25/p50/p75 of total_purchases for last month, ONE row with three numbers, the population thresholds across all users." If responder still adds GROUP BY on the entity, RECURRENCE confirmed → LIGHT FIX-A.
+2. storage-tiering 9th angle (still thinnest required-topic row at +0.4219).
+3. dbt-snapshots-SCD2 17th angle.
+4. cost-considerations 22nd angle.
 
-**Next re-probe queue:**
-1. Compaction-in-Trino-context Q (re-probe Q4 `rewrite_data_files` slip from "what command compacts an Iceberg table from Trino?" or "dbt operation to compact post-incremental?" angle) — scope per-instance vs structural
-2. storage-tiering 9th angle (still thinnest required-topic row)
-3. dbt-snapshots-SCD2 17th angle (next thinnest non-storage)
-4. cost-considerations 22nd angle ($manifests partition-cost attribution)
+**If Q2 RECURS in next 2-3 iters → LIGHT FIX-A in r23 §247-§253:** insert one paragraph + INLINE-WRONG defang above the "PER GROUP" example (see Q2 section above for the exact paragraph + DO-NOT-WRITE block). Reconcile-in-place per `feedback_reconcile_dont_append`; keep the existing per-group example, just front it with the disambiguator.
 
-Federation 4.50244/312 untouched (fragile-PASS preserved). CBO/ANALYZE 4.5920/21 untouched.
+**Do NOT preemptively edit.** The corpus already has the correct content; one-instance slip on adjacent-keyword attraction is not enough signal to justify a defang — re-probe first.
 
 ---
 
 ## Pattern observation
 
-- **3-iter Q1 partition-column-COUNT trajectory** (iter1123 slip → iter1124 slip+FIX-A → iter1125 clean) validates the targeted-FIX-A-on-recurrence playbook. First-instance NO-OP-then-re-probe scoping (iter1123) → 2nd-instance LIGHT FIX-A targeted at the keyword route (iter1124 r18 §Check-2) → 3rd-instance clean reach with all four checkpoints (this iter). Same shape as iter1112 dbt_is_deleted FIX-A reach lineage.
-- **Q4 `rewrite_data_files` Spark-name slip on operational aside** is the same shape as iter1116 ts-minus-ts WATCH and iter1120 multi-clause ADD COLUMN WATCH — primary answer clean, broken syntax/dialect on a secondary aside. Per `feedback_responder_broken_secondary_alternative`, scope as per-instance one-off NOT a resource defect.
-- 9-iter ≥4.75 STRONG PASS sustainment (1090/1092/1093/1117/1118/1119/1121/1122/1125 with 1091/1116/1124 LIGHT FIX-A reaching iters between) — content lineage durable, no structural drift, FIX-A discipline is working.
+10-iter sustainment band shape continues: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125 with LIGHT FIX-A iters 1091/1116/1124 reaching cleanly between; iter1126 4.5000 PASS is the lowest of the recent band, driven entirely by a single Q2 wrong-shape synthesis miss on a population-vs-per-group disambiguation. No content-lineage erosion; no recurring defect class; one new watch stream opened. Continue verify-first against trino.io 467 RAW source + grep resources/ before classifying any slip as resource-sourced.
+
+Q1's correct `format('%,.2f')` shape demonstrates the iter954 `reference_trino_to_char_exists` pin (numeric `to_char` does not exist; numeric formatting goes through `format()`) reaching cleanly. Q3's `transform` + lambda shape demonstrates higher-order array function discipline durable. Q4's CROSS JOIN UNNEST inner-vs-LEFT semantic correctly inoculated.
+
+Q2's adjacency-attraction signature: the resource has the right answer in the right section, but the per-group example's "store_id" entity keyword has pulled the per-entity GROUP BY shape onto a population question whose entity is "customer" (high keyword affinity, lexically similar role). This is the EXACT mechanism `feedback_new_card_over_attracts_adjacent` describes — a magnetic adjacent canonical capturing an entity-keyword-similar but semantically-different question. The defang (if needed after re-probe) belongs at the boundary between the two canonicals, not inside either one.
