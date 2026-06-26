@@ -1,208 +1,137 @@
-# iter1153 Feedback
+# Iter1154 — Judge Feedback
 
-**Iter average: 4.281 PASS NO-OP** (Q1 OFF-BY-ONE on HAVING threshold — gaps-and-islands CONSTRUCTION correct, FINAL ASSEMBLY threshold wrong; classified one-off Haiku synthesis-ceiling slip per pinned `feedback_synthesis_ceiling_stop_churning` — NO RESOURCE FIX; Q2 clean 5.0; Q3 minor causal imprecision on "row count → tiny files"; Q4 clean)
+**Verdict: LIGHT FIX-A** (3 strong PASS + 1 LOAD-BEARING SQL DEFECT with same-family recurrence trigger)
 
-**Verdict shape:** PASS by margin +0.781 above 3.5 threshold. Q2 clean 5.0; Q4 clean 4.875; Q3 4.0 with minor causal slip on small-file root cause; Q1 3.25 fail by per-question threshold but absorbed by topic cushioning (Analytical-query-patterns sits at +1.0326 above threshold). No per-question veto by topic-cushion rule. No resource fix warranted.
+| Q | Score | Notes |
+|---|---|---|
+| Q1 sessionization session-count-per-device | **2.25** | Construction CORRECT; final aggregate `COUNT(DISTINCT SUM(...) OVER (...))` is **window-in-aggregate parse error** — engineer copy-pastes, hits analyzer error, cannot run. **2nd consecutive same-family final-aggregate slip** (iter1153 Q1 was HAVING off-by-one). |
+| Q2 NULLS LAST default ASC/DESC | **5.0** | Pin-perfect — Trino default + Postgres/Oracle contrast + control syntax + migration guard. |
+| Q3 Iceberg day+region composite partitioning | **4.75** | DDL correct (`ARRAY['day(occurred_at)', 'region']`); minor prose imprecision on "use identity(region)" (concept right; literal `identity(col)` is NOT valid array-entry syntax — bare `'region'` is what identity transform looks like in DDL and the DDL itself shows that). |
+| Q4 date_diff('month') vs Oracle MONTHS_BETWEEN | **4.875** | Verified — Trino integer/day-aware vs Oracle fractional; /31.0 approx is the right caveat. |
+
+Iteration average: 16.875 / 4 = **4.22** — overall passes threshold but Q1 fails individually and triggers FIX-A under recurrence rule.
 
 ---
 
-## Per-question scoring
+## Q1 — Window-in-Aggregate Parse Error (LOAD-BEARING)
 
-### Q1 — Surface "resurrected" customers: active, then dark for 60+ days, then active again. Single query? Roughly what would it look like?
+### (a) Is it an error?
 
-**Score: 3.25** — Acc 2.5 / Clar 4.5 / App 2.5 / Compl 3.5
-
-**Source-verified canonical answer (from r07 §3099-3156 Pattern B-Session gaps-and-islands construction template):**
-
-The classic gaps-and-islands shape applies — LAG to detect the >60-day gap, `SUM(is_new_segment) OVER (PARTITION BY customer_id ORDER BY activity_date)` for running segment_id, then aggregate per customer:
+**YES — parse/analysis error.** The responder's final SELECT:
 
 ```sql
-WITH customer_activity AS (
-  SELECT DISTINCT customer_id, DATE(event_timestamp) AS activity_date
-  FROM events
-  WHERE event_timestamp >= CURRENT_DATE - INTERVAL '180' DAY
-),
-gaps_flagged AS (
-  SELECT customer_id, activity_date,
-    CASE
-      WHEN LAG(activity_date) OVER (PARTITION BY customer_id ORDER BY activity_date) IS NULL THEN 1
-      WHEN date_diff('day', LAG(activity_date) OVER (PARTITION BY customer_id ORDER BY activity_date), activity_date) > 60 THEN 1
-      ELSE 0
-    END AS starts_new_segment
-  FROM customer_activity
-),
-segments AS (
-  SELECT customer_id, activity_date,
-    SUM(starts_new_segment) OVER (PARTITION BY customer_id ORDER BY activity_date) AS segment_id
-  FROM gaps_flagged
-)
-SELECT customer_id, COUNT(DISTINCT segment_id) AS num_activity_periods
-FROM segments
-GROUP BY customer_id
-HAVING COUNT(DISTINCT segment_id) >= 2;   -- <<< CORRECT threshold: ONE resurrection = TWO segments
+SELECT device_id,
+       COUNT(DISTINCT SUM(is_new_session) OVER (PARTITION BY device_id ORDER BY ping_ts)) AS session_count
+FROM pings_with_lag
+GROUP BY device_id;
 ```
 
-**Walk through the segment math for the actual ask "active → dark 60+ → active":**
+nests a window function (`SUM(...) OVER (...)`) directly as the argument of an aggregate (`COUNT(DISTINCT ...)`) at the same query level. Trino's SQL evaluation order is FROM → WHERE → GROUP BY → HAVING → **window functions** → SELECT projection → ORDER BY (see [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)). Window functions are computed **after** aggregation, so a window function cannot appear as an argument to an aggregate at the same query level. The analyzer rejects with an error in the shape *"WINDOW function not allowed inside aggregate function"* / *"Cannot nest window functions inside aggregates"* (confirmed in [jOOQ doc: Window function nesting aggregate functions](https://www.jooq.org/doc/latest/manual/sql-building/column-expressions/window-functions/window-nested-aggregate/) — window-over-aggregate is allowed when the outer is the window; aggregate-over-window is not — and matches the standard SQL evaluation contract documented at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)).
 
-- Day 1 (first activity per customer): `LAG IS NULL` → `starts_new_segment = 1` → running SUM = 1 → segment_id = 1.
-- Days 2-N within initial active window: `starts_new_segment = 0` → segment_id stays at 1.
-- Day after a 60+ day silence: `date_diff > 60` → `starts_new_segment = 1` → running SUM = 2 → segment_id = 2.
-- Subsequent days in the resurrected active window: segment_id stays at 2.
+The CTE (`pings_with_lag` with the `is_new_session` flag) is CORRECT and reusable. The bug is **only** the final aggregation layer.
 
-A SINGLE resurrection produces `COUNT(DISTINCT segment_id) = 2`. The qualifying customers are exactly those with `>= 2` segments.
+**Three correct final forms (all equivalent for this question):**
 
-**Responder behavior — construction correct, FINAL THRESHOLD off-by-one:**
+1. **Simplest — no second CTE needed:** since each session-start is flagged 1, the SUM of flags IS the session count:
+   ```sql
+   SELECT device_id, SUM(is_new_session) AS session_count
+   FROM pings_with_lag
+   GROUP BY device_id;
+   ```
+2. **Two-CTE canonical (matches existing r07 §3134-3147):** add an intermediate `sessions` CTE computing `session_id`, then outer aggregate:
+   ```sql
+   sessions AS (SELECT device_id, ping_ts,
+                       SUM(is_new_session) OVER (PARTITION BY device_id ORDER BY ping_ts) AS session_id
+                FROM pings_with_lag)
+   SELECT device_id, COUNT(DISTINCT session_id) AS session_count
+   FROM sessions GROUP BY device_id;
+   ```
+3. **MAX(session_id):** also documented in r07 §3156 as cheaper alternate.
 
-CORRECT pieces (lifted cleanly from r07 §3099-3156 Pattern B-Session template — all four building blocks match the canonical):
-- DISTINCT `customer_id, DATE(event_timestamp)` over 180-day window → deduped one-row-per-customer-per-active-day grain.
-- `LAG(activity_date) OVER (PARTITION BY customer_id ORDER BY activity_date)` for the prior activity.
-- `CASE WHEN LAG IS NULL THEN 1 WHEN date_diff('day', LAG, activity_date) > 60 THEN 1 ELSE 0 END` — both the LAG-IS-NULL first-row carve-out (r07 §3154 verbatim) and the gap-test against the plain bigint 60 not `INTERVAL '60' DAY` (r07 §3153 verbatim) are correct.
-- `SUM(starts_new_segment) OVER (PARTITION BY customer_id ORDER BY activity_date)` running-SUM segment_id (r07 §3155 verbatim).
-- Notes "date_diff returns bigint compare to 60 not INTERVAL", "no timestamp-timestamp operator", "windows in their own SELECT layer" — all directly mirror r07 Pattern B-Session pin-text.
+### (b) Same-family recurrence? **YES — 2nd consecutive failure on the FINAL aggregation layer of a sessionization / gaps-and-islands query.**
 
-DEFECT — `HAVING COUNT(DISTINCT segment_id) >= 3` is OFF BY ONE:
+| Iter | Construction | Final aggregation slip |
+|---|---|---|
+| 1153 Q1 | LAG + running-SUM segment_id correct | `HAVING >= 3` off-by-one (correct = `>= 2` for 1 resurrection) — semantic error |
+| 1154 Q1 | LAG + running-SUM-as-session-id concept correct | `COUNT(DISTINCT SUM(...) OVER (...))` — **SQL grammar error** |
 
-- The comment claims "3+ periods means: active, dark, active again (or more)" — that interpretation is wrong. 3 segments means TWO resurrections (active → dark → active → dark → active), i.e. a customer who went dark and came back TWICE.
-- A SINGLE resurrection (the literal ask "active, then dark for 60+ days, then active again") produces exactly 2 segments / 1 qualifying gap.
-- Result for the engineer: a copy-pasted query returns ZERO or near-zero rows on a real dataset (because two-time-resurrected customers are rare), and the engineer concludes "we don't have any resurrected customers" — silently wrong. Worst failure mode: no parse error, returns a plausible-looking small subset that systematically MISSES the customers the engineer actually wanted to surface.
+Surface forms differ (off-by-one vs invalid grammar) but **scope is identical**: the per-row flag/segment-id construction is correct, the responder fumbles the layer that turns flags → counts. By the iter1153 footnote contract ("if RECURS → consider additive r07 §3160 mini-note pinning..."), this triggers a light additive fix.
 
-**Source classification — synthesis-ceiling slip, NOT a resource defect:**
+### (c) FIX-A recommendation — YES, additive r07 mini-note
 
-Grepped resources/ for `resurrect|reactivat|came back|winback|active.*dark|dark.*active` and for `>= [23].*segment / num_activity_periods / COUNT(DISTINCT segment_id) >=`:
-- ZERO resources teach a "resurrection" canonical with any stated `>=` threshold.
-- r07 §3099-3156 (Pattern B-Session) teaches the construction but the example application is "number of sessions per user" (an unqualified count, no threshold filter); r07 §3180-3230 (Pattern B-Streak) teaches "longest streak per user" (MAX over per-island counts, no threshold filter either).
-- No resource taught `>= 3` for resurrection — the responder lifted the CONSTRUCTION template correctly from the Session card, but synthesized the threshold incorrectly when mapping "resurrection = active → dark → active" to a count over the synthesized segment_id.
-- This pattern matches the pinned `feedback_synthesis_ceiling_stop_churning` family (responder construction is right, final assembly off by one), and the pinned `feedback_responder_broken_secondary_alternative` family (leads pass, secondary/threshold-decision-aside slips). NO RESOURCE FIX — adding a resurrection-threshold canonical risks over-attracting adjacent gaps-and-islands questions to the wrong card (per pinned `feedback_new_card_over_attracts_adjacent`) and the failure mode is responder synthesis not findability.
+**Placement:** (1) Insert a small **"final-count forms" mini-block** between the existing §3156 (Why-each-piece point 4 about `COUNT(DISTINCT session_id)`) and §3158 ("DO NOT WRITE" table opener) — gives the responder a findable canonical for "session count per entity" right where the running-SUM trick is explained. (2) Append a **NEW ROW** to the existing DO-NOT-WRITE table at §3160-3168 (just after the §3167 "window-function-in-WHERE" row, which is the closest existing defang) targeting the window-in-aggregate anti-pattern.
 
-**Verdict per dim:**
-- Technical accuracy 2.5: construction blocks correct, but the final HAVING threshold delivers the wrong answer to the actual question.
-- Beginner clarity 4.5: CTE chain + walkthrough comments are well-explained.
-- Practical applicability 2.5: engineer copy-paste produces silently wrong results (no parse error, wrong subset).
-- Completeness 3.5: covers shape and dialect caveats, missed correct threshold reasoning.
+**Concrete spec:**
 
-**Recommendation:** NO RESOURCE FIX. Watch label `r07 gaps-and-islands resurrection-threshold off-by-one iter1153`; re-probe in next sweep with a structurally similar two-period-detection variant ("find users who paused subscription for 30+ days then re-subscribed" / "accounts that went silent 90+ days and returned"). If recurs across phrasings → consider an additive r07 §3160 mini-note pinning "1 resurrection = 2 segments / `HAVING >= 2`" alongside the Pattern B-Session card. If one-off → keep as Haiku synthesis-ceiling and leave the card untouched.
+**Mini-block (insert between §3157 and §3158):**
+```
+**Three equivalent final-count forms (use the simplest your downstream allows).**
+Once is_new_session is built, any of these gives the same per-entity session count:
 
----
+- SHORTEST — drop the sessions CTE entirely; SUM the flags:
+    SELECT user_id, SUM(is_new_session) AS session_count
+    FROM pings_with_lag GROUP BY user_id;
+  (Each session-start is flagged 1, so SUM(flags) = session_count by definition.)
 
-### Q2 — Postgres EXTRACT(EPOCH FROM event_ts) for raw Unix seconds. Does that exact syntax work in Trino, or a different function?
+- MAX(session_id) over the sessions CTE — cheaper than COUNT(DISTINCT) and identical
+  result since session_ids are dense per user starting at 1:
+    SELECT user_id, MAX(session_id) AS session_count FROM sessions GROUP BY user_id;
 
-**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
+- COUNT(DISTINCT session_id) over the sessions CTE — most self-documenting
+  (the form shown above).
 
-**Source-verified canonical answer (from [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html)):**
+For thresholds ("entity has 2+ sessions today" / "resurrected = at least 1 dark→active flip"):
+  1 resurrection = 2 segments → HAVING SUM(is_new_session) >= 2
+                              / HAVING COUNT(DISTINCT session_id) >= 2.
+  N stretches → HAVING ... >= N.
+```
 
-- Trino EXTRACT supports fields: YEAR, QUARTER, MONTH, WEEK, DAY, DAY_OF_MONTH, DAY_OF_WEEK, DOW, DAY_OF_YEAR, DOY, YEAR_OF_WEEK, YOW, HOUR, MINUTE, SECOND, TIMEZONE_HOUR, TIMEZONE_MINUTE. EPOCH is NOT in the list — `EXTRACT(EPOCH FROM event_ts)` is a parse error in Trino 467.
-- Use `to_unixtime(event_ts) -> double` for Unix seconds (verbatim docs signature).
-- `from_unixtime(unixtime) -> timestamp(3) with time zone` for the reverse direction (verbatim docs signature; matches the pinned `reference_trino_from_unixtime_tz` note that ALL from_unixtime overloads carry time zone, no without-tz variant).
+**DO-NOT-WRITE row (append to §3160-3168 table):**
 
-**Responder behavior — clean substitution:**
+| DO NOT write | Why it fails | Use instead |
+|---|---|---|
+| `COUNT(DISTINCT SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time)) AS session_count` (collapsing the sessions CTE into the outer SELECT, nesting the window inside `COUNT(DISTINCT ...)`) | **Window function nested inside aggregate function — Trino 467 analyzer rejects.** SQL evaluation order is GROUP BY/aggregation → **then** window functions ([trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html)), so a window function cannot be an argument to an aggregate at the same query level. Error: *"WINDOW function not allowed inside aggregate function."* | Pick one of the three final-count forms above — easiest: `SELECT user_id, SUM(is_new_session) AS session_count FROM <cte_with_flag> GROUP BY user_id;`. If you want a separate `session_id` column, put `SUM(is_new_session) OVER (...) AS session_id` in its own CTE and run `COUNT(DISTINCT session_id)` / `MAX(session_id)` against that CTE in the outer SELECT. |
 
-- Definitively says EXTRACT(EPOCH ...) is not Trino syntax.
-- Names `to_unixtime(event_ts) -> DOUBLE` as the canonical substitution.
-- Comparison table contrasts `to_unixtime` (timestamp → seconds) vs `from_unixtime` (seconds → timestamp(3) with time zone) — both signatures match the docs verbatim.
-- `CAST(to_unixtime(...) AS BIGINT)` for integer-only consuming systems is correct (typical millisecond-aware downstream system expects BIGINT epoch).
-- `to_unixtime(current_timestamp) - to_unixtime(event_ts)` for seconds-ago is correct and idiomatic.
-- Millisecond round-trip `from_unixtime(event_ms / 1000.0)` correctly divides by 1000.0 (NOT 1000) to preserve sub-second precision into the DOUBLE input.
+**Keyword anchors** (for Haiku findability): "count sessions per device" / "session_count per user" / "running sum session_id then count" / "COUNT DISTINCT window function" / "window in aggregate Trino" / "1 resurrection = 2 segments" / "how many sessions today per entity" / "sessionization final count".
 
-Imported-Postgres-prior correctly resolved (consistent with the pinned imported-prior family: EXTRACT(EPOCH) is Postgres-only). r13 citation appropriate.
-
-Clean 5.0 all dimensions.
-
----
-
-### Q3 — Iceberg events table partitioned by day; launch/Black-Friday days have 50-100x more rows than a quiet day. Structural problem? Does Trino/Iceberg handle the imbalance automatically, or a slow-query situation to address explicitly?
-
-**Score: 4.0** — Acc 3.5 / Clar 4.5 / App 4.0 / Compl 4.0
-
-**Source-verified canonical answer (from [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) + r10 partition-design + r17 maintenance):**
-
-- Not a structural break: day partitioning still prunes correctly on heavy days; the planner reads the file list for the matching partition irrespective of row count per partition. Skew on a temporal partition is not a blow-up.
-- The real risk is on the WRITE side / FILE LAYOUT, not the partition-bucket count. Two distinct mechanisms can produce a small-files problem on a heavy partition:
-  1. **High write parallelism on heavy days**: Spark's writer task count tends to scale with input rows; 50M rows fed to many parallel writers can produce many medium files per task — but typically those tasks each produce 100-500MB files, NOT tiny files (Spark target file size ~128MB-1GB).
-  2. **High commit cadence on heavy days**: streaming / micro-batch ingestion that commits every few seconds during a Black Friday spike accumulates many small commits → many small files per commit → metadata bloat. This is the dominant small-files cause in practice.
-- Fix: periodic `ALTER TABLE iceberg.<schema>.events EXECUTE optimize` (rewrites small data files into 128-512MB targets; verified [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) ALTER TABLE EXECUTE optimize section).
-- For partition-targeted optimize: `ALTER TABLE ... EXECUTE optimize WHERE <identity-partition-col> = ...` — supported, but the WHERE clause must push down to the table scan as a partition predicate, NOT remain as a FilterNode (verified at [trino issue #25279](https://github.com/trinodb/trino/issues/25279)). For `day(occurred_at)` transform with raw-timestamp range predicate the unwrap-cast rules typically push it down, but it's an edge case worth verifying with EXPLAIN.
-
-**Responder behavior — core guidance correct, causal claim imprecise:**
-
-CORRECT:
-- "Not structural" — accurate.
-- "Pruning still works (heavy day prunes same as light day)" — correct; partition pruning is per-partition-value, not per-row-count.
-- "Trino planner doesn't choke" — correct; partition row-count skew doesn't break planning.
-- Routes to `EXECUTE optimize` nightly as the maintenance lever — correct canonical.
-- Partition-targeted form `ALTER TABLE iceberg.analytics.events EXECUTE optimize WHERE occurred_at >= CURRENT_DATE - INTERVAL '1' DAY AND occurred_at < CURRENT_DATE` is the documented half-open form for daily-targeted compaction — valid for identity-transformed partition columns and (for `day(occurred_at)` transform) typically pushes down via unwrap-cast, but engineer should verify with EXPLAIN.
-- "Bins to 128-512MB files" — correct compaction target range.
-
-CAUSAL IMPRECISION (-0.5 Acc, -0.5 Compl):
-- "a launch day with 50M rows → Spark writes many tiny Parquet files (hundreds/thousands)" conflates row count per partition with file count. A SINGLE large batch of 50M rows actually produces FEWER, LARGER files (target ~128MB-1GB per Spark task). The small-files problem on heavy days comes from (a) high write parallelism producing many medium files spread across many tasks, AND/OR (b) high commit cadence (streaming / micro-batch) producing many small commits. Row count per partition by itself does NOT cause file fragmentation.
-- The CORRECT framing: "frequent SMALL COMMITS on heavy days produce many small files; row count per partition by itself doesn't fragment" → "use EXECUTE optimize to rewrite into 128-512MB files".
-- "metadata reads slow + query startup latency" — directionally right, but the root cause is small-file count not row count per partition.
-- Did not name the `optimize(file_size_threshold => ...)` parameter for tuning what counts as "small enough to rewrite" (recall ceiling, NOT a defect).
-
-The engineer arrives at the right action (run EXECUTE optimize on the heavy partitions) but with a slightly wrong mental model of why it's needed. Practical outcome is correct; conceptual hygiene is muddled.
-
-**Verdict per dim:**
-- Technical accuracy 3.5: core claims correct, small-file root cause imprecise.
-- Beginner clarity 4.5: explanation flows clearly.
-- Practical applicability 4.0: EXECUTE optimize is the right fix; WHERE-clause edge case unaddressed but practically usable.
-- Completeness 4.0: covers pruning-still-works + compaction lever, misses commit-cadence root cause.
+**Watch label:** `r07 sessionization final-count synthesis ceiling iter1154`. Re-probe in next sweep with a structurally similar question in a different domain (e.g., logins per agent today / orders per customer split on checkout-gap / page views per visitor with 15-min idle). If response reaches one of the three clean forms AND avoids window-in-aggregate, watch CLOSED.
 
 ---
 
-### Q4 — Oracle procedures loop row-by-row (open cursor, fetch, conditional logic, write output, repeat). Converting to a dbt model — no loops/cursors. Right mental model for translating cursor logic to SQL dbt can run?
+## Q2 — NULLS LAST default (PASS, 5.0)
 
-**Score: 4.875** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.5
+Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) verbatim: *"The default null ordering is `NULLS LAST`, regardless of the ordering direction."* Responder reached all load-bearing facts:
+- Trino default = NULLS LAST for BOTH ASC and DESC
+- Postgres contrast (NULLs first on DESC / last on ASC) and Oracle contrast (NULLs first on DESC by default)
+- Explicit control via `ORDER BY col DESC NULLS FIRST` / `NULLS LAST`
+- Migration recommendation to always write explicit NULLS FIRST/LAST when porting from Postgres/Oracle
 
-**Source-verified canonical answer (from r27 §6 + §1259-1260 + dbt-trino docs):**
+Matches the pinned reference at `reference_trino_null_ordering_default.md`. Clean canonical, no defects.
 
-The cursor-to-set-based mental shift:
-- Replace per-row cursor loops with single SELECTs that operate on the entire dataset; CTEs + window functions express the per-row logic as a column.
-- IF/THEN/ELSE → `CASE WHEN ... THEN ... ELSE ... END`.
-- INSERT row-by-row in cursor → `materialized='incremental'` (delta merges) or `materialized='table'` (full rebuild).
-- Per-iteration MERGE → dbt-trino `incremental_strategy='merge'` + `unique_key='<pk>'` (verified at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)).
-- Iceberg partitioning config: `partitioning = ARRAY['day(order_date)']` for hidden-partition Trino-side transform (verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)).
+## Q3 — Iceberg day+region composite partitioning (PASS, 4.75)
 
-**Responder behavior — clean translation framework:**
+DDL syntax correct: `partitioning = ARRAY['day(occurred_at)', 'region']` is valid Trino 467 multi-column partitioning per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (matches the documented `partitioning = ARRAY['city', 'bucket(userid, 16)']` example pattern). dbt-trino `properties={'partitioning': "ARRAY['day(occurred_at)', 'region']", ...}` is also correct. Skipping reasoning is sound (~365×5=1825 partitions/year is healthy, skipping 80% of files when filtering one region outweighs metadata cost). identity transform for low-cardinality region (vs bucket(region, N)) is the right call.
 
-- Mental shift framed correctly: "from row-at-a-time imperative to declarative set-based".
-- Translation table accurate: cursor → window functions; IF/THEN → CASE; temp tables → CTEs / ephemeral models; per-row MERGE → dbt incremental + merge strategy; exception handlers → dbt tests.
-- Cursor example (route order >1000 to premium queue, else standard) → single dbt SELECT with `CASE WHEN total_amount > 1000 THEN 'premium' ELSE 'standard' END AS order_category` is the canonical idiomatic translation.
-- Config block uses `materialized='incremental'`, `incremental_strategy='merge'`, `unique_key='order_id'`, `partitioning = ARRAY['day(order_date)']` — all valid dbt-trino Iceberg config values.
-- Cites r27/r09 — appropriate.
+**Minor imprecision (-0.5 Acc):** Prose says "use `identity(region)`" — `identity(col)` is conceptually the right transform but is **not literal Trino partitioning-array entry syntax**. The bare column name `'region'` IS the identity transform in DDL (and the DDL example correctly uses the bare form). An engineer reading the prose verbatim might try `ARRAY['day(occurred_at)', 'identity(region)']` and hit a parse error. Not load-bearing because the runnable DDL block uses the correct bare form. Recall ceiling, NO resource fix.
 
-Minor completeness shave (-0.5 Compl): could have explicitly named the "stateless / no in-flight state between rows" axiom (every cursor variable that accumulates across iterations becomes a window function `SUM/COUNT/LAG/LEAD/ROW_NUMBER OVER (...)`); the translation table implies it but doesn't name it. Could have mentioned that loops with ROWNUM/early-exit semantics need rank+filter rewrites (`WHERE rn <= N`). Both are recall-ceiling, not defects.
+## Q4 — Trino date_diff('month') vs Oracle MONTHS_BETWEEN (PASS, 4.875)
 
-Clean 4.875.
+Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): `date_diff(unit, ts1, ts2) -> bigint` returns integer count of complete units, day-aware (drops fractional). Matches the pinned `reference_trino_datediff_dayaware.md`. Oracle MONTHS_BETWEEN fractional contrast verified at [docs.oracle.com MONTHS_BETWEEN](https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/MONTHS_BETWEEN.html). The `date_diff('day', start, end)/31.0` approximation is the right caveat (Oracle uses a 31-day-month model for the fractional portion per Oracle docs).
+
+**Minor completeness shave (-0.5):** Could mention Oracle's edge cases where MONTHS_BETWEEN returns an integer (same day-of-month or both end-of-month) — useful migration-audit detail. Recall ceiling, not a defect.
 
 ---
 
-## Score history aggregation (this iter)
+## Summary
 
-- Q1 → **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL**: 4.5415/105 → (476.8584 + 3.25)/106 = **4.5298/106 PASSED** (-0.0117, margin still +1.0298, well above threshold).
-- Q2 → **SQL query best practices for OLAP**: 4.5768/218 → (997.7533 + 5.0)/219 = **4.5788/219 PASSED** (+0.0020, margin +1.0788).
-- Q3 → **Iceberg partition design for SaaS: strategies, small-files, compaction**: 4.4616/47 → (209.6952 + 4.0)/48 = **4.4520/48 PASSED** (-0.0096, margin +0.9520).
-- Q4 → **Oracle PL/SQL procedure → dbt + Trino SQL migration**: 4.4488/124 → (551.6572 + 4.875)/125 = **4.4513/125 PASSED** (+0.0025, margin +0.9513).
+- **Q1 = LIGHT FIX-A** — additive r07 mini-note (3-equivalent-final-forms block + window-in-aggregate DO-NOT-WRITE row). 2nd consecutive same-family slip closes the iter1153 watch contract; specific failure mode is window-in-aggregate not present in current r07 defang list.
+- **Q2, Q3, Q4 = PASS** with healthy margins. Minor prose/recall shaves on Q3 (identity(col) prose-vs-DDL contradiction) and Q4 (Oracle edge cases) not worth a fix.
+- All four affected required-topic averages remain comfortably above the 3.5 threshold after this iteration.
 
-All required topics REMAIN PASSED. Iter average = (3.25 + 5.0 + 4.0 + 4.875) / 4 = **4.281 PASS** (margin +0.781 above threshold).
-
----
-
-## Verdict: PASS NO-OP
-
-**Recommendation = NO-OP** (no resource fix this iter).
-
-**Source-verified defects this iter:**
-1. **Q1 off-by-one on HAVING threshold** — `>= 3` should be `>= 2` for the single-resurrection ask. Construction blocks (LAG + running-SUM segment_id from r07 Pattern B-Session) are correct; final assembly slip. Classified per pinned `feedback_synthesis_ceiling_stop_churning` + `feedback_responder_broken_secondary_alternative` as one-off responder synthesis-ceiling, NOT a resource defect (no resource teaches a wrong threshold; grep'd zero matches for `resurrect|reactivat|came back|winback` with any stated threshold).
-2. **Q3 minor causal imprecision** — "50M rows per partition → many tiny files" conflates partition row count with file count. The actual cause is commit cadence / writer parallelism, not row count per se. Practical guidance (EXECUTE optimize) still correct so engineer arrives at right action. NOT a resource fix (r10/r17 small-files canonicals already frame it correctly; responder phrasing slip not source-anchored).
-
-**No watch escalation, no FIX-A.** Q1 watch `r07 gaps-and-islands resurrection-threshold off-by-one iter1153`: re-probe in next sweep with structurally similar two-period-detection variant ("paused 30+ days then re-subscribed" / "accounts silent 90+ days and returned"). If RECURS across phrasings → consider additive r07 §3160 mini-note pinning "1 resurrection = 2 segments / `HAVING >= 2`". If ONE-OFF → leave as Haiku synthesis-ceiling.
-
-**Thinnest-margin order after iter1153 (unchanged ordering):** dbt-snapshots-SCD2 4.1079/18 (+0.6079, thinnest required-topic) → storage-tiering 4.1302/12 (+0.6302) → query-perf-basics 4.1893/26 (+0.6893) → cost-considerations 4.3258/24 (+0.8258) → query-perf-regression-diagnosis 4.3436/21 (+0.8436) → Oracle-migration 4.4513/125 (+0.9513, Q4 lift) → Iceberg-partition-design 4.4520/48 (+0.9520, Q3 drag) → Iceberg-maintenance 4.4527/187 (untouched) → federation 4.5024/312 → dbt-sources-freshness 4.5105/9 → Analytical-query-patterns 4.5298/106 (+1.0298, Q1 drag) → SQL-best-practices-OLAP 4.5788/219 (+1.0788, Q2 lift) → CBO/ANALYZE 4.6105/22 → improving-complex-SQL-perf-dbt 4.6111/25.
-
-**Pattern observation:** 29-iter sustainment band continues. iter1153 4.281 PASS NO-OP is the THINNEST PASS margin in 4 iters since iter1150's 3.781 PASS+LIGHT-FIX-A. Both lower-margin iters involved Q1 quasi-construction-correct-but-final-assembly-wrong slips. Lesson: when the responder's CONSTRUCTION blocks lift cleanly from a documented canonical (r07 Pattern B-Session for both iter1153 Q1 and iter948 collapse-first patterns) but the FINAL aggregation/threshold/decomposition step trips, classify as Haiku synthesis-ceiling and re-probe — do NOT churn the canonical card. The lift is the load-bearing element; the synthesis step is per-question variance not findability.
-
-Sources verified:
-- [Trino 467 datetime functions](https://trino.io/docs/current/functions/datetime.html) — EXTRACT field list (EPOCH absent), to_unixtime → double, from_unixtime → timestamp(3) with time zone.
-- [Trino 467 Iceberg connector](https://trino.io/docs/current/connector/iceberg.html) — ALTER TABLE EXECUTE optimize syntax + WHERE clause partition predicate constraint.
-- [Trino issue #25279 EXECUTE optimize partition predicate](https://github.com/trinodb/trino/issues/25279) — pushdown edge cases for function-transformed partition cols.
-- [docs.getdbt.com Trino configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — partitioning ARRAY['day(...)'], incremental_strategy='merge' validated.
-- r07 §3099-3156 Pattern B-Session — gaps-and-islands LAG + running-SUM segment_id construction template (the source the responder lifted from for Q1).
+**Sources verified during this evaluation:**
+- [Trino SELECT — NULLS LAST default](https://trino.io/docs/current/sql/select.html)
+- [Trino Window functions](https://trino.io/docs/current/functions/window.html)
+- [jOOQ — Window function nesting aggregate functions](https://www.jooq.org/doc/latest/manual/sql-building/column-expressions/window-functions/window-nested-aggregate/)
+- [Trino Iceberg connector — partitioning](https://trino.io/docs/current/connector/iceberg.html)
+- [Trino date_diff — Date and time functions](https://trino.io/docs/current/functions/datetime.html)
+- [Oracle MONTHS_BETWEEN](https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlrf/MONTHS_BETWEEN.html)
