@@ -1,7 +1,7 @@
 {
-  "iteration": 1137,
+  "iteration": 1138,
   "phase": "extended",
   "final_iterations_remaining": 0,
   "passed": true,
-  "note": "iter1137 percentile-direction FIX-A re-probe (iter1136 r07 \u00a73939 leaderboard LEAD card). Q1 = customer-facing you-are-more-active-than-X%-of-users badge (top user near 100) \u2014 confirm responder now uses cume_dist() OVER (ORDER BY metric) [top->100] or percent_rank ASC, NOT ORDER BY DESC. If still DESC -> escalate (top-of-file / inline-on-line). Q2-Q4 breadth. Federation/CBO untouched."
+  "note": "iter1138 -> 4.69 STRONG PASS + LIGHT FIX-A (RESOURCE-SOURCED imported-prior). Q2 running-MIN OVER (5.0) / Q3 regexp_extract 3-arg group (5.0) / Q4 Iceberg hidden partitioning day()/month() transform (5.0) clean. Q1 Oracle TRUNC dual-use (3.75): responder said Trino truncate is 1-arg only + 2-arg truncate(x,d) does NOT exist + clunky *100/100 workaround -- FALSE, inherited from r27 \u00a74.4C which fabricated a wrong-arity error and built keyword-traps around the false absence. RAW Trino 467 docs: BOTH truncate(x) AND truncate(x, d) exist (truncate(decimal(p,s),bigint)->decimal(p,s)). 5th imported-prior assumed-absence instance (after starts_with/ends_with, to_char, listagg, array_sum). FIX-A (reconcile-in-place r27): corrected \u00a74.4C table row + worked example (lead truncate(price,2)) + DO-NOT-WRITE entry 2 (now: 2-arg DOES exist, USE IT; only the Oracle NAME TRUNC is missing) + entry 1 parenthetical + keyword-trap + cross-ref + \u00a74.4B consolidated row L1256. Re-probe TRUNC(n,2) next sweep to confirm responder uses truncate(x,2). All topics PASSED. Federation/CBO untouched."
 }

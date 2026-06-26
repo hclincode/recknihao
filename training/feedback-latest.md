@@ -1,6 +1,6 @@
-# Iter1137 Judge Feedback
+# Iter1138 Judge Feedback
 
-**Verdict: 5.0000 STRONG PASS NO-OP. iter1136 LIGHT FIX-A (r07 §3939 Customer-facing percentile-message LEAD card) REACHED on first re-probe; percentile-direction WATCH CLOSED.**
+**Verdict: 4.6875 STRONG PASS LIGHT FIX-A. Q1 surfaced a RESOURCE-SOURCED factual defect in r27 §4.4C — Trino 467 DOES have `truncate(x, n)` 2-arg form (verified at trino.io/docs/current/functions/math.html); resource explicitly asserts it does NOT exist and even fabricates a precise wrong-arity error message. Workaround `truncate(x*100)/100` still produces correct value so user-facing impact is bounded, but the function-inventory claim and fabricated error text are flat false. Q2/Q3/Q4 clean 5.0 breadth angles. Joins memory `Trino starts_with / ends_with` + `Trino to_char Exists` + `Trino listagg Native` + `Trino No array_sum` imported-prior recurring class — this time the wrong direction (assumed absence; the form IS there). NO new watch streams.**
 
 ---
 
@@ -8,165 +8,198 @@
 
 | Q | Topic | Acc | Clar | App | Compl | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | Year-in-Review "more active than X% of users" badge — `cume_dist() OVER (ORDER BY metric ASC)`, top user → ~100 | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q2 | Churn-risk single-pass `MAX(CASE)`/`HAVING` window-bucket vs LEFT-JOIN anti-join | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q3 | "Every user completed onboarding" → `bool_and(completed)` + NULL caveat + `COALESCE(...,FALSE)` guard | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| Q4 | Perf regression triage 3-4s → 60s, SQL unchanged — r18 ordered triage | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
-| **Iter avg** | | | | | | **5.0000 STRONG PASS** |
+| Q1 | Oracle TRUNC dual-use → Trino (no overloaded TRUNC; `truncate()` numeric + `date_trunc('day',ts)` date — but responder repeats r27's wrong "1-arg only" claim, missing direct `truncate(x, 2)` form) | 3.0 | 4.0 | 4.0 | 4.0 | **3.7500** |
+| Q2 | Running per-customer MIN — `MIN(monthly_spend) OVER (PARTITION BY customer_id ORDER BY month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`, same framing as running SUM | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q3 | Extract '3.12.0' from 'client/v3.12.0/release' — `regexp_extract(str, 'v([0-9.]+)', 1)`, 3-arg form, group 0=whole / 1=first capture | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| Q4 | Iceberg hidden partitioning by month/day — `WITH (partitioning = ARRAY['day(occurred_at)'])`, filter on raw timestamp auto-prunes, dbt key is `partitioning` (not `partitioned_by`) for Iceberg | 5.0 | 5.0 | 5.0 | 5.0 | **5.0000** |
+| **Iter avg** | | | | | | **4.6875 STRONG PASS** |
 
-Margin = +1.5000 above 3.5 pass threshold. Highest single-iter average in the 20-iter sustainment band (matches iter1093 4.97 / iter1133 4.9844 clean-breadth profile, slightly above).
+Margin = +1.1875 above 3.5 pass threshold. Q1 drag (3.75) traceable to a SINGLE resource-sourced factual claim that the responder faithfully echoed.
 
 ---
 
 ## Per-question detail
 
-### Q1 — Year-in-Review percentile badge (FIX-A re-probe) — **5.0**
+### Q1 — Oracle TRUNC dual-use → Trino — **3.7500** — RESOURCE-SOURCED FACTUAL DEFECT
 
-Customer-facing message "You were more active than X% of all users this year"; most-active user near 100, barely-active near 0; metric = total actions in 2025.
+Question: "Oracle's `TRUNC(decimal, 2)` truncates decimals; `TRUNC(timestamp)` strips time. Does Trino have one overloaded TRUNC, or separate functions?"
 
-Responder produced:
+Responder answer (correct parts):
+- No overloaded `TRUNC` in Trino — CORRECT.
+- Numeric truncation → `truncate()` — CORRECT (function name).
+- Date truncation → `date_trunc('day', ts)` — CORRECT.
+- These are **separate functions** (not one overload) — CORRECT.
+- `truncate(timestamp)` errors — CORRECT (math fn doesn't accept temporal types).
+
+Responder answer (DEFECT):
+> "truncate() which it claims is '1-arg only', so for 2 decimals use `truncate(price*100)/100` (general: `truncate(price*power(10,2))/power(10,2)`)"
+
+**Trino 467 HAS BOTH `truncate(x)` 1-arg AND `truncate(x, n)` 2-arg forms.** Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html):
+- `truncate(x) → [same as input]` — "Returns `x` rounded to integer by dropping digits after decimal point."
+- `truncate(x, d) → [same as input]` — "Returns `x` truncated to `d` decimal places. `d` can be negative, in which case `d` digits to the left of the decimal point are zeroed out."
+
+Trino-481 search hit also confirms decimal signature: `function truncate(decimal(p, s), bigint) returns decimal(p, s)`. Examples per the docs: `truncate(REAL '12.333', -1)` → `10.0`; `truncate(REAL '12.333', 1)` → `12.3`.
+
+So the simpler direct form `truncate(price, 2)` produces the same `47.89` result the workaround produces — and the responder's `truncate(price*100)/100` workaround is **functionally correct but unnecessarily verbose**, and the underlying claim that "the 2-arg form does NOT exist" is FACTUALLY WRONG.
+
+**Severity classification: minor accuracy defect.** The workaround the responder offered produces the correct value, so user-facing breakage is bounded — engineer ships working code, just verbose. BUT:
+1. Function-inventory misrepresentation pollutes the engineer's mental model.
+2. The resource even fabricates a precise wrong-arity error text the engine would purportedly throw (see below) — that's a forward-credibility hit if the engineer ever tests it.
+
+**Source root cause: resource defect, not responder slip.** Greppable to `resources/27-oracle-plsql-to-dbt-trino.md`:
+- **Line 1628** (canonical table row): *"Trino's `truncate` is **1-arg only**; the 2-arg `truncate(n, d)` form **does NOT exist** in Trino 467."* — FLAT FALSE.
+- **Line 1657** (DO-NOT-WRITE entry 2): *"`truncate(n, d)` — the 2-arg numeric truncation form — does NOT exist on Trino. Trino's `truncate` is **1-arg ONLY** … Writing `truncate(12.3456, 2)` produces a wrong-arity / function-resolution error of the form `Unexpected parameters (decimal(6,4), integer) for function truncate. Expected: truncate(<numeric type>)`"* — FABRICATED ERROR MESSAGE; the engine would NOT throw this because the 2-arg overload exists.
+- **Line 1665** (Keyword-trap phrase): *"Anyone who writes `TRUNC(x, 2)` for Trino is using Oracle syntax — Trino has lowercase `truncate(x)` 1-arg only"* — WRONG; the lowercase 2-arg form IS available.
+- **Line 1624** explicitly cites a verification date of 2026-06-05 against `trino.io/docs/current/functions/math.html`, which makes the wrong claim look authoritative.
+
+**Classification: imported-prior recurring class — assumed-absence direction.** This joins the documented memory pins:
+- "Trino starts_with / ends_with" (assumed `starts_with` was a fabrication; it isn't),
+- "Trino to_char Exists" (wrongly called `to_char` a fabrication),
+- "Trino listagg Native" (wrongly lumped `listagg` absent),
+- "Trino No array_sum" (other direction: my pin asserted presence; the form was absent).
+
+The class is "assume foreign-looking forms aren't in Trino without verifying" — this is the 5th instance in the catalogued series. Resource was likely written from an unverified directive prior; trino.io math docs refute it directly.
+
+**LIGHT FIX-A SPEC (single resource, ~10-15 line reconciliation):**
+- `resources/27-oracle-plsql-to-dbt-trino.md` §4.4C — reconcile in-place (do NOT just append per memory pin "Reconcile Don't Append"):
+  - Line 1628 row 1 — change Trino canonical column to: *"`truncate(n, d)` — lowercase, 2-arg (Trino 467 HAS this overload, `truncate(decimal(p,s), bigint) → decimal(p,s)`). Equivalent verbose form: `truncate(n * power(10, d)) / power(10, d)`."* Drop the "1-arg only / does NOT exist" claim.
+  - Line 1639-1642 canonical worked example — LEAD with `truncate(price * 1.0875, 2) AS price_with_tax` (direct 2-arg); keep `truncate(price * 1.0875 * 100) / 100` as an "equivalent verbose form" cross-reference, not the canonical.
+  - Line 1657 DO-NOT-WRITE entry 2 — DELETE this entry entirely (the form is valid; defang is the inverse of truth). Replace with: *"Watch the result type: `truncate(decimal(p,s), n)` returns `decimal(p,s)` not a double; chained string formatting should still wrap in `CAST(... AS DECIMAL(18,2))` or `format()` if a fixed scale is required for display."*
+  - Line 1665 Keyword-trap phrase — rewrite: *"Anyone who writes `TRUNC(x, 2)` for Trino is using Oracle syntax — Trino lowercase form is `truncate(x, 2)` (2-arg form IS supported in 467); if you only have the 1-arg form in mind, `truncate(x*100)/100` is equivalent."*
+- Keep the `TRUNC` (uppercase / non-existent name) defang and the `truncate(date)` defang in entries 1, 3, 4 — those are correct.
+- Add a `verification_date: 2026-06-26` comment with explicit re-verification against `trino.io/docs/current/functions/math.html` two-arg signature.
+- Cross-link from r07 §4528+ (the rounding/truncating canonical) to the corrected r27 §4.4C so the rounding-vs-truncation guidance stays aligned.
+
+After landing, re-probe within 2-3 iters with a different Oracle-TRUNC-to-Trino phrasing (e.g., "Oracle code uses `TRUNC(amount, 4)`; what's the Trino form?") to confirm the responder reaches the direct `truncate(x, n)` form instead of repeating the workaround verbatim.
+
+### Q2 — Running per-customer MIN with OVER framing — **5.0000**
+
+Question: "I have monthly_spend per (customer_id, month). I want to show 'lowest spend ever through this month' running per customer. Does MIN() work with the same OVER (… ROWS UNBOUNDED PRECEDING …) syntax as a running SUM?"
+
+Responder:
 ```sql
-WITH user_activity_2025 AS (
-  SELECT user_id, COUNT(*) AS action_count
-  FROM user_events
-  WHERE event_date in 2025
-  GROUP BY user_id
-)
-SELECT user_id, action_count,
-       ROUND(100.0 * cume_dist() OVER (ORDER BY action_count ASC), 1) AS percentile_of_users
-FROM user_activity_2025
-ORDER BY action_count DESC;
+SELECT customer_id, month, monthly_spend,
+       MIN(monthly_spend) OVER (
+         PARTITION BY customer_id
+         ORDER BY month
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS lowest_spend_through_month
+FROM spend_by_month;
 ```
-With explicit framing: "**`ORDER BY metric ASC` (not DESC) — highest value is the last row, gets a score near 100**".
++ explicit "yes, same positional framing as a running SUM; MIN is an aggregate that also works as a window function — you just add OVER and a frame."
 
-**Verification.** `cume_dist()` formula (verified [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html)): "the number of rows preceding or peer with the row … divided by the total number of rows" = fraction at-or-below. Under `ORDER BY action_count ASC` the top user is the LAST row, gets `cume_dist = 1.0`, multiplied by 100 → 100.0 — matches the requirement exactly. Under `ORDER BY action_count DESC` the top user would be the FIRST row, gets `cume_dist = 1/N` ≈ 0, OPPOSITE of requirement. Responder's ASC + correct rationale is the canonical answer.
+Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): "All Aggregate functions can be used as window functions by adding the `OVER` clause. The aggregate function is computed for each row over the rows within the current row's window frame." Documentation provides explicit rolling-sum example using the same `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` framing. MIN/MAX/AVG/SUM all behave identically as aggregates-as-window-functions under explicit ROWS framing.
 
-**iter1136 LIGHT FIX-A REACH VERDICT: CONFIRMED REACHED.** The new r07 §3939 LEADING CANONICAL — "Customer-facing 'YOU BEAT X% OF YOUR PEERS' leaderboard/badge message (top performer ⇒ number near 100). USE ASCENDING ORDER (or `cume_dist`)" with keyword anchors *you beat X% of peers / your team ran more reports/sessions/queries than X% of teams / top of the leaderboard near 100% / percentile badge / "you spent more than 73% of customers" / "more active than X% of users"* — pulled the responder to the exact ASC + cume_dist shape on this third customer-facing percentile-message phrasing ("Year-in-Review more active than X% of users"). The inline copy block `ROUND(100.0 * cume_dist() OVER (ORDER BY report_count), 1)` is what the responder reproduced (with the analytics metric swapped in).
+Clean canonical answer, correct framing choice (ROWS not RANGE — RANGE on date/timestamp could behave differently with peers, ROWS is the cumulative-by-position framing), correct equivalence statement.
 
-**percentile-direction WATCH (opened iter1135 Q2, escalated iter1136 Q1): CLOSED.** Two-iter slip streak → LIGHT FIX-A landed → iter1137 Q1 reaches cleanly on the FIRST re-probe with novel phrasing. Discipline working as designed.
+### Q3 — `regexp_extract` capture-group index — **5.0000**
 
-Minor (non-scoring observation): the responder wrote `WHERE event_date in 2025` (likely a transcription; the proper Trino 467 forms would be `WHERE event_date >= DATE '2025-01-01' AND event_date < DATE '2026-01-01'` or `WHERE year(event_date) = 2025`). Not a defect for THIS question (which was about percentile direction, not date filtering), and does not affect the percentile math; flagged only so the date-range canonical is on the next-iter probe radar if it persists.
+Question: "Extract '3.12.0' from 'client/v3.12.0/release'. Does Trino's `regexp_extract` support a capturing-group index?"
 
-### Q2 — Churn risk: single-pass vs subquery-join — **5.0**
-
-Engineer asked: accounts active in the 30-90d-ago window but ZERO in the last 30d; two subqueries+join or single-pass?
-
-Responder gave BOTH forms:
-- **Single-pass conditional aggregation** — bucket events into `recent_30d` and `window_30_90d` via CASE on `event_date`, `GROUP BY account_id`, `HAVING MAX(window_30_90d)=1 AND MAX(recent_30d)=0`.
-- **Two-subquery LEFT JOIN anti-join** — `(SELECT DISTINCT account_id FROM events WHERE event_date BETWEEN now()-90d AND now()-30d)` LEFT JOIN `(SELECT DISTINCT account_id FROM events WHERE event_date >= now()-30d)`, `WHERE recent.account_id IS NULL`.
-
-Both forms verified valid Trino 467. Single-pass scans the events table ONCE and is generally cheaper at scale; the anti-join form is more readable and is the natural shape when the two cohorts come from DIFFERENT tables. Responder correctly framed the choice rather than picking one dogmatically.
-
-The single-pass `MAX(CASE WHEN cond THEN 1 ELSE 0 END)` is a canonical Trino conditional-aggregation form (equivalent to `bool_or` semantically; the `MAX`-over-0/1 form is familiar from the Postgres/MySQL playbook and matches what the engineer's mental model expects). `HAVING MAX(recent_30d) = 0` correctly enforces "no row in last 30d"; `HAVING MAX(window_30_90d) = 1` correctly enforces "at least one row in 30-90d window".
-
-The LEFT JOIN anti-join with `WHERE recent IS NULL` is the standard set-difference shape. Both `DISTINCT` subqueries are needed because the cohorts are per-account, not per-event.
-
-### Q3 — `bool_and` for "every row in group satisfies a boolean" — **5.0**
-
-Engineer's current form: `COUNT(CASE WHEN completed THEN 1 END) = COUNT(*)`. Asked for a built-in aggregate.
-
-Responder produced:
+Responder:
 ```sql
-SELECT account_id, bool_and(completed = TRUE) AS all_users_completed
-FROM onboarding
-GROUP BY account_id;
+SELECT regexp_extract('client/v3.12.0/release', 'v([0-9.]+)', 1);  -- '3.12.0'
 ```
-With NULL caveat: "bool_and ignores NULLs; all-NULL group returns NULL (NOT FALSE); to make NULL count as not-completed use `bool_and(COALESCE(completed, FALSE))`".
++ 2-arg form returns whole match; 3-arg form takes group index (0=whole match, 1=first capture); second example with `'action=(\S+)'` group 1.
 
-**Verification.** [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html): `bool_and(boolean) → boolean` — "Returns TRUE if every input value is TRUE, otherwise FALSE." `bool_and` is NOT in the documented count()/count_if()/max_by()/min_by()/approx_distinct() NULL-counting exception list, so it ignores NULLs per the page-level rule. All-NULL or empty group → NULL. The `COALESCE(...,FALSE)` guard correctly forces NULL rows to count as not-TRUE → if any row is non-completed (or NULL → coerced FALSE) the group result is FALSE. Matches r07 §1332-1372 + r23 §3.1 `bool_or`/`bool_and` canonical exactly.
+Verified at [trino.io/docs/current/functions/regexp.html](https://trino.io/docs/current/functions/regexp.html):
+- 2-arg: `regexp_extract(string, pattern) → varchar` — first substring matched by pattern.
+- 3-arg: `regexp_extract(string, pattern, group) → varchar` — capturing group number `group`.
 
-**Positive durability signal.** In iter1123 Q3 the responder gave the count_if=COUNT(*) form instead of `bool_and`, indicating a findability gap on the "every-row-in-group satisfies X" canonical at that time. iter1137 Q3 reaches `bool_and` directly with the right NULL guard — the existing r07 §1332+ canonical is sticky on this phrasing and the iter1123 miss has not recurred. The "every-row satisfies X → `bool_and`" mapping is now durable across at least 14 iters.
+Pattern `v([0-9.]+)` against `'client/v3.12.0/release'` matches `v3.12.0` at position 7 (the literal `v` anchors, then `[0-9.]+` greedy-captures `3.12.0` until non-matching `/`). Group 1 = `'3.12.0'`. Correct.
 
-### Q4 — Perf regression triage (3-4s → 60s timeout, SQL unchanged) — **5.0**
+Single-backslash `'\S'` in Trino SQL string literal works per memory pin `Trino Regex Backslash` (RAW git-tag 467 regexp.md verifies single backslash in actual SQL; double backslash is a Sphinx rendering artifact on trino.io HTML). Responder used single backslash — correct.
 
-Responder produced the ordered triage from r18:
-1. **Cluster saturation / concurrency** — check Trino UI queued count + concurrent query load (Check 1 in r18).
-2. **Partition pruning broke** — `EXPLAIN (TYPE DISTRIBUTED)`; look for a `Filter` node ABOVE `TableScan` instead of a constraint INSIDE the TableScan; the predicate is usually a partition column wrapped in **`LOWER()` / non-invertible `CAST` / UDF the optimizer can't invert**; fix by comparing the bare column (Check 3 in r18).
-3. **Small-files accumulation** — `Scheduled time >> CPU time`; fix with `ALTER TABLE … EXECUTE optimize` (Step 7 in r18).
-4. **Join / GROUP BY skew** — `EXPLAIN ANALYZE` per-fragment timing; one driver doing all the work (Step 5 in r18).
-5. **Stale stats** — run `ANALYZE` (no `TABLE` keyword) per r24.
+Clean canonical answer, both forms covered, correct group-index semantics.
 
-**Critical verification — r18 partition-pruning iter1098 FIX-A NOT regressed.** Responder attributed the pruning break to **opaque non-invertible wraps: `LOWER()` / `CAST` / `UDF`** — explicitly framed as "the optimizer can't invert". This matches the iter1098 r18 FIX-A framing. The responder did NOT say "any function on a partition column breaks pruning" and did NOT name `date()`, `CAST AS DATE`, `date_trunc('day', …)`, `year()`, or `EXTRACT(YEAR, …)` as pruning-killers — all of which Trino 467 auto-unwraps via the default-on `UnwrapCastInComparison` / `UnwrapDateTruncInComparison` / `UnwrapYearInComparison` rules (verified `UnwrapCastInComparison.java`@467; carried memory pin "Trino Unwraps Temporal Predicates"). The iter870 imported-sargability prior ("function-on-column = full scan") did NOT resurface.
+### Q4 — Iceberg hidden partitioning by month-of-timestamp — **5.0000**
 
-The mention of `CAST` is correctly qualified with "the optimizer can't invert" — not a blanket claim. A non-invertible CAST (e.g., `CAST(tenant_id AS INTEGER)` on a VARCHAR partition column when not all rows are numeric) genuinely is opaque; an invertible CAST (`CAST(occurred_at AS DATE)`) gets unwrapped. The framing reads correctly.
+Question: "Can Iceberg partition by month-of-timestamp WITHOUT a separate date column? How do I define it in Trino + dbt? Does Trino auto-prune when I filter on the raw timestamp column?"
 
-`EXECUTE optimize` is the correct Trino 467 spell (NOT the Spark `CALL iceberg.system.rewrite_data_files` form — verified r18 DO-NOT-WRITE block). `ANALYZE` is the bare form, NOT `ANALYZE TABLE`.
+Responder:
+- "Yes, Iceberg HIDDEN PARTITIONING via transforms."
+- DDL: `CREATE TABLE … WITH (partitioning = ARRAY['day(occurred_at)'])` (Trino syntax `day(col)` not `days(col)`).
+- Filter on raw timestamp: `WHERE occurred_at >= TIMESTAMP '…' AND occurred_at < TIMESTAMP '…'` — Iceberg applies the transform to the predicate bounds to prune.
+- Transform names: `day` / `month` / `year` / `hour` / `bucket(col, N)`.
+- dbt config key: `partitioning` (not `partitioned_by`) for Iceberg.
+
+Verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html): partition transforms supported include `year(ts)`, `month(ts)`, `day(ts)`, `hour(ts)`, `bucket(x, nbuckets)`, `truncate(s, nchars)`, and identity. Native Trino spelling is **singular** `day` / `month` / `year` / `hour` (Spark/Iceberg Spark uses plural `days` / `months` / `years` / `hours` — common cross-engine confusion; responder correctly distinguishes).
+
+Auto-prune on raw-timestamp filter verified at [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html) ("Just the right time date predicates with Iceberg") and Starburst's "Iceberg Partitioning and Performance Optimizations in Trino" — Trino applies constant-replacement optimization that pushes filters down to Iceberg, which uses the transform definition to translate raw-column bounds into partition-value bounds and prune at the metadata layer. Caveat (correctly implicit in the responder's bare-range form): a predicate that doesn't align with the partition granularity (e.g., a sub-day window inside a `day()`-partitioned table) still benefits from file-level min/max stats but not full partition elimination.
+
+dbt-trino Iceberg `partitioning` key: Trino's native CREATE TABLE WITH property for the Iceberg connector is **`partitioning = ARRAY[...]`** (verified at iceberg.html — examples consistently use `partitioning = ARRAY['city', 'bucket(userid, 16)']` / `partitioning = ARRAY['month(order_date)']`). dbt-trino's `properties={...}` dict passes the property name through to Trino's WITH clause unchanged, so for Iceberg the correct key inside `properties` is `partitioning` (not `partitioned_by`, which is the Hive-connector property). dbt docs examples occasionally show `partitioned_by` because they target both Hive and Iceberg; responder's "for Iceberg specifically, use `partitioning`" framing is accurate for the prod_info.md stack (Trino 467 + Iceberg connector + Hive Metastore catalog).
+
+Clean canonical answer.
+
+---
+
+## Topics updated
+
+- **Oracle PL/SQL → dbt + Trino SQL migration**: 4.4561/115 → (512.4515 + 3.75)/116 = **4.4500/116 PASSED** (−0.0061, Q1 drag from r27 §4.4C `truncate(x, n)` non-existence misclaim). Margin +0.9500 — still safely above 3.5 even after the drag.
+- **Analytical query patterns on Iceberg+Trino**: 4.4571/89 → (396.6819 + 5.0)/90 = **4.4631/90 PASSED** (+0.0060, Q2 lift).
+- **SQL query best practices for OLAP**: 4.5607/200 → (912.14 + 5.0)/201 = **4.5629/201 PASSED** (+0.0022, Q3 lift on `regexp_extract` 3-arg canonical).
+- **Iceberg partition design for SaaS**: 4.4499/46 → (204.6954 + 5.0)/47 = **4.4616/47 PASSED** (+0.0117, Q4 lift on hidden-partitioning + `day()` singular + `partitioning` key).
+
+ALL required topics REMAIN PASSED. No topic drops below threshold.
 
 ---
 
 ## Source-verified defects this iter
 
-**ZERO.** No fabrications, no parse errors, no dialect imports, no folklore reintroductions. The Q4 pruning attribution correctly distinguishes opaque (LOWER / non-invertible CAST / UDF) from auto-unwrapped (temporal date() / CAST AS DATE / date_trunc / year() / EXTRACT).
+**1 resource-sourced (Q1):** `resources/27-oracle-plsql-to-dbt-trino.md` §4.4C (lines 1628, 1657, 1665) asserts `truncate(x, n)` 2-arg form does NOT exist in Trino 467 and fabricates a precise wrong-arity error message. RAW Trino 467 docs at trino.io/docs/current/functions/math.html confirm BOTH 1-arg and 2-arg `truncate` overloads exist. LIGHT FIX-A required (see spec in Q1 detail).
 
-No recurrence of any tracked watch stream (`::` / QUALIFY / false-semi-join / fabricated-fn / regex-backslash / INTERVAL-quarter-week / OFFSET-before-LIMIT / CAST-truncate / EXECUTE-rollback-on-467 / Spark-Oracle-spillover / imported-prior / GREATEST-NULL-Postgres / array_sum / `->`/`->>`-JSON / DATEDIFF-dialect-import / multi-arg-COUNT-DISTINCT / ts-minus-ts / over-warning / multi-clause-ADD-COLUMN / contains_sequence-array_position-arithmetic / partition-column-COUNT-data-file-folklore / population-vs-per-group-percentile / dedup-tied-tuple / SELECT-*-EXCEPT / `CAST(md5 AS VARCHAR)`-mis-hex / `{% if execute %}` / `$snapshots`-CROSS-JOIN-LATERAL / **percent_rank-DESC-direction**).
+**0 responder one-off defects.**
 
----
-
-## Watch verdicts
-
-- **percent_rank-DESC-direction WATCH (opened iter1135 Q2, escalated iter1136 Q1 → LIGHT FIX-A r07 §3939): CLOSED on first re-probe.** Responder produced `cume_dist() OVER (ORDER BY action_count ASC)` with explicit ASC-not-DESC rationale on a third novel customer-facing percentile-message phrasing ("Year-in-Review more active than X% of users"). The keyword-magnetic LEAD card pulls correctly; the inline DO-NOT-WRITE defang of `ORDER BY metric DESC` was not exhibited.
-- **iter1098 r18 temporal-unwrap stability (auto-unwrap of date() / CAST AS DATE / date_trunc / year() / EXTRACT): HOLDING.** Responder's Q4 pruning attribution correctly limits the "wrap breaks pruning" claim to opaque non-invertible wraps (LOWER / CAST / UDF) and did not name the temporal forms.
-- **`bool_and` "every row satisfies X" canonical durability (iter1123 Q3 was a miss): HOLDING.** Q3 reached `bool_and(boolean)` + NULL caveat + COALESCE guard on the first new direct re-probe of this canonical in 14 iters.
-
-No new watch streams opened.
+No new defect classes; this is the 5th instance of the documented imported-prior recurring class (assumed-absence direction: assume foreign-looking forms aren't in Trino without verifying). Joins memory pins `Trino starts_with / ends_with`, `Trino to_char Exists`, `Trino listagg Native`, `Trino No array_sum`. Pattern: verify both presence and absence of any function-existence claim against trino.io math/datetime/array/regexp pages directly before asserting.
 
 ---
 
-## Topic-row updates
+## Watch streams
 
-- **Analytical query patterns on Iceberg+Trino** (Q1 percentile-message): 4.4509/88 → (4.4509 × 88 + 5.0)/89 = (391.6792 + 5.0)/89 = **4.4571/89 PASSED** (+0.0062, margin +0.9571).
-- **SQL best practices for OLAP** (Q2 single-pass conditional aggregation + Q3 `bool_and` canonical): 4.5563/198 → (4.5563 × 198 + 5.0 + 5.0)/200 = (902.1474 + 10.0)/200 = **4.5607/200 PASSED** (+0.0044, margin +1.0607).
-- **Query performance regression diagnosis** (Q4 r18 triage): 4.3108/20 → (4.3108 × 20 + 5.0)/21 = (86.216 + 5.0)/21 = **4.3436/21 PASSED** (+0.0328, margin +0.8436).
-
-All required topics REMAIN PASSED.
+**No new watch streams opened.** Existing watch streams (all CLOSED as of iter1137): ADD-COLUMN, partition-COUNT-folklore, population-percentile, dedup-tied-tuple, SELECT-*-EXCEPT, `{% if execute %}`, percent_rank-DESC-direction — all remain CLOSED. iter1134 $snapshots-CROSS-JOIN-LATERAL watch: no dbt-table-rebuild Q this iter, watch continues quietly.
 
 ---
 
-## Thinnest-margin order after iter1137
+## Thinnest-margin order after iter1138
 
-| Rank | Topic | Avg/N | Margin above 3.5 |
-|---|---|---|---|
-| 1 | Storage tiering on Trino+Iceberg+MinIO | 4.0739/11 | +0.5739 (thinnest, untouched) |
-| 2 | dbt snapshots SCD2 | 4.1526/16 | +0.6526 (untouched) |
-| 3 | Query performance basics | 4.1771/23 | +0.6771 (untouched) |
-| 4 | Cost considerations | 4.3074/23 | +0.8074 (untouched) |
-| 5 | Query-perf-regression diagnosis | 4.3436/21 | +0.8436 (Q4 lift) |
-| 6 | Oracle PL/SQL → dbt+Trino migration | 4.4561/115 | +0.9561 (untouched) |
-| 7 | Analytical query patterns on Iceberg+Trino | 4.4571/89 | +0.9571 (Q1 lift) |
-| 8 | Iceberg table maintenance | 4.4800/179 | +0.9800 (untouched) |
-| 9 | Trino federation / cross-source connectors | 4.5024/312 | +1.0024 (untouched, fragile-PASS preserved) |
-| 10 | SQL best practices for OLAP | 4.5607/200 | +1.0607 (Q2+Q3 lift) |
-| 11 | Trino CBO / ANALYZE / Puffin / NDV / join ordering | 4.6105/22 | +1.1105 (untouched) |
-| 12 | Improving complex SQL perf on Trino with dbt | 4.6111/25 | +1.1111 (untouched) |
+1. storage-tiering 4.0739/11 (+0.5739, thinnest required-topic, untouched)
+2. dbt-snapshots SCD2 4.1526/16 (+0.6526, untouched)
+3. query-perf-basics 4.1771/23 (+0.6771, untouched)
+4. cost-considerations 4.3074/23 (+0.8074, untouched)
+5. query-perf-regression-diagnosis 4.3436/21 (+0.8436, untouched)
+6. Oracle-migration 4.4500/116 (+0.9500, Q1 drag from r27 §4.4C truncate-2-arg defect)
+7. Iceberg-partition-design 4.4616/47 (+0.9616, Q4 lift)
+8. Analytical-query-patterns 4.4631/90 (+0.9631, Q2 lift)
+9. Iceberg-maintenance 4.4800/179 (untouched)
+10. federation 4.5024/312 (untouched, fragile-PASS preserved)
+11. SQL-best-practices-OLAP 4.5629/201 (+1.0629, Q3 lift)
+12. CBO/ANALYZE 4.6105/22 (untouched)
+13. improving-complex-SQL-perf-dbt 4.6111/25 (untouched)
 
 ---
 
-## RECOMMENDATION = **NO-OP** (commit rubric + feedback only)
+## RECOMMENDATION = LIGHT FIX-A (single surgical reconciliation)
 
-No resource edits. The iter1136 LIGHT FIX-A landed and reached cleanly on the first re-probe with novel "Year-in-Review more active than X%" phrasing — the keyword anchors are doing their job. Three other answers are clean canonical reaches with positive durability signals (Q3 `bool_and` recovering the iter1123 miss; Q4 r18 triage not regressing the iter1098 temporal-unwrap fix).
+**FIX-A spec (~10-15 lines, in-place reconcile, no append):**
+- `resources/27-oracle-plsql-to-dbt-trino.md` §4.4C lines 1628 / 1657 / 1665 — correct the false "Trino `truncate` is 1-arg only / 2-arg form does NOT exist" claim and the fabricated wrong-arity error text. Replace with the verified two-overload signature `truncate(x) → [same as input]` AND `truncate(x, d) → [same as input]`. Keep workaround as "equivalent verbose form" cross-reference, not the canonical. Keep the (correct) `TRUNC` name defang and `truncate(date)` defang in entries 1, 3, 4.
+- Cross-link from r07 §4528+ rounding/truncating canonical to corrected r27 §4.4C.
+- Add `verification_date: 2026-06-26` comment with explicit re-verification against trino.io math docs two-arg signature.
 
-### Re-probe queue (next iters)
-
-1. **Storage-tiering 12th angle** (thinnest required-topic, untouched in 4 iters; pure tiering-keyword phrasing without MV hint to confirm the iter1134 cross-ref reach is sticky).
-2. **dbt-snapshots SCD2 17th angle** (2nd thinnest required-topic, untouched).
-3. **2nd-instance generative sustainment re-probe for percent_rank-DESC-direction** — slightly different phrasing ("leaderboard widget — show 'you're in the top X% of users by points'") to confirm the iter1136 FIX-A holds across more wording variants.
-4. **`bool_and` 3rd-angle re-probe** (per-account compliance check: "every order in the account has a non-null shipping_address") to confirm the iter1123 → iter1137 durability is stable.
-5. **Q2 single-pass vs join framing re-probe** — different scenario shape (e.g., "tenants who logged in to feature A but never feature B") to confirm the both-forms framing is the canonical answer not just for churn-window cases.
+**Re-probe queue** (priority order):
+1. Oracle-`TRUNC(x, n)`-to-Trino direct re-probe with a different phrasing after FIX-A lands ("Oracle code has `TRUNC(amount, 4)`; what's the Trino form?") — confirm responder reaches `truncate(x, 4)` direct form not the `*power(10,4)/power(10,4)` workaround verbatim.
+2. Storage-tiering 12th angle (thinnest required-topic, untouched 5 iters; tiering-keyword-only without MV hint).
+3. dbt-snapshots SCD2 17th angle.
+4. Iceberg-partition-design follow-up: month()-partition vs day()-partition decision when query patterns are mixed (carry from Q4 hidden-partitioning canonical).
+5. Q2 running-MIN 2nd-instance generative re-probe ("highest balance ever seen per account through this snapshot") to sustain MIN-as-window-function canonical.
 
 ---
 
 ## Pattern observation
 
-**20-iter sustainment band shape:**
+21-iter sustainment band: STRONG PASS iters 1090/1092/1093/1117/1118/1119/1121/1122/1125/1127/1128/1131/1133/1134/1137 + LIGHT FIX-A iters 1091/1116/1124/1129/1132/1136/**1138** + NO-OP+WATCH iters 1120/1123/1126/1130/1135.
 
-| Type | Iters |
-|---|---|
-| STRONG PASS NO-OP | 1090, 1092, 1093, 1117, 1118, 1119, 1121, 1122, 1125, 1127, 1128, 1131, 1133, 1134, **1137** |
-| LIGHT FIX-A | 1091, 1116, 1124, 1129, 1132, 1136 |
-| NO-OP + WATCH | 1120, 1123, 1126, 1130, 1135 |
+iter1138 4.6875 STRONG PASS + LIGHT FIX-A is a clean breadth-sweep iter that surfaced a SINGLE resource-sourced factual defect on a NEW dimension (Trino function-inventory absence claim) without any responder one-off slip. Three of four answers at 5.0 with canonical reaches verified against trino.io/docs. The defect is INFORMATIVE — it catches a fabricated wrong-arity error message that would have been a forward-credibility hit for any engineer who tested it, and it's the 5th instance in the imported-prior "assumed-absence" recurring class, suggesting the teacher should add a verification-checklist step for any future "form X does NOT exist in Trino 467" claim.
 
-iter1137 5.0000 STRONG PASS NO-OP is the highest single-iter average in the 20-iter band (matching iter1093 4.97 / iter1133 4.9844 clean-breadth profile, marginally above). Shape is identical to iter1133's TRIPLE-watch-closure-in-one-iter profile but extends it: the iter1136 LIGHT FIX-A on r07 §3939 is the first watch-close on a customer-facing-percentile-direction defect, and it closes ALONGSIDE a positive durability signal for the iter1123 `bool_and` miss and a stability hold for the iter1098 r18 temporal-unwrap fix. Three independent watch/canonical signals confirm in one iter.
+The Q1 defect does NOT regress Oracle-migration below threshold (margin still +0.9500) and the topic-history math absorbs the drag cleanly. LIGHT FIX-A is the scoped correction; no architectural changes needed; no other resources touched.
 
-The Q1 watch-close validates the iter1135 first-instance NO-OP+WATCH discipline once again — seven consecutive watch streams have now followed the pattern (first instance = NO-OP+WATCH, second instance = escalate to LIGHT FIX-A, next instance after FIX-A = closed): ADD-COLUMN (iter1121), partition-COUNT-folklore (iter1125), population-percentile (iter1127), dedup-tied-tuple (iter1130), SELECT-*-EXCEPT (iter1131), `{% if execute %}` (iter1133), and now percent_rank-DESC-direction (iter1137). The discipline is producing consistent low-cost surgical edits without resource-content churn.
-
-No content-lineage erosion; no recurring defect class re-opened; no new watch streams opened; no new resource defects.
+No content-lineage erosion; no recurring defect class re-opened (this is a NEW dimension of an existing class — different from the absence-of-function-inventory previous instances which were on directives, not resources); no new watch streams opened.
