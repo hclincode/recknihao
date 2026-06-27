@@ -1,15 +1,15 @@
-# Iter1166 — Judge Feedback
+# Iter1167 — Judge Feedback
 
-## Verdict: STRONG PASS NO-OP — Average 4.859 / 5.0
+## Verdict: STRONG PASS NO-OP — Average 5.0 / 5.0
 
 | Q | Topic row | Score | Verdict |
 |---|---|---:|---|
-| Q1 named WINDOW clause | SQL query best practices for OLAP | 5.0000 | clean canonical |
-| Q2 bool_or any-row-in-group | Analytical query patterns on Iceberg+Trino | 4.7500 | clean, minor over-dismissiveness on valid alternatives |
-| Q3 Iceberg metadata-driven file pruning | Iceberg partition design for SaaS | 5.0000 | pin-perfect mental model |
-| Q4 dbt vars for date-range/segment reuse | Oracle PL/SQL → dbt+Trino migration | 4.6875 | mechanism correct, minor sentinel-example slip |
+| Q1 JSON safe-extract (json_extract_scalar + JSON_VALUE) | SQL query best practices for OLAP | 5.0000 | pin-perfect, both forms correct |
+| Q2 relational division via COUNT(DISTINCT date_trunc) | Analytical query patterns on Iceberg+Trino | 5.0000 | canonical, COUNT(*) defang sound |
+| Q3 Iceberg INTEGER -> BIGINT widening | Iceberg table maintenance | 5.0000 | exact ALTER syntax + spec-correct promotion matrix |
+| Q4 current_timestamp / now() / SYSDATE | Oracle PL/SQL -> dbt+Trino migration | 5.0000 | all aliasing/paren/pin-at-start facts verified |
 
-Iter average = (5.0 + 4.75 + 5.0 + 4.6875) / 4 = **4.859 STRONG PASS NO-OP**.
+Iter average = (5.0 + 5.0 + 5.0 + 5.0) / 4 = **5.0 STRONG PASS NO-OP**.
 
 No open watches triggered, no FIX-A spec issued, no resource churn recommended.
 
@@ -17,74 +17,95 @@ No open watches triggered, no FIX-A spec issued, no resource churn recommended.
 
 ## Per-question detail
 
-### Q1 — Trino named WINDOW clause (5.0)
+### Q1 — JSON safe-extract pattern (5.0)
 
-**Responder's answer:** `SELECT ..., SUM(amount) OVER w, AVG(amount) OVER w, MAX(amount) OVER w FROM t WINDOW w AS (PARTITION BY tenant_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` plus position and inheritance notes.
+**Responder's answer:** `json_extract_scalar(metadata, '$.referral_source')` returns NULL for missing keys AND malformed JSON (no error). For stricter control: `JSON_VALUE(metadata, '$.referral_source' RETURNING varchar NULL ON EMPTY NULL ON ERROR)`. Recommends json_extract_scalar for simplicity, JSON_VALUE for explicit edge-case control.
 
 **Verification:**
-- Trino SELECT supports named WINDOW clause — verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html). Doc example uses verbatim shape `WINDOW w AS (PARTITION BY clerk ORDER BY totalprice DESC)`.
-- Position: doc states sequence `SELECT → FROM → WHERE → GROUP BY → HAVING → WINDOW → set ops → ORDER BY → OFFSET → LIMIT`. Responder's "after HAVING, before ORDER BY" is correct for the single-SELECT case engineers care about (slight simplification by omitting the WINDOW → set ops → ORDER BY interleave, but practically right).
-- Window inheritance: doc states "The existing window name... is the basis of the current specification" — `WINDOW w2 AS (w ORDER BY ts)` form is valid.
+- `json_extract_scalar` documented at [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html) — returns NULL for paths that don't resolve to a value (standard well-known behavior, also confirmed in search results). Does NOT error on missing keys.
+- `JSON_VALUE` SQL/JSON syntax in 467 confirmed verbatim per same doc:
+  ```
+  JSON_VALUE(
+      json_input [ FORMAT JSON [ ENCODING { UTF8 | UTF16 | UTF32 } ] ],
+      json_path
+      [ PASSING json_argument [...] ]
+      [ RETURNING type ]
+      [ { ERROR | NULL | DEFAULT expression } ON EMPTY ]
+      [ { ERROR | NULL | DEFAULT expression } ON ERROR ]
+  )
+  ```
+  Responder's `RETURNING varchar NULL ON EMPTY NULL ON ERROR` matches the grammar exactly. Defaults are `NULL ON EMPTY` and `NULL ON ERROR` when omitted, but writing them explicitly (as the responder does) is legal and self-documenting.
+- Two-tier recommendation (simple vs explicit) is correct framing for the engineer's actual question: how to extract safely when keys are sometimes absent.
 
 **Score breakdown:** Accuracy 5 / Clarity 5 / Applicability 5 / Completeness 5.
 
-### Q2 — bool_or any-row-in-group (4.75)
+### Q2 — "Entity present in every quarter" via relational division (5.0)
 
-**Responder's answer:** `SELECT account_id, COALESCE(bool_or(event_type='error'), false) AS has_recent_error FROM events WHERE occurred_at >= current_date - INTERVAL '7' DAY GROUP BY account_id`.
+**Responder's answer:**
+```sql
+SELECT customer_id
+FROM orders
+WHERE order_date >= DATE '2025-01-01' AND order_date < DATE '2026-01-01'
+GROUP BY customer_id
+HAVING COUNT(DISTINCT date_trunc('quarter', order_date)) = 4
+```
+Plus correct defang: `HAVING COUNT(*) = 4` would count ROWS not QUARTERS (a customer with 4 orders all in Q1 would falsely pass).
 
 **Verification:**
-- bool_or correct per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html): "Returns TRUE if any input value is TRUE, otherwise FALSE." Aggregates ignore NULLs and return NULL only for empty/all-null groups.
-- COALESCE wrap defensive — with the WHERE 7-day filter, every grouped account already has ≥1 row, so bool_or never returns NULL here. Harmless either way.
-
-**Minor shave (-0.25 Compl):** Responder dismissed `count_if(pred) > 0` as "indirect" and `MAX(CASE WHEN .. THEN 1 ELSE 0) > 0` as "a number not boolean." Both ARE valid Trino-native alternatives — `count_if` is native (same doc page); `MAX(CASE)` is portable ANSI. bool_or IS the cleanest, but framing the others as inferior is mild over-dismissiveness. Engineer still arrives at correct code; framing shave only. NO RESOURCE FIX.
-
-**Score breakdown:** Accuracy 4.5 / Clarity 5 / Applicability 5 / Completeness 4.5.
-
-### Q3 — Iceberg metadata-driven file pruning (5.0)
-
-**Responder's answer:** HMS holds `metadata_location` pointer → Trino reads metadata.json + manifest-list.avro + manifest files with per-file min/max stats → uses stats to prune files → reads only unpruned files. Directory `/year=/month=/day=` layout is LOGICAL partition spec ergonomics + human readability, NOT a file-discovery mechanism. Trino never crawls directories.
-
-**Verification (Apache Iceberg spec):**
-- Manifest files are immutable Avro listing data files with each file's partition data tuple, metrics, tracking info — verified [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/).
-- Column-level value counts, null counts, lower/upper bounds used to eliminate files at planning time — verified [iceberg.apache.org/docs/latest/performance/](https://iceberg.apache.org/docs/latest/performance/).
-- Manifest list acts as index over manifests for range-based skipping — confirmed.
-- Data file paths tracked in manifests; planning uses predicates on partition data first to filter files — confirmed.
-- Hive-vs-Iceberg discovery contrast (Hive: directory listing; Iceberg: manifest-driven) is the right mental model and is accurate.
+- `date_trunc('quarter', timestamp)` confirmed valid Trino 467 unit per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — full unit list includes `year, quarter, month, week, day, hour, minute, second, millisecond`.
+- `COUNT(DISTINCT expr) = N` is the canonical relational-division pattern for "appears in all N buckets" (after pre-filtering rows to the universe of N buckets via the WHERE date range).
+- COUNT(*) defang reasoning is sound: `COUNT(*) = 4` is a row count not a bucket count; a customer with 4 orders all in Q1 would falsely pass; the responder's correction is essential and correctly explained.
+- Date-range half-open interval `>= '2025-01-01' AND < '2026-01-01'` is the right form to avoid timestamp boundary inclusion ambiguity.
 
 **Score breakdown:** Accuracy 5 / Clarity 5 / Applicability 5 / Completeness 5.
 
-### Q4 — dbt vars for date-range/segment reuse (4.6875)
+### Q3 — Iceberg INTEGER -> BIGINT widening (5.0)
 
-**Responder's answer:** `var('lookback_days', 30)` two-arg with default; `dbt_project.yml` top-level `vars:`; `dbt run --select revenue_summary --vars '{lookback_days: 7, segment: premium}'` CLI; precedence CLI > project > default; `{% set %}` is compile-time. DO/DO-NOT block correctly flags `--var` singular, top-level vars not under models, and {% set %} for overridable values.
+**Responder's answer:** YES native in Trino 467, metadata-only, no rewrite. Syntax `ALTER TABLE iceberg.analytics.customers ALTER COLUMN customer_id SET DATA TYPE BIGINT`. Old Parquet INT32 files keep physical type; reader promotes on read. Promotion matrix: INTEGER->BIGINT, REAL->DOUBLE, DECIMAL(p,s)->DECIMAL(p',s) where p'>p, same scale. Narrowing (BIGINT->INTEGER) rejected at commit; needs add-new-col + backfill CAST + drop + rename.
 
-**Verification ([docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables)):**
-- `var()` Jinja function with default — correct.
-- `vars:` at top-level of dbt_project.yml — correct, and docs explicitly contrast with nested-under-models (silently won't work).
-- `--vars` is plural — confirmed verbatim.
-- Precedence CLI --vars > dbt_project.yml vars > var() default — confirmed.
+**Verification:**
+- ALTER TABLE syntax — confirmed verbatim at [trino.io/docs/467/sql/alter-table.html](https://trino.io/docs/467/sql/alter-table.html):
+  > `ALTER TABLE [ IF EXISTS ] name ALTER COLUMN column_name SET DATA TYPE new_type`
+- Iceberg connector support for the type change — confirmed at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) under "Iceberg supports updating column types only for widening operations":
+  > `INTEGER` to `BIGINT`, `REAL` to `DOUBLE`, `DECIMAL(p,s)` to `DECIMAL(p2,s)` when `p2 > p`
+- Iceberg spec promotion matrix — confirmed at [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) (and [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/)): exactly the three allowed promotions the responder lists. Date->timestamp is v3+ (out of scope for a SaaS-typical v2 production table). Decimal scale is fixed; precision can only widen.
+- Metadata-only / no file rewrite — confirmed: when Iceberg reads an old data file in the original type (INT), it promotes the value to the newer type (LONG) at read time; no rewrite needed.
+- Narrowing rejected — confirmed: only widening is allowed, so BIGINT->INTEGER would be rejected at commit time.
+- The add/backfill/drop/rename workaround for narrowing is exactly the right shape for the rare case the engineer might need it (e.g., over-provisioned bigint they want to narrow).
 
-**Minor example imperfection (-0.5 Acc / -0.5 Compl):** The example `WHERE customer_segment = '{{ var('segment', 'all') }}'` with default 'all' renders to literal `WHERE customer_segment = 'all'` — a sentinel comparison that filters to zero rows on any real `customers` table (no customer is segmented as the string 'all'). To mean "no segment filter" the engineer needs Jinja-conditional wrap (`{% if var('segment') != 'all' %} AND customer_segment = '{{ var('segment') }}' {% endif %}`) or a COALESCE-equality skip pattern. The var() MECHANISM is the question and IS correctly answered; the sentinel-handling refinement is a recall ceiling, not a mechanism defect. Engineer is unblocked on the main ask.
+**Score breakdown:** Accuracy 5 / Clarity 5 / Applicability 5 / Completeness 5.
 
-**Score breakdown:** Accuracy 4.5 / Clarity 5 / Applicability 4.5 / Completeness 4.75.
+### Q4 — current_timestamp / now() / SYSDATE (5.0)
+
+**Responder's answer:** current_timestamp and now() are IDENTICAL/interchangeable aliases; both return TIMESTAMP(3) WITH TIME ZONE; both pinned to query START — every reference in one query yields the same value; a 5-min query does NOT tick forward row-by-row. SYSDATE -> current_timestamp (no parens) or now() (empty parens OK); current_timestamp() WITH parens is a parse error. Both respect session time zone (verify sql.forced-session-time-zone).
+
+**Verification (per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html)):**
+- `now()` is defined as: "This is an alias for `current_timestamp`." Confirmed verbatim.
+- Both return `timestamp(3) with time zone` (default precision; `current_timestamp(p)` precision override exists but is a footnote, not load-bearing for SYSDATE migration).
+- Both evaluated "as of the start of the query" and remain constant throughout query execution. The 5-min dbt model concern (does it tick forward?) is correctly answered: NO. Every reference returns the same instant.
+- `current_timestamp` listed among SQL-standard functions that "do not use parenthesis" (alongside `current_date`, `current_time`, `localtime`, `localtimestamp`). Writing `current_timestamp()` with empty parens is a parse error — responder's defang is correct.
+- `now()` is a true function and DOES require parens — correct.
+- Oracle SYSDATE -> Trino current_timestamp / now() is the right mapping. (One pedantic aside: SYSDATE in Oracle returns a `DATE` without TZ in server local time, whereas Trino current_timestamp returns `timestamp(3) with time zone`; the responder's mention of session time zone covers this implicitly. Not a defect — the practical drop-in replacement IS current_timestamp/now() for any "current moment" semantic, and most migration playbooks accept the TZ-aware return as the correct evolution.)
+
+**Score breakdown:** Accuracy 5 / Clarity 5 / Applicability 5 / Completeness 5.
 
 ---
 
 ## Source classification
 
-- Q1 / Q3 — pin-perfect canonical reaches; no resource gap.
-- Q2 / Q4 — minor framing/example slips; classified as recall ceiling, not resource-sourced. No FIX-A.
-- No open watches opened, no open watches closed (no recent open watches on this sweep's topic mix).
-- Falls in the "STRONG PASS NO-OP" band consistent with iter1163-1165 cadence.
+- All four — pin-perfect canonical reaches; no resource gap; no defect; no FIX-A.
+- No open watches opened, no open watches closed (no recent open watches active).
+- This iter is the cleanest sweep in the recent cadence (iter1163-1167): four 5.0s with zero shaves. Falls in the "STRONG PASS NO-OP" band consistent with the breadth-sweep phase.
 
 ## Rubric updates
 
-- "SQL query best practices for OLAP" 4.5824/235 → 4.5841/236 (+0.0017).
-- "Analytical query patterns on Iceberg+Trino" 4.5234/117 → 4.5253/118 (+0.0019).
-- "Iceberg partition design for SaaS" 4.4581/49 → 4.4689/50 (+0.0108).
-- "Oracle PL/SQL → dbt + Trino" 4.4619/134 → 4.4636/135 (+0.0017).
+- "SQL query best practices for OLAP" 4.5841/236 -> 4.5859/237 (+0.0018).
+- "Analytical query patterns on Iceberg+Trino" 4.5253/118 -> 4.5293/119 (+0.0040).
+- "Iceberg table maintenance" 4.4533/192 -> 4.4561/193 (+0.0028).
+- "Oracle PL/SQL -> dbt+Trino" 4.4636/135 -> 4.4675/136 (+0.0039).
 
 All four topics remain comfortably above pass threshold. No row near threshold or trending down.
 
 ## Recommendation
 
-NO-OP this iteration. Continue breadth-first probing of less-recently-touched topics in iter1167. No teacher action needed.
+NO-OP this iteration. Continue breadth-first probing of less-recently-touched topics in iter1168. No teacher action needed. Iter1167 confirms r13 (JSON funcs), r07/r10 (analytical patterns), r17 (Iceberg connector schema evolution), and r27 (Oracle migration date-time) are all production-grade canonical reaches.
