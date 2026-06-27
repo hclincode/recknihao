@@ -1254,6 +1254,27 @@ ANALYZE iceberg.analytics.tenants;
 
 **`ANALYZE TABLE <t>` is Spark/Hive syntax and fails in Trino with a parser error** — see [resource 24 §4 LEADING CANONICAL STATEMENT](24-trino-cbo-analyze.md). Run after a `dbt run` that significantly changes data (e.g., post full refresh, post big incremental). The Trino optimizer uses these stats to pick join distribution, join order, and dynamic-filter thresholds.
 
+### 6.5 `dbt run` is slow overall — `threads` (model PARALLELISM) + Trino concurrency + finding the slowest models
+
+> **Keyword anchors:** dbt run takes hours, speed up dbt run, dbt threads, increase dbt parallelism, how many parallel models, will 20 concurrent models overload Trino, dbt threads vs Trino capacity, safe thread count, find slowest dbt models, which model is slow, dbt timing, run_results.json execution_time.
+
+**`threads` controls how many models dbt builds IN PARALLEL** (set in `profiles.yml`, default **4**). dbt walks the DAG and runs up to `threads` models concurrently as long as their `ref()`/`source` dependencies are satisfied — each model is a separate Trino query. So `threads: 8` means up to 8 Trino queries in flight at once. `threads` is NOT Trino's concurrency limit — it's dbt's client-side fan-out.
+
+**Why more threads ≠ always faster (the Trino-side ceiling).** The two limits compound:
+- **dbt `threads`** = how many model queries dbt *submits* concurrently.
+- **Trino resource groups** (`hardConcurrencyLimit` per group — see [resource 05 § resource groups](05-multi-tenant-analytics.md) / [trino.io/docs/current/admin/resource-groups.html](https://trino.io/docs/current/admin/resource-groups.html)) = how many of those queries Trino *runs* at once; the rest **queue**. Plus each query competes for cluster memory (`query.max-memory-per-node`).
+
+So raising `threads` above the dbt-group's `hardConcurrencyLimit` just builds a queue inside Trino — no extra parallelism, and you risk memory pressure / queue-timeout if a few heavy models land together. **Safe sizing:** set `threads` ≈ the dbt resource group's `hardConcurrencyLimit` (so dbt doesn't submit more than Trino will run concurrently), then raise gradually while watching the cluster's running-vs-queued query count and per-node memory. On a shared cluster, isolate dbt in its own resource group so a big `dbt run` can't starve interactive dashboards. Parallelism only helps the parts of the DAG that are actually independent — a long linear `ref()` chain runs serially no matter how high `threads` is.
+
+**Find the slowest models (so you tune the right ones).** Every `dbt run`/`dbt build` writes **`target/run_results.json`** with an `execution_time` (seconds) per node — sort it to rank models:
+```bash
+# top 15 slowest models from the last run
+jq -r '.results[] | "\(.execution_time)\t\(.unique_id)"' target/run_results.json | sort -rn | head -15
+```
+The dbt console also prints per-model timing as it runs. Focus optimization (incremental materialization §6.1, partitioning §6.2, `sorted_by` §6.3, the projection/predicate/decorrelation fixes in §8) on the top few `execution_time` models — usually a handful of full-refresh `table` models or wide joins dominate the 2-hour wall clock, not the 200 small `view` models.
+
+> **DO-NOT-WRITE:** "raise dbt `threads` to 20+ to make the run fast" (without checking the Trino resource-group `hardConcurrencyLimit` — excess threads just queue inside Trino and can cause memory/queue failures); "dbt `threads` defaults to 1" (it defaults to **4**); "the slow part is the CTEs re-running" as a blanket cause — verify with `run_results.json` `execution_time` first (Trino DOES inline CTEs — §3 — but that's a per-query issue, not why a 2-hour multi-model run is slow).
+
 ---
 
 ## 7. Re-runs of the same query are also slow — the result-caching gap

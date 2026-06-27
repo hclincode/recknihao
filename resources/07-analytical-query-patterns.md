@@ -1534,6 +1534,45 @@ The outer `COALESCE` is optional but makes intent explicit when `metric` is non-
 
 **Complement / cross-reference.** This is the **value** forward-fill. The **row** densification (creating one row per `(id, day)` so there's something to fill) is the §4 date gap-fill recipe above (calendar `UNNEST(sequence(...))` LEFT JOIN'd to the sparse fact). Use them together: gap-fill the dates first, then forward-fill the values. For lookback comparisons that also need IGNORE NULLS, `LAG(x) IGNORE NULLS OVER (... ORDER BY day)` returns the **previous non-null** value (vs `LAG(x)` which returns the previous **row's** value even if NULL). See §5 Pattern B3 for the related `LAST_VALUE` **default-frame** footgun (when the frame is omitted, `LAST_VALUE` returns the current row's value — that section is about a different fab; this section is about correctly-framed forward-fill with `IGNORE NULLS`).
 
+### LEADING CANONICAL — show ALL CATEGORY values including ones with ZERO rows (a CATEGORICAL dimension spine from a literal `VALUES` list — NOT `SELECT DISTINCT`)
+
+> **Keyword anchors (read this FIRST if your question contains any of these):** show all tiers/statuses/categories including the ones with zero rows · force every category to appear in GROUP BY · a category value is completely absent from the data but must show as 0 · all enum values even with no matching rows · every status in the report even unused ones · fixed category list with zero-fill · 4×3 grid all cells · plan tier / region / status grid with explicit zeros · category never appears in the table.
+
+> **THE ONE FACT:** to guarantee a row for **every** category value — including a value that has **ZERO rows anywhere in the table** (e.g. an `enterprise` tier nobody has signed up for yet) — build the category set from a **literal `VALUES` list**, then `LEFT JOIN` your `GROUP BY` aggregate onto it and `COALESCE(count, 0)`. **Do NOT derive the categories with `SELECT DISTINCT tier FROM accounts`** — `DISTINCT` only returns values that *appear in the data*, so a fully-absent category is silently dropped (the exact bug the question is about). This is the categorical sibling of the date-spine zero-fill recipe above (date spine = `sequence()`+`UNNEST`; category spine = a hard-coded `VALUES` list).
+
+```sql
+-- ✅ COPY THIS — every tier shows up, absent ones as 0
+WITH all_tiers(tier) AS (
+  VALUES ('free'), ('starter'), ('pro'), ('enterprise')   -- the COMPLETE fixed set, hard-coded
+),
+counts AS (
+  SELECT tier, COUNT(*) AS account_count
+  FROM accounts
+  GROUP BY tier
+)
+SELECT t.tier, COALESCE(c.account_count, 0) AS account_count
+FROM all_tiers t
+LEFT JOIN counts c ON c.tier = t.tier
+ORDER BY t.tier;
+-- 'enterprise' appears with account_count = 0 even though it has NO rows in accounts.
+```
+
+> **Two-dimension grid (e.g. tier × region — all cells, including empty ones):** `CROSS JOIN` two `VALUES` lists to make the full grid, then `LEFT JOIN` the aggregate:
+> ```sql
+> WITH tiers(tier)   AS (VALUES ('free'),('starter'),('pro'),('enterprise')),
+>      regions(region) AS (VALUES ('us'),('eu'),('apac'))
+> SELECT t.tier, r.region, COALESCE(c.n, 0) AS n
+> FROM tiers t CROSS JOIN regions r
+> LEFT JOIN (SELECT tier, region, COUNT(*) n FROM accounts GROUP BY tier, region) c
+>   ON c.tier = t.tier AND c.region = r.region
+> ORDER BY t.tier, r.region;   -- all 4×3 = 12 cells, empty combos = 0
+> ```
+
+> **DO-NOT-WRITE:**
+> - `SELECT DISTINCT tier FROM accounts` (or `CROSS JOIN` of two such `DISTINCT` sets) as the category spine — **drops any category value that has zero rows.** It produces all combos of *observed* values only; a fully-absent tier/region never appears. Use a literal `VALUES` list for a known fixed dimension.
+> - Relying on `GROUP BY tier` alone to "show all tiers" — `GROUP BY` only emits a row per value **present in the data**; absent categories are simply missing.
+> - If the category set is NOT fixed/known (it's an open-ended high-cardinality column), a `VALUES` list isn't maintainable — but then "show categories with zero rows" is usually not the real ask; confirm the dimension is a small fixed enum first. For a small reference list maintained elsewhere, a **dbt seed** ([resource 27 §6.7D](27-oracle-plsql-to-dbt-trino.md)) `ref()`-ed as the spine is the maintainable form.
+
 ### COMBINED CANONICAL — composing the date-spine + forward-fill correctly (ORDERING MATTERS — iter570 PIN, iter572 REORDERED)
 
 > **Keyword anchors (read this section FIRST if your question contains any of these):** forward-fill plus date spine, gap-fill dates AND forward-fill values, dense minute grid + LOCF, device heartbeat forward-fill, IoT minute-bucket forward-fill, sensor status carry-forward minute spine, fill missing minutes with last reported status, every minute per device last known status, combine sequence and LAST_VALUE IGNORE NULLS, date-spine forward-fill order of operations, IGNORE NULLS placement, IGNORE NULLS inside parentheses parse error, where does IGNORE NULLS go, IGNORE NULLS after closing paren before OVER, LAST_VALUE IGNORE NULLS syntax.
