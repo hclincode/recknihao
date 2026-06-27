@@ -443,6 +443,28 @@ ALTER TABLE iceberg.analytics.events RENAME COLUMN user_id_v2 TO user_id;
 > | `ALTER TABLE ... RENAME COLUMN col TO new` followed by silent assumption "old Parquet data is now unreachable" | **FALSE.** Iceberg's field-ID model preserves the field ID through rename; ALL historical data is immediately readable under the new name with zero file rewrites. | Renames are loss-less metadata-only on Iceberg — emphasize this when migrating from Hive (where rename was destructive). |
 > | "After `RENAME COLUMN old TO new`, both the old AND the new name resolve / dbt models can keep referencing the old name / the field ID maps to both names simultaneously" | **FALSE — conflates DATA preservation with NAME preservation.** Iceberg's field-ID model preserves the **old DATA** (pre-rename Parquet files are read under the **new name** with no rewrite — the field ID still matches). It does NOT preserve the **old NAME**. The SQL-facing schema exposes ONLY the current (new) name; after the rename, `SELECT old_name FROM t` errors with `Column 'old_name' cannot be resolved` (Trino parser-side — the planner consults only the current schema). Field IDs are an INTERNAL physical-to-logical mapping, not a user-visible alias list. | Two TRUE statements that the DO-NOT-WRITE row conflates: (a) "old DATA files readable under the new name" = TRUE, lossless; (b) "old NAME still queryable after rename" = FALSE, errors. Never assert (b). After rename, every reference (dbt models, views, ad-hoc queries) MUST use `new_name`; the old name is gone from the schema the instant the ALTER commits. |
 
+### LEADING CANONICAL — `object_store_layout_enabled` (spread data files across object-store prefixes to avoid MinIO/S3 request-rate hotspotting at scale)
+
+> **Keyword anchors:** object storage layout Iceberg, object_store_layout_enabled, MinIO performance bottleneck at scale, S3 prefix throttling / 503 SlowDown, hash prefix on data files, spread files across object store prefixes, avoid hot prefix on MinIO, write.object-storage.enabled, ObjectStoreLocationProvider, should I enable object storage layout on every table.
+
+> **THE ONE FACT — it's a WRITE-side file-LAYOUT property, NOT a read setting.** `object_store_layout_enabled = true` (Trino Iceberg table property; the Iceberg-native equivalent is `write.object-storage.enabled`; default **false**, catalog knob `iceberg.object-store-layout-enabled`) makes the WRITER insert a **deterministic hash component into each data file's object path**, so newly-written files are spread across **many distinct object-store prefixes** instead of piling under one `.../data/<partition>/...` prefix. On S3-protocol stores — **including on-prem MinIO** — request throughput is rate-limited **per prefix**, so a high-write-rate table whose files all share a prefix hits throttling / `503 SlowDown` / latency cliffs at scale. Hashing the prefix distributes the load and removes the hotspot. Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) + [iceberg.apache.org/docs/latest/configuration/](https://iceberg.apache.org/docs/latest/configuration/).
+
+```sql
+-- ✅ Enable at create time (or ALTER existing):
+CREATE TABLE iceberg.analytics.events (...)
+  WITH (partitioning = ARRAY['day(occurred_at)'], object_store_layout_enabled = true);
+
+ALTER TABLE iceberg.analytics.events SET PROPERTIES object_store_layout_enabled = true;  -- affects FUTURE writes only
+```
+
+- **Reads are UNAFFECTED.** Trino resolves data files by the **absolute paths stored in the Iceberg manifests** — it never lists object-store prefixes to find files — so hashed paths don't slow (or speed) queries. This is purely about avoiding **write/request-rate** hotspots on the storage layer.
+- **`ALTER ... SET PROPERTIES` applies to FUTURE writes only** — existing files keep their old paths until rewritten (e.g. by `EXECUTE optimize`); it does not relocate current data.
+- **When to enable:** **high-write-throughput / large** tables (busy fact/event tables, heavy concurrent ingestion). **Do NOT blanket-enable on every table** — on small or low-write tables it adds nothing, and the opaque hashed path segments make `mc ls` / manual MinIO browsing harder to read. Decide per-table by write volume.
+- **DO-NOT-WRITE:**
+  - "`object_store_layout_enabled` makes queries/reads faster" — FALSE; it's write-side, reads are unaffected (manifests carry absolute paths).
+  - "Trino has to scan/list object-store prefixes to find files, so the hash layout speeds discovery" — FALSE; Trino reads file paths from the manifest, never by prefix-listing.
+  - "Enable it on every table by default" — NO; only high-write/large tables benefit; it hurts manual MinIO browsing elsewhere.
+
 ### Safe-rename playbook — so downstream dbt models / views / dashboards don't break
 
 > **Why this exists (iter508 — RENAME-COLUMN downstream-breakage fab).** `RENAME COLUMN` is metadata-only and lossless on the DATA side, but the OLD NAME stops resolving the instant the ALTER commits. A dbt build that referenced `old_name` will fail the next run with `Column 'old_name' cannot be resolved`. Choose ONE of the three patterns below BEFORE you run the ALTER — do not just rename and discover the breakage on the next dbt run.
