@@ -1804,6 +1804,31 @@ GROUP BY c.bucket;
 
 **Important — the INNER-JOIN form is unaffected.** The trap is **specifically** the `LEFT JOIN`-for-zero-rows + `COUNT(*)` pairing. The canonical INNER JOIN query at the top of this H3 uses `COUNT(*)` safely because INNER JOIN drops the zero-match bucket entirely — there is no NULL-padded row to over-count. The pattern: keep `COUNT(*)` with `INNER JOIN`; switch to `COUNT(<right_col>)` the moment you switch to `LEFT JOIN`.
 
+#### LEADING CANONICAL — find PAIRS of OVERLAPPING intervals in the SAME table (self-join, TWO-SIDED predicate) — a DIFFERENT shape from the calendar×intervals form above
+
+> **Keyword anchors (read FIRST if your question contains any of these):** find pairs of rows whose date ranges overlap, two deals/subscriptions/bookings active at the same time, overlapping intervals in the same table, self-join overlap, detect double-booking, two reservations for the same room overlap, concurrent records same entity, find rows whose [start,end] ranges intersect, overlapping memberships, overlapping leases, did two things overlap in time, replace slow correlated overlap subquery.
+
+> **This is NOT the calendar×intervals canonical above.** Above = "how many intervals are active on EACH calendar DAY" (join intervals to a calendar spine). HERE = "which PAIRS of rows in the SAME table have ranges that OVERLAP each other" (a self-join of the table to itself). Different question, different predicate.
+
+> **THE ONE FACT — the overlap test is TWO-SIDED.** Two intervals `[a.start, a.end]` and `[b.start, b.end]` overlap **iff** `a.start <= b.end AND b.start <= a.end` — BOTH conditions, symmetric. An open-ended interval (`end IS NULL`) extends to +infinity, so `COALESCE(end, DATE '9999-12-31')`. Pair each row with the *other* rows via `a.id < b.id` (dedupes the pair and excludes self-match):
+
+```sql
+-- ✅ COPY THIS — all pairs of same-account deals whose date ranges overlap
+SELECT a.deal_id AS deal_a, b.deal_id AS deal_b, a.account_id
+FROM deals a
+JOIN deals b
+  ON a.account_id = b.account_id
+  AND a.deal_id < b.deal_id                                          -- each pair once, no self-match
+  AND a.start_date <= COALESCE(b.end_date, DATE '9999-12-31')        -- a starts before b ends
+  AND b.start_date <= COALESCE(a.end_date, DATE '9999-12-31');       -- b starts before a ends
+```
+
+> Replaces a slow `O(N×M)` correlated subquery with a single self-join the optimizer can hash-partition on `account_id` (run `ANALYZE` so it picks a good plan). The `a.id < b.id` equi-key plus the two range conditions is the whole pattern.
+
+> **DO-NOT-WRITE (the iter1179 broken-predicate fab):**
+> - `... AND a.start_date <= b.start_date AND (b.end_date IS NULL OR b.end_date > a.start_date)` — **BROKEN both ways.** (1) `a.start_date <= b.start_date` is a spurious **start-ordering filter** that is NOT implied by `a.id < b.id`, so it silently **drops valid overlapping pairs** where the lower-id row starts later. (2) Given `a.start <= b.start`, the check `b.end > a.start` is **trivially true** (because `b.end >= b.start >= a.start`), so it does NOT test overlap at all — the query then returns **nearly every same-account pair** regardless of overlap. Diagnostic: `a=[Jan1,Feb1]`, `b=[Mar1,Apr1]` do NOT overlap, but `Jan1<=Mar1 ✓` and `Apr1>Jan1 ✓` make the broken form WRONGLY emit them. The bug is checking `b.end vs a.start` (one-sided, calendar-shape leftover) instead of the **two-sided** `a.start<=b.end AND b.start<=a.end`.
+> - Omitting the `COALESCE(end, DATE '9999-12-31')` for open-ended (`end IS NULL`) intervals — a NULL end must count as +infinity, or open deals never match.
+
 **Bounded-window spine (just yesterday / this week — relative bounds, NOT `MIN(...)` full history).** When the question scopes the spine to a bounded window (e.g., "active sessions per hour **yesterday**", "open tickets per day **this week**"), set explicit relative bounds in the calendar CTE instead of deriving `lo` from `MIN(...)` — that gives you only the rows the question asks for, no full-history scan:
 
 ```sql
