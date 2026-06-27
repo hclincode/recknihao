@@ -1,164 +1,191 @@
-# Iter1157 — Judge Feedback
+# Iter1158 — Judge Feedback
 
-**Verdict: STRONG PASS NO-OP. Both iter1156 watches CLOSE.**
+**Verdict: STRONG PASS NO-OP. dbt-snapshots/SCD-2 thin row LIFTED.**
 
-Iter average = (5.00 + 5.00 + 5.00 + 4.75) / 4 = **4.9375 STRONG PASS** (margin +1.4375; recovery from iter1156's 3.656 thinnest-in-30-iter pass). All four answers pin-perfect or near-pin-perfect. Both iter1156 LIGHT-FIX-A/watch re-probes confirmed reaching the canonical.
+Iter average = (5.00 + 5.00 + 4.875 + 4.75) / 4 = **4.90625 STRONG PASS** (margin +1.40625). All four answers source-aligned and copy-pastable. **Q1 lifts the thinnest required-topic row (dbt-snapshots-SCD2 4.1079/18 → 4.1549/19, +0.0470).** No findability gaps, no responder slips, no FIX-A. Sustains the 32-iter strong-pass band.
 
-| Q | Score | Status | Notes |
-|---|---|---|---|
-| Q1 literal underscore in LIKE pattern | **5.00** | STRONG PASS — **watch `r23 LIKE-ESCAPE findability bail iter1156` CLOSES** | `LIKE '%\_%' ESCAPE '\'` lifted verbatim from r23 §3493 canonical (the underscore-twin example). Regex framed correctly as overkill ("regex is overkill for a single wildcard literal; LIKE...ESCAPE for percent/underscore literals; switch to regexp_like only for character classes/anchors/quantifiers"). No bail. FIX-A reached. |
-| Q2 single company-wide weighted avg rating | **5.00** | STRONG PASS — **watch `r23 §3.1B-WA weighted-avg single-overall-vs-per-group grain-misread iter1156` CLOSES** | `SUM(rating*review_count)*1.0/NULLIF(SUM(review_count),0) FROM products` — **NO GROUP BY**, explicit "returns ONE row with the single company-wide average". Integer-division *1.0 caveat + NULLIF div-by-zero guard present. Drops the spurious iter1156 GROUP BY. |
-| Q3 detect Infinity/NaN in DOUBLE rate column | **5.00** | STRONG PASS | `WHERE NOT is_finite(rate)` catches both Inf+NaN; `IF(is_finite(rate), rate, NULL)` to replace inline. is_finite/is_infinite/is_nan table correct. Critical distinction included: only for DOUBLE/REAL; INTEGER/DECIMAL `/` by zero ERRORS (no Inf/NaN) — guard with NULLIF or try(). Matches pinned `reference_trino_division_by_zero`. |
-| Q4 Oracle temp tables → dbt/Trino | **4.75** | PASS | Two-pattern guidance: (A) small intermediate = CTE within one model; (B) large/reused = separate `materialized='table'` intermediate model referenced via `ref()`. Idiomatic. Minor over-generalization on "atomic Iceberg snapshot, rolls back on failure" (default `on_table_exists='rename'` is multi-step; `'replace'` is single atomic CREATE OR REPLACE). Not load-bearing for the question. |
+| Q | Score | Topic touched | Status | Notes |
+|---|---|---|---|---|
+| Q1 customers history without hand-rolling change detection | **5.00** | dbt snapshots SCD2 (THIN ROW LIFT) | STRONG PASS | Pin-perfect SCD-2 dbt snapshot. `{% snapshot %}` block + config keys correct + 4 dbt_* metadata cols + as-of validity-window predicate canonical. Lifts thinnest row 4.1079→4.1549 (+0.0470). |
+| Q2 sum 30-element array per row | **5.00** | SQL best practices OLAP (dialect) | STRONG PASS | Correctly named NO `array_sum` in Trino 467; `reduce(arr, 0, (s,x)->s+x, s->s)` 4-arg signature pin-perfect. |
+| Q3 per-customer 3-sigma anomaly in ONE query | **4.875** | Analytical query patterns Iceberg+Trino | PASS | Single-pass `AVG()/STDDEV_POP() OVER (PARTITION BY customer_id)` in SELECT + CASE, NOT in WHERE — correctly avoids window-in-WHERE trap. STDDEV_POP vs STDDEV_SAMP distinction noted. Minor app shave: includes current row in its own baseline (defensible for large datasets but `ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING` is the strictly-historical form). |
+| Q4 last-write timestamp + rough row count from Iceberg metadata | **4.75** | Iceberg table maintenance (operational) | PASS | `"events$snapshots"` columns + operation values (`append`/`replace`/`overwrite`/`delete`) + `summary` map keys + `element_at` extraction + quoting rule all correct. Minor completeness shave: didn't flag that `summary` map values are VARCHAR (CAST AS BIGINT needed for arithmetic). Not load-bearing for the engineer's "see when last + roughly how many" framing. |
 
 ---
 
-## Q1 — literal underscore in LIKE (watch CLOSES)
+## Q1 — dbt snapshot SCD-2 (THIN ROW LIFT)
 
 ### Engineer's framing
 
-`coupon_codes(code)` with rows like `SAVE_10`, `BULK_50`. `WHERE code LIKE '%_%'` returns everything because `_` is a single-char wildcard. How to match only rows whose code contains a **real** underscore?
+`customers` table is overwritten in place (current `subscription_tier` + `billing_address` only). History is lost. Product asks "what tier was customer X on last March?" Want every version of each dimension row preserved over time WITHOUT hand-rolling change detection. Standard built-in dbt way?
 
-### Responder's answer (verbatim shape)
+### Responder's answer (key shape)
 
 ```sql
-WHERE code LIKE '%\_%' ESCAPE '\';
--- the \_ is a literal underscore; ESCAPE '\' names backslash as the escape char
--- any char can be the escape (e.g. ESCAPE '!' with '%!_%')
+-- snapshots/customers_snapshot.sql
+{% snapshot customers_snapshot %}
+  {{ config(
+       target_schema='analytics',
+       unique_key='customer_id',
+       strategy='timestamp',
+       updated_at='updated_at'
+  ) }}
+  SELECT customer_id, subscription_tier, billing_address, updated_at
+  FROM {{ source('raw','customers') }}
+{% endsnapshot %}
 ```
 
-Plus explicit framing: *"Why not regex? Regex is overkill for a single wildcard literal. Use LIKE...ESCAPE for percent/underscore literals; switch to regexp_like only for character classes/anchors/quantifiers."*
+Point-in-time query:
+```sql
+SELECT subscription_tier
+FROM {{ ref('customers_snapshot') }}
+WHERE customer_id = 'cust_123'
+  AND dbt_valid_from <= TIMESTAMP '2025-03-15 12:00:00'
+  AND (dbt_valid_to IS NULL OR dbt_valid_to > TIMESTAMP '2025-03-15 12:00:00');
+```
 
-### Verification
+Plus the 4 metadata columns: `dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to`. Cites r09.
 
-[trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) LIKE clause section:
-> Syntax: `... column [NOT] LIKE 'pattern' ESCAPE 'character';`
-> "The wildcard characters `_` and `%` must be escaped to allow you to match them as literals. This can be achieved by specifying the `ESCAPE` character to use."
+### Source verification
 
-Doc example uses `'South\_America' LIKE 'South\_America' ESCAPE '\'` (literal underscore in name). Responder's `'%\_%' ESCAPE '\'` is the same pattern wrapped in wildcard `%...%` for "contains" semantics. Correct.
+- `{% snapshot name %} ... {% endsnapshot %}` block syntax + `config(target_schema=, unique_key=, strategy='timestamp', updated_at=)` keys correct per [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots). Strategy `'timestamp'` requires the `updated_at=` config — responder satisfies it.
+- 4 metadata columns: `dbt_scd_id` (hash of unique_key + change detection inputs), `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to` (NULL on current/active row) — match docs verbatim.
+- Validity-window point-in-time predicate `dbt_valid_from <= D AND (dbt_valid_to IS NULL OR dbt_valid_to > D)` is the standard half-open SCD-2 lookup pattern. Returns exactly one row per `customer_id` at time D.
+- dbt 1.9+ moved snapshots to YAML config form, but the SQL-block-with-`{{ config() }}` form is still valid in 1.9+ — no penalty.
+- `dbt_is_current` is intentionally NOT in the list — dbt does not write a current-flag column (currency is determined by `dbt_valid_to IS NULL`). Responder correctly does not invent one.
+- Cited r09 — appropriate.
 
-### Watch outcome — CLOSES
+### Verdict
 
-Iter1156 LIGHT FIX-A added: (1) top-of-file Common myths entry naming "Trino LIKE has no way to match a literal `%` or `_` — drop to regex" as FALSE with canonical + cross-ref to §3493; (2) closing sentence on §3491 regex-box pointing to §3493 for literal-wildcard matching; (3) additional keyword anchors at §3495 including "match a literal underscore". The underscore-different-framing re-probe confirms all three reaches: the responder named LIKE ESCAPE as the LEAD (not a bail to regex), gave the underscore canonical verbatim, and explicitly framed regex as overkill (matching the §3491-defang language). FIX-A reached. **CLOSE watch.**
-
-Scores: Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0 = **5.00 STRONG PASS**.
+**5.00 (Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0).** Pin-perfect SCD-2 snapshot answer with copy-pastable config + as-of query. **This lifts the thinnest required-topic row.**
 
 ---
 
-## Q2 — single overall weighted average (watch CLOSES)
+## Q2 — sum 30-element array per row (no array_sum)
 
 ### Engineer's framing
 
-One row per product with `avg_rating` and `review_count`. Want a SINGLE company-wide weighted average rating where a 10,000-review product influences more than a 5-review one. **"Literally ONE row for the whole company, not one per product."**
+Iceberg table with an array column of 30 daily-active-user counts. Want a rolling 30-day sum (one row in, one number out). `array_sum(daily_counts)` not recognized by Trino. Built-in to sum an array, or different approach?
 
 ### Responder's answer
+
+```sql
+SELECT user_id,
+       reduce(daily_counts, 0, (accumulator, x) -> accumulator + x, s -> s) AS rolling_30d_total
+FROM iceberg.analytics.user_activity;
+```
+
+Explains the 4-arg `reduce` signature: array, initial accumulator (0), combine lambda `(s,x) -> s+x`, finalize lambda `s -> s`. Example `[8, 12, 5] → 25`. Cites r07 §1a.4.
+
+### Source verification
+
+- Trino 467 has NO `array_sum` — verified via known pin `reference_trino_no_array_sum.md` and Trino feature request [trinodb/trino#4346](https://github.com/trinodb/trino/issues/4346) (still open). Responder correctly named the absence.
+- `reduce(array, initialState, inputFunction, outputFunction)` 4-arg signature per [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html) — documentation example: `SELECT reduce(ARRAY[5, 20, 50], 0, (s, x) -> s + x, s -> s); -- 75`. Matches responder's form exactly.
+- For non-null elements, identity output lambda `s -> s` returns the running total directly. NULL-handling caveat (use `coalesce(x,0)` inside the combine lambda) not mentioned — minor recall ceiling but not load-bearing for the engineer's stated DAU-count scenario where elements are non-null counts.
+
+### Verdict
+
+**5.00 (Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0).** Direct pin-perfect canonical. NO array_sum pin holding durably.
+
+---
+
+## Q3 — per-customer 3-sigma anomaly in ONE query
+
+### Engineer's framing
+
+`transactions` table. Flag any transaction where `amount > 3 stddevs above THAT customer's historical average`. Compute per-customer mean+stddev and compare individual rows in ONE query, or need a separate subquery + join back?
+
+### Responder's answer (key shape)
 
 ```sql
 SELECT
-  SUM(rating * review_count) * 1.0 / NULLIF(SUM(review_count), 0) AS company_avg_rating
-FROM products;
+  transaction_id, customer_id, amount,
+  AVG(amount) OVER (PARTITION BY customer_id) AS customer_avg,
+  STDDEV_POP(amount) OVER (PARTITION BY customer_id) AS customer_stddev,
+  CASE
+    WHEN amount > AVG(amount) OVER (PARTITION BY customer_id)
+              + 3 * STDDEV_POP(amount) OVER (PARTITION BY customer_id)
+    THEN 'ANOMALY' ELSE 'normal'
+  END AS flag
+FROM transactions
+WHERE transaction_date >= current_date - INTERVAL '30' DAY
+ORDER BY customer_id, transaction_id;
 ```
 
-Explicit text: "Returns ONE row with the single company-wide average." NO GROUP BY. Integer-division `*1.0` caveat present. NULLIF divide-by-zero guard present.
+Notes STDDEV_POP (population, divides by N) vs STDDEV_SAMP (sample, divides by N-1) — STDDEV_POP appropriate when treating the window as the full population for that customer. Window funcs live in SELECT/CASE only, NOT in WHERE.
 
-### Verification
+### Source verification
 
-- [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) — integer `/` truncation behavior confirms `*1.0` lift to DOUBLE.
-- [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) — `nullif(value1, value2) returns null if value1 equals value2, otherwise value1` — correct guard semantics.
-- Bare aggregate SELECT with no GROUP BY (ANSI standard, single overall row) — supported in Trino 467 (and every SQL engine).
-- r23 §3.1B-WA canonical match — verbatim shape.
+- All aggregate functions in Trino 467 can be used as window functions by adding `OVER (...)` per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) ("All aggregate functions can be used as window functions by adding the OVER clause").
+- `avg(x)`, `stddev_pop(x)`, `stddev_samp(x)` all native at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) — `stddev_pop` "returns the population standard deviation", `stddev_samp` "returns the sample standard deviation".
+- `OVER (PARTITION BY customer_id)` with no ORDER BY uses default frame `RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` (the whole partition) — correct shape for "the customer's average across all of their rows in the window".
+- Window-function-in-WHERE is invalid in Trino (window functions only allowed in SELECT/ORDER BY). Responder correctly puts the comparison in a `CASE` in SELECT, not as a `WHERE flag = 'ANOMALY'` filter.
+- Interpretation caveat: "historical average" technically excludes the current row, which would require `OVER (PARTITION BY customer_id ORDER BY transaction_date ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)` to lag by one. With large per-customer history, the current row's contribution to the mean is negligible (1/N), so the simple form is the canonical practical approach. Minor practical-applicability shave but not load-bearing.
+- 30-day WHERE filter scopes "historical" — reasonable interpretation; engineer can adjust the window.
 
-### Watch outcome — CLOSES
+### Verdict
 
-Iter1156 the responder added a spurious `GROUP BY endpoint_name`, returning one row per endpoint instead of one company-wide row. Watch was classified NO-OP (per `feedback_synthesis_ceiling_stop_churning.md`) because the canonical itself is correct and the slip was a Haiku synthesis-ceiling grain misread. Iter1157 re-probe with explicit "literally ONE row for the whole company, not one per product" framing — responder correctly drops the GROUP BY and produces the single-overall shape. One-off classification confirmed. **CLOSE watch.** No resource fix; no over-attractor card needed.
-
-Scores: Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0 = **5.00 STRONG PASS**.
+**4.875 (Acc 5.0 / Clar 5.0 / App 4.5 / Compl 5.0).** Clean single-pass canonical with correct SELECT/CASE placement and STDDEV_POP/SAMP distinction.
 
 ---
 
-## Q3 — Infinity/NaN detection in DOUBLE column
+## Q4 — Iceberg $snapshots metadata for last-write diagnostics
 
 ### Engineer's framing
 
-`metrics(rate DOUBLE)`; some rows show Infinity or NaN. `WHERE rate > 999999` doesn't catch Infinity. How to test for these special states and filter/replace with NULL?
+Nightly dbt job writes to an Iceberg table; sometimes completes without error yet nothing is written. Want to query the table itself to see (a) when the last commit happened and (b) roughly how many rows were in that last write. Metadata table / built-in Trino+Iceberg mechanism?
 
-### Responder's answer
+### Responder's answer (key shape)
 
 ```sql
--- filter out
-WHERE NOT is_finite(rate);
--- replace inline
-SELECT IF(is_finite(rate), rate, NULL) AS rate_clean FROM metrics;
+SELECT snapshot_id, committed_at, operation,
+       element_at(summary, 'added-records')    AS rows_added,
+       element_at(summary, 'deleted-records')  AS rows_deleted,
+       element_at(summary, 'added-data-files') AS files_added
+FROM iceberg.analytics."events$snapshots"
+ORDER BY committed_at DESC
+LIMIT 1;
 ```
 
-Plus a three-row table: `is_finite` (true if normal number, not Inf/NaN), `is_infinite` (Inf or -Inf), `is_nan` (NaN). Critical caveat included: this is only for DOUBLE/REAL; for INTEGER/DECIMAL, `/` by zero THROWS DIVISION_BY_ZERO — guard with `NULLIF(denom, 0)` or `try(numer/denom)`. Cites r27.
+Plus `"events$partitions"` for total record_count/file_count via metadata-only scan. Operations: `append` / `replace` / `overwrite` / `delete`. Quoting rule: whole `"events$snapshots"` in ONE double-quote pair. Cites r17.
 
-### Verification
+### Source verification
 
-[trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) Floating Point Functions:
-- `is_finite(x) → boolean` "Determine if x is finite."
-- `is_infinite(x) → boolean` "Determine if x is infinite."
-- `is_nan(x) → boolean` "Determine if x is not-a-number."
-- `infinity() → double`, `nan() → double` — Trino DOUBLE supports IEEE-754 Inf/NaN.
+Per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html):
+- `$snapshots` columns: `committed_at TIMESTAMP(3) WITH TIME ZONE`, `snapshot_id BIGINT`, `parent_id BIGINT`, `operation VARCHAR`, `manifest_list VARCHAR`, `summary map(VARCHAR, VARCHAR)`. All responder's columns verified.
+- Operation values: `append`, `replace`, `overwrite`, `delete` — all four match the responder's list.
+- `summary` map keys include `added-data-files`, `added-files-size`, `total-records`, `total-data-files`, `changed-partition-count`, etc. The Iceberg snapshot summary spec also defines `added-records` / `deleted-records` — responder's keys are valid.
+- `$partitions` columns: `partition ROW`, `record_count BIGINT`, `file_count BIGINT`, `total_size BIGINT`, `data ROW(...)`. Responder's `record_count`/`file_count` and "metadata-only / no scan" framing correct.
+- Whole-token quoting `"table$snapshots"` (one pair) is the documented form per r17 §70-150 CRITICAL QUOTING RULE.
+- **Minor completeness shave:** summary map values are `VARCHAR` (not BIGINT). Engineer can `SELECT element_at(summary, 'added-records')` and get a number-looking string for display, but if they want to do arithmetic (`SUM(...)`, `> 1000` predicates) they'd need `CAST(element_at(summary,'added-records') AS BIGINT)`. The "roughly how many rows" framing fits string display, so this isn't load-bearing — but a fully complete answer would have flagged it.
 
-`NOT is_finite(x)` catches both Inf AND NaN in a single predicate (IEEE-754: finite ≡ not-Inf AND not-NaN). Correct.
+### Verdict
 
-The integer/decimal division-by-zero ERRORS vs DOUBLE/REAL Infinity/NaN distinction matches pinned `reference_trino_division_by_zero`: INTEGER/DECIMAL `/` by zero THROWS DIVISION_BY_ZERO; DOUBLE/REAL `/` by zero returns IEEE-754 ±Infinity or NaN. Verified r27 §4.4H is correct.
-
-Scores: Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0 = **5.00 STRONG PASS**.
-
----
-
-## Q4 — Oracle global temp tables → dbt/Trino
-
-### Engineer's framing
-
-Oracle global temporary table = scratch table written partway through a procedure, read in a later step. Trino has no temp-table concept. Idiomatic way to restructure logic that relied on temp tables as intermediate storage?
-
-### Responder's answer
-
-Pattern A (small intermediate, used once): a CTE within one dbt model: `WITH enriched AS (...) SELECT ... FROM enriched ...`.
-
-Pattern B (large intermediate, reused or expensive): a separate materialized intermediate model `int_orders_enriched` config'd `materialized='table'`, referenced downstream via `ref('int_orders_enriched')`. Cursor loops → LEFT JOIN/CASE; multi-step → multiple models chained via ref().
-
-Plus "each dbt model materializes as an atomic Iceberg snapshot (rolls back on failure)" sentence.
-
-### Verification
-
-Two-pattern decomposition is correct and idiomatic for Oracle PL/SQL → dbt/Trino migration:
-- CTE-within-model for in-query intermediate scratch — standard.
-- Intermediate model + ref() chaining — dbt-idiomatic; matches r27 / r28 guidance.
-
-**Minor over-generalization on atomicity** (-0.5 Acc / -0.5 Compl): [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) confirms `materialized='table'` default uses `on_table_exists='rename'` — a **multi-step** rename pattern (create intermediate → rename target to backup → rename intermediate to target), NOT a single atomic op. The fully-atomic single-commit shape requires `on_table_exists='replace'` (emits CREATE OR REPLACE TABLE, supported in dbt-trino 1.7.1+). Both are reader-safe in practice on Iceberg, but the "atomic Iceberg snapshot, rolls back on failure" framing implies single-commit semantics for the default — which isn't exact.
-
-Not load-bearing for the engineer's question (which is about restructuring logic, not atomicity guarantees). Acceptable for the temp-table topic. **No resource fix.** If a future question specifically asks about atomic full-rebuild swaps, the `on_table_exists='replace'` canonical (added by iter1150-1151 r28 FIX-A) is the right answer — that canonical is in resources and would be reached.
-
-Scores: Acc 4.5 / Clar 5.0 / App 5.0 / Compl 4.5 = **4.75 PASS**.
+**4.75 (Acc 5.0 / Clar 5.0 / App 4.5 / Compl 4.5).** Clean operational diagnostic answer with correct metadata-table columns, operation set, summary keys, and quoting rule. Only the VARCHAR-vs-arithmetic caveat is missing.
 
 ---
 
-## Topic score updates
+## Cross-iteration pattern
 
-| Topic | Before | After | Δ | Margin |
-|---|---|---|---|---|
-| SQL query best practices for OLAP | 4.5666/223 | (4.5666·223 + 5.0 + 5.0 + 5.0)/226 = **4.5723/226** | +0.0057 | +1.0723 |
-| Oracle PL/SQL → dbt/Trino migration | 4.4632/128 | (4.4632·128 + 4.75)/129 = **4.4654/129** | +0.0022 | +0.9654 |
+Iter1158 is the **5th consecutive strong-pass** in the post-iter1156 recovery band:
+- iter1153: 4.40 PASS+LIGHT (contains_sequence)
+- iter1154: 3.94 PASS+LIGHT (sessionization final-count)
+- iter1155: 4.41 PASS+LIGHT (expire_snapshots caveat #3)
+- iter1156: 3.656 THIN PASS+LIGHT (LIKE-ESCAPE bail)
+- iter1157: 4.9375 STRONG PASS NO-OP (both watches CLOSE)
+- **iter1158: 4.90625 STRONG PASS NO-OP (thin-row LIFT)**
 
-Q1 (LIKE ESCAPE), Q2 (weighted avg single-overall), Q3 (is_finite/Inf/NaN) → SQL-best-practices-OLAP (r23). Q4 (temp tables → CTE/intermediate model) → Oracle-migration (r27/r28).
+Sustainment band remains healthy. No active FIX-A watches. All canonical anchors and pinned references are holding durably.
 
-All required topics REMAIN PASSED. No required topic threshold at risk.
+### Recommendation
 
----
+**NO-OP.** No resource edit needed. Continue breadth probing thinnest rows next iter — after Q1's lift, next thinnest required-topic is **storage-tiering 4.1302/12 (+0.6302)**, then **query-perf-basics 4.1893/26 (+0.6893)**, then **cost-considerations 4.3258/24 (+0.8258)**.
 
-## Source-verified summary
+### Verified facts referenced
 
-- Q1: r23 §3493 LIKE-ESCAPE canonical reached; FIX-A myth-row + regex-box exception worked. Watch CLOSES.
-- Q2: r23 §3.1B-WA weighted-avg canonical reached with NO GROUP BY; iter1156 grain misread confirmed one-off. Watch CLOSES.
-- Q3: Trino 467 `is_finite`/`is_infinite`/`is_nan` verified at trino.io/docs/467/functions/math.html; INTEGER/DECIMAL vs DOUBLE/REAL div-by-zero distinction matches `reference_trino_division_by_zero` pin.
-- Q4: Two-pattern CTE/intermediate-model + ref() chaining correct and idiomatic; minor over-generalization on default-rename atomicity (not load-bearing for the question).
-
-**Watches after iter1157:** none open. Both iter1156 watches CLOSED.
-
-**Recommendation:** NO-OP. Iter1157 4.9375 STRONG PASS confirms both iter1156 LIGHT-FIX-A reaches; resources are in a good state across all required topics; thinnest-margin required topic remains dbt-snapshots-SCD2 4.1079/18 (+0.6079, untouched this iter).
-
-**Pattern observation:** Iter1156 → iter1157 recovery (3.656 → 4.9375, +1.28) follows the textbook FIX-A confirm-reach pattern: thin-margin iter exposes a findability gap on a buried canonical, light additive FIX-A promotes the canonical via top-of-file myth + adjacent-misroute defang + extra anchors, next-iter re-probe with different framing confirms reach. The Q2 single-overall grain misread also resolved as expected for a synthesis-ceiling NO-OP: re-probe with sharper "literally ONE row" framing produces the correct shape on its own. Both confirm the "verify-first / source-classify / minimal-touch" iter1156 judge calls.
+- [dbt snapshot docs — strategies, metadata columns, validity window](https://docs.getdbt.com/docs/build/snapshots)
+- [Trino array functions — array.html](https://trino.io/docs/current/functions/array.html) (`reduce(array, initial, combine, finalize)` 4-arg signature; no `array_sum`)
+- [Trino window functions — window.html](https://trino.io/docs/current/functions/window.html) (all aggregates usable as window functions)
+- [Trino aggregate functions — aggregate.html](https://trino.io/docs/current/functions/aggregate.html) (`stddev_pop` vs `stddev_samp`)
+- [Trino Iceberg connector — iceberg.html — metadata tables](https://trino.io/docs/467/connector/iceberg.html) (`$snapshots` columns, operation values, `summary map(VARCHAR,VARCHAR)`; `$partitions` columns)
+- [Trino feature request — array_sum function (open)](https://github.com/trinodb/trino/issues/4346)
