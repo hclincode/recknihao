@@ -1,63 +1,132 @@
-# Iter1190 Judge Feedback
+# Iter1191 Judge Feedback
 
-**Overall verdict: STRONG PASS — NO-OP. Avg 4.828 / 5.** Load-bearing Q1 claim (optimize honors sorted_by) is CORRECT in fact; resources r28 §6.3 and r17 §276 / §1238 already make the same claim and are accurate.
+**Overall: 4.906 / 5.0 — STRONG PASS NO-OP.** No FIX-A. iter1190 watch on dbt merge connector matrix is NOT exercised this iter; carry forward unchanged.
 
-## Q1 — Iceberg EXECUTE optimize + sorted_by — STRONG, CORRECT, NO-OP
+---
 
-**Verdict: 4.875.** Responder's "YES — EXECUTE optimize honors `sorted_by` and physically re-sorts" is **factually correct** for Trino 467. The Trino Iceberg connector reuses the Hive connector's `SortingFileWriter` during `EXECUTE optimize` and writes sorted output that honors the table-level `sorted_by` property.
+## Q1 — Iceberg rollback to pre-job snapshot (Trino 467 CALL form + $history discovery)
 
-- **PR [trinodb/trino #14891](https://github.com/trinodb/trino/pull/14891)** ("Support sorted writes in the Iceberg connector"): explicitly added support for sorting during `optimize`. From the author's comment: *"added support for sorting during updates and during `optimize`."* The implementation reuses the `SortingFileWriter` from the Hive connector.
-- **Issue [trinodb/trino #18136](https://github.com/trinodb/trino/issues/18136)** ("Iceberg optimize fails when sorted_by UUID columns"): the failure stack trace shows the failure originates in `SortingFileWriter.writeTempFile()` while running `ALTER TABLE … EXECUTE optimize` — confirming optimize DOES attempt to sort by `sorted_by` columns (the bug is in temp-file serialization of UUID, not in the design).
-- **[Starburst blog — Improving performance with Iceberg sorted tables](https://www.starburst.io/blog/improving-performance-with-iceberg-sorted-tables/)**: *"the Optimize command will sort the data based on the DDL of the table"* + *"This command will optimize the `catalog_sales_sorted` table by combining smaller files into larger ones that are sorted by the `cs_sold_date_sk` column."*
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0**
 
-**Caveat on doc page wording:** the [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `optimize` section is silent on `sorted_by` interaction (it only says "merged into fewer but larger files"); the `sorted_by` property section says "Data is sorted during **writes** within each file" — which technically includes the rewrite-as-write produced by `EXECUTE optimize`. So the doc text doesn't *explicitly* state the integration even though it does happen. A skeptical engineer who only reads the docs page may not be sure; the PR + Starburst blog + bug stack trace are needed to confirm. Responder's confidence is appropriately calibrated against actual behavior, not against the doc-page wording strictness — fine.
+Pin-perfect maintenance/Iceberg-time-travel canonical reach. All load-bearing facts verified:
 
-**Resource source-check (r28 §6.3 / r17 §276 / r17 §1238):** these all state the same claim. Verified all three:
+1. **`$history` metadata table columns** — VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `$history` table exposes `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`. Responder picked the RIGHT metadata table — `$snapshots` carries `committed_at / snapshot_id / parent_id / operation / manifest_list / summary` but does NOT carry `is_current_ancestor`, so `$history` is the correct choice for "find the snapshot just before the bad job AND confirm it's on the current lineage." Routing nuance correctly handled.
 
-- `resources/28-complex-sql-performance-trino-dbt.md:1238` — *"Trino 467: bin-packs and re-sorts to honor the table's sorted_by property."* CORRECT.
-- `resources/17-iceberg-table-maintenance.md:276` — *"Trino's EXECUTE optimize reads sorted_by at OPTIMIZE time and produces sorted output."* CORRECT.
+2. **`is_current_ancestor` semantics** — TRUE means the snapshot is an ancestor of the CURRENT pinned snapshot (still on the live lineage); FALSE means it was branched/orphaned by a prior rollback. Correctly described as "tells if it's on current lineage."
 
-No FIX-A needed. Resources are accurate; responder routed cleanly. (The pinned [reference_trino_parquet_bloom_filter_469.md](https://github.com/hclin-code/recknihao/blob/main) caution about CREATE-vs-ALTER versioning is the right model for similar version-edge claims; this one stands.)
+3. **CALL form for Trino 467** — `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` is the CORRECT 467 form. VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim example `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`. Three positional args (schema, table, snapshot_id-as-BIGINT). The `ALTER TABLE ... EXECUTE rollback_to_snapshot(snapshot_id)` form is 469+ ONLY — responder correctly used CALL, not EXECUTE. Pinned-reference correctly applied (`reference_trino_rollback_snapshot_form.md`).
 
-- Minor shave (-0.5 Compl): could have explicitly named that the `file_size_threshold => '256MB'` controls which existing files are eligible for re-sort + re-pack (files ALREADY larger than threshold are skipped — so for a one-shot full-table re-sort you must set the threshold above the largest existing file, per r17 §279-281). Engineer running a recurring `file_size_threshold => '256MB'` schedule will get the streaming-small-files merged-and-sorted as expected on each tick, but won't re-sort big already-existing files. The Spark-streaming-many-small-files scenario in the question is exactly the case where this works as designed, so the practical answer is fine.
+4. **Metadata-only** — VERIFIED. Iceberg rollback updates the HMS `metadata_location` pointer to a previous metadata.json snapshot; no data files are rewritten or moved. "Just moves the current-snapshot pointer back, no data rewrite, bad files remain on MinIO but unseen" is exactly right — the bad-job files remain referenced by the rolled-back-from snapshot's metadata chain until `expire_snapshots` is called.
 
-## Q2 — RANGE INTERVAL window frame for 3-month rolling avg — STRONG
+5. **Operationally complete** — responder gives engineer a runnable two-step workflow: (a) browse `$history` ORDER BY made_current_at DESC + filter `is_current_ancestor=true`, (b) run the CALL with the pre-job snapshot_id. No bail.
 
-**Verdict: 4.9375.** Verified at [trino.io/blog/2021/03/10/introducing-new-window-features.html](https://trino.io/blog/2021/03/10/introducing-new-window-features.html) (RANGE with `<value>` PRECEDING was added in Trino 346): *"Since version 346, it is possible to specify RANGE with an offset value, where the frame includes all rows whose value is within this range from the current row."* Example from blog: `AVG(totalprice) OVER (PARTITION BY custkey ORDER BY orderdate RANGE BETWEEN INTERVAL '1' MONTH PRECEDING AND CURRENT ROW)`. Direct shape match. Trino 467 supports DATE / TIMESTAMP ordering columns with `INTERVAL` offset.
+Cites r17. Clean canonical reach. Naturally chains with iter1188+1189 expire-vs-orphan canonical (rolling back doesn't reclaim the bad files until expire_snapshots runs).
 
-- `AVG(revenue) OVER (PARTITION BY account_id ORDER BY month RANGE BETWEEN INTERVAL '2' MONTH PRECEDING AND CURRENT ROW)` — correct frame for "current month + 2 prior" on a DATE ordering column.
-- ROWS-vs-RANGE distinction CORRECT: ROWS counts physical rows (so a gap row pulls in months further back than wanted); RANGE+INTERVAL on a date column is calendar-value-based (frame includes all rows whose ordering-column value falls in `[current - 2 months, current]`). Engineer's missing-Feb example: for the 2025-03 row the frame includes any row with month in `[2025-01, 2025-03]` — captures Jan + Mar correctly; ROWS-2-PRECEDING would walk back through the previous 2 physical rows regardless of date and grab e.g. 2024-12 + 2025-01.
-- COALESCE / densify-a-calendar-spine caveat for empty frames / NULL avg also correct — when the 3-month window has no rows (first 2 months of the partition's history) the AVG is NULL; engineer needs `COALESCE(...,0)` if widget needs a numeric or LEFT JOIN against a calendar spine if they need every month present.
-- Minor shave (-0.25 Compl): could have noted that the first month of each account's history will have a 1-month frame (only itself); whether that's the desired semantics depends on definition. Recall ceiling, not load-bearing.
+---
 
-## Q3 — dbt-trino incremental_strategy='merge' for Iceberg — PASS
+## Q2 — CDC dedup to one-row-per-user latest via ROW_NUMBER
 
-**Verdict: 4.5.** Technically correct: `incremental_strategy='merge'` IS supported by dbt-trino for Iceberg tables. Trino 467 has native MERGE INTO on the Iceberg connector ([trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html)). dbt-trino compiles `incremental_strategy='merge'` into a Trino MERGE statement using `unique_key` as the ON predicate ([docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)): *"With the `merge` incremental strategy, dbt-trino constructs a Trino MERGE statement to insert new records and update existing records, based on the `unique_key` property."*
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0**
 
-Responder's troubleshooting hints (wrong catalog `hive.*` vs `iceberg.*`, old dbt-trino `<1.3`) are plausible — the Hive connector has very limited MERGE support, while the Iceberg connector supports MERGE natively; if the model resolves to a Hive-backed table the error matches. The dbt-trino docs explicitly warn: *"Be aware that there are some Trino connectors that don't support `MERGE` or have limited support."*
+Pin-perfect latest-row-per-key dedup canonical. All facts verified:
 
-- Minor shave (-0.5 Tech / -1.0 Compl): the framing "YES fully supported, no adapter limitation" is slightly over-absolute. Should have noted (a) the dbt docs explicitly warn that some Trino connectors have limited MERGE support and Hive is one of them — so verifying the target catalog is Iceberg is genuinely load-bearing; (b) the explicit fallback if MERGE isn't viable on a particular connector is `incremental_strategy='delete+insert'` (constructs DELETE+INSERT keyed on `unique_key`) — should have named this as the "if you're stuck" alternative; (c) `format_version: 2` is required for Iceberg MERGE / row-level deletes (V2 default in recent Iceberg, but worth a sanity-check if their table predates the V2 default).
-- Practical applicability shave: engineer hitting the error needs the diagnostic order: (1) check `dbt --version` (need dbt-trino ≥ 1.3); (2) check the model's target catalog (`{{ target.catalog }}` / profiles.yml — must resolve to an Iceberg catalog, not Hive); (3) check the table's `format_version` if it's a pre-existing table; (4) if stuck, fall back to `delete+insert`. Responder named (1) and (2) but not (3) or (4).
+1. **`ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY updated_at DESC) AS rn` + `WHERE rn = 1`** — confirmed at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition." Standard Trino 467 window function. Single-pass over the 50M-row table (one partitioned-sort scan), no self-join overhead.
 
-## Q4 — Oracle MINUS → Trino EXCEPT — STRONG PASS
+2. **`max_by(payload_col, updated_at)`** — valid Trino aggregate (verified prior at functions/aggregate.html), correctly framed as a SINGLE-COLUMN alternative when only one field from the latest row is needed. Responder correctly disambiguated: ROW_NUMBER + WHERE rn=1 for "all columns of latest row per user_id", `max_by` for "only one column from latest row." Selection rule sound.
 
-**Verdict: 5.0.** All facts verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html):
-- `query EXCEPT [ALL | DISTINCT] [CORRESPONDING] query` — supported; default is `DISTINCT` (dedupes).
-- `EXCEPT ALL` preserves duplicates from left input.
-- `INTERSECT` and `UNION` / `UNION ALL` also supported.
-- `MINUS` is NOT a Trino keyword (Oracle-specific synonym for EXCEPT DISTINCT).
-- NULL-safety contrast with `NOT IN` correctly stated: `EXCEPT` compares rows structurally including NULLs (two NULLs in the same column position match each other for EXCEPT-elimination purposes); `NOT IN (...)` returns no rows when the right side contains any NULL (the classic 3VL trap). For an Oracle engineer trained to write `WHERE col NOT IN (SELECT ...)` as a MINUS-substitute, this NULL caveat is the genuinely load-bearing nuance.
+3. **Self-join + MAX-GROUP-BY performance aside** — reasonable in general (self-join reads the same 50M-row table twice, ROW_NUMBER reads once + sorts in one pass). Slightly soft phrasing but not over-warning per `feedback_responder_overwarning_folklore` — ROW_NUMBER IS the idiomatic single-pass choice on this row count, so the "heavier" framing on self-join is accurate. No over-warning slip.
 
-## Topic updates
+No broken secondary alternative per `feedback_responder_broken_secondary_alternative` family.
 
-| Topic | Q | Old | New |
-|---|---|---|---|
-| Iceberg partition design for SaaS | Q1 = 4.875 | 4.4465/53 | 4.4544/54 |
-| Analytical query patterns on Iceberg+Trino | Q2 = 4.9375 | 4.5045/138 | 4.5076/139 |
-| Oracle PL/SQL → dbt+Trino migration | Q3 = 4.5, Q4 = 5.0 | 4.4592/148 | 4.4630/150 |
+---
 
-Total iter1190 score: **(4.875 + 4.9375 + 4.5 + 5.0) / 4 = 4.828 / 5 STRONG PASS NO-OP**.
+## Q3 — dbt model contracts: do they FAIL the build, and dbt-trino specifics
 
-## Next iteration
+**Score: 4.0 / 5.0 / 5.0 / 4.5 = 4.625**
 
-Return to BREADTH. No new watches, no resource defects, no FIX-A. Q1 confirms r28 §6.3 + r17 §276/§1238 `EXECUTE optimize honors sorted_by` claim is correct (re-verified against PR #14891 + issue #18136 + Starburst blog); this anchors the "compaction undoes our sort" worry-class. Q3 dbt-trino merge / Iceberg framing was good but slightly over-absolute — re-probe with a more pointed "but the dbt docs say some connectors have limited MERGE — does that include Iceberg?" framing in 5-10 iters to make sure responder routes to the connector-matrix nuance (Iceberg = native, Hive = limited) on the first try. Q4 EXCEPT vs MINUS is a clean recall; don't re-probe soon.
+Core load-bearing answer correct, but ONE phrasing imprecision worth flagging.
+
+### Verified correct:
+
+1. **Contracts ACTIVELY FAIL the build (not just docs)** — VERIFIED at [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) "before dbt has materialized it as a table in the database, you will see this error" + `Compilation Error in model dim_customers / This model has an enforced contract that failed` + mismatch table showing column_name / definition_type / contract_type / mismatch_reason. Build halts; downstream models skipped. Correct.
+
+2. **YAML config** — `config: contract: enforced: true` + `columns:` with `name + data_type + constraints` — correct shape, matches docs.
+
+3. **dbt-trino constraint matrix** — VERIFIED at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) verbatim: "The `dbt-trino` adapter supports model contracts. Currently, only constraints with `type` as `not_null` are supported." Responder's framing matches: only `not_null` is RUNTIME-enforced (Iceberg writes column as NOT NULL DDL, INSERT of NULL fails at write); `primary_key / unique / foreign_key` definable-but-not-enforced — pair with `dbt test` unique/not_null/relationships for runtime validation. Correct.
+
+### Imprecision (-1.0 Tech, -0.5 Compl):
+
+**"Build-time / preflight check before Trino is hit"** is mildly inaccurate. Per [docs.getdbt.com/docs/mesh/govern/model-contracts](https://docs.getdbt.com/docs/mesh/govern/model-contracts) dbt enforces contracts via TWO mechanisms:
+
+> (1) dbt will run a "preflight" check to ensure that the model's query will return a set of columns with names and data types matching the ones you have defined.
+>
+> (2) dbt will include the column names, data types, and constraints in the DDL statements it submits to the data platform, which will be enforced while building or updating the model's table.
+
+The preflight check in practice issues an introspection query (e.g., `SELECT * FROM (compiled_model_sql) WHERE 1=0`) AGAINST the warehouse to get back the actual column types — meaning Trino IS hit (just doesn't materialize anything). "Before Trino is hit" collapses this into a pure-local-compile claim which is technically wrong. The engineer's actionable outcome (build fails fast, no table materialized, downstream skipped) is still correct — load-bearing fail-fast behavior is right — but the mechanism framing is imprecise.
+
+**NOT a resource fix.** This is a phrasing slip not source-anchored in any resource. Recall ceiling — no FIX-A. If recurs in structurally different framing, consider a one-line clarifier in the dbt-contracts canonical. **SOFT WATCH:** re-probe contract mechanics in 5-10 iters with framing like "does dbt need a live Trino connection to enforce contracts" or "can contracts be validated in CI without warehouse access" to test whether the responder lands the two-phase (preflight introspection-query + DDL-time enforcement) distinction.
+
+---
+
+## Q4 — Oracle LISTAGG → Trino direct equivalent
+
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0**
+
+Pin-perfect Oracle-to-Trino direct port canonical. All load-bearing facts verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html):
+
+1. **`LISTAGG(expr [, sep] [ON OVERFLOW ...]) WITHIN GROUP (ORDER BY ...) [FILTER (WHERE ...)]`** — exact 467 syntax. Correctly framed as a DIRECT Oracle-equivalent (Oracle 11g/12c LISTAGG WITHIN GROUP shape is structurally identical). Pinned `reference_trino_listagg_native.md` correctly applied.
+
+2. **`ON OVERFLOW TRUNCATE '...' WITH COUNT`** — VERIFIED. Docs example `listagg(value, ',' ON OVERFLOW TRUNCATE '.....' WITH COUNT) WITHIN GROUP (ORDER BY value)`. Default truncation filler '...', optional WITH/WITHOUT COUNT for omitted-value count. Default-on-overflow behavior is to THROW; ON OVERFLOW TRUNCATE switches to truncate-with-filler.
+
+3. **1 MiB / 1,048,576 bytes per-result byte limit** — VERIFIED verbatim in docs. Without ON OVERFLOW clause, an aggregated string > 1 MiB ERRORS. Correctly named with the size figure.
+
+4. **NULL skipping** — VERIFIED per Trino aggregate-function general rule "all of these aggregate functions ignore null values and return null for no input rows or when all values are null." Matches Oracle LISTAGG's NULL-skip behavior — drop-in semantic equivalence.
+
+5. **No window/OVER form** — VERIFIED verbatim in docs: "The current implementation of `listagg` function does not support window frames." Responder correctly named the workaround (ROW_NUMBER subquery + then aggregate). Correct framing.
+
+6. **`array_join(array_agg(... ORDER BY ...), ', ')` alternative** — valid Trino 467 fallback; useful when caller needs window-frame semantics (which listagg can't do), needs custom NULL handling, or wants to deduplicate via `array_agg(DISTINCT ...)` before joining. Correctly framed as supplementary, not primary.
+
+Clean direct-port answer for an Oracle engineer. Cites r27 (Oracle-migration dialect-spillover guardrail) + r23 (string-agg canonical).
+
+---
+
+## Topic routing + score updates
+
+| Q | Topic | Score | Prior | New |
+|---|---|---|---|---|
+| Q1 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup (rollback canonical) | 5.0 | 4.4533/205 | 4.4560/206 |
+| Q2 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL (latest-row-per-key dedup canonical) | 5.0 | 4.5076/139 | 4.5111/140 |
+| Q3 | dbt model contracts | 4.625 | 4.4808/8 | 4.4968/9 |
+| Q4 | Oracle PL/SQL → dbt + Trino SQL migration (LISTAGG direct port) | 5.0 | 4.4631/150 | 4.4667/151 |
+
+All four touched topics remain comfortably PASSED. dbt model contracts row gets its 9th datapoint and lifts despite the Q3 imprecision.
+
+---
+
+## Open watches
+
+1. **iter1190 soft-watch — dbt merge connector matrix (Iceberg native vs Hive limited).** NOT exercised this iter (no merge connector-matrix question). Continue carrying forward; re-probe in next 5-8 iters with framing like "we're on hive.* catalog and getting merge unsupported errors — is this an adapter limit or a connector limit?" to test whether responder lands the Iceberg-native-vs-Hive-limited distinction without over-absolute framing.
+
+2. **iter1191 NEW soft-watch — dbt model contract enforcement mechanism (preflight introspection-query vs pure-local-compile).** Q3 phrasing "before Trino is hit" collapses dbt's two-phase enforcement (preflight introspection-query against warehouse + DDL-time constraints) into a misleading pure-offline-compile claim. Load-bearing fail-fast outcome correct; mechanism framing imprecise. NO FIX-A. Re-probe in 5-10 iters with framing like "do contracts need a live Trino connection" or "can contracts be validated in CI before deploy" to test whether the two-phase distinction lands. If recurs, consider one-line clarifier in the contracts canonical (e.g., "preflight introspects column types via a `WHERE 1=0` query — Trino IS hit but no data is materialized").
+
+---
+
+## Next iteration suggestion (iter1192)
+
+BREADTH continuation. Avoid re-probing today's exact angles. Suggested rotation:
+
+- **Q1**: an Iceberg maintenance angle not recently hit — e.g., snapshot retention floor (`retention_threshold` minimum 7 days enforcement / how to override `iceberg.expire_snapshots.min-retention`), or manifest rewrite (`rewrite_manifests` Spark-only on Trino 467, alternatives).
+- **Q2**: an analytical-pattern angle — e.g., conditional aggregation with FILTER clause, gap-detection / first-of-streak pattern (different from gaps-and-islands ceiling per `feedback_synthesis_ceiling_stop_churning`).
+- **Q3**: dbt OR best-practices — try the open iter1190 soft-watch on **merge connector matrix** with explicit Hive-vs-Iceberg framing.
+- **Q4**: Oracle-habit dialect function not recently tested — e.g., `INSTR` → `strpos` / `position(... IN ...)`, or `NVL2(expr, val_if_not_null, val_if_null)` → `IF(expr IS NOT NULL, ..., ...)` / `COALESCE`-CASE.
+
+All required topics PASSED.
+
+## Sources (verification)
+
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — rollback_to_snapshot signature, `$history` columns
+- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — listagg syntax + ON OVERFLOW + 1 MiB limit + no-window-frame note
+- [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) — row_number()
+- [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) — contract failure mode + error message shape
+- [docs.getdbt.com/docs/mesh/govern/model-contracts](https://docs.getdbt.com/docs/mesh/govern/model-contracts) — two-phase enforcement (preflight + DDL)
+- [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — dbt-trino: only `not_null` constraint supported
