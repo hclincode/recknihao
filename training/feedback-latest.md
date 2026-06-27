@@ -1,102 +1,119 @@
-# Iter1164 — Judge Feedback
+# Iter1165 — Judge Feedback
 
-**Verdict: 4.96875 STRONG PASS NO-OP. WATCH CLOSES.**
+**Verdict: 4.59375 STRONG PASS NO-OP.**
 
-**Iter average = (4.875 + 5.0 + 5.0 + 5.0) / 4 = 4.96875 STRONG PASS.** Three pin-perfect canonical reaches (date_parse/parse_datetime / MAX-OVER-PARTITION-BY single-pass / Iceberg UPDATE-MoR with maintenance follow-up) plus a clean Q1 watch re-probe — Q1 framing the strict-typing failure mode CORRECTLY as "Trino ERRORS with TYPE_MISMATCH" with NO silent-string-compare fabrication. The iter1163 r27 date-vs-string watch is now bounded: same failure-mode question class in different framing (DECIMAL × varchar vs date × varchar) reached the correct error-out answer first try. **WATCH `r27 date-vs-string-literal silent-string-comparison fabrication iter1163` CLOSES on first re-probe** — pattern consistent with the recent "first NO-OP/WATCH → close on next re-probe" cadence (r17 TopN-disambiguation / r23 VARCHAR-exact-comparison / r07 IGNORE-NULLS-placement / r07 percent-of-total).
+**Iter average = (4.25 + 4.5 + 4.75 + 4.875) / 4 = 4.59375 STRONG PASS.** Fresh breadth sweep across four distinct areas — analytical SCD-2 range join (Q1), Trino dialect-translation (Q2), Iceberg schema evolution (Q3), Oracle-to-dbt assertion migration (Q4). All four pass with comfortable margins. **Q2 was the dialect-critical verification** — the responder's claim that Trino 467 does NOT support `= ANY(ARRAY[...])` Postgres form is **VERIFIED CORRECT** against the Trino grammar (`quantifiedComparison: comparisonOperator comparisonQuantifier '(' query ')'` — operand MUST be a query, not an expression). No FIX-A. No watch opened. No resource defects detected.
 
-No resource defects detected. No FIX-A required. No new watch opened.
-
----
-
-## Q1 — DECIMAL column = '85' quoted-string predicate (WATCH RE-PROBE)
-
-**Score: 4.875** (Acc 5 / Clarity 5 / Practical 5 / Completeness 4.5)
-
-Responder correctly framed the failure mode:
-- **YES Trino errors** — TYPE_MISMATCH at analysis time. **NO silent-string-comparison claim** anywhere in the answer. The iter1163 Q4 fabrication ("Trino executes it as string comparison, wrong result") is **absent** from this re-probe.
-- Stated reason: Trino is strict about types, has **no implicit varchar↔number coercion** (unlike Postgres). Verified at [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) — implicit coercion list does NOT include varchar→decimal/bigint/double, and [Trino blog "Optimizing the Casts Away"](https://trino.io/blog/2019/05/21/optimizing-the-casts-away.html) explicitly confirms Trino "will not convert between character and numeric types."
-- Error shape `Cannot apply operator: decimal(p,s) = varchar(N)` is the documented `TYPE_MISMATCH` error class — same family as the [TYPE_MISMATCH: Cannot apply operator: date < varchar(10)](https://repost.aws/questions/QUpE0-ijXmRGaRD0LWYVfI0g/type-mismatch-line-3-32-cannot-apply-operator-date-varchar-10) case.
-
-Fix patterns correct:
-- `WHERE score = CAST('85' AS DECIMAL)` — works, partition-prunes via UnwrapCastInComparison (column stays bare).
-- `WHERE CAST(score AS VARCHAR) = '85'` — works but listed correctly as the worse alternative (column-side CAST breaks numeric semantics; e.g., 85 vs 85.0 vs 85.00 stringify differently).
-- Best-practice recommendation: emit `CAST('85' AS DECIMAL)` at param-generation time. Correct routing.
-
-**Minor completeness shave (-0.5)**: the most engineer-natural fix — **just unquote the literal at codegen** (`WHERE score = 85`, no CAST needed at all because a numeric literal `85` is implicitly compatible with DECIMAL) — was not explicitly named. CAST('85' AS DECIMAL) is functionally equivalent (and the responder's wording is correct) but unquoting is shorter and the more common production fix. Not load-bearing — engineer reading the answer arrives at correct code either way.
-
-**WATCH STATUS: CLOSED.** Different framing (DECIMAL column not DATE/TIMESTAMP column, Postgres-source-app not Oracle migration, codegen-quote-string not literal-string-in-SQL), same strict-typing question class — responder gave the correct TYPE_MISMATCH framing with zero silent-string-compare fabrication. r27 §4.2 + §4.4 + r23 strict-typing canonicals are doing their job; the iter1163 slip was a single-phrasing responder over-elaboration absorbed by 9 of last 9 recent watches closing on first re-probe.
-
-Cites r27.
+Per-topic deltas (all PASSED):
+- Analytical query patterns on Iceberg+Trino: 4.5258/116 → 4.5234/117 (-0.0024, margin +1.0234)
+- SQL query best practices for OLAP: 4.5827/234 → 4.5824/235 (-0.0003, margin +1.0824)
+- Iceberg table maintenance: 4.4518/191 → 4.4533/192 (+0.0015, margin +0.9533)
+- Oracle PL/SQL → dbt + Trino migration: 4.4588/133 → 4.4619/134 (+0.0031, margin +0.9619)
 
 ---
 
-## Q2 — Vendor MM/DD/YYYY VARCHAR → DATE parsing
+## Q1 — Point-in-time plan lookup, 500M events × account_plan_changes, set-based vs correlated subquery
 
-**Score: 5.0** (Acc 5 / Clarity 5 / Practical 5 / Completeness 5)
+**Score: 4.25** (Acc 4.0 / Clarity 4.5 / Practical 4.5 / Compl 4.0)
 
-Responder named both correct Trino 467 functions with the exact format strings:
-
-- **`date_parse('06/25/2026', '%m/%d/%Y')`** (MySQL-style) — returns `timestamp(3)`; wrap with `CAST(... AS DATE)` to get a date. Verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html): "Parses `string` into a timestamp using `format`" with example `date_parse('2022/10/20/05', '%Y/%m/%d/%H') → 2022-10-20 05:00:00.000`. Format specifiers `%m` (month 01-12), `%d` (day 01-31), `%Y` (4-digit year) all match the MM/DD/YYYY vendor feed correctly.
-
-- **`parse_datetime('06/25/2026', 'MM/dd/yyyy')`** (Joda-style) — returns `timestamp with time zone`. Verified at the same docs page: "Parses `string` into a timestamp with time zone using `format`" using JodaTime's DateTimeFormat pattern.
-
-The pair-framing is exactly right (one returns timestamp-without-tz, the other timestamp-with-tz; engineer picks based on whether they need TZ awareness). Both CAST-to-DATE wraps are documented and valid.
-
-CTE pattern to avoid repeating `date_parse(...)` in WHERE (parse once in staging, filter on typed DATE downstream) correct and aligns with the partition-pruning best-practice when the staged VARCHAR is the partition column AFTER materialization.
-
-Clean canonical. Cites r27 §4.2.
-
----
-
-## Q3 — Per-feature max broadcast onto every row in one pass
-
-**Score: 5.0** (Acc 5 / Clarity 5 / Practical 5 / Completeness 5)
-
-Pin-perfect window-function-as-broadcast canonical:
+Responder reached the **canonical SCD-2 range/interval join** answer:
 
 ```sql
-SELECT
-  account_id, feature_name, monthly_event_count,
-  MAX(monthly_event_count) OVER (PARTITION BY feature_name) AS max_for_feature,
-  CAST(monthly_event_count AS DOUBLE)
-    / MAX(monthly_event_count) OVER (PARTITION BY feature_name) AS fraction_of_max
-FROM account_usage;
+LEFT JOIN events e
+  ON e.account_id = p.account_id
+  AND e.event_timestamp >= p.effective_from
+  AND (p.effective_to IS NULL OR e.event_timestamp < p.effective_to)
 ```
 
-All load-bearing elements correct:
-- `MAX(x) OVER (PARTITION BY feature_name)` with no ORDER BY uses default frame `RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` = the whole partition. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): "All aggregate functions can be used as window functions by adding the OVER clause" + default frame semantics produce per-partition max broadcast onto every row.
-- `CAST(monthly_event_count AS DOUBLE)` correctly avoids integer division (Trino INTEGER/INTEGER returns INTEGER per pinned reference_trino_cast_to_integer_rounds.md family — without the CAST you'd lose decimal precision on the ratio).
-- Single-pass — no self-join, no subquery, no GROUP BY — engineer drops the existing per-feature-max subquery+join entirely.
+Half-open interval shape `[effective_from, effective_to)` correctly guarantees exactly-one-plan-per-event under non-overlapping intervals. To bridge the current schema (only `effective_from`, no `effective_to`): responder offered (a) ALTER TABLE + backfill, (b) dbt snapshot `strategy='timestamp'` with updated_at=effective_from producing `dbt_valid_from`/`dbt_valid_to` per [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots). Routing to r09 SCD-2 + dbt snapshots correct.
 
-Cites r23. Clean canonical reach.
+Correctly did NOT fabricate an ASOF JOIN — verified Trino 467 has no native ASOF JOIN ([trinodb/trino#10180](https://github.com/trinodb/trino/issues/10180) still open).
 
----
+**Minor accuracy shaves (-0.5 Acc / -0.5 Compl):**
+1. **"Trino decorrelates into a hash/broadcast join scanning plans once"** — slight mis-framing. The query as written is already a JOIN, not a correlated subquery, so there's no decorrelation rewrite step. Trino executes the equi-join on account_id as a hash join (broadcast if plans is small) with the timestamp range as a residual/post-join filter. The contrast (single plans scan vs per-row rescans) is fair; "decorrelates" is the wrong mechanism name. Per [trino.io/docs/current/optimizer/dynamic-filtering.html](https://trino.io/docs/current/optimizer/dynamic-filtering.html) dynamic filtering applies to equi-join keys.
+2. **"Range predicates sargable, will prune partitions if plans partitioned by time"** — loose. Partition pruning works for predicates against constants/literals on a single table. A per-row range across two tables (`e.event_timestamp >= p.effective_from`) is not a constant-predicate prune. Dynamic filtering covers the equi-side automatically; range-on-join-key is not effectively prunable here.
+3. **Missed alternative**: the LEAD-derived `effective_to` trick — `LEAD(effective_from) OVER (PARTITION BY account_id ORDER BY effective_from) AS effective_to` in a CTE — is the most concise way to materialize the missing column **without** schema change or dbt snapshot. Useful for engineers reluctant to ALTER or set up snapshot. Verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) LEAD/LAG.
 
-## Q4 — UPDATE on Iceberg via Trino (teammate's "must delete+reinsert" claim)
-
-**Score: 5.0** (Acc 5 / Clarity 5 / Practical 5 / Completeness 5)
-
-Responder is correct on every load-bearing point:
-
-- **Teammate is WRONG.** Trino 467 SUPPORTS `UPDATE` on Iceberg. Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): the Iceberg connector lists Data management as supported (INSERT/UPDATE/DELETE/MERGE) and "Tables using v2 of the Iceberg specification support deletion of individual rows by writing position delete files." UPDATE is implemented via MoR (delete-then-insert at the file level).
-
-- Concrete SQL `UPDATE iceberg.analytics.metrics SET status='active' WHERE account_id=4521` is the correct Trino 467 form.
-
-- **Merge-on-Read mechanic correctly described**: writes position-delete files + new data files in the same snapshot, regardless of `write.update.mode`. Trino 467 only writes MoR for row-level updates on Iceberg v2 — it does not implement copy-on-write for UPDATE; this matches the Iceberg connector behavior in 467 (the property exists in the Iceberg spec but Trino writer ignores `copy-on-write` for UPDATE and always emits position-delete + new rows).
-
-- **Maintenance follow-up correct**: accumulating position-delete files cause read amplification; `ALTER TABLE ... EXECUTE optimize` is the Trino 467 compaction lever. Verified at the same docs page: "The `optimize` command is used for rewriting the content of the specified table so that it is merged into fewer but larger files" (and rewrites data files including those with active delete files, effectively reclaiming them).
-
-- **`rewrite_position_delete_files` correctly scoped Spark-only**: the Trino 467 procedure list at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) is `register_table` / `unregister_table` / `migrate` / `add_files` / `rollback_to_snapshot` — `rewrite_position_delete_files` is NOT listed. Iceberg's `RewritePositionDeleteFiles` action is only callable via Spark `CALL system.rewrite_position_delete_files(...)`. Responder explicitly flagging this asymmetry is exactly right and matches pinned reference_trino_rollback_snapshot_form.md "Trino procedure ≠ Spark CALL" framing.
-
-Matches all known pins. Clean canonical. Cites r17.
+**Practical impact bounded** — engineer reading the answer writes the right query. Framing slips don't change actionable code. NO RESOURCE FIX. Cites r09.
 
 ---
 
-## Summary
+## Q2 — Postgres `WHERE status = ANY(ARRAY['active','pending','trial'])` on Trino [CRITICAL DIALECT VERIFICATION]
 
-- **Q1 (4.875) WATCH CLOSE** — re-probe answered with correct TYPE_MISMATCH framing; iter1163 silent-string-compare fabrication did not recur. Watch `r27 date-vs-string-literal silent-string-comparison fabrication iter1163` **CLOSED on first re-probe**. Minor shave only — didn't name the simplest fix (unquote at codegen).
-- **Q2 (5.0)** — clean Trino-date-parsing canonical, both date_parse (MySQL-style) and parse_datetime (Joda) correctly named with format strings + return types + CAST-to-DATE wrap.
-- **Q3 (5.0)** — clean MAX-OVER-PARTITION-BY broadcast canonical with CAST-AS-DOUBLE integer-division guard.
-- **Q4 (5.0)** — clean Trino-467 Iceberg UPDATE MoR + EXECUTE optimize + rewrite_position_delete_files Spark-only canonical; matches all pinned references.
+**Score: 4.5** (Acc 5.0 / Clarity 4.5 / Practical 4.5 / Compl 4.0)
 
-**Iter average 4.96875.** No FIX-A. No new watch. No churn. Three 5.0s in a row plus a corrected re-probe is exactly the closure pattern.
+**Responder's claim — "Trino 467 does NOT natively support `= ANY(ARRAY[...])`, must convert every instance to `IN (...)`" — VERIFIED CORRECT.**
+
+Trino 467 grammar in [SqlBase.g4](https://github.com/trinodb/trino/blob/master/core/trino-grammar/src/main/antlr4/io/trino/grammar/sql/SqlBase.g4) defines:
+
+```antlr
+| comparisonOperator comparisonQuantifier '(' query ')'   #quantifiedComparison
+```
+
+The operand inside the parentheses must be a `query` (subquery, `VALUES` clause, or `SELECT`) — NOT an arbitrary expression. An `ARRAY[...]` literal is an expression, not a query, so `= ANY(ARRAY['active','pending','trial'])` does not match this rule and fails parsing. [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html) shows only `'hello' = ANY (VALUES 'hello', 'world')` and `SELECT 42 >= SOME (SELECT 41 UNION ALL ...)` — both query operands, never an ARRAY literal.
+
+The responder's recommended fix `col IN ('active','pending','trial')` is the canonical and idiomatic Trino form. Bulk find/replace + `dbt parse` verification guidance is practical and complete for the engineer's "hundreds of these" scenario.
+
+**Minor completeness shaves (-1.0 Compl):** the responder missed two valid Trino-native alternatives worth surfacing for migration planning:
+
+1. **`contains(ARRAY['active','pending','trial'], status)`** — array-membership boolean per [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html). Useful when the array is already a parameter or variable in the application code (smaller rewrite delta than expanding to a flat IN-list).
+2. **`status = ANY (VALUES 'active', 'pending', 'trial')`** — the literally-closest valid Trino form. `VALUES` IS a query, so this DOES parse correctly. For mechanical bulk rewriting of "hundreds of `= ANY(ARRAY[...])`" call sites, the `ARRAY[...]` → `VALUES ...` substitution is structurally smaller than full IN-list expansion. IN is still the most idiomatic Trino form, but VALUES is an interesting middle ground.
+
+These are recall ceiling, NOT defects. The primary answer (use `IN`) is correct, idiomatic, and engineer-actionable. The federation `system.query()` passthrough note is accurate but tangential (engineer wants native Trino, not federation).
+
+NO RESOURCE FIX. Correct dialect call on the headline question. Cites r22.
+
+---
+
+## Q3 — Iceberg `RENAME COLUMN raw_user_id → user_id` on 400M-row Parquet without rewrite
+
+**Score: 4.75** (Acc 5.0 / Clarity 4.5 / Practical 5.0 / Compl 4.5)
+
+Pin-perfect Iceberg schema-evolution canonical. All load-bearing facts verified:
+
+- **Metadata-only operation, zero data rewrite** per [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/) "Iceberg schema updates are metadata changes, so no data files need to be rewritten to perform the update."
+- **Trino syntax** `ALTER TABLE iceberg.analytics.events RENAME COLUMN raw_user_id TO user_id` per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html).
+- **Field-ID-based column resolution** per [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) — Iceberg assigns a unique field ID to every column at creation; that ID is stored in both table metadata AND embedded Parquet file metadata. When Iceberg reads a data file, it matches columns by ID, not by name or position. Field ID is unchanged across rename.
+- **Old Parquet files DO NOT break** — they continue to resolve via field-ID mapping. The physical name inside the old Parquet (`raw_user_id`) still exists in the file but is mapped to the new logical name through the unchanged field ID.
+- **Caveat correctly flagged**: old NAME stops resolving in queries immediately after ALTER — dbt models / dashboards / saved queries referencing `raw_user_id` fail with "Column cannot be resolved" until updated.
+
+Three concrete migration patterns offered (atomic PR / gradual via view alias `CREATE VIEW v_events AS SELECT user_id AS raw_user_id, ... FROM events` for backward compat / compat-view dual-naming during transition window) — engineer knows exactly what to do.
+
+**Minor completeness shave (-0.5 Compl):** could note that the rename creates a new metadata snapshot which is still rollbackable via `CALL iceberg.system.rollback_to_snapshot(...)` per pinned `reference_trino_rollback_snapshot_form.md` — useful as a safety net during the cutover window. Recall ceiling, NOT a defect.
+
+Cites r17. Clean canonical reach.
+
+---
+
+## Q4 — Oracle `RAISE_APPLICATION_ERROR` for data quality → dbt built-in assertion concept
+
+**Score: 4.875** (Acc 5.0 / Clarity 5.0 / Practical 5.0 / Compl 4.5)
+
+Pin-perfect dbt data-test canonical with Oracle migration framing intact. All load-bearing facts verified at [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests) + [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build):
+
+1. **Four built-in generic tests** `unique` / `not_null` / `accepted_values` / `relationships` defined as YAML properties on model columns in `schema.yml` (`data_tests:` key in dbt 1.8+, also accepts legacy `tests:` key).
+2. **Compile-to-failing-rows-SELECT semantic** — verified verbatim: "they are `select` statements that seek to grab 'failing' records, ones that disprove your assertion...If the data test returns zero failing rows, it passes." 0 rows = PASS; >=1 row = FAIL.
+3. **Default `severity: error` blocks downstream** — verified verbatim from `dbt build` docs: "Tests on upstream resources will block downstream resources from running, and a test failure will cause those downstream resources to skip entirely. E.g. If `model_b` depends on `model_a`, and a `unique` test on `model_a` fails, then `model_b` will `SKIP`."
+4. **`dbt build` interleaves models + tests in DAG order** — runs model, then tests on that model, then dependents. Test failure SKIPs dependents and exits non-zero so CI/CD halts (the equivalent of Oracle's procedural-abort semantics).
+
+Direct replacement for `RAISE_APPLICATION_ERROR` correctly framed — engineer's loud-immediate-failure semantic preserved (test fails → downstream skipped → CI halts → alert via existing CI infrastructure). Concrete YAML walkthrough copy-pasteable. Cites r28/r09.
+
+**Minor completeness shave (-0.5 Compl):** could mention three complementary configs the engineer may want later:
+- `severity: warn` + `error_if: ">100"` / `warn_if: ">10"` thresholds per [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity) for "alert but don't block" partial-degradation case (Oracle had no built-in for this; it's a step up from RAISE_APPLICATION_ERROR's binary semantic).
+- Singular data tests in `tests/` directory for arbitrary SQL assertions beyond the four generics.
+- `store_failures: true` config to persist failing rows for forensic inspection (analogous to logging the offending PK in Oracle before the RAISE).
+
+All recall ceiling NOT defects — engineer's core ask (built-in assertion concept that fails pipeline + alerts) fully answered with copy-pasteable YAML.
+
+---
+
+## Patterns
+
+- **Q2 dialect verification was the iter's load-bearing check.** Trino grammar (`'(' query ')'` operand) confirms the responder's "not supported, use IN" call. This is the **inverse** of the recent imported-prior family slips (`starts_with` / `to_char` / `listagg` / `array_sum` / `truncate(x,n)` — assumed-absent of foreign-looking functions). The Postgres `= ANY(ARRAY[...])` form actually IS absent from Trino, and the responder correctly identified it as such. Healthy verify-direction calibration — responder did NOT over-correct toward "assume foreign syntax IS supported" after the recent imported-prior corrections.
+- **Q1 framing slips ("decorrelates", "partition prune") are responder padding family** per pinned `feedback_responder_broken_secondary_alternative.md` — primary canonical correct, secondary mechanism-naming slightly off. NO-OP, scope as per-instance.
+- **Q3 + Q4 pin-perfect** on hard-to-fake metadata-only / interleaved-DAG-skipping facts — r17 + r28 + r09 routing strong.
+- **No FIX-A. No watch opened.** Fresh breadth sweep across four distinct areas, all PASSED with margins +0.95 to +1.08. Iter1163 r27 date-vs-string watch already closed by iter1164 Q1 re-probe; no carryover watch from prior iters.
+
+---
+
+Next sweep: continue breadth probing on less-recently-tested angles. Candidates: Iceberg partition evolution (vs schema evolution covered today), Trino federation predicate-pushdown edge cases, dbt model contracts vs data tests boundary (different question class than Q4), Iceberg time-travel rollback semantics paired with the iter1165 Q3 schema-evolution snapshot lineage.
