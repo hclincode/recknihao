@@ -1,139 +1,226 @@
-# Iter1193 Judge Feedback
+# Iter1194 Judge Feedback
 
-**Overall: 4.92 / 5.0 — STRONG PASS, NO-OP.** All 4 answers technically sound and production-stack-aligned. Q1 has one mild secondary-framing slip on Trino-optimize-vs-Spark-rewrite_data_files routing but the core partition-evolution canonical is pin-perfect and the Spark routing the responder lands on is correct and prod-stack-aligned. Q2 / Q3 / Q4 clean ≥4.9. WATCHES from iter1192 (`delete+insert-on-non-ACID-Hive defang`) and iter1191 (`dbt-contract two-phase mechanism`) NOT exercised this iter — both carry forward.
-
----
-
-## Q1 — Iceberg ALTER TABLE partition spec evolution (month→day), what happens to existing data
-
-**Score: 5.0 / 5.0 / 4.0 / 5.0 = 4.75 (PASS)**
-
-Core partition-evolution canonical is pin-perfect. One secondary-routing imprecision on the Trino-optimize-vs-Spark-rewrite_data_files framing — engineer arrives at the correct action (Spark for historical re-layout) so practical impact is bounded.
-
-### Verified correct (load-bearing primary axis):
-
-1. **DDL form `ALTER TABLE iceberg.<schema>.<table> SET PROPERTIES partitioning = ARRAY['day(signed_up_at)']`** — VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim:
-   > "ALTER TABLE table_name SET PROPERTIES partitioning = ARRAY[<existing partition columns>, 'my_new_partition_column'];"
-
-   The `'day(signed_up_at)'` transform notation is the documented Iceberg/Trino transform syntax (alongside `month(...)`, `year(...)`, `hour(...)`, `bucket(col, N)`, `truncate(col, L)`). Responder's exact form is copy-pasteable.
-
-2. **NO drop-and-recreate needed** — VERIFIED. Trino docs verbatim: *"Partitioning can also be changed and the connector can still query data created before the partitioning change."* Plus the Dremio future-proof-partitioning blog: *"Partition evolution lets you change how a table is partitioned, from monthly to daily granularity, from one column to multiple columns, or from no partition to a fully partitioned layout, without rewriting a single data file."*
-
-3. **Old files KEEP old (month) partition spec, NEW writes use new (day) spec** — VERIFIED. This is the foundational Iceberg partition-evolution semantic: each data file records the partition-spec-ID it was written under, and the planner uses the per-file recorded spec for pruning. Old files pruned at month granularity, new files at day granularity, all under one logical table. Responder's framing exact.
-
-4. **No automatic rewrite, no auto-repartitioning** — VERIFIED. Per Iceberg spec, partition evolution is a metadata-layer schema change; data files are NOT touched. Engineer's specific question ("auto-repartitioned, or old files keep old layout while new writes use new") answered correctly: the second branch.
-
-5. **Partition pruning on old files still works (at month granularity)** — VERIFIED. The planner uses per-file partition-spec-ID for pruning; old files still get correctly pruned at month-level. New queries crossing the cutover boundary scan a mix of old-spec and new-spec files transparently.
-
-### Imprecision — Trino-EXECUTE-optimize-vs-Spark-rewrite_data_files routing (Acc 5.0, App 4.0):
-
-Responder framed historical re-layout as: *"For historical files under the new spec, use SPARK to rewrite them (Trino's EXECUTE optimize has limitations on evolved partition columns per resource 17): CALL iceberg.system.rewrite_data_files(table => 'schema.users')."*
-
-Two sub-points to verify:
-
-**(a) Does Trino 467 have a native `rewrite_data_files` procedure?** — VERIFIED **NO**. Trino 467 docs list these `iceberg.system.*` procedures: `register_table`, `unregister_table`, `migrate`, `add_files_from_table`, `add_files`, `rollback_to_snapshot`. NO `rewrite_data_files`. So routing the engineer to Spark's `CALL <catalog>.system.rewrite_data_files(...)` is the **correct routing** — the responder is right that this is Spark-side. Spark Iceberg's `rewrite_data_files` procedure DOES exist per [Iceberg Spark procedures docs](https://iceberg.apache.org/docs/latest/spark-procedures/#rewrite_data_files). Production-stack-aligned per `prod_info.md` (Spark is the ingestion engine).
-
-**(b) Does Trino's `EXECUTE optimize` actually FAIL TO rewrite files into the new partition spec?** — PARTIALLY. The precise behavior per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): *"If the table is partitioned, the data compaction acts separately on each partition selected for optimization."* Per [trinodb/trino #25279](https://github.com/trinodb/trino/issues/25279) "Add support to optimize iceberg table on newly added partition predicate": the documented limitation is that the **newly-added partition column cannot be used in a predicate during optimize**. The unrestricted `ALTER TABLE ... EXECUTE optimize` (no WHERE) without a new-partition-column predicate CAN rewrite files into the new spec — partition compaction acts per partition under the current spec. Per Dremio's "Future-Proof Partitioning" blog: *"if you compact old data to the new partition spec, you temporarily double storage until old snapshots are expired"* — confirming Trino's optimize CAN rewrite to new spec in the unrestricted case.
-
-So the responder's claim "Trino's EXECUTE optimize has limitations on evolved partition columns" is **technically true but over-warned** — the limitation is narrow (predicate-only, on the new partition column), NOT a blanket inability to rewrite. The engineer who reads this verbatim is routed to Spark (which works on this stack), but is denied the in-place Trino option (`ALTER TABLE iceberg.<schema>.users EXECUTE optimize(file_size_threshold => '512MB')` without a new-day-column predicate) that ALSO works.
-
-Per `feedback_responder_broken_secondary_alternative.md` and `feedback_responder_overwarning_folklore.md` families — this is a mild over-warning on a secondary alternative, not a load-bearing error. Core answer is right; engineer arrives at a working action; the omitted Trino-side path is a recall ceiling. **NO RESOURCE FIX** per directive: "if responder OVER-stated Trino optimize's limitation, flag as minor secondary imprecision, don't tank score since core answer is right."
-
-### Production stack fit:
-
-Recommendation routes correctly — Spark Iceberg procedures fit `prod_info.md` (Spark is the ingestion engine). No imported-prior slip on procedure existence (responder correctly identifies `rewrite_data_files` as Spark-side, not making the iter1168-style mistake of assuming a procedure is Spark-only when it's actually Trino-native). 
+**Overall: 4.00 / 5.0 — PASS WITH FIX-A (TWO RESOURCE-SOURCED DEFECTS).** Q3 is the load-bearing failure (factually wrong: sided with the wrong teammate on dbt model-contract enforcement timing) AND it is resource-sourced (r27 §6.7C + r28 §282 both teach the wrong "compile-time check" framing). Q1 has an over-stated Spark-only claim that is also resource-sourced (r28 §348–403 "delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut" — refuted by Trino issue #12617 completed in 2022 + Starburst blog quote). Q2 + Q4 clean 5.0. The iter1191 dbt-contract two-phase-mechanism WATCH was exercised this iter AND CONFIRMS THE DEFECT — recommend LIGHT FIX-A reconcile-in-place on both r27 §6.7C and r28 §282 (Q3) and r28 §348–403 (Q1).
 
 ---
 
-## Q2 — CROSS JOIN UNNEST array element + position (1st/2nd/5th) in same query, no self-join
+## Q1 — Iceberg position-delete maintenance: collapse delete files back into data files
+
+**Score: 3.0 / 5.0 / 4.0 / 4.0 = 4.0 (PASS, but over-stated Spark-only claim — RESOURCE-SOURCED)**
+
+### What the responder said:
+- YES — Iceberg v2 merge-on-read writes position-delete files on DELETE/UPDATE/MERGE; reads merge them at query time. CORRECT.
+- Two-step fix:
+  - **Step 1 (load-bearing): SPARK `CALL iceberg.system.rewrite_position_delete_files(table => 'iceberg.analytics.subscriptions')` — Trino 467 has NO equivalent for position-delete compaction.**
+  - Step 2: Trino `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` compacts data files.
+
+### What's wrong:
+
+The "Trino 467 has NO equivalent for position-delete compaction" framing is **OVER-STATED**. Verified evidence:
+
+1. **[trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617) "Remove unused position and equality deletes when running Iceberg `optimize`" — CLOSED, completed by PR #12704 (2022).** Trino's `EXECUTE optimize` already removes unused position+equality delete files when run without path or file_modified_time predicates. This shipped well before Trino 467.
+
+2. **[trinodb/trino#24086](https://github.com/trinodb/trino/issues/24086)** quote from a Trino maintainer in the thread: *"Position deletes are local to a partition. OPTIMIZE supports only enforced predicates which select whole partitions. Therefore, we can clean up position deletes in OPTIMIZE when there are no path or file_modified_time predicates."*
+
+3. WebSearch summary of Trino current docs (verbatim paraphrase): *"The OPTIMIZE command can even remove position delete files in merge-on-read tables by rewriting affected data files."*
+
+The accurate model is:
+
+- **Trino `EXECUTE optimize`** REWRITES DATA FILES affected by deletes — after optimize, the rewritten data files no longer reference the position-delete files, so reads no longer reconcile them. As a side effect (per #12617), unused position+equality delete files become eligible for cleanup.
+- **Spark `rewrite_position_delete_files`** is a SEPARATE, cheaper operation that COMPACTS many small delete files into fewer larger delete files WITHOUT rewriting data — useful when many small delete files have accumulated but most are still actively referenced (delete-file-only compaction).
+- For the engineer's stated goal ("collapses delete files back into data files so reads don't check them all"), **Trino `EXECUTE optimize` ALONE solves the read-slowdown** on this stack. Spark `rewrite_position_delete_files` is optional and cheaper, not load-bearing.
+
+### Resource source — RESOURCE-SOURCED DEFECT in r28 §348-403:
+
+`grep` confirmed the over-claim is sourced from `resources/28-complex-sql-performance-trino-dbt.md` §348-403 (LEADING CANONICAL — merge-model degradation workflow). Specifically:
+
+- L350: *"Run Spark `rewrite_position_delete_files` to compact the delete files — there is NO Trino-native equivalent on 467 (see DO-NOT-WRITE below for the common fab). **This is the load-bearing fix.**"*
+- L390 DO-NOT-WRITE row: *"`ALTER TABLE fct_events EXECUTE rewrite_position_delete_files` — **No such Trino EXECUTE procedure on 467. Trino's `optimize` does NOT compact position-delete files on this version.** ... delete-file compaction must be scheduled as a Spark job."*
+- L397 DO-NOT-WRITE row: *"'I'll fix this by running `EXECUTE optimize` from Trino more often — it'll clean up the delete files too' — **WRONG — Trino's `optimize` on 467 does NOT compact delete files, only data files.**"*
+- L403: *"**On Trino 467 + Iceberg 1.5.2, delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut.**"*
+
+These framings conflate two distinct operations:
+- **(a) Applying deletes by rewriting affected data files + removing now-unreferenced delete files** = exactly what Trino `EXECUTE optimize` DOES (per #12617).
+- **(b) Compacting delete-file CONTENTS (many small delete files → fewer larger delete files) WITHOUT rewriting data** = what Spark `rewrite_position_delete_files` does (genuinely Spark-only).
+
+The resource over-generalizes (b)'s Spark-only-ness to claim all position-delete handling is Spark-only — which is false.
+
+### LIGHT FIX-A recommendation for r28 §348-403:
+
+Reconcile in place:
+
+1. L350 — change "load-bearing fix" framing to:
+   > "**Two complementary fixes:** Trino `EXECUTE optimize` is the primary lever — it rewrites data files affected by deletes (so reads no longer reconcile delete files for those data files) AND removes unused delete files as a side effect (per [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617), completed 2022). **For most "reads slow because of accumulated deletes" cases, Trino `EXECUTE optimize` alone solves the problem.** Spark `rewrite_position_delete_files` is a cheaper, optional delete-file-only compaction (compacts MANY small delete files into FEWER larger delete files WITHOUT rewriting data files) — useful when many delete files are still actively referenced and rewriting data files would be too expensive."
+
+2. L390 — soften the DO-NOT-WRITE row. The Trino EXECUTE form `EXECUTE rewrite_position_delete_files` doesn't exist as a Trino procedure (correctly defanged), but the "Trino's optimize does NOT compact delete files" claim must be REMOVED. Replace with:
+   > "Trino's `optimize` rewrites affected data files (applying deletes) and removes orphaned delete files (#12617) but does NOT compact delete file contents into fewer larger delete files. For the latter, use Spark `rewrite_position_delete_files`."
+
+3. L397 — REMOVE the row entirely (it teaches a false claim). Or replace with:
+   > "'I'll fix this with Trino `EXECUTE optimize` alone — should I also schedule Spark `rewrite_position_delete_files`?' — **Trino `EXECUTE optimize` alone is sufficient for most cases** (it rewrites affected data files + removes orphaned delete files per #12617). Add Spark `rewrite_position_delete_files` ONLY if you observe many small delete files still actively referenced by data files that don't yet meet the data-file rewrite threshold."
+
+4. L403 — change "delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut" to:
+   > "On Trino 467, `EXECUTE optimize` is the primary delete-application lever (rewrites data files + clears orphaned deletes per #12617). Spark `rewrite_position_delete_files` is the secondary delete-file-only compaction lever (compacts delete-file contents without rewriting data)."
+
+### Production-stack fit:
+
+Routing to Spark still works on this stack (Spark is the ingestion engine per `prod_info.md`), so the engineer arrives at a working action — but is denied the simpler in-place Trino path that also works. Practical impact bounded (not load-bearing for "does it work?") but the resource's load-bearing claim is factually wrong.
+
+---
+
+## Q2 — NTILE(4) for equal-size quartile bucketing on 90-day spend
 
 **Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (STRONG PASS)**
 
-Pin-perfect `UNNEST WITH ORDINALITY` canonical. All load-bearing facts VERIFIED at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html):
+Pin-perfect NTILE quartile canonical. All load-bearing facts VERIFIED at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html):
 
-1. **Syntax `CROSS JOIN UNNEST(viewed_skus) WITH ORDINALITY AS t(sku, position)`** — VERIFIED verbatim: *"UNNEST can optionally have a WITH ORDINALITY clause, in which case an additional ordinality column is added to the end"*; example *"UNNEST (ARRAY[2, 5], ARRAY[7, 8, 9]) WITH ORDINALITY AS t(a, b, rownumber)"*. Responder's exact shape.
+1. **`NTILE(4) OVER (ORDER BY SUM(spend) DESC)`** — VERIFIED. Trino docs verbatim: *"Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."* Example with 6 rows and 4 buckets distributes as `1 1 2 2 3 4` — as-balanced-as-possible (which is the engineer's actual ask — equal-sized buckets without manual cutoffs).
 
-2. **Ordinality column appended LAST, 1-based bigint** — VERIFIED. Docs example output shows `rownumber` values 1, 2, 3 sequential. Engineer's literal "1st/2nd/5th" maps directly.
+2. **CTE structure**: `SELECT account_id, NTILE(4) OVER (ORDER BY SUM(spend) DESC) AS quartile FROM events WHERE event_date >= current_date - INTERVAL '90' DAY GROUP BY account_id` — sound. NTILE operates over the aggregated rows (one per account_id), assigning 1=top 25% / 4=bottom 25%.
 
-3. **Two-alias `AS t(sku, position)` names element + ordinality** — VERIFIED via the docs example `AS t(a, b, rownumber)` (two element columns plus ordinality alias).
+3. **`current_date - INTERVAL '90' DAY`** — VERIFIED valid Trino 467 date arithmetic per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html). `INTERVAL` literal `'90' DAY` is documented; `current_date` returns DATE; result is DATE.
 
-4. **Duplicates get distinct ordinals** — Responder's example `ARRAY['a','b','a']` → `(a,1), (b,2), (a,3)` is correct: ordinality is by POSITION not by value, so duplicate values get distinct ordinals. Pin-perfect demonstration.
+4. **Direction guardrail (ORDER BY DESC → bucket 1 = highest, ASC → bucket 1 = lowest)** — accurate. This is exactly the sort-direction trap that bites engineers using NTILE for percentile ranking.
 
-5. **`LEFT JOIN UNNEST(...) WITH ORDINALITY AS t(...) ON TRUE` preserves rows with NULL/empty arrays** — VERIFIED verbatim: *"LEFT JOIN is preferable in order to avoid losing the row containing the array/map field in question when referenced columns from relations on the left side of the join can be empty or have NULL values"* + *"in case of using LEFT JOIN the only condition supported by the current implementation is ON TRUE"*. Responder's exact form.
+5. **Auto-shift with data** — NTILE re-bucketizes on every query run, so quartile cutoffs move with the data. No manual percentile thresholds, no big CASE WHEN — direct match for engineer's ask "without manual percentile cutoffs + big CASE".
 
-Matches r07 §156-186 (iter720 PIN — FIX-A) LEADING CANONICAL doing its job. Same canonical reached cleanly at iter1176 Q2 + iter1177 Q4 + now iter1193 Q2 (3 of last 3 UNNEST-WITH-ORDINALITY angles passed clean 5.0). No imported-prior slip, no broken-secondary-alternative slip.
+6. **CASE label mapping (quartile=1 → 'Top 25%', =4 → 'Bottom 25%')** — sound for human-readable output.
+
+No imported-prior slip, no broken-secondary-alternative slip, no over-warning. Clean canonical reach.
 
 ---
 
-## Q3 — dbt seed for ~250-row ISO-country→region lookup CSV
+## Q3 — dbt model contract enforcement: live Trino connection needed or pure offline parse/compile? (WATCH iter1191 + SUSPECTED WRONG)
+
+**Score: 1.0 / 4.5 / 1.0 / 1.5 = 2.0 (FAIL — LOAD-BEARING FACTUAL ERROR; RESOURCE-SOURCED)**
+
+### THE RESPONDER SIDED WITH THE WRONG TEAMMATE. TEAMMATE B IS CORRECT, NOT TEAMMATE A.
+
+### Verified against dbt docs:
+
+**[docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract):**
+- Validation timing: *"When you `dbt run` your model, _before_ dbt has materialized it as a table in the database, you will see this error"* — indicates **contract validation occurs during `dbt run`, NOT during `dbt parse` or `dbt compile`.**
+- Compares actual columns/types returned by SQL model's query vs declared columns/types in YAML.
+- Requires runtime because dbt must execute the SQL model and inspect the actual result-set schema.
+
+**[docs.getdbt.com/docs/mesh/govern/model-contracts](https://docs.getdbt.com/docs/mesh/govern/model-contracts):**
+- *"When building a model with a defined contract, dbt will do two things differently: 1. dbt will run a 'preflight' check to ensure that the model's query will return a set of columns with names and data types matching the ones you have defined."*
+- The preflight check happens during the **build process**, which requires **a live warehouse connection** to execute the model's SQL query.
+- **"A CI pipeline running only `dbt parse` and `dbt compile` WITHOUT warehouse access cannot catch data-type contract violations."** — verbatim from the docs page.
+- Build-time enforcement also involves DDL — *"dbt will include the column names, data types, and constraints in the DDL statements it submits to the data platform"* — explicitly warehouse-interactive.
+
+### What the responder said vs reality:
+
+| Responder claim | Reality |
+|---|---|
+| "Your FIRST teammate is right." | WRONG — Teammate **B** is right. |
+| "Contract validation is a BUILD-TIME COMPILE CHECK — dbt does NOT need a live Trino connection to validate the contract." | WRONG — preflight runs at `dbt run`/`dbt build` time and REQUIRES a live warehouse connection (Trino on this stack). |
+| "`dbt compile` validates the contract (dbt-side preflight, no Trino needed)" | WRONG — `dbt compile` produces compiled SQL artifacts but does NOT run the contract preflight. |
+| "if SELECT projects plan_type as integer not varchar, `dbt build` prints a Compilation Error BEFORE touching Trino" | WRONG — the contract preflight DOES touch Trino. It runs the model's SELECT (or a typed describe) against Trino, inspects the actual columns/types, then compares against YAML. |
+| "Trino never sees the broken SQL" | WRONG — Trino MUST see the SQL for the preflight to detect type mismatches. The check IS warehouse-interactive. |
+
+### Practical impact:
+
+The engineer's CI pipeline runs ONLY `dbt parse` + `dbt compile` with NO Trino connection. The responder told them: "this is enough — contracts catch declared-vs-SQL mismatch WITHOUT touching the warehouse." Following this advice, the engineer will:
+1. Ship a broken type mismatch through CI (which passes).
+2. Discover the contract violation only at production `dbt run` against Trino.
+3. The CI promise of "catches violations before merge" silently fails.
+
+This is **load-bearing wrong** — the answer makes the engineer worse off than asking nobody.
+
+### Resource source — RESOURCE-SOURCED DEFECT in r27 §6.7C + r28 §282:
+
+`grep` confirms TWO resource locations source the error:
+
+**r27 §6.7C (the canonical dbt-contracts section):**
+- L3178: *"When `contract.enforced: true`, dbt's **compilation step** runs a **'preflight' check** before materializing the model"* — MISLEADING: conflates "compilation step" with the actual `dbt run`/`dbt build` preflight. An engineer reading this verbatim concludes that `dbt compile` runs the preflight (which it doesn't).
+- L3182: *"If ANY column is missing, extra, or has the wrong type, **dbt errors and refuses to build the model — the SQL is never executed against Trino**"* — MISLEADING: literally true that the FAILING-CONTRACT SQL is not materialized, BUT the preflight ITSELF is a warehouse-interactive operation. The phrasing strongly implies "no Trino interaction needed for the check" which is false.
+- L3184: *"This is a **build-time check** (during `dbt run` / `dbt build`), NOT a query-time check."* — half-right (build-time is correct), but ambiguous about whether build-time needs a warehouse connection.
+- L3172 (router row): *"Build time (during `dbt run` / `dbt build`'s preflight check), NOT query time. The Trino engine itself does NOT enforce the contract — dbt does, before materialization."* — this row again strongly implies no-warehouse-needed, which is false. (dbt-the-tool needs to run a describe/typed query against Trino to know the actual column types.)
+
+**r28 §282 (cross-reference row in dbt tests primer):**
+- L282: *"r27 §6.7C — dbt model contracts (the column-name + `data_type:` build-time STRUCTURAL preflight). Different mechanism from generic data tests: **contracts check schema/type at compile time**; generic tests check data values at materialize time."* — **OUTRIGHT FACTUAL ERROR.** "contracts check schema/type at compile time" is FALSE per dbt docs verbatim. Contracts check at BUILD/RUN time and require a live warehouse connection.
+
+### LIGHT FIX-A recommendation:
+
+**r27 §6.7C (load-bearing reconcile):**
+
+1. Change L3178 to:
+   > *"When `contract.enforced: true`, dbt's BUILD step (during `dbt run` or `dbt build`) runs a 'preflight' check before materializing the model:*
+   > *1. dbt executes a typed describe / LIMIT 0 query of the model's SELECT against the warehouse (Trino on this stack) to get the actual column names + types of the result set.*
+   > *2. dbt compares the actual columns + types against the YAML-declared `columns:` list.*
+   > *3. If ANY column is missing, extra, or has the wrong type, dbt errors and refuses to materialize the model.*
+   >
+   > **This preflight check REQUIRES a live warehouse connection — it is NOT a pure parse/compile check.** `dbt parse` + `dbt compile` alone do NOT run the contract preflight. A CI pipeline with no warehouse access CANNOT catch contract violations — it must run `dbt build` against a real Trino (CI-target Trino instance or staging Trino, or a `--defer`-with-deferred-state alternative)."*
+
+2. Update L3172 router row "Does it fail at build time or query time?" answer to:
+   > *"**Build time** (during `dbt run` / `dbt build`'s preflight check), NOT query time. The Trino engine itself does NOT enforce the contract — dbt does. **But the preflight IS warehouse-interactive — dbt must query Trino to discover the model's actual column types.** Pure `dbt parse` + `dbt compile` with no warehouse access do NOT validate the contract."*
+
+3. ADD a router row addressing the iter1191/iter1194 question directly:
+   > *"Does dbt model-contract enforcement need a live Trino connection?" → "**YES. Contract preflight runs at `dbt run`/`dbt build` time and requires Trino to introspect the SELECT's actual column types. `dbt parse` + `dbt compile` alone do NOT validate the contract.** CI pipelines that only run parse+compile CANNOT catch contract violations — must run `dbt build` against a real Trino."*
+
+4. ADD a DO-NOT-WRITE row in the existing §3370 DO-NOT-WRITE block:
+   > *"'Contract enforcement is a pure compile-time check; CI doesn't need a Trino connection' — WRONG. The preflight check runs at `dbt run`/`dbt build` time and queries Trino for the actual SELECT result-set types. `dbt parse` + `dbt compile` do NOT run the preflight. CI without warehouse access does NOT catch contract violations. Verified at [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) + [docs.getdbt.com/docs/mesh/govern/model-contracts](https://docs.getdbt.com/docs/mesh/govern/model-contracts)."*
+
+**r28 §282 (factual-error fix):**
+
+Change "contracts check schema/type at compile time" to "contracts check schema/type at build time (preflight runs at `dbt run`/`dbt build`, requires live warehouse connection)".
+
+### iter1191 dbt-contract two-phase mechanism WATCH:
+
+**STATUS: WATCH FIRED — RESPONDER GOT IT WRONG.** The watch should now be promoted from "carry forward" to "LIGHT FIX-A pending" status. Re-probe after FIX-A lands.
+
+---
+
+## Q4 — Oracle DECODE → Trino CASE (NULL=NULL semantic contrast)
 
 **Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (STRONG PASS)**
 
-Pin-perfect dbt-seed canonical. All load-bearing facts VERIFIED:
+Pin-perfect Oracle-to-Trino direct port with critical NULL-semantic contrast. All load-bearing facts VERIFIED.
 
-1. **`seeds/country_regions.csv` directory layout** — VERIFIED at [docs.getdbt.com/docs/build/seeds](https://docs.getdbt.com/docs/build/seeds) verbatim: *"Seeds are CSV files in your dbt project (typically in your seeds directory), that dbt can load into your data warehouse using the dbt seed command."*
+1. **Trino has NO native DECODE function** — VERIFIED absent from [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html). DECODE is Oracle-only; parse-error is the expected Trino behavior. Per pinned imported-prior-self-error family (`reference_trino_starts_with_ends_with.md`, `reference_trino_listagg_native.md`, `reference_trino_to_char_exists.md`, `reference_trino_iceberg_migrate_native.md`), DECODE legitimately doesn't exist in Trino — unlike LISTAGG / to_char / migrate which surprised the assumed-absence priors.
 
-2. **`+column_types` in `dbt_project.yml` (optional)** — Correct, matches dbt config pattern for explicit column-type declaration (otherwise dbt infers from CSV content, which can mis-type ISO codes as e.g. integer).
-
-3. **`dbt seed` / `dbt seed --select country_regions`** — VERIFIED at dbt docs as the loader command. The `--select` flag for single-seed targeting is the standard dbt selector pattern.
-
-4. **Creates a real table in the warehouse (Iceberg on this stack)** — VERIFIED. dbt-trino materializes seeds as regular tables in the target catalog/schema; on a Trino + Iceberg stack, this lands as an Iceberg table. Engineer can `SELECT * FROM iceberg.<schema>.country_regions` after `dbt seed`.
-
-5. **`dbt build` runs seeds automatically, `dbt run` does NOT** — VERIFIED at [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build) verbatim: *"The dbt build command will: run models, test tests, snapshot snapshots, seed seeds, build user-defined functions ... In DAG order, for selected resources or an entire project."* `dbt run` is a separate command restricted to models. Critical distinction the engineer needs.
-
-6. **`ref('country_regions')` to join from a model** — VERIFIED at the dbt seeds page verbatim: *"Seeds can be referenced in downstream models the same way as referencing models — by using the ref function."* Example: `SELECT * FROM {{ ref('country_regions') }}`.
-
-7. **Editing CSV + re-running `dbt seed` TRUNCATES and fully reloads** — VERIFIED at dbt seeds FAQ verbatim: *"When you typically run dbt seed, dbt truncates the existing table and reinserts the data."* — Responder's "no special sync" framing is accurate. Caveat the responder didn't name (recall ceiling, not load-bearing): if CSV columns are added/renamed, `dbt seed --full-refresh` is required to drop-and-rebuild (truncate-and-reinsert doesn't update the table SCHEMA). For the engineer's stated workflow (quarterly value updates to a fixed 2-column ISO→region mapping), truncate+reinsert is exactly the right semantic.
-
-Use-case fit confirmed: ~250-row lookup updated quarterly is the textbook dbt-seed scenario per docs verbatim ("country code mappings ... Good use-cases"). Production-stack-aligned (no external infra needed — runs entirely through dbt-trino + Iceberg + HMS).
-
-No broken-secondary-alternative slip, no over-warning, no fabrication. Clean canonical reach.
-
----
-
-## Q4 — Oracle ADD_MONTHS → Trino date_add('month', n, ts/date)
-
-**Score: 5.0 / 5.0 / 5.0 / 4.75 = 4.9375 (STRONG PASS)**
-
-Pin-perfect Oracle-to-Trino direct port with month-end-clamp semantic contrast. All load-bearing facts VERIFIED.
-
-1. **`date_add('month', 12, subscription_start_date) AS renewal_date`** — VERIFIED at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_add(unit, value, timestamp) → [same as input]`. The `'month'` unit is documented (full list includes year/quarter/month/week/day/hour/minute/second/millisecond). Responder's exact form.
-
-2. **Works on both DATE and TIMESTAMP, return type matches input** — VERIFIED per docs return-type annotation `[same as input]`. Trino's `date_add` is signature-polymorphic over DATE / TIMESTAMP / TIMESTAMP WITH TIME ZONE inputs (per pinned `reference_trino_from_unixtime_tz.md` and standard datetime fn pattern). DATE input + 'month' unit returns DATE; TIMESTAMP input returns TIMESTAMP. Responder's "return type matches input" framing exact.
-
-3. **No native Oracle `ADD_MONTHS` in Trino** — VERIFIED. Not in [functions list](https://trino.io/docs/467/functions/list.html) for datetime. Function-not-found is the expected error. Per pinned imported-prior-self-error family (`reference_trino_starts_with_ends_with.md`, `reference_trino_listagg_native.md`, `reference_trino_to_char_exists.md`) — `ADD_MONTHS` is one of the legitimate Oracle-only fns that does NOT have a Trino native equivalent (unlike LISTAGG / to_char / starts_with which surprised the prior).
-
-4. **Oracle ADD_MONTHS month-end clamp behavior** — VERIFIED against [Oracle ADD_MONTHS docs](https://docs.oracle.com/cd/B19306_01/server.102/b14200/functions004.htm) verbatim: *"If date is the last day of the month or if the resulting month has fewer days than the day component of date, then the result is the last day of the resulting month."* Responder's framing exact: input month-end → output month-end.
-
-5. **Worked example `ADD_MONTHS(DATE '2026-02-28', 1)`** — VERIFIED. 2026 is non-leap (2026/4 = 506.5), so Feb 2026 has 28 days, so Feb 28 IS the last day of Feb 2026. Per Oracle rule → result clamps to last day of March → `2026-03-31`. Trino `date_add('month', 1, DATE '2026-02-28')` does NOT clamp (no Oracle-special-rule) → preserves day-of-month → `2026-03-28`. Exact 3-day divergence is the load-bearing demonstration.
-
-6. **CASE wrapper for Oracle-compatible clamp** — VERIFIED sound:
+2. **Simple-CASE form rewrite** — VERIFIED valid Trino 467 syntax:
    ```sql
-   CASE WHEN d = last_day_of_month(d)
-        THEN last_day_of_month(date_add('month',12,d))
-        ELSE date_add('month',12,d) END
+   CASE plan_type
+     WHEN 'starter' THEN 1
+     WHEN 'pro' THEN 2
+     WHEN 'enterprise' THEN 3
+     ELSE 0
+   END
    ```
-   `last_day_of_month(x) → date` exists in Trino 467 per docs verbatim. The CASE detects "is input the month-end?" and if so forces output to last-day-of-result-month; otherwise standard `date_add`. This is the canonical Oracle-compat shape and works on both DATE and TIMESTAMP inputs.
+   Direct one-for-one port of `DECODE(plan_type, 'starter', 1, 'pro', 2, 'enterprise', 3, 0)`. Per [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) simple CASE form.
 
-7. **`col + INTERVAL '12' MONTH` equivalent** (not explicitly named by responder but worth verifying) — VERIFIED at docs: `timestamp '2012-10-31 01:00' + interval '1' month` returns `2012-11-30 01:00:00.000` (clamps when target month has fewer days). Equivalent to `date_add` semantic for the no-overflow case; both forms behave identically. Recall ceiling, not a defect.
+3. **CRITICAL NULL-semantic contrast — Oracle DECODE NULL=NULL vs Trino simple-CASE NULL≠NULL** — VERIFIED accurate. Per [Oracle SQL Reference - Nulls](https://docs.oracle.com/cd/B19306_01/server.102/b14200/sql_elements005.htm) + community references: **"DECODE considers two NULLs to be equivalent. If expr is null, then Oracle returns the result of the first search that is also null."** Standard SQL CASE (including Trino's simple-CASE) treats NULL comparisons as UNKNOWN, so `CASE col WHEN NULL THEN ...` NEVER MATCHES because the equality check returns NULL not TRUE.
 
-### Minor recall ceiling (Compl -1.0 weighted into 4.75 on that dim):
+   Example divergence:
+   - Oracle: `DECODE(col, NULL, 'was-null', col, 'not-null', 'other')` — MATCHES the NULL branch when col is NULL.
+   - Trino: `CASE col WHEN NULL THEN 'was-null' ELSE 'other' END` — NEVER matches the `WHEN NULL` branch; always falls through to ELSE. Silent semantic drift on every Oracle→Trino port.
 
-Responder's claim "Trino date_add preserves the day number" is precise FOR THE SPECIFIC EXAMPLE (Feb 28 → Mar 28, target month has day 28). It's slightly oversimplified for the edge case where target month has FEWER days than input day (e.g., `date_add('month', 1, DATE '2026-01-31')` → 2026-02-28 in non-leap year; the day is NOT preserved, it clamps to last day of Feb because Feb has only 28 days). This is the same auto-clamp Postgres and most engines do, but the responder's "preserves the day number" phrasing might mislead an engineer who tests Jan 31 + 1 month and is surprised by Feb 28.
+4. **Searched-CASE fix** — VERIFIED correct:
+   ```sql
+   CASE
+     WHEN col IS NULL THEN 'was-null'
+     WHEN col = 'pro' THEN 2
+     ELSE 0
+   END
+   ```
+   Per Trino conditional.html, searched-CASE allows arbitrary boolean predicates including `IS NULL` — exactly the right tool to replicate Oracle DECODE's NULL=NULL semantic.
 
-Practical impact bounded — engineer's actual use-case is renewal-date addition of 12 months which typically preserves day cleanly (e.g., 2025-03-15 + 12 months = 2026-03-15); the edge case only matters for Jan-29/30/31 inputs +1 month etc. Not load-bearing for the renewal-date use case. NO RESOURCE FIX.
+5. **Audit tip — `grep` Oracle code for `DECODE(<col>, NULL, ...)`** — practical and exactly what an engineer migrating hundreds of DECODE call sites needs. Identifies the subset that REQUIRES searched-CASE rewrite (vs simple-CASE port).
 
-No imported-prior slip (didn't fabricate ADD_MONTHS as existing in Trino — correctly identifies as Oracle-only). No broken-secondary-alternative slip. No over-warning per `feedback_responder_overwarning_folklore.md`.
+6. **Two-arg / three-arg DECODE form (`DECODE(is_active, 1, 'Yes', 'No')`)** — engineer's second example. Direct port to simple-CASE works for the non-NULL case: `CASE is_active WHEN 1 THEN 'Yes' ELSE 'No' END`. If `is_active` can be NULL and intended to match the ELSE branch (Oracle would: NULL ≠ 1 → ELSE), simple-CASE behaves identically here because the NULL falls through to ELSE in both engines. No NULL-semantic divergence for this specific shape; the divergence only bites when a NULL search arg is present.
+
+No imported-prior slip, no broken-secondary-alternative slip, no over-warning. Clean canonical reach with the load-bearing NULL caveat exactly named.
 
 ---
 
-## Watches carried forward (NOT exercised this iter):
+## Watches carried forward / status changes:
 
-1. **`iter1192 dbt delete+insert-on-non-ACID-Hive defang`** — r27 §3.2 LIGHT FIX-A added Hive-connector capability-gate card. Re-probe in 4-7 iters with framing like "we tried delete+insert on Hive after merge failed, also fails" / "non-ACID Hive table fallback for upsert". CARRY.
+1. **`iter1191 dbt-contract two-phase mechanism phrasing` WATCH — FIRED.** Responder confirmed wrong on first probe. Status changes from `WATCH CARRY` → `LIGHT FIX-A PENDING` (r27 §6.7C reconcile + r28 §282 fact-correction). Re-probe after FIX-A lands with same framing ("CI without warehouse access / does compile catch contracts").
 
-2. **`iter1191 dbt-contract two-phase mechanism phrasing`** — re-probe with "do model contracts need a live Trino connection / can they be validated in CI without warehouse access" framing. CARRY.
+2. **`iter1192 dbt delete+insert-on-non-ACID-Hive defang` WATCH** — NOT exercised this iter; CARRY forward.
 
-Both watches carry forward at iter1193; no resource change recommended this iter.
+3. **`iter1194 r28 §348-403 delete-file-compaction-Spark-only over-claim` WATCH — NEW.** LIGHT FIX-A pending on r28 §348-403 reconcile (Trino EXECUTE optimize IS the primary delete-application lever per Trino #12617; Spark rewrite_position_delete_files is the optional delete-file-only compaction, not load-bearing). Re-probe after fix lands with same framing ("accumulated position-delete files / what maintenance collapses them").
 
 ---
 
@@ -141,11 +228,17 @@ Both watches carry forward at iter1193; no resource change recommended this iter
 
 | Q | Tech | Clarity | Practical | Compl | Avg |
 |---|------|---------|-----------|-------|-----|
-| Q1 partition evolution | 5.0 | 5.0 | 4.0 | 5.0 | **4.75** |
-| Q2 UNNEST WITH ORDINALITY | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q3 dbt seed mechanics | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q4 date_add month + ADD_MONTHS | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
+| Q1 position-delete maintenance | 3.0 | 5.0 | 4.0 | 4.0 | **4.0** |
+| Q2 NTILE(4) quartile bucketing | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+| Q3 dbt model-contract live-Trino-connection (WATCH) | 1.0 | 4.5 | 1.0 | 1.5 | **2.00** |
+| Q4 Oracle DECODE → Trino CASE + NULL contrast | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
 
-**Iter1193 overall = (4.75 + 5.00 + 5.00 + 4.9375) / 4 = 4.92 — STRONG PASS, NO-OP.**
+**Iter1194 overall = (4.0 + 5.00 + 2.00 + 5.00) / 4 = 4.00 — PASS WITH FIX-A.**
 
-No resource fix recommended. Q1 secondary-routing imprecision is a recall ceiling on a peripheral alternative; engineer arrives at correct action via Spark routing which fits production stack. Q2/Q3/Q4 clean canonical reaches.
+### Verdict: FIX-A required (two resource-sourced defects).
+
+**Q1**: r28 §348–403 over-claims "Trino has no equivalent for position-delete compaction." Refuted by Trino #12617 (completed 2022). Recommend LIGHT FIX-A reconcile-in-place (don't append — fix L350, L390, L397, L403 in the existing canonical).
+
+**Q3 (load-bearing)**: r27 §6.7C frames preflight as "dbt's compilation step" + r28 §282 explicitly says "contracts check schema/type at compile time" — both factually wrong. Preflight runs at `dbt run`/`dbt build` time and REQUIRES a live warehouse connection. CI with only `dbt parse` + `dbt compile` does NOT catch contract violations. Recommend LIGHT FIX-A reconcile-in-place on r27 §6.7C (router rows L3170-3172 + body L3178-3184 + new DO-NOT-WRITE row in §3370 block) + r28 §282 single-line fact correction.
+
+Q2 + Q4 clean canonical reaches, no fix needed.
