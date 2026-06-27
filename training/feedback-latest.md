@@ -1,152 +1,141 @@
-# Iter1168 — Judge Feedback
+# Iter1169 — Judge Feedback
 
-## Verdict: PASS + FIX-A — Average 4.4219 / 5.0
+## Verdict: PASS + LIGHT FIX-A — Average 4.75 / 5.0
 
 | Q | Topic row | Score | Verdict |
 |---|---|---:|---|
-| Q1 Postgres ILIKE → Trino case-insensitive (LOWER+LIKE / regexp_like) | SQL query best practices for OLAP | 4.875 | pin-perfect, both forms correct |
-| Q2 per-category MEDIAN minutes opened→first_response (HARDER 2-STEP SYNTHESIS) | Analytical query patterns on Iceberg+Trino | 4.9375 | 2-level assembly CORRECT, T-Digest claim VERIFIED accurate |
-| Q3 register existing Parquet on MinIO as Iceberg via migrate/snapshot | Iceberg table maintenance | 2.875 | **RESOURCE-SOURCED DEFECT — claims migrate is Spark-only when Trino 467 implements it natively** |
-| Q4 Oracle NVL2 → Trino CASE / IF | Oracle PL/SQL → dbt+Trino migration | 5.0 | clean pin-perfect, both rewrites valid |
+| Q1 legacy_clickstream Hive Parquet → Iceberg WITHOUT Spark (WATCH RE-PROBE) | Iceberg table maintenance | 4.9375 | **WATCH CLOSES — Trino-native migrate FIX-A reaches verbatim** |
+| Q2 Postgres `to_char('Month YYYY')` → Trino dashboard label "June 2026" | SQL query best practices for OLAP | 4.0625 | **RESOURCE-SOURCED DEFECT — r27 falsely says "Trino has no to_char"** |
+| Q3 EARLIEST date `api_calls > 1000` per customer, NULL if never | Analytical query patterns on Iceberg+Trino | 5.0 | pin-perfect conditional aggregation |
+| Q4 dbt feature for loading small reference CSVs into Iceberg | Oracle PL/SQL → dbt+Trino migration | 5.0 | clean canonical dbt seeds |
 
-Iter average = (4.875 + 4.9375 + 2.875 + 5.0) / 4 = **4.4219 PASS** (margin +0.9219 over 3.5 threshold, Q3 drags hard).
+Iter average = (4.9375 + 4.0625 + 5.0 + 5.0) / 4 = **4.75 PASS + LIGHT FIX-A** (margin +1.25 over 3.5 threshold).
+
+**Watch status:** `r21+r17 migrate-Trino-native FIX-A iter1168` — **CLOSED** on first re-probe.
+
+**New watch:** `r27 to_char-exists-numeric-only FIX-A iter1169` — re-probe next sweep.
 
 ---
 
 ## Per-question detail
 
-### Q1 (4.875 — Acc 5.0 / Clar 4.75 / App 5.0 / Compl 4.75) — Postgres ILIKE → Trino case-insensitive
+### Q1 (4.9375 — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.75) — Hive Parquet → Iceberg WITHOUT Spark (WATCH RE-PROBE)
+
+**WATCH `r21+r17 migrate-Trino-native FIX-A iter1168` — CLOSES on first re-probe.**
+
+Iter1168 the responder said `CALL iceberg.system.migrate(...)` is "Spark SQL, NOT Trino" — RESOURCE-SOURCED defect across r21 §78/§141/§147 + r17 §231/§912. Iter1168 FIX-A spec rewrote r21 §80-95+§141+§147 to "**`migrate` runs natively in Trino 467 via `CALL iceberg.system.migrate(schema_name => '...', table_name => '...')` — no Spark required**" + named-arg form + optional `recursive_directory` param.
+
+**Iter1169 Q1 reaches the FIX-A canonical verbatim:**
+- "YES, entirely in Trino, no Spark" — correct routing decision.
+- `CALL iceberg.system.migrate(schema_name => 'your_analytics_schema', table_name => 'legacy_clickstream')` — exact named-arg form matching FIX-A spec.
+- "Trino reads existing Parquet file list, builds Iceberg snapshot+manifest metadata on top (no rewrite/movement), updates HMS pointer" — accurate description of in-place metadata-only conversion.
+- "~1-5 min for 100GB" — sensible order-of-magnitude estimate for metadata-only migration.
+- `CALL iceberg.system.rewrite_manifests(...)` correctly kept as Spark-only on the production stack (Trino 467 has no native rewrite_manifests — `ALTER TABLE EXECUTE optimize_manifests` lands in 470+).
+
+**VERIFIED via [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)** "Procedures" section verbatim:
+```sql
+CALL example.system.migrate(
+    schema_name => 'testdb',
+    table_name => 'customer_orders')
+```
++ optional `recursive_directory => 'true'|'false'|'fail'` (default `'fail'`). Available natively in Trino 467 with no `iceberg.migrate-procedure.enabled` flag required (unlike `register_table` / `add_files_from_table`). Iter1168 misroute ("Spark-only") did NOT recur. 10 of last 10 watches close on first re-probe — Haiku 1-iter-slip-then-recover variance pattern holds, FIX-A reaches reliably.
+
+**Minor Compl shave (-0.25):** responder said "New tables default format v2" — true generally for Trino `CREATE TABLE iceberg.<>.<>`, but ambiguous in the migrate context. Per r21 §139, migrated Hive tables default to Iceberg format v1 (no delete files); engineer would need `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` if they later want MERGE/DELETE. Non-load-bearing for the stated time-travel + schema-evolution requirements (both work on v1 fine).
+
+Cites r21. Resource-aligned to FIX-A.
+
+### Q2 (4.0625 — Acc 3.0 / Clar 4.75 / App 4.5 / Compl 4.0) — Postgres TO_CHAR → Trino month-year label
+
+**RESOURCE-SOURCED DEFECT on foundational `to_char` claim. Actionable answer for THIS specific task is correct; foundational framing is wrong.**
+
+**What the responder said:** "**Trino has NO TO_CHAR function — that's an Oracle-ism.**"
+
+**VERIFIED WRONG via [trino.io/docs/467/functions/teradata.html](https://trino.io/docs/467/functions/teradata.html):**
+- Trino 467 HAS a Teradata-compatibility `to_char(timestamp, format)` function.
+- Documented format specifiers are LOWERCASE NUMERIC-ONLY: `dd` (day), `mm` (month NUMBER), `yyyy`/`yy` (year), `hh`/`hh24` (hour), `mi` (minute), `ss` (second) + punctuation.
+- Doc explicitly notes: "Case insensitivity is not currently supported. All specifiers must be lowercase."
+- NO month-name codes (`Month`/`Mon`) documented.
+
+Matches pinned `reference_trino_to_char_exists.md`.
+
+**For THIS specific task (`'June 2026'` requires month NAME), `to_char` genuinely cannot produce it** (numeric-only) — so the responder's STEERING to `date_format` / `format_datetime` IS the correct actionable answer for the literal task. **Verified correct facts:**
+- `date_format(ts, '%M %Y')` → `'June 2026'` per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) (MySQL `%M` = full month name, `%Y` = 4-digit year). VERIFIED.
+- `date_format(ts, '%Y-%m')` → `'2026-06'` (`%m` = zero-padded month number). VERIFIED.
+- `format_datetime(ts, 'MMMM yyyy')` → `'June 2026'` (Joda `MMMM` = full month name, `yyyy` = 4-digit year). VERIFIED.
+- `format_datetime(ts, 'yyyy-MM')` → `'2026-06'` (`MM` = 2-digit month number). VERIFIED.
+- **Joda lowercase-`mm`=MINUTE-not-month caveat is ACCURATE** per JodaTime DateTimeFormat docs. Engineer-actionable trap correctly named.
+
+**PROBLEM:** the "no to_char" framing is FACTUALLY WRONG and will misroute future tasks where `to_char` genuinely WOULD work — e.g., `to_char(order_ts, 'yyyy-mm-dd')` IS valid Trino 467 SQL with the lowercase numeric format and produces a `'2026-06-25'` date label without parse error.
+
+**SOURCE — RESOURCE-SOURCED DEFECT confirmed via grep:**
+- `resources/27-oracle-plsql-to-dbt-trino.md:549` "**Trino has NO `TO_CHAR` function** — copy-pasting `TO_CHAR(dt, 'YYYY-MM-DD')` from Oracle into a Trino query or a dbt-Trino model produces `Function 'to_char' not registered` (function-resolution error)."
+- `resources/27-oracle-plsql-to-dbt-trino.md:659` table row "`TO_CHAR(order_ts, 'YYYY-MM-DD')` | Oracle | `Function 'to_char' not registered` (function-resolution error) | `date_format(order_ts, '%Y-%m-%d')` or `format_datetime(order_ts, 'yyyy-MM-dd')`"
+- `resources/27-oracle-plsql-to-dbt-trino.md:1685` similar table row.
+
+All three are flat false — `to_char` exists in Trino 467 Teradata-compat, no parse error for lowercase numeric formats. **NOT a one-off responder slip** — responder repeated what r27 teaches verbatim. Per pinned `feedback_trace_recurring_folklore_to_resource_root_cause.md`.
+
+This is the **6th instance** of the imported-prior recurring class (assumed-absence direction: starts_with / to_char / listagg / array_sum / trim 2-arg / truncate 2-arg) — and the assumed-absence claim for `to_char` is still in r27 unchanged despite pinned `reference_trino_to_char_exists.md` correcting it.
+
+**FIX-A SPEC (LIGHT):**
+
+1. **r27 §549** — REWRITE: replace "Trino has NO `TO_CHAR` function" with:
+   > "**Trino 467 HAS a `to_char(timestamp, format)` function** (Teradata-compatibility connector function) — but with **LOWERCASE NUMERIC-ONLY format codes**: `dd` (day), `mm` (month NUMBER 01-12 not month NAME), `yyyy`/`yy` (year), `hh`/`hh24` (hour), `mi` (minute), `ss` (second), plus punctuation. NO month-name codes (`Month`/`Mon`) — uppercase specifiers are INVALID (parse error). For month-name labels (`'June 2026'`) use `date_format(ts, '%M %Y')` (MySQL-style) or `format_datetime(ts, 'MMMM yyyy')` (Joda)."
+
+2. **r27 §659 + §1685 table rows** — UPDATE: `TO_CHAR(order_ts, 'YYYY-MM-DD')` Oracle uppercase form is invalid in Trino BUT lowercase `to_char(order_ts, 'yyyy-mm-dd')` IS valid (case-sensitivity is the trap, not function existence); preferred forms still `date_format(order_ts, '%Y-%m-%d')` or `format_datetime(order_ts, 'yyyy-MM-dd')` for portability + Joda month-name capability.
+
+3. **Add explicit row:** `TO_CHAR(dt, 'Month YYYY')` Oracle → **NOT possible via Trino `to_char`** (no month-name codes) → use `date_format(dt, '%M %Y')` (MySQL) or `format_datetime(dt, 'MMMM yyyy')` (Joda).
+
+4. **DO-NOT-WRITE defang** at r27 §549: "Trino has no to_char function" — WRONG; `to_char` exists in 467 Teradata-compat but is numeric-only.
+
+5. **Citations:** [trino.io/docs/467/functions/teradata.html](https://trino.io/docs/467/functions/teradata.html) for to_char existence + lowercase-numeric-only constraint.
+
+6. **Pin alignment:** verify pinned `reference_trino_to_char_exists.md` already states the correct existence-but-numeric-only fact; the resource correction brings r27 into alignment with the pin.
+
+**Watch label:** `r27 to_char-exists-numeric-only FIX-A iter1169` — re-probe next sweep with structurally similar question. Two angles for the re-probe:
+- Numeric-format angle: "Postgres `to_char(ts, 'YYYY-MM-DD')` → Trino equivalent" — verify responder mentions `to_char(ts, 'yyyy-mm-dd')` IS valid (lowercase).
+- Month-name angle: "Trino label 'Q2 2026' or 'June 2026' from a timestamp" — verify steering to date_format/format_datetime + reason ("to_char is numeric-only, no month-name codes").
+
+If both reach the corrected fact, watch closes. If responder still says "Trino has no to_char" → escalate.
+
+Cites r27 §4.1.
+
+### Q3 (5.0 — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0) — EARLIEST date `api_calls > 1000`, NULL if never
+
+**Pin-perfect canonical conditional-aggregation idiom.**
+
+```sql
+SELECT customer_id,
+       MIN(CASE WHEN api_calls > 1000 THEN activity_date END) AS first_milestone_date
+FROM daily_usage
+GROUP BY customer_id;
+```
 
 **Verified correct on all load-bearing facts:**
-- "Trino has NO native ILIKE — parse error" — confirmed via [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) ("Matching characters is case sensitive"; no ILIKE keyword in the comparison or LIKE syntax tables). Matches pinned `reference_trino_no_ilike.md`.
-- Option 1: `WHERE LOWER(customer_name) LIKE '%acme%'` — correct, canonical case-fold-then-LIKE.
-- Option 2: `WHERE regexp_like(customer_name, '(?i)acme')` — correct; the Java-regex inline `(?i)` case-insensitive flag is honored by Trino's `regexp_like` per [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) (Trino regex uses java.util.regex semantics, which supports embedded flag expressions).
-- Suffix example `LOWER(filename) LIKE '%.csv'` / `regexp_like(filename, '(?i)\.csv$')` correct (single-backslash regex literal per pinned `reference_trino_regex_backslash.md`).
-- "Normalize with LOWER() at ingest" tip is the right durable fix.
+- **CASE returns `activity_date` on qualifying rows, NULL on non-qualifying rows** — standard ANSI CASE-WITHOUT-ELSE semantics returns NULL on no match.
+- **`MIN` ignores NULLs** per [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) verbatim ("aggregate functions ignore null values" applies to MIN/MAX/SUM/AVG/COUNT).
+- **Returns smallest qualifying date** — engineer gets earliest milestone date.
+- **Customer with zero qualifying rows** — MIN sees only NULLs → returns NULL → engineer gets the "NULL if never" semantic automatically without a separate guard.
+- **Single-pass, single GROUP BY** — no CTEs, no anti-join, no correlated subquery. The cleanest possible shape.
+- **Standard ANSI** — works identically across Trino/Postgres/Oracle.
 
-**Minor completeness shave (-0.25 Compl):** did not name the partition-pruning caveat — applying `LOWER(col)` on a partition/sort key can hide the bare column from Iceberg pruning. Engineer's scenario (free-text customer_name search) is not a partitioned column, so the omission is non-load-bearing. NOT a defect.
+Zero defects, full reach. Engineer ships the one-liner.
 
-Cites r23. Resource-aligned.
+### Q4 (5.0 — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0) — dbt feature for loading small reference CSVs
 
-### Q2 (4.9375 — Acc 5.0 / Clar 4.75 / App 5.0 / Compl 5.0) — per-category MEDIAN minutes opened→first_response (HARDER 2-STEP SYNTHESIS)
-
-**THE 2-STEP ASSEMBLY IS CORRECTLY ASSEMBLED.** This was the key check for this iter; reporting in detail:
-
-**Step 1 (CTE pivot per ticket):**
-```sql
-WITH ticket_gaps AS (
-  SELECT category, ticket_id,
-         date_diff(
-           'minute',
-           MIN(CASE WHEN event_type='opened' THEN event_time END),
-           MIN(CASE WHEN event_type='first_response' THEN event_time END)
-         ) AS minutes_to_response
-  FROM tickets
-  WHERE event_type IN ('opened','first_response')
-  GROUP BY category, ticket_id
-)
-```
-- **Grain correct:** `GROUP BY category, ticket_id` produces exactly one row per ticket (per category, which is fine because tickets don't change category across events).
-- **Pivot correct:** `MIN(CASE WHEN event_type='opened' THEN event_time END)` returns the opened-event timestamp for that ticket; CASE returns NULL on non-matching rows; MIN ignores NULLs per [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html). Same for first_response.
-- **date_diff arg order correct:** verified via [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_diff(unit, timestamp1, timestamp2) → bigint` returns "`timestamp2 - timestamp1` expressed in terms of `unit`" — so earlier=arg2, later=arg3 for positive result. Responder's explicit swap-warning ("if you swap, you'll get a negative number") is correct and useful.
-- **WHERE event_type IN ('opened','first_response') predicate** correctly drops 'resolved' rows before the pivot — small efficiency win, doesn't change correctness.
-
-**Step 2 (outer median per category):**
-```sql
-SELECT category, approx_percentile(minutes_to_response, 0.5) AS median
-FROM ticket_gaps
-WHERE minutes_to_response IS NOT NULL
-GROUP BY category;
-```
-- **`approx_percentile(x, 0.5)` correctly used as median** per [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) (verified via WebFetch — signature `approx_percentile(x, percentage) → [same as x]`).
-- **NULL filter correct:** tickets missing one event (opened-but-no-response, or response-without-opened) produce NULL `minutes_to_response` — sensible to exclude before percentile.
-- **GROUP BY category** for per-category median — correct grain.
-
-**Claim verifications:**
-1. **"No MEDIAN aggregate in Trino 467"** — VERIFIED CORRECT. WebFetch of trino.io/docs/467/functions/aggregate.html lists only `approx_percentile`, `tdigest_agg`, `qdigest_agg`, `value_at_quantile` — no `median()` function.
-2. **"No PERCENTILE_CONT / PERCENTILE_DISC ordered-set aggregates"** — VERIFIED CORRECT. The Trino 467 aggregate-functions page does not list these (they are SQL:2003 ordered-set aggregates that PostgreSQL/Oracle support but Trino has not implemented).
-3. **"approx_percentile multi-quantile array form"** — VERIFIED CORRECT. Doc: "Returns the approximate percentile for all input values of `x` at each of the specified percentages. Each element of the `percentages` array must be between zero and one." Responder's example `approx_percentile(x, ARRAY[0.25,0.5,0.75,0.95])` is the canonical multi-quantile call.
-4. **"approx_percentile uses T-Digest sketches internally"** — VERIFIED ACCURATE for Trino current. Per [trinodb/trino PR #5158](https://github.com/trinodb/trino/pull/5158) "Add T-digest type and functions" + subsequent change replacing QuantileDigest with T-Digest in the implementation of `approx_percentile(x, percentage)` and `approx_percentile(x, weight, percentage)` overloads. The 4-arg `approx_percentile(x, weight, percentage, accuracy)` overload still uses QuantileDigest. The responder's blanket "uses T-Digest sketches internally" is mostly accurate (3 of 4 overloads), only the 4-arg accuracy form is qdigest. Engineer-action wise, the routing-level claim (sketch-based, fast on huge data, approximate) is correct. **MINOR shave already absorbed in Acc score** — not load-bearing for the engineer's per-category-median query (uses the 2-arg overload which IS t-digest).
-
-**Conclusion: HARDER 2-STEP SYNTHESIS PIN-PERFECTLY ASSEMBLED.** No grain misread, no nested-aggregate trap, no `approx_percentile`-inside-OVER fabrication, no swap on date_diff args. Clean canonical reach on a 2-level question. Cites r23. Resource-aligned.
-
-### Q3 (2.875 — Acc 2.0 / Clar 4.0 / App 2.5 / Compl 3.0) — register Parquet on MinIO as Iceberg
-
-**DEFECT: RESOURCE-SOURCED FACTUAL ERROR on `migrate` Spark-only claim.**
-
-**What the responder said (lifted from resources):**
-- "Option 1 in-place: `CALL iceberg.system.migrate('analytics.events')` — Spark SQL, NOT Trino"
-- "Option 2 shadow: `CALL iceberg.system.snapshot('analytics.events','analytics.events_iceberg')` — Spark-only"
-- "Follow up `CALL iceberg.system.rewrite_manifests(...)` — Spark-only"
-
-**Verified facts:**
-
-1. **`system.migrate` IS NATIVE in Trino 467 — NOT Spark-only.** Verified via [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) "Procedures" section. Direct quote of the documented call shape:
-   ```sql
-   CALL example.system.migrate(
-     schema_name => 'testdb',
-     table_name => 'customer_orders')
-   ```
-   Plus optional `recursive_directory => 'true'|'false'|'fail'` parameter. **Enabled by default — no `iceberg.migrate-procedure.enabled` flag needed** (unlike `register_table` / `add_files_from_table` which DO need explicit enablement). Accepts Parquet, ORC, or Avro source files. Bucketed Hive tables convert to non-bucketed Iceberg tables.
-
-   The feature was added via [trinodb/trino#13493](https://github.com/trinodb/trino/pull/13493), closing feature request [trinodb/trino#13196](https://github.com/trinodb/trino/issues/13196). It has been available natively in Trino for many releases before 467.
-
-2. **`system.snapshot` (shadow-copy form) IS Spark-only** — VERIFIED CORRECT. Trino 467 docs do not list a `snapshot` procedure; the Spark-side `system.snapshot(source, target)` is documented only at [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/). Responder is right on this one.
-
-3. **`system.rewrite_manifests` IS Spark-only** — VERIFIED CORRECT. Trino's manifest rewriting is `ALTER TABLE ... EXECUTE optimize_manifests`, available in Trino 470+ (PR #24678), NOT in 467. Responder is right on this one.
-
-4. **Missing alternatives the responder did not name:**
-   - **`register_table`** — Trino 467 native (gated by `iceberg.register-table-procedure.enabled=true`). For the engineer's scenario ("hundreds of millions of rows in Parquet on MinIO from old Spark jobs, already date-partitioned dirs, register existing files as an Iceberg table without a full ETL reload"), `register_table` is the lighter-weight option IF the source already has an Iceberg `metadata.json` somewhere (it doesn't here — Hive Parquet wouldn't), so the right answer for the engineer's scenario truly IS `migrate`.
-   - **`add_files`** — Trino 467 native (gated by `iceberg.add-files-procedure.enabled=true`). Adds existing Parquet/ORC/Avro files into an already-existing Iceberg table — useful as a follow-on or for partial-partition imports.
-
-**Practical impact:** The engineer follows the responder's advice and spins up a Spark session (which the production stack DOES have per prod_info.md "Apache Spark with Iceberg 1.5.2 backed by Hive Metastore (ingestion use only)") to run `CALL iceberg.system.migrate(...)`. That works. But they could have done it natively from Trino with the exact same procedure name — saving the Spark detour. The mental model "Trino can't migrate Hive to Iceberg, you must use Spark" is durably wrong and will mis-direct future similar questions.
-
-**Source classification: RESOURCE-SOURCED DEFECT — NOT a one-off responder slip.** Grep results confirm the responder lifted the false claim from the resources:
-
-- `resources/21-hive-metastore-iceberg.md:78` "Both run from **Spark SQL** (not Trino — Trino does not implement the migration stored procedures)."
-- `resources/21-hive-metastore-iceberg.md:141` "Runs from Spark, not Trino | Trino does not implement `CALL system.migrate()`. Use a Spark session or a Spark-based notebook."
-- `resources/21-hive-metastore-iceberg.md:147` "run `CALL iceberg.system.migrate('your_schema.your_table')` from Spark."
-- `resources/17-iceberg-table-maintenance.md:231` "`publish_changes`, `cherrypick_snapshot`, `migrate`, `snapshot` (table-snapshot form) | Various migration/WAP flows. | Spark only."
-- `resources/17-iceberg-table-maintenance.md:912` "`publish_changes`, `cherrypick_snapshot`, `set_current_snapshot` (procedure form), `migrate`, `snapshot` (the table-snapshot form for migration) — all Spark-only."
-
-The responder followed the resource correctly; the resource has the wrong fact. Per pinned `feedback_trace_recurring_folklore_to_resource_root_cause.md` — confirmed before declaring it a pure responder slip.
-
-**FIX-A SPEC (REQUIRED):**
-
-1. **r21 §78 + §80-95 + §141 + §147** — REWRITE migrate framing:
-   - Replace "Both run from Spark SQL (not Trino)" with "**`migrate` runs natively in Trino 467 via `CALL iceberg.system.migrate(schema_name => '...', table_name => '...')` — no Spark required.** `snapshot` (shadow copy) remains Spark-only because Trino 467 does not implement the snapshot procedure."
-   - Replace the §86 example with Trino-native form: `CALL iceberg.system.migrate(schema_name => 'analytics', table_name => 'events');` (named args required by Trino).
-   - Add the `recursive_directory => 'true'|'false'|'fail'` parameter as an optional argument (default is `'fail'`).
-   - Replace the §141 table row "Runs from Spark, not Trino" with "Runs natively in Trino 467 (and from Spark — both work; Trino is simpler if you don't already have a Spark session)."
-   - Update §147 bottom-line: "run `CALL iceberg.system.migrate(schema_name => 'analytics', table_name => 'events')` from **Trino directly** (or Spark if you prefer)."
-   - Cite the Trino docs URL [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) "Procedures" section.
-   - Cite the PR that added it: [trinodb/trino#13493](https://github.com/trinodb/trino/pull/13493).
-
-2. **r17 §231 (Spark-only procedures table)** — REMOVE `migrate` from the Spark-only list. Keep `publish_changes`, `cherrypick_snapshot`, `snapshot` (table-snapshot form) as Spark-only.
-
-3. **r17 §912** — REMOVE `migrate` from the "all Spark-only" sentence. Keep the others.
-
-4. **Add new entry near r17 §219 (Trino-native CALL procedures table)**: `migrate` row with named-arg syntax + `recursive_directory` parameter + supported formats Parquet/ORC/Avro + "no flag needed (enabled by default)" + use-case "convert an existing Hive Parquet table to Iceberg in place without rewriting data files."
-
-5. **Cross-ref from r21 §migration to r17 §219 register_table/migrate Trino-native procedure table.**
-
-6. **DO-NOT-WRITE** (defang the now-corrected myth at top of r21): "Trino cannot migrate Hive Parquet to Iceberg — you must use Spark" — WRONG since Trino 401-ish; Trino 467 has the native `CALL iceberg.system.migrate(...)` procedure with `recursive_directory` option.
-
-7. **Keyword anchors to embed near the corrected r21 §migrate**: "hundreds of millions of rows in Parquet on MinIO from old Spark jobs", "register existing files as an Iceberg table without ETL reload", "Hive Parquet to Iceberg without rewriting data", "do I need Spark to migrate to Iceberg", "metadata-only Hive to Iceberg conversion Trino", "in-place Iceberg migration from Trino".
-
-8. **PIN the corrected fact** in CLAUDE.md memory: `reference_trino_iceberg_migrate_native.md` — Trino 467 implements `CALL iceberg.system.migrate(schema_name => ..., table_name => ...)` natively, enabled by default (unlike register_table/add_files), accepts Parquet/ORC/Avro source. Past resource claim "migrate is Spark-only" was wrong; corrected r21+r17.
-
-**Watch label:** `r21+r17 migrate-Trino-native FIX-A iter1168` — re-probe in next sweep with structurally similar question ("can I convert my Hive Parquet table to Iceberg directly from Trino or do I need Spark?") to confirm FIX-A reaches. If reaches → close watch. If still routes to Spark-only → escalate to top-of-r21 callout box.
-
-### Q4 (5.0 — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0) — Oracle NVL2 → Trino CASE / IF
+**Clean canonical dbt seeds reach.**
 
 **Verified correct on all facts:**
-- "Trino has no NVL2" — verified via [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html). The page lists `if`, `coalesce`, `nullif`, `try`, `CASE` — no `nvl2`. (Trino does have NVL/2-arg-COALESCE coverage; only the 3-arg NVL2 is Oracle-specific.)
-- `CASE WHEN commission_rate IS NOT NULL THEN base_salary*1.1 ELSE base_salary END` — correct, ANSI-standard CASE shape.
-- `IF(commission_rate IS NOT NULL, base_salary*1.1, base_salary)` — correct. Verified `if(condition, true_value, false_value)` signature: "Evaluates and returns `true_value` if `condition` is true, otherwise evaluates and returns `false_value`."
-- Anatomy mapping (arg1 → `IS NOT NULL` test, arg2 → THEN/true_value, arg3 → ELSE/false_value) is the right migration mental model — engineer porting hundreds of NVL2 calls knows exactly the find-and-replace pattern.
+- **CSV at `seeds/plans.csv`** — correct per [docs.getdbt.com/docs/build/seeds](https://docs.getdbt.com/docs/build/seeds) verbatim ("seed CSV files live in the `seeds` directory of your dbt project").
+- **`ref('plans')` in models** — correct (standard ref function works for seeds; verified in dbt docs example `select * from {{ ref('country_codes') }}`).
+- **`dbt build` or `dbt seed` then `dbt run`** — correct; `dbt build` runs seeds + tests + models in dependency order, `dbt seed` is the seeds-only command.
+- **CSV version-controlled in git** — correct, seeds are best for "static data that changes infrequently" per dbt docs.
+- **Loads as Iceberg table on dbt-trino** — correct; dbt-trino adapter materializes seeds as tables on the configured catalog (Iceberg here).
+- **Truncate+reload full CSV each build** — correct (seeds default to full-refresh semantics; runs `CREATE OR REPLACE` / `TRUNCATE` + `INSERT`).
+- **Size guidance NOT for >~1MB / millions of rows** — correct per dbt docs verbatim: "**Loading CSVs using dbt's seed functionality is not performant for large files. Consider using a different tool to load these CSVs into your data warehouse.**" Engineer's threshold reasoning aligns with docs.
+- **Use case alignment** — dbt docs explicit examples ("country code mappings, test email lists, employee account ID lists") map verbatim to engineer's "currency codes, country mappings, plan-tier labels."
+- **Spark-ingested dbt source alternative for larger reference data** — correct fallback per dbt docs "For large data loading, use alternative ETL/ELT tools rather than dbt seeds."
 
-Cites r27. Clean 5.0 all dimensions.
+Cites r27 §6.7D. Clean 5.0 all dimensions.
 
 ---
 
@@ -154,24 +143,35 @@ Cites r27. Clean 5.0 all dimensions.
 
 | Topic | Before | After | Delta |
 |---|---|---|---|
-| SQL query best practices for OLAP (Q1) | 4.5859 / 237 | (4.5859 × 237 + 4.875)/238 ≈ **4.5871 / 238** | +0.0012 micro-lift |
-| Analytical query patterns on Iceberg+Trino (Q2) | 4.5293 / 119 | (4.5293 × 119 + 4.9375)/120 ≈ **4.5327 / 120** | +0.0034 micro-lift |
-| Iceberg table maintenance (Q3) | 4.4561 / 193 | (4.4561 × 193 + 2.875)/194 ≈ **4.4480 / 194** | **-0.0081 drag** (still PASSED, margin +0.9480) |
-| Oracle PL/SQL → dbt+Trino migration (Q4) | 4.4675 / 136 | (4.4675 × 136 + 5.0)/137 ≈ **4.4714 / 137** | +0.0039 micro-lift |
+| Iceberg table maintenance (Q1) | 4.4480 / 194 | (4.4480 × 194 + 4.9375)/195 ≈ **4.4505 / 195** | +0.0025 Q1 lift |
+| SQL query best practices for OLAP (Q2) | 4.5871 / 238 | (4.5871 × 238 + 4.0625)/239 ≈ **4.5849 / 239** | -0.0022 Q2 drag |
+| Analytical query patterns on Iceberg+Trino (Q3) | 4.5327 / 120 | (4.5327 × 120 + 5.0)/121 ≈ **4.5366 / 121** | +0.0039 Q3 lift |
+| Oracle PL/SQL → dbt+Trino migration (Q4) | 4.4714 / 137 | (4.4714 × 137 + 5.0)/138 ≈ **4.4745 / 138** | +0.0031 Q4 lift |
 
 ALL required topics REMAIN PASSED.
 
 ---
 
 ## Source-verified outcomes this iter
-- 0 dialect errors on Q1/Q2/Q4
+- 0 dialect errors on Q1/Q3/Q4
 - 0 findability gaps
-- 1 resource-sourced false-fact (Q3 migrate-Spark-only) — FIX-A REQUIRED
-- 0 responder over-warning folklore
-- 1 strong reach on harder 2-step synthesis (Q2) — clean assembly
+- **1 RESOURCE-SOURCED false fact** (Q2 r27 §549/§659/§1685 "Trino has NO to_char" — FACTUALLY WRONG per trino.io/docs/467/functions/teradata.html) — **LIGHT FIX-A REQUIRED**
+- 0 over-warning folklore
+- **1 successful watch closure on first re-probe** (Q1 — r21+r17 migrate-Trino-native FIX-A iter1168 reaches with verbatim named-arg form; engineer routed correctly to Trino-direct migration with no Spark detour)
+- 1 minor Compl shave (Q1 — "new tables default v2" ambiguous in migrate context; non-load-bearing for time-travel + schema-evolution stated requirements)
 
 ## Recommendation
 
-**PASS + LIGHT FIX-A.** Iter average 4.4219 well above threshold; topic margins intact. Q3 defect is RESOURCE-sourced (r21 + r17 both teach the wrong "Trino doesn't implement migrate" claim) — teacher to fix per the FIX-A spec above. Q1/Q2/Q4 clean reaches; Q2 harder synthesis confirms the 2-level CTE-pivot-then-aggregate pattern is durable. Continue breadth probing next iter; re-probe migrate-Trino-vs-Spark with different phrasing to confirm FIX-A reaches.
+**PASS + LIGHT FIX-A** on r27 §549/§659/§1685 to_char-exists-but-numeric-only correction per spec above.
 
-**Open watches:** `r21+r17 migrate-Trino-native FIX-A iter1168` (new this iter — re-probe in next sweep).
+Iter average 4.75 well above threshold; topic margins intact. Q2 defect is **RESOURCE-SOURCED** (r27 teaches the wrong "Trino has no to_char" claim across three locations) — teacher to fix per the FIX-A spec. Q1 watch CLOSES cleanly. Q3/Q4 clean canonical reaches.
+
+**Open watches:**
+- ~~`r21+r17 migrate-Trino-native FIX-A iter1168`~~ — **CLOSED** on first re-probe (iter1169 Q1 reached verbatim FIX-A spec).
+- `r27 to_char-exists-numeric-only FIX-A iter1169` — new, re-probe next sweep with both numeric-format AND month-name-format angles.
+
+**Pattern observation:** Two consecutive iters surfaced RESOURCE-SOURCED defects of the same family (assumed-absence claims for functions/procedures that actually exist in Trino 467): iter1168 Q3 migrate (claimed Spark-only, is Trino-native) and iter1169 Q2 to_char (claimed nonexistent, exists with numeric-only codes). This continues the recurring "imported-prior assumed-absence" pattern documented across CLAUDE.md memory pins (starts_with, listagg, array_sum, trim 2-arg, truncate 2-arg, to_char, migrate). Verify-first against trino.io/docs/467 official function and connector pages catches these every time; treat any "Trino doesn't have X" claim in resources as guilty until proven innocent.
+
+The Q1 watch closure on FIRST re-probe with DIFFERENT framing ("Hive-format Parquet in HMS, no Spark, Trino only" vs iter1168 "register Parquet on MinIO as Iceberg") confirms the iter1168 FIX-A was structurally sound — engineer arrives at exact named-arg form without needing the original phrasing. The 10-watch run of first-probe closures continues.
+
+**Q2 lesson:** even when the actionable steer is correct (date_format/format_datetime for month-name labels IS the right answer), a false foundational claim in the supporting prose ("Trino has no to_char") propagates from resource to responder. The pin `reference_trino_to_char_exists.md` records the correct fact, but r27 was never reconciled — per pinned `feedback_reconcile_dont_append.md`, the fix must rewrite the wrong claim in place, not append a correction elsewhere.
