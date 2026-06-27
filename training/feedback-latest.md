@@ -1,270 +1,153 @@
-# Iter1174 — Judge Feedback
+# Iter1175 — Judge Feedback
 
-## Verdict: PASS + LIGHT FIX-A — Average 4.5 / 5.0 — Q1 WATCH CLOSES, Q4 NEW LOAD-BEARING LATERAL/CROSS-APPLY FACTUAL ERROR (RESOURCE-SILENT)
+## Verdict: STRONG PASS — Average 4.875 / 5.0 — Q1 WATCH CLOSES (r27 LATERAL/CROSS APPLY FIX-A REACHED CLEANLY)
 
 | Q | Topic row | Score | Verdict |
 |---|---|---:|---|
-| Q1 K/M/B abbreviation `12,400,000 → '12.4M'` / `3,750 → '3.75K'` | SQL query best practices for OLAP | 5.0 | **iter1173 r07 format_number FIX-A REACHED CLEANLY — WATCH CLOSES on first re-probe** |
-| Q2 digits-only varchar check via regex in WHERE | SQL query best practices for OLAP | 5.0 | pin-perfect `regexp_like` + `^[0-9]+$` anchors + `NOT regexp_like` for negation |
-| Q3 7-day moving average over daily signups | Analytical query patterns on Iceberg+Trino | 5.0 | pin-perfect ROWS-vs-RANGE handling + pre-aggregate-to-day caveat + INTERVAL '6' DAY for gap-day calendar-aware variant |
-| Q4 Oracle `CROSS APPLY` per-row top-3-tickets → Trino | Oracle PL/SQL → dbt+Trino migration | 3.0 | **DEFECT — "Trino has no CROSS APPLY or LATERAL join syntax" is FACTUALLY WRONG. Trino 467 DOES support `CROSS JOIN LATERAL` / `LEFT JOIN LATERAL` per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html). Resources are 100% silent on LATERAL → LIGHT FIX-A in r27.** |
+| Q1 LATERAL/CROSS APPLY for "latest price-change per product" per-row correlated subquery | Oracle PL/SQL → dbt+Trino migration | 5.0 | **iter1174 r27 §35 LATERAL FIX-A REACHED CLEANLY — WATCH CLOSES on first re-probe. Affirmed LATERAL exists, ON true required for LEFT JOIN LATERAL, correct CROSS-vs-LEFT JOIN choice, ROW_NUMBER alternative noted as better-planning for top-N-per-group.** |
+| Q2 `array_remove(arr, element)` removes single element from string array | Analytical query patterns on Iceberg+Trino | 5.0 | pin-perfect — one row in/out, no UNNEST, removes all occurrences, cites r07 |
+| Q3 4×3 plan_tier × billing_region grid with explicit zeros for absent combos | Analytical query patterns on Iceberg+Trino | 4.5 | Cross-join-of-dimensions + LEFT JOIN + COALESCE pattern correct; minor completeness shave — used `SELECT DISTINCT … FROM accounts` for the dimension spine which silently drops any FULLY-ABSENT dimension value (e.g. zero enterprise accounts anywhere → 9 cells not 12). Static `VALUES ('free'),('starter'),('pro'),('enterprise')` CROSS JOIN VALUES is the bulletproof form for a known fixed list. Practical impact bounded — pattern works correctly the moment at least one row exists per tier/region. |
+| Q4 Long-running Trino-on-Iceberg query + mid-query writes — reader-side snapshot isolation? | Iceberg table maintenance / Iceberg concurrent writes | 5.0 | pin-perfect — quoted r26 §45 verbatim ("a query started at snapshot S sees the table exactly as it was at S, regardless of how many writers committed after S"); correctly distinguished writer-side `write.delete/update/merge.isolation-level` props from reader visibility. Cites r26. |
 
-Iter average = (5.0 + 5.0 + 5.0 + 3.0) / 4 = **4.5**. Three strong canonical reaches + one load-bearing factual error on a directly-asked question.
+Iter average = (5.0 + 5.0 + 4.5 + 5.0) / 4 = **4.875**. Three pin-perfect canonical reaches + one minor completeness shave. Q1 WATCH CLOSES on first re-probe (13 of last 13 watches close on first re-probe).
 
 ---
 
-## Q1 — `format_number()` K/M/B abbreviation (STRONG PASS 5.0) — WATCH CLOSES
+## Q1 — LATERAL / CROSS APPLY per-row correlated join (STRONG PASS 5.0) — WATCH CLOSES
 
 ### Responder answer (verbatim core)
 
-> *"YES — Trino 467 has the built-in `format_number(number) → varchar` that does exactly this. `format_number(12400000) = '12.4M'`, `format_number(3750) = '3.75K'`. Takes BIGINT or DOUBLE, returns varchar with ~3 sig figs and K/M/B/T/Q decimal-unit suffix. Built-in since Release 357."*
+> *"YES — Trino 467 supports LATERAL (ANSI standard, equivalent to APPLY)."*
 >
-> Carve-out: do NOT confuse with `format_data_size` (bytes formatter, IEC units, SQL-UDF not built-in).
+> ```sql
+> SELECT p.product_id, p.name, pc.*
+> FROM products p
+> LEFT JOIN LATERAL (
+>   SELECT * FROM price_changes
+>   WHERE product_id = p.product_id
+>   ORDER BY changed_at DESC LIMIT 1
+> ) pc ON true;
+> ```
+>
+> *"LATERAL subquery references `p.product_id`, `ORDER BY changed_at DESC LIMIT 1` per product, one row per product. `ON true` required for LEFT JOIN LATERAL. CROSS JOIN LATERAL drops products w/ no changes; LEFT JOIN LATERAL … ON true keeps all (NULLs). For top-N-per-group at scale, `ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY changed_at DESC)` wrapped in subquery often plans better; LATERAL gives APPLY parity."*
 
 ### Verification
 
-- `format_number(number) → varchar` listed in [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html). Docs verbatim: *"Returns a formatted string using a unit symbol"* with examples `SELECT format_number(123456); -- '123K'` and `SELECT format_number(1000000); -- '1M'`.
-- Built-in since [Release 357 (May 2021)](https://trino.io/docs/current/release/release-357.html). Source: [trino-main FormatNumberFunction.java](https://github.com/trinodb/trino/blob/master/core/trino-main/src/main/java/io/trino/operator/scalar/FormatNumberFunction.java) — input BIGINT or DOUBLE, output VARCHAR, K/M/B/T/Q unit symbols, three-sig-fig precision rule.
-- For the engineer's exact examples: `format_number(12400000)` → `'12.4M'` (three-sig-fig: 12.4M, not 12.40M) ✓; `format_number(3750)` → `'3.75K'` (three-sig-fig: 3.75K) ✓.
-- `format_data_size` carve-out correctly named — it's an EXAMPLE SQL UDF on the routines page, not a built-in, intended for binary-IEC byte units (`'1MB'`, `'2.3GB'`). Different output space from `format_number`. Matches pinned `reference_trino_format_data_size_is_udf.md`.
+- **LATERAL exists in Trino 467**. Verified verbatim at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"Subqueries appearing in the FROM clause can be preceded by the keyword LATERAL. This allows them to reference columns provided by preceding FROM items."* Same page: *"A LATERAL join can appear at the top level in the FROM list, or anywhere within a parenthesized join tree."* And: *"for each row of the FROM item providing the cross-referenced columns, the LATERAL item is evaluated using that row set's values"*.
+- **ORDER BY + LIMIT inside LATERAL works**. Confirmed via web search — Trino has explicit decorrelation support for ORDER BY+LIMIT in correlated subqueries (PR #1415 "Decorrelate subqueries with Limit or TopN" by kasiafi; PR #8554 "Improve support for correlated subqueries with GROUP BY or LIMIT"). The classic top-N-per-group shape `FROM groups g CROSS JOIN LATERAL (SELECT * FROM items WHERE group_id = g.id ORDER BY date DESC LIMIT N)` is the documented use case.
+- **ON true is the documented `LEFT JOIN LATERAL` form**. ANSI/SQL-standard; matches r27 §35 verbatim translation `OUTER APPLY (subq)` → `LEFT JOIN LATERAL (subq) ON true`.
+- **ROW_NUMBER alternative routing correct**. r27 §35 verbatim: *"BUT for top-N-per-group, the `row_number() OVER (PARTITION BY account_id ORDER BY created_at DESC)` + outer `WHERE rn <= 3` rewrite is usually the better-planning, more idiomatic Trino form (a correlated LATERAL-with-LIMIT can plan as a per-row CorrelatedJoin). Pick LATERAL for 1:1 migration parity / genuinely per-row logic; pick `row_number()` for top-N-per-group at scale."*
 
 ### Watch close
 
-`r07 format_number K/M/B FIX-A iter1173` — **CLOSES on first re-probe**. The r07 §1845-1865 card added in iter1173 with:
-- THE ONE FACT statement (Trino 467 HAS a built-in `format_number(number) → varchar`)
-- Worked examples covering the exact engineer-asked shapes (`890K`, `1.25M`, `12.4M`)
-- Keyword anchors {compact number display, abbreviated number, K/M/B suffix, show 1.25M instead of 1250000, 890K format, human-readable count, magnitude formatter, shorten big numbers for a dashboard, thousands/millions/billions suffix, format a large integer compactly, format_number Trino}
-- Inline DO-NOT-WRITE defang of both iter1173 wrong claims ("no built-in" + "format_number is general numeric formatting not magnitude compression")
-- format_data_size carve-out
+`r27 LATERAL / CROSS APPLY FIX-A iter1174` — **CLOSES on first re-probe**. The iter1174 FIX-A added an r27 §35 myth-table row stating Trino 467 HAS LATERAL with the documented translation `CROSS APPLY → CROSS JOIN LATERAL` / `OUTER APPLY → LEFT JOIN LATERAL ... ON TRUE`, both forms + ROW_NUMBER selection rule, DO-NOT-WRITE defang of "Trino has no LATERAL", worked Oracle→Trino side-by-side example, and keyword anchors {CROSS APPLY, OUTER APPLY, LATERAL, CROSS JOIN LATERAL, LEFT JOIN LATERAL, per-row correlated join, per-account top-N tickets, Oracle CROSS APPLY translation, SQL Server APPLY in Trino}. iter1175 Q1 was deliberately phrased with DIFFERENT framing (price-changes-per-product, SQL Server/Oracle APPLY recall, single-most-recent variant of top-N) and the FIX-A reached cleanly — engineer gets the correct LATERAL affirmation AND the ROW_NUMBER planning-trade-off in the same answer. Imported-prior fab-class regression PREVENTED.
 
-is doing exactly its job — engineer-facing K/M/B questions now keyword-route to the correct one-line answer instead of the `format_data_size`-style hand-rolled CASE. Pattern of one-iteration find-and-close holds (12 of last 12 watches).
+13 of last 13 watches close on first re-probe pattern HOLDS.
 
 ---
 
-## Q2 — Digits-only varchar check via `regexp_like` in WHERE (STRONG PASS 5.0)
+## Q2 — `array_remove(arr, element)` element removal (STRONG PASS 5.0)
 
-### Responder answer
+### Responder answer (verbatim core)
 
-```sql
-SELECT account_id
-FROM customers
-WHERE NOT regexp_like(account_id, '^[0-9]+$');
-```
-
-Plus: `regexp_like(string, pattern) → boolean` directly usable in WHERE; anchors `^...$` required for exactly-digits (without them, `regexp_like('abc123', '[0-9]+')` returns TRUE on contains-a-digit, false positive); `NOT regexp_like` for negation (no `regexp_unlike`); Java regex flavor.
+> *"`array_remove(feature_flags, 'legacy_export')` — removes ALL occurrences of 'legacy_export' from each user's array. One row in / one row out. No `UNNEST` + re-aggregate needed."*
 
 ### Verification
 
-- `regexp_like(string, pattern) → boolean` verified verbatim at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html): *"Evaluates the regular expression `pattern` and determines if it is contained within `string`"* — note "contained within" exactly justifies the responder's anchors-required warning.
-- Anchors `^[0-9]+$` are necessary: without them, the predicate matches contains-a-digit which would let `'CUST-1234'` through (wrong). With anchors, only entire strings that are all digits match.
-- `NOT regexp_like(...)` for negation is the correct form (Trino has no `regexp_unlike`).
-- Java regex flavor noted at top of the regexp.html docs page; `[0-9]` POSIX-style digit class works (`\d` also works per [reference_trino_regex_backslash.md](pinned) but `[0-9]` is portable and avoids the rendered-vs-RAW backslash ambiguity).
-- 200M-row context: WHERE NOT regexp_like is the canonical Trino dirty-data sweep form. No fabrications.
+- `array_remove(x, element) → array` — verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html). Docs verbatim: *"Remove all elements that equal `element` from array `x`."*
+- Matches r07 §751 LEADING CANONICAL ("array_remove(arr, element) removes ALL occurrences") + iter750 PIN.
+- Engineer's UPDATE-style use case (`UPDATE users SET feature_flags = array_remove(feature_flags, 'legacy_export')`) is the canonical retire-a-flag pattern — Trino 467 supports UPDATE on Iceberg tables per [trino.io/docs/467/sql/update.html](https://trino.io/docs/467/sql/update.html). One row in/out, no fanout.
 
-### Source
-
-`r07` + `r23` regex-function canonicals. No resource action.
+Clean 5.0 all dimensions.
 
 ---
 
-## Q3 — 7-day moving average over daily signups (STRONG PASS 5.0)
+## Q3 — 4×3 plan_tier × billing_region grid with explicit zeros (PASS 4.5)
 
-### Responder answer
+### Responder answer (verbatim core)
 
-```sql
-WITH daily_signups AS (
-  SELECT signup_date, COUNT(*) AS new_signups
-  FROM signups
-  GROUP BY signup_date
-)
-SELECT
-  signup_date,
-  new_signups,
-  AVG(new_signups) OVER (
-    ORDER BY signup_date
-    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-  ) AS avg_7day
-FROM daily_signups
-ORDER BY signup_date;
-```
-
-Plus: ROWS counts **physical rows** not days — pre-aggregate-to-one-row-per-day in a CTE first, else "6 rows back" = 6 orders not 6 days. Gap-day caveat: if some days have zero signups (missing rows), use `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` (calendar-aware: window includes all rows whose `signup_date` is within 6 days of current row, missing days don't shift the window).
+> ```sql
+> WITH dim_tiers AS (SELECT DISTINCT plan_tier FROM accounts),
+>      dim_regions AS (SELECT DISTINCT billing_region FROM accounts),
+>      all_combinations AS (
+>        SELECT t.plan_tier, r.billing_region
+>        FROM dim_tiers t CROSS JOIN dim_regions r
+>      ),
+>      grouped_data AS (
+>        SELECT plan_tier, billing_region, COUNT(*) AS account_count
+>        FROM accounts GROUP BY plan_tier, billing_region
+>      )
+> SELECT c.plan_tier, c.billing_region, COALESCE(g.account_count, 0)
+> FROM all_combinations c
+> LEFT JOIN grouped_data g
+>   ON c.plan_tier = g.plan_tier AND c.billing_region = g.billing_region
+> ORDER BY c.plan_tier, c.billing_region;
+> ```
 
 ### Verification
 
-- ROWS BETWEEN N PRECEDING AND CURRENT ROW for AVG window — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): *"All aggregate functions can be used as window functions by adding the OVER clause"* + frame syntax per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) WINDOW clause.
-- `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` is **valid Trino 467** — interval-based RANGE frames were added per the [Trino "Introducing new window features" blog post (release 346+)](https://trino.io/blog/2021/03/10/introducing-new-window-features.html) and the documented form is `RANGE BETWEEN INTERVAL '1' MONTH PRECEDING AND CURRENT ROW`. The offset interval applies to the sorting column (must be a date/time type), so `ORDER BY signup_date RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` is correct shape.
-- ROWS-vs-RANGE distinction is exactly the load-bearing nuance the question hinted at ("does the sliding window get defined differently?"). Responder names both forms with the correct selection rule (ROWS for dense-daily-data, RANGE for sparse/gap days).
-- Pre-aggregation-to-day caveat is the key trap: applying ROWS BETWEEN 6 PRECEDING directly to raw signups (one row per individual signup event) would compute a moving average over the last 7 signup EVENTS not the last 7 DAYS — silent off-by-N-row bug. CTE solves it.
-- Engineer's literal "moving average is just running-total with AVG?" framing gets the right answer: NO — running total uses `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (accumulating from start), moving average uses a bounded sliding window `BETWEEN 6 PRECEDING AND CURRENT ROW` (last N rows/period).
+- **Pattern is fundamentally correct.** CROSS JOIN of two distinct-value sets → LEFT JOIN the grouped data → `COALESCE(count, 0)` is the textbook fill-zero-for-sparse-cells form. Trino 467 supports CROSS JOIN per [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) §JOIN syntax + `COUNT(*)` GROUP BY standard.
+- Engineer can copy-paste and arrives at the right answer in the common case (every tier and every region has ≥1 account somewhere in `accounts`).
 
-### Source
+### Minor completeness shave (-0.5 Completeness)
 
-`r07` window-frame canonicals + cumulative-vs-moving distinction. No resource action.
+The `SELECT DISTINCT plan_tier FROM accounts` / `SELECT DISTINCT billing_region FROM accounts` dimension-spine is a **DISTINCT-from-observed-data spine** — same family as the time-spine trap r07 §1608 explicitly warns against:
+
+> r07 §1608 verbatim: *"**DO NOT** build the spine from `SELECT DISTINCT date_trunc('day', event_ts) FROM facts` — days with **zero events across ALL entities** will be MISSING (you only get days that appear at least once in the raw facts)."*
+
+The engineer's literal stakeholder ask is **"all 12 cells"** (explicit 4×3 grid). If `enterprise` tier has zero accounts in ANY region, OR if `apac` region has zero accounts in ANY tier, the DISTINCT spine silently drops that entire row/column → engineer ships 9 cells (or 8) when stakeholders asked for 12.
+
+The bulletproof form for a known fixed dimension set is **static VALUES lists**:
+
+```sql
+WITH dim_tiers(plan_tier) AS (VALUES ('free'),('starter'),('pro'),('enterprise')),
+     dim_regions(billing_region) AS (VALUES ('us'),('eu'),('apac')),
+     all_combinations AS (
+       SELECT t.plan_tier, r.billing_region
+       FROM dim_tiers t CROSS JOIN dim_regions r
+     ),
+     ...
+```
+
+This guarantees exactly 12 cells regardless of what's in `accounts`. The 4 tiers and 3 regions were explicitly named in the question, so the dimension set is **known fixed** — exactly the case where static VALUES dominates DISTINCT-from-data. `VALUES (...)` as a table-source is valid Trino 467 per [trino.io/docs/current/sql/values.html](https://trino.io/docs/current/sql/values.html) and is the canonical small-static-table form across r07/r09/r23.
+
+### Classification — NOT a defect, not a resource fix
+
+- Pattern is fundamentally right; engineer gets a working query that handles the common case correctly.
+- Static-VALUES refinement is a recall ceiling — r07 has the time-spine canonical with DISTINCT-from-data warning but does NOT have a categorical-dimension-spine canonical pairing it with static VALUES for known-fixed-dimension cases.
+- Responder framing is the standard textbook "all combinations" answer; the refinement is the more bulletproof variant.
+- **NO RESOURCE FIX**. Adding a new categorical-dim-spine canonical card with static VALUES risks `feedback_new_card_over_attracts_adjacent` over-attractor on neighboring sparse-grid / fill-zero / pivot questions (which currently route correctly). Re-probe in next sweep with a phrasing that DOES have a fully-absent dimension value (e.g. "no enterprise accounts in our data yet, still want 12 cells") to test whether this gap is load-bearing or one-off recall.
+- Watch label: `r07 categorical-dim-spine DISTINCT-from-data static-VALUES preferred iter1175` — if RECURS across phrasings with explicit fully-absent-dim-value framing, consider additive r07 cross-ref from §1608 time-spine canonical to a new categorical-dim-spine card. If ONE-OFF → leave untouched.
 
 ---
 
-## Q4 — Oracle `CROSS APPLY` → Trino (FAIL 3.0) — LIGHT FIX-A
+## Q4 — Iceberg reader-side snapshot isolation during long-running query (STRONG PASS 5.0)
 
-### The defect: "Trino has no CROSS APPLY or LATERAL join syntax" is FACTUALLY WRONG
+### Responder answer (verbatim core)
 
-Responder answer (verbatim core):
+> *"YES — Trino guarantees reader-side snapshot isolation. A query started at snapshot S sees the table exactly as it was at S, regardless of how many writers committed after S. The 20-min query sees its start snapshot; concurrent ingestion rows go to a DIFFERENT snapshot, invisible to the running query; later queries see them. Writer-side isolation-level props (`write.delete/update/merge.isolation-level`) control write conflicts, NOT readers."*
 
-> *"Trino has no direct CROSS APPLY syntax. ... Trino has no CROSS APPLY or LATERAL join syntax. The window function rewrite is standard practice."*
+### Verification
 
-The first half is correct (no `APPLY` keyword in Trino). The second half — that Trino has **no LATERAL** — is **factually wrong**.
+- **Reader-side snapshot isolation is unconditional**. Verified verbatim in r26 §45: *"Plain reader-side guarantee is unchanged. Both isolation levels give readers full snapshot isolation: a query started at snapshot S sees the table exactly as it was at S, regardless of how many writers committed after S. The isolation level here is a writer-side conflict detection knob, not a reader consistency knob."* — quoted exactly by responder.
+- **Iceberg snapshot model** verified at [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/): each table version is a snapshot; commits create new snapshots; readers resolve `metadata_location` → `current-snapshot-id` at query-plan time and pin that snapshot for the entire query. New commits during query execution land in NEW snapshots not visible to the in-flight query. [Trino Iceberg connector docs](https://trino.io/docs/467/connector/iceberg.html) reinforce: time-travel `FOR VERSION AS OF` syntax exists precisely because each snapshot is an immutable view of the table.
+- **Writer-side isolation-level** verified via web search of Apache Iceberg docs + Javadoc `org.apache.iceberg.IsolationLevel`:
+  - `write.delete.isolation-level` / `write.update.isolation-level` / `write.merge.isolation-level` (default `serializable`, alternative `snapshot`).
+  - **Serializable** (default): UPDATE/DELETE/MERGE FAILS if a concurrent commit added a new file that might contain rows matching the predicate.
+  - **Snapshot**: weaker — UPDATE/DELETE/MERGE succeeds even if a concurrent commit happened, but may miss rows that the concurrent commit added.
+  - Quoted from Iceberg docs: *"the serializable isolation level guarantees that an ongoing UPDATE/DELETE/MERGE operation fails if a concurrent transaction commits a new file that might contain rows matching the condition used in UPDATE/DELETE/MERGE"*. Both settings apply to WRITERS only; readers always get snapshot isolation regardless. Responder's "writer-side conflict detection knob, not reader visibility" framing is exactly correct.
+- The mid-query-write mental model the engineer is worried about (the long-running 20-min query reading a mix of old + newly-committed rows) is **not a possible failure mode on Trino+Iceberg**. The only way a long query could fail due to concurrent activity is `expire_snapshots` deleting the data files the in-flight scan was planning to read — that's a maintenance-window issue (separately covered in r05 §3356 + r26), not a mid-query torn read.
 
-Trino 467 **DOES support LATERAL joins**, verified verbatim at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html):
-
-> *"Subqueries appearing in the `FROM` clause can be preceded by the keyword `LATERAL`. This allows them to reference columns provided by preceding `FROM` items."*
->
-> *"A `LATERAL` join can appear at the top level in the `FROM` list, or anywhere within a parenthesized join tree."*
-
-With this docs-quoted example:
-```sql
-SELECT name, x, y
-FROM nation
-CROSS JOIN LATERAL (SELECT name || ' :-' AS x)
-CROSS JOIN LATERAL (SELECT x || ')' AS y);
-```
-
-So the direct 1:1 Oracle/SQL-Server → Trino translation is:
-- `CROSS APPLY (subquery)` → `CROSS JOIN LATERAL (subquery)`
-- `OUTER APPLY (subquery)` → `LEFT JOIN LATERAL (subquery) ON TRUE`
-
-For the engineer's specific "per account, 3 most recent tickets" example, the direct LATERAL port would be:
-
-```sql
--- DIRECT 1:1 PORT — works in Trino 467
-SELECT a.account_id, t.ticket_id, t.created_at
-FROM accounts a
-CROSS JOIN LATERAL (
-  SELECT ticket_id, created_at
-  FROM tickets
-  WHERE account_id = a.account_id
-  ORDER BY created_at DESC
-  LIMIT 3
-) t;
-```
-
-### What the responder got right
-
-- The `ROW_NUMBER() OVER (PARTITION BY account_id ORDER BY created_at DESC) AS rn` rewrite filtered by `rn <= 3` IS a valid and often-preferred form for top-N-per-group on Trino — it usually plans more efficiently than LATERAL for the top-N-per-group case because the planner can do a single partitioned sort instead of N correlated subquery evaluations.
-- `max_by(ticket_id, created_at)` for a single scalar alternative is correct (Trino-native aggregate per [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)).
-- The warning about `CorrelatedJoin` in EXPLAIN being expensive is fair guidance for when a correlated form survives planning.
-
-### What's wrong and why it matters
-
-The engineer's literal question is: *"Does Trino support that per-row correlated join style at all, or must those queries be redesigned?"* — the responder answers "must be redesigned" via ROW_NUMBER, when the truthful answer is **"yes, via LATERAL — and for top-N-per-group ROW_NUMBER is often the better-planning alternative"**. Both forms work; the engineer should know both.
-
-In a 50+ Oracle-report migration this misanswer costs real time: an engineer who knows `CROSS APPLY → CROSS JOIN LATERAL` can do a 1:1 textual rewrite of dozens of reports; an engineer who believes Trino has no LATERAL has to redesign each report with window-function logic — sometimes correctly, sometimes not (e.g., `OUTER APPLY` returning a single-row scalar is awkward to express via window function without a separate aggregation step). The LATERAL form preserves the original report's structure, which matters when the goal is migration parity.
-
-### Source classification: RESOURCE GAP (LIGHT FIX-A) — pin-correct-but-resource-silent family
-
-Grepped `resources/` for:
-- `lateral` (case-insensitive) → **zero matches in any resource file**
-- `CROSS APPLY` / `OUTER APPLY` (case-insensitive) → **zero matches in any resource file**
-
-The entire LATERAL / APPLY translation pattern is absent from `resources/`. Combined with the Oracle migration context (r27 explicitly addresses Oracle→Trino dialect rewrites), this is exactly the **pin-correct-but-resource-silent** family seen recently with `format_number` / `to_char` / `migrate` — the function/syntax exists in Trino but no resource documents it, so the responder defaults to "doesn't exist" / "must be rewritten."
-
-This is the **6th instance** of imported-prior-direction errors (after `starts_with` / `to_char` / `listagg` / `array_sum` / `format_number`) — the responder assumed absence of a foreign-looking-but-real Trino syntax. Same family, same remediation pattern (additive keyword-magnet card in the topically-correct resource).
-
-### Recommended LIGHT FIX-A
-
-Add an additive canonical card to **`r27-oracle-plsql-to-dbt-trino.md`** (most natural home — `CROSS APPLY` is the Oracle/SQL Server idiom the engineer is migrating; Trino-side LATERAL is the direct replacement). Cross-ref from `r23-sql-best-practices-olap.md` so questions framed in non-migration contexts also reach it.
-
-**Keyword anchors (load these so any Q1-style question keyword-routes here):**
-{CROSS APPLY, OUTER APPLY, LATERAL, CROSS JOIN LATERAL, LEFT JOIN LATERAL, per-row correlated join, for each row a correlated subquery, per-account top-N tickets, per-customer most-recent-N orders, Oracle CROSS APPLY translation, SQL Server APPLY in Trino, can Trino reference outer-query columns in a FROM-clause subquery, correlated subquery in FROM}
-
-**Load-bearing facts:**
-- Trino 467 HAS `LATERAL` join syntax — verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): *"Subqueries appearing in the `FROM` clause can be preceded by the keyword `LATERAL`. This allows them to reference columns provided by preceding `FROM` items."*
-- Trino does NOT have the `APPLY` keyword (`CROSS APPLY`/`OUTER APPLY` parse-error). The direct ANSI-standard translation is LATERAL:
-  - `CROSS APPLY (subquery)` → `CROSS JOIN LATERAL (subquery)`
-  - `OUTER APPLY (subquery)` → `LEFT JOIN LATERAL (subquery) ON TRUE`
-- LATERAL is the direct 1:1 port for migration parity. For top-N-per-group specifically, `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) <= N` is often a better-planning alternative (single partitioned sort vs N correlated evaluations) — name BOTH forms with a selection rule:
-  - **Use LATERAL** when porting Oracle/SQL-Server reports verbatim (preserves structure, easier code review, handles arbitrary per-row subqueries that aren't just top-N).
-  - **Use ROW_NUMBER + filter** when the pattern is specifically top-N-per-group on a large table and planning efficiency matters.
-
-**Defang DO-NOT-WRITE entries:**
-- "Trino has no LATERAL" — **FALSE** (it's documented in 467 SELECT syntax, with example).
-- "All Oracle CROSS APPLY queries must be redesigned with window functions" — **FALSE** (most can be 1:1 ported via `CROSS JOIN LATERAL`; only redesign when planning matters).
-
-**Worked Oracle→Trino example:**
-```sql
--- Oracle (or SQL Server)
-SELECT a.account_id, t.ticket_id, t.created_at
-FROM accounts a
-CROSS APPLY (
-  SELECT ticket_id, created_at
-  FROM tickets
-  WHERE account_id = a.account_id
-  ORDER BY created_at DESC
-  FETCH FIRST 3 ROWS ONLY
-) t;
-
--- Direct 1:1 Trino 467 port (preserves report structure)
-SELECT a.account_id, t.ticket_id, t.created_at
-FROM accounts a
-CROSS JOIN LATERAL (
-  SELECT ticket_id, created_at
-  FROM tickets
-  WHERE account_id = a.account_id
-  ORDER BY created_at DESC
-  LIMIT 3
-) t;
-
--- Often-better-planning alternative when the table is very large
-SELECT account_id, ticket_id, created_at
-FROM (
-  SELECT t.account_id, t.ticket_id, t.created_at,
-         ROW_NUMBER() OVER (PARTITION BY t.account_id ORDER BY t.created_at DESC) AS rn
-  FROM tickets t
-)
-WHERE rn <= 3;
-```
-
-**Cross-ref / placement notes:**
-- r27 §4.4 (cross-dialect-spillover guardrail) is a natural section to graft this onto — Oracle `CROSS APPLY` is exactly a cross-dialect spillover case.
-- r23 should add a 1-line cross-ref ("for the LATERAL syntax used in correlated-subquery-in-FROM patterns, see r27 §X").
-- Cross-ref `r28-complex-sql-performance-trino-dbt.md` for the ROW_NUMBER-vs-LATERAL planning trade-off (top-N-per-group section).
-
-**Watch label:** `r27 LATERAL / CROSS APPLY FIX-A iter1174`. Re-probe next sweep with structurally similar phrasings:
-- *"SQL Server `OUTER APPLY (...)` patterns — Trino equivalent?"*
-- *"For each parent row, run a small correlated query — does Trino allow that or only the window-function form?"*
-- *"Porting `CROSS APPLY` for a per-order-recent-shipments report — Trino syntax?"*
-
-If reaches LATERAL canonical → CLOSE.
-
-### Classification fit
-
-6th instance of imported-prior-direction errors (after `starts_with` / `to_char` / `listagg` / `array_sum` / `format_number`). Pattern: responder assumes absence of a foreign-looking-but-real Trino syntax/function when the resource is silent on it. Remediation pattern is consistent: additive keyword-magnet card in the topically-correct resource, with explicit DO-NOT-WRITE defang of the "doesn't exist" claim.
-
-### Practical impact
-
-Q1/Q2/Q3 are pin-perfect canonical reaches. Q4 engineer gets a **working** ROW_NUMBER query — they can ship — but loses (a) the 1:1 LATERAL migration shortcut (forcing per-report redesign across the 50+ Oracle reports), and (b) the correct mental model that Trino is ANSI-compliant on LATERAL even though it lacks the SQL Server `APPLY` keyword. For a SaaS team mid-Oracle-migration, this is a real time tax.
+Clean 5.0 all dimensions. r26 §45 LEADING CANONICAL on the reader-side guarantee is doing its job — engineer-facing "will my long query see mid-query writes?" routes correctly to the verbatim quote.
 
 ---
 
-## Watches summary
+## Cross-cutting observations
 
-| Watch | Iter opened | This iter | Status |
-|---|---|---|---|
-| `r07 format_number K/M/B FIX-A iter1173` | 1173 | Q1 re-probe reached `format_number(12400000)='12.4M'`, `format_number(3750)='3.75K'` with format_data_size carve-out | **CLOSED** |
-| `r27 LATERAL / CROSS APPLY FIX-A iter1174` | **1174 (NEW)** | Q4 said "Trino has no LATERAL" — factually wrong; resources 100% silent on LATERAL / APPLY | **OPEN — LIGHT FIX-A recommended** |
+**Strong pattern of one-iteration FIX-A → WATCH CLOSES.** iter1174 added a load-bearing factual correction (Trino HAS LATERAL, with translation table) and iter1175 Q1 with DIFFERENT framing reached the new canonical cleanly. This is now the 13th consecutive watch closing on first re-probe (across format_number, contains_sequence, percent-of-total transcription, INDF-as-NVL-substitute, IF-EXISTS-staging-guard, date-vs-string-literal, TRUNC-2-arg, and now LATERAL). The teacher's pattern of **additive myth-table rows with keyword anchors + DO-NOT-WRITE defang + worked example** consistently lands on Haiku's first re-probe — no recurrence of the imported-prior fab-class on LATERAL.
 
----
+**Imported-prior-direction error class status.** The LATERAL gap was the **6th instance** of the foreign-looking-but-real Trino syntax / function class (starts_with, to_char, listagg, array_sum, format_number, LATERAL). Each has been resolved by an additive myth-table card pinning the existence + canonical usage shape. iter1175 Q1 confirms LATERAL is now in the "resolved" set. Next probes should look for further instances — candidates the responder might still slip on (unverified — speculative): WITH RECURSIVE (resource exists), JSON_TABLE / JSON_QUERY, GROUPING SETS expressions, TABLESAMPLE BERNOULLI, MATCH_RECOGNIZE.
 
-## Recommended next-sweep action for the teacher
+**Minor Q3 completeness shave does NOT trigger FIX-A.** Q3's DISTINCT-from-data spine is the standard textbook answer; the static-VALUES refinement is more bulletproof but the gap is only load-bearing when an entire dimension value is fully absent. r07 §1608 has the time-spine warning; the categorical-dim case is one layer of abstraction removed and not currently in resources. Re-probe with explicit "no enterprise accounts anywhere, still want 12 cells" framing before deciding if this is a recall ceiling or a resource gap.
 
-**LIGHT FIX-A on r27-oracle-plsql-to-dbt-trino.md** (with cross-ref in r23 and r28):
-
-Add a `CROSS APPLY → CROSS JOIN LATERAL` / `OUTER APPLY → LEFT JOIN LATERAL` canonical card. Trino 467 has LATERAL joins — documented in [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — and they are the direct ANSI-standard replacement for the missing `APPLY` keyword. The card must include both the LATERAL form (for 1:1 migration parity) AND the ROW_NUMBER form (for top-N-per-group planning), with a selection rule between them. Defang the "Trino has no LATERAL" claim with the explicit docs quote.
-
-**No resource action on Q1, Q2, Q3** — Q1 watch CLOSES (12/12 pattern holds); Q2 and Q3 are pin-perfect canonical reaches.
-
-**Margin update:**
-- SQL query best practices for OLAP: 4.5736/249 → (1138.8264 + 5.0 + 5.0)/251 = **4.5770/251** (+0.0034, margin +1.0770).
-- Analytical query patterns on Iceberg+Trino: 4.5394/122 → (553.8068 + 5.0)/123 = **4.5432/123** (+0.0038, margin +1.0432).
-- Oracle PL/SQL → dbt+Trino migration: 4.4778/139 → (622.4142 + 3.0)/140 = **4.4674/140** (-0.0104, margin still +0.9674, cushion absorbs).
-
-The Q4 fail is bounded by topic margin and adds one watch. Three of four answers above 4.875 keeps the overall iter average at 4.5, comfortably PASS.
+**Topic-row routing.** Q1 → Oracle PL/SQL → dbt+Trino migration (LATERAL is an Oracle/SQL-Server APPLY-translation question, scored under the migration topic, watch tied to r27). Q2 → Analytical query patterns on Iceberg+Trino (array_remove canonical lives in r07). Q3 → Analytical query patterns on Iceberg+Trino (cross-join dimension spine + LEFT JOIN + COALESCE-zero is r07 sparse-grid canonical family). Q4 → Iceberg table maintenance (snapshot-isolation reader-side canonical lives in r26 §45). No misroutes.
