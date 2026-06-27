@@ -1,146 +1,172 @@
-# Iter1171 — Judge Feedback
+# Iter1172 — Judge Feedback
 
-## Verdict: STRONG PASS — Average 4.84375 / 5.0
+## Verdict: FIX-A — Average 3.625 / 5.0 — TWO LOAD-BEARING DEFECTS (Q2 + Q3)
 
 | Q | Topic row | Score | Verdict |
 |---|---|---:|---|
-| Q1 starts_with vs ends_with / LIKE for suffix (PIN AUDIT) | SQL query best practices for OLAP | 4.9375 | **AUDIT PASSES — `reference_trino_starts_with_ends_with` pin still matches Trino 467 (resource not stale)** |
-| Q2 GREATEST/LEAST with NULL args / ignore-NULLs via COALESCE-sentinel (PIN AUDIT) | SQL query best practices for OLAP | 4.8125 | **AUDIT PASSES — `reference_trino_greatest_least_null` pin still matches Trino 467 (resource not stale)** |
-| Q3 percent_rank() / cume_dist() per-row relative-rank vs approx_percentile | Analytical query patterns on Iceberg+Trino | 4.875 | pin-perfect canonical, distinction from approx_percentile correctly framed |
-| Q4 Iceberg branches — Trino read / Spark write split / WAP + fast_forward / dbt-Spark adapter for branch writes | Iceberg table maintenance | 4.75 | branch read/write split correct, Spark DDL+procedures verified, dbt-on-Trino-can't-write-to-branch correctly named |
+| Q1 `map_filter((k,v)->predicate)` returns smaller MAP without UNNEST | SQL query best practices for OLAP | 5.0 | pin-perfect; one-line canonical |
+| Q2 HAVING ratio `reopened/total > 0.5` — INTEGER DIVISION BUG | SQL query best practices for OLAP | 2.5 | **DEFECT — answer SQL silently returns wrong rows; classification = ONE-OFF RESPONDER SLIP** |
+| Q3 GDPR purge `DELETE WHERE event_date < cutoff` — WRONG PREMISE + WRONG `expire_snapshots` PARAM | Iceberg table maintenance | 2.625 | **DEFECT — falsely agreed delete files pile up; over-engineered Spark step; wrong param syntax; classification = LIGHT FIX-A (findability gap)** |
+| Q4 `UPPER(email)` sargability + Iceberg/Trino equivalents | SQL query best practices for OLAP / Query performance basics | 4.375 | mostly correct; normalize-at-write canonical reached; minor framing shave on partition-pruning phrasing |
 
-Iter average = (4.9375 + 4.8125 + 4.875 + 4.75) / 4 = **4.84375 STRONG PASS** (margin +1.34375 over 3.5 threshold).
-
-**No watches opened, no FIX-A required.** Two of four questions were pin-vs-resource AUDIT probes — both pins confirmed accurate against current Trino 467 docs (no stale resource teaching). The other two were breadth probes that reached canonical answers cleanly.
+Iter average = (5.0 + 2.5 + 2.625 + 4.375) / 4 = **3.625** — just above the 3.5 pass threshold but with two load-bearing technical-accuracy fails. Recommending **LIGHT FIX-A on r17 partition-aligned-DELETE findability**; Q2 stays NO-OP+WATCH per the `feedback_responder_broken_secondary_alternative` pattern.
 
 ---
 
-## Per-question detail
+## Q1 — map_filter (STRONG PASS 5.0)
 
-### Q1 (4.9375 — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.75) — starts_with vs ends_with / suffix via LIKE / PIN AUDIT
+Responder answer: `map_filter(feature_scores, (k, v) -> v > threshold)`.
 
-**PIN AUDIT VERDICT: `reference_trino_starts_with_ends_with` pin matches Trino 467 docs verbatim. Resource is NOT stale.**
+Verified against [trino.io/docs/467/functions/map.html](https://trino.io/docs/467/functions/map.html): `map_filter(map(K, V), function(K, V, boolean)) -> map(K, V)` — *"Constructs a map from those entries of map for which function returns true"*. Signature, return type, lambda form all match. The "one row in, one row out, no UNNEST + MAP_AGG rebuild" framing is the correct mental model. r09 citation aligned.
 
-Verified against [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) — the live string-functions page lists:
-- `starts_with(string, substring) → boolean` — **EXISTS** ("Tests whether substring is a prefix of string.")
-- `ends_with` — **ABSENT** (not in the function list; ends_with is Spark/Snowflake-only, not Trino).
-
-Responder's three load-bearing facts all source-aligned:
-1. **Prefix**: `starts_with(filename, 'invoice_')` is the native Trino 467 form. `LIKE 'invoice_%'` also works and is the more familiar/portable shape. Correct.
-2. **Suffix**: NO `ends_with()` — must use `LIKE '%.pdf'` OR `substr(filename, -4) = '.pdf'`. Correct.
-3. **Negative-index substr**: verified at the same page — "substring(string, start): A negative starting position is interpreted as being relative to the end of the string." So `substr(filename, -4) = '.pdf'` correctly returns the last 4 characters. Correct.
-
-Practical guidance shape ("prefer LIKE for readability and pushdown") is sound:
-- LIKE `'%.pdf'` is a constant-anchored pattern with a fixed suffix — Trino can push the LIKE predicate down to the Iceberg connector as a filter on the column (no UDF wrapping the column → still sargable for unwrap-cast and partition pruning).
-- `substr(filename, -4) = '.pdf'` wraps the column in a function call — connector pushdown is not guaranteed for substr-equality (function-wrapped column = no UnwrapCast rule applies; comparable to the pattern called out in `reference_trino_unwrap_temporal_predicates`).
-- starts_with prefix form has equivalent pushdown to `LIKE 'prefix%'`.
-
-Minor completeness shave (-0.25 Compl): did not name `regexp_like(filename, '\.pdf$')` as a third option. Recall ceiling — regex is overkill for a fixed-suffix match, LIKE is the right answer, no harm.
-
-Cites correctly. **No resource fix. Pin holds.**
-
-### Q2 (4.8125 — Acc 5.0 / Clar 4.75 / App 5.0 / Compl 4.5) — GREATEST/LEAST NULL behavior / COALESCE-sentinel / PIN AUDIT
-
-**PIN AUDIT VERDICT: `reference_trino_greatest_least_null` pin matches Trino 467 docs verbatim. Resource is NOT stale.**
-
-Verified against [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) — for GREATEST/LEAST:
-> "Like most other functions in Trino, they return null if any argument is null."
-
-The docs explicitly contrast this with PostgreSQL (which only returns null if ALL arguments are null). This is the exact behavior the engineer was worried about, and the responder correctly named it.
-
-Responder's load-bearing facts all source-aligned:
-1. **Trino's GREATEST returns NULL if ANY arg is NULL** — verbatim docs. Different from Postgres skip-NULLs; matches Oracle/MySQL "NULL-poisons" behavior. Correct.
-2. **COALESCE-to-sentinel pattern**: `greatest(coalesce(score_a, 0), coalesce(score_b, 0), coalesce(score_c, 0))` is the canonical workaround — substitute a floor sentinel that won't win against any real score. For GREATEST use a floor lower than any real value; for LEAST use a ceiling higher than any real value. Correct.
-3. **"All NULL → returns the sentinel" caveat**: the responder explicitly noted that if all three are NULL the expression returns 0 (the sentinel), not NULL. Engineer can wrap with `CASE WHEN score_a IS NULL AND score_b IS NULL AND score_c IS NULL THEN NULL ELSE greatest(...) END` if they want NULL-preserving "no scores → unknown" semantics. Correct.
-4. **Negative-scores caveat**: the responder flagged that the 0-floor breaks if scores can be negative (a real-but-negative max would be hidden by the 0 sentinel). Recommended a domain-specific floor (e.g., -1e18 or the minimum possible score in the domain). **This is exactly the right caveat to flag** — many engineers hit this trap with elo/rating columns that can go below zero.
-
-Minor clarity shave (-0.25 Clar): the sentinel-direction mnemonic ("0 floor for greatest, 9e18 ceiling for least") is correct but could lead an engineer to use `0` for a positive-score-but-bounded domain where the actual max is much higher — sentinel must be BELOW any real value, not just at zero. Not load-bearing — the negative-scores caveat already covers the "choose a sentinel that can't collide" framing.
-
-Minor completeness shave (-0.5 Compl): did not name the alternative `array_max(array[score_a, score_b, score_c])` form which **does** skip NULLs in Trino (since array_max ignores NULLs in the array per [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html) "Returns the maximum value of input array."). Wait — actually `array_max(array[1, NULL, 3])` semantics needs verification; per the docs the array_max function returns NULL if the array contains any NULL. So this would NOT be a clean alternative. The responder's COALESCE-sentinel is in fact the cleanest documented pattern. Recall ceiling on this verification — not a defect.
-
-Cites correctly. **No resource fix. Pin holds.**
-
-### Q3 (4.875 — Acc 5.0 / Clar 4.75 / App 5.0 / Compl 4.75) — percent_rank() per-row relative percentile
-
-Canonical reached cleanly. Verified against [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html):
-- **percent_rank()**: returns `(r - 1) / (n - 1)` where `r` is the rank of the row in its window partition and `n` is the total row count. Lowest row → 0, highest row → 1. Responder's formula matches verbatim.
-- **cume_dist()**: "Returns the cumulative distribution of a value in a group of values. The result is the number of rows preceding or peer with the row in the window ordering of the window partition divided by the total number of rows in the window partition." So lowest row → 1/n (small but never 0), highest row → 1.
-
-Responder's two-form contrast is correct:
-- **percent_rank()** — `(rank - 1) / (n - 1)`, strictly-less-than-or-equal-to-peers semantics with both endpoints 0 and 1. "Higher than 85% of accounts" → roughly 0.85.
-- **cume_dist()** — count(rows ≤ current) / n, includes-self semantics. The top row is always 1.0; the lowest row is 1/n not 0. Useful when you want "what fraction of accounts are at or below this one".
-
-**Critical distinction correctly drawn:** `percent_rank()` answers "what is my row's percentile rank?" (per-row relative position), while `approx_percentile(spend, 0.85)` answers "what is the spend value at the 85th percentile?" (aggregate, returns ONE value not one per row). The engineer's literal ask ("higher than 85% of accounts") is the per-row form — percent_rank is the right tool. The responder correctly framed both and routed to percent_rank.
-
-Sample query shape `percent_rank() OVER (ORDER BY monthly_spend)` is correct — no PARTITION BY needed when comparing each account against ALL accounts in one bucket. (If the engineer wanted per-segment percentile, e.g. "higher than 85% of accounts on the SAME plan", they'd add `PARTITION BY plan_tier`.)
-
-Minor completeness shave (-0.25 Compl): could mention `ntile(100)` as the discrete-bucket alternative (assigns each row to 1-100 bucket based on rank order). For "give me a 1-100 percentile band" report column, ntile(100) is often the more readable choice. percent_rank gives a continuous [0,1] which the engineer's "0.85" framing suggests is what they want, so the lead choice is correct.
-
-Minor clarity shave (-0.25 Clar): the responder's "(rank-1)/(total-1)" formula is correct but a worked example showing 5 rows with values [10, 20, 30, 40, 50] producing percent_rank values [0, 0.25, 0.5, 0.75, 1.0] would have driven the intuition home for an engineer new to window functions. Recall ceiling.
-
-Cites correctly. **No resource fix.**
-
-### Q4 (4.75 — Acc 4.75 / Clar 4.75 / App 4.75 / Compl 4.75) — Iceberg branches Trino-read / Spark-write split
-
-**Branch read/write split correctly named and verified:**
-
-**(a) Trino 467 CAN read branches via `FOR VERSION AS OF '<branch-name>'`.** Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html):
-> "Iceberg supports named references of snapshots via branches and tags. Time travel can be performed to branches and tags in the table."
-
-Docs example: `SELECT * FROM example.testdb.customer_orders FOR VERSION AS OF 'test-branch'` — exact form the responder named. Correct.
-
-**(b) Trino 467 CANNOT create branches, write to branches, fast-forward, or drop branches.** The Trino 467 Iceberg connector docs do NOT mention `CREATE BRANCH` / `DROP BRANCH` / `fast_forward` anywhere. The supported `ALTER TABLE ... EXECUTE` procedures in 467 are: `optimize` / `expire_snapshots` / `remove_orphan_files` / `drop_extended_stats` — no branch operations. Correct.
-
-**(c) Spark side — branch DDL and procedures verified:**
-- `ALTER TABLE <catalog>.<schema>.<table> CREATE BRANCH \`<name>\` RETAIN 7 DAYS` — verified at [iceberg.apache.org/docs/latest/spark-ddl/](https://iceberg.apache.org/docs/latest/spark-ddl/); CREATE BRANCH supports `IF NOT EXISTS`, `AS OF VERSION <snapshot-id>`, `RETAIN <n> DAYS`. The responder's "CREATE BRANCH b RETAIN 7 DAYS" form is correct (with the backtick-quoted name requirement on Spark for hyphenated branch names).
-- `ALTER TABLE ... DROP BRANCH \`<name>\`` — verified at the same page.
-- `CALL <catalog>.system.fast_forward(table => 'analytics.orders', branch => 'main', to => 'b')` — verified at [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/); arguments are `table` (required), `branch` (target to fast-forward, e.g. 'main'), `to` (source branch whose snapshot you want, e.g. the staging branch). Responder's signature `fast_forward(table=>'...', branch=>'main', to=>'b')` is correct.
-
-**(d) Two Spark branch-write forms named:**
-- **Table-suffix form**: `INSERT INTO orders.branch_b VALUES (...)` — Spark Iceberg recognizes the `.branch_<name>` suffix on the table identifier as a branch write target. Correct.
-- **Session form**: `SET spark.wap.branch=b` then plain `INSERT INTO orders ...` redirects writes (and reads) to the specified branch. Verified — this is the documented WAP (Write-Audit-Publish) configuration property in Iceberg per [iceberg.apache.org/docs/](https://iceberg.apache.org/docs/) branching section. Correct. (Prerequisite: the table needs `write.wap.enabled=true` property set, which the responder did NOT mention — see completeness shave below.)
-
-**(e) dbt-on-Trino CANNOT write to a branch.** Correct — dbt-trino compiles to Trino INSERT/MERGE statements, and Trino 467 has no write-to-branch syntax. The dbt model that produces the staging-on-branch data must run on the dbt-spark adapter (or be a Spark job orchestrated outside dbt), not dbt-trino. The responder correctly routed this. dbt-trino is appropriate for the AUDIT step (Trino can `FOR VERSION AS OF '<branch>'` SELECTs against the staging branch for QA queries), but the WRITE step is Spark-side.
-
-**Five-step WAP workflow** the responder outlined is the canonical pattern:
-1. Spark: `ALTER TABLE ... CREATE BRANCH staging_b RETAIN 7 DAYS`
-2. Spark: write into the branch via `INSERT INTO tbl.branch_staging_b ...` OR `SET spark.wap.branch=staging_b; INSERT INTO tbl ...`
-3. Trino: audit/QA via `SELECT ... FROM tbl FOR VERSION AS OF 'staging_b'`
-4. Spark: `CALL iceberg.system.fast_forward(table=>'tbl', branch=>'main', to=>'staging_b')` to promote
-5. Spark: `ALTER TABLE ... DROP BRANCH staging_b` to clean up
-
-All five steps source-aligned. Cites r17 correctly.
-
-Minor completeness shave (-0.25 Compl): did NOT mention the `write.wap.enabled=true` table property prerequisite for the `spark.wap.branch` session-config form. The table-suffix form (`branch_<name>`) does NOT require this property, but the session-config form does. Engineer attempting `SET spark.wap.branch=b; INSERT ...` on a fresh table without first setting `ALTER TABLE ... SET TBLPROPERTIES ('write.wap.enabled'='true')` will see the insert silently land on `main` not the branch. Recall ceiling — not load-bearing because the table-suffix form (which the responder also named) doesn't have this trap.
-
-Minor accuracy shave (-0.25 Acc): the responder said `fast_forward(branch=>'main', to=>'b')` "promotes" branch b to main. The naming is somewhat counterintuitive: `branch` is the **target to be updated** (main), `to` is the **source snapshot to fast-forward to** (the staging branch's tip). The responder used the args correctly in the right slots, but a one-line "branch=target-to-update, to=source-snapshot" gloss would have helped engineers who confuse the two. Not load-bearing — the worked example matches the docs verbatim.
-
-Minor practical shave (-0.25 App): on the on-prem stack per `prod_info.md`, Iceberg 1.5.2 + Spark are already in the ingestion pipeline, so the "must use Spark for branch writes" routing is fully actionable. dbt-spark adapter is not explicitly named in `prod_info.md` — the responder correctly noted dbt could run on Spark but did not flag whether dbt-spark is already deployed on the stack. Engineer may need to confirm dbt-spark availability with the data platform team before assuming dbt-on-Spark is a turnkey path. Not a defect — production-stack-aligned framing is correct.
-
-Cites r17. **No resource fix.**
+No issues. Pass.
 
 ---
 
-## Cross-question patterns
+## Q2 — HAVING ratio with INTEGER-DIVISION BUG (FAIL 2.5)
 
-**Pin-vs-resource AUDIT clean pass:** Both Q1 (`reference_trino_starts_with_ends_with`) and Q2 (`reference_trino_greatest_least_null`) AUDIT probes confirm the pinned facts still match Trino 467 docs verbatim — resources teaching them are NOT stale. Q1 confirms starts_with EXISTS / ends_with ABSENT (and negative-index substr supported as suffix fallback); Q2 confirms GREATEST/LEAST return NULL if ANY arg is NULL (contrasted with Postgres skip-NULLs in the docs themselves). No resource correction needed.
+### The defect (verified)
 
-**Imported-prior family — clean run continues:** Q1 (starts_with-from-Postgres, ends_with-from-Spark/Snowflake) and Q2 (GREATEST-NULL-from-Postgres) both involve dialect-prior questions; the responder correctly affirmed Trino-specific behavior in both. Consistent with prior wins in the same family (to_char, listagg, concat_ws, translate, week_of_year all correctly answered as existing in Trino 467). The "verify-existence-before-asserting-absence" pattern is holding.
+Responder's HAVING clause as written:
+```sql
+HAVING COUNT(CASE WHEN was_reopened THEN 1 END) / COUNT(*) > 0.5
+```
 
-**Read/write split for advanced Iceberg features:** Q4 surfaces the canonical pattern that recurs across multiple Trino+Iceberg topics — Trino 467 is read-rich and write-poor for newer Iceberg features (branches, rewrite_manifests, drop_branch, fast_forward, etc.), while Spark Iceberg is the write side. The responder correctly routed the WAP workflow split. Production stack already has Spark in-band per `prod_info.md`, so the recommendation is actionable.
+`COUNT(...)` returns `BIGINT` in Trino 467. Per [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) operator table: *"Division (integer division performs truncation)"*. So `BIGINT / BIGINT` truncates toward zero — `3 / 5 = 0`, NOT `0.6`. The HAVING expression is `0 > 0.5` (FALSE) for any account that is NOT 100% reopened, and `1 > 0.5` (TRUE) only when ALL tickets are reopened (ratio exactly 1).
 
-**No resource defects surfaced.** All minor shaves are responder recall ceilings (Q1 regexp alternative, Q2 sentinel-direction phrasing, Q3 ntile alternative, Q4 write.wap.enabled prerequisite) — not findability gaps. **NO FIX-A required. NO watch opened.**
+**Effect**: the responder's SQL silently returns ONLY accounts with `reopened_count == total_tickets`, not accounts with majority (> half) reopens. This is a silent-wrong correctness bug — engineer gets a result set that looks plausible but is filtered far too aggressively.
 
-**Production-stack fit:** All four answers fit on-prem Trino 467 + Iceberg 1.5.2 + Spark + MinIO + Hive Metastore. Q4 explicitly routes branch writes to Spark (in-stack) and reserves Trino for reads/audits. No cloud-only or Trino-469+-only syntax recommended (CREATE BRANCH stays Spark-side; fast_forward stays Spark-side; no AWS-specific WAP tooling cited).
+### Correct forms (any one is fine)
+```sql
+-- decimal coercion
+HAVING COUNT(CASE WHEN was_reopened THEN 1 END) * 1.0 / COUNT(*) > 0.5
+-- explicit CAST
+HAVING CAST(COUNT(CASE WHEN was_reopened THEN 1 END) AS DOUBLE) / COUNT(*) > 0.5
+-- integer-safe rearrangement (preferred for exact arithmetic)
+HAVING COUNT(CASE WHEN was_reopened THEN 1 END) * 2 > COUNT(*)
+```
+
+### What the responder got RIGHT
+- HAVING accepts aggregate expressions combined arithmetically — correct, no need for an outer query.
+- Must repeat the aggregate expression in HAVING (not the SELECT alias) — correct per Trino's logical evaluation order.
+
+### Resource coverage check (NOT a resource defect)
+
+The integer-division trap is **already extensively documented** in resources:
+- `resources/07-analytical-query-patterns.md:1824` — *"`revenue / SUM(...)` on two integers does integer division (truncates to 0). Multiply by the DECIMAL literal `100.0` (or `CAST` the numerator) so the division is done in floating/decimal — see resource 23 §3 integer-division trap"*
+- `resources/07-analytical-query-patterns.md:3510` — *"**`* 1.0`** forces decimal division. Without it, `SUM(amount) / NULLIF(SUM(amount), 0)` on two integer/bigint values does integer division and the ratio truncates to 0..."*
+- `resources/07-analytical-query-patterns.md:3585` — DO-NOT-WRITE row explicitly flagging the omission as SILENT-WRONG with worked example
+- `resources/23-sql-best-practices-olap.md:988` — *"Weighted average — `SUM(value * weight) / SUM(weight)` — FORCE non-integer division or the mean TRUNCATES"*
+
+The canonical IS findable, IS load-bearing, and the responder applies it correctly in the percent-of-total / YoY-ratio / cohort-retention canonicals across many prior iterations. This is a one-off recall slip on a HAVING-specific phrasing where the integer-division trap didn't fire as a recall keyword.
+
+### Classification: ONE-OFF RESPONDER SLIP — NO-OP + WATCH
+
+Matches the `feedback_responder_broken_secondary_alternative.md` pattern (responder occasionally drops a load-bearing safety even when the resource warns) and the `feedback_responder_overwarning_folklore.md` ceiling. No single resource fix would catch this without churning a row that already says it correctly multiple times. Add to next-sweep watch: re-probe HAVING ratio-style aggregation on a different scenario (e.g., conversion-rate, attach-rate, refund-rate); expect the responder to land `*1.0` consistently. If misses on the re-probe, then consider a HAVING-anchored cross-ref card in r07/r23.
 
 ---
 
-## Score history update
+## Q3 — Partition-aligned DELETE on Iceberg (FAIL 2.625) — LIGHT FIX-A
 
-- Q1 → SQL query best practices for OLAP: 4.5851/242 → (1109.5942 + 4.9375)/243 = **4.5854/243 PASSED** (+0.0003)
-- Q2 → SQL query best practices for OLAP (same row): chained: (1114.5317 + 4.8125)/244 = **4.5817/244 PASSED** (-0.0037)
-  - Combined Q1+Q2: 4.5851*242 = 1109.5942; +4.9375+4.8125 = 1119.3442/244 = **4.5874/244 PASSED** (+0.0023)
-- Q3 → Analytical query patterns on Iceberg+Trino: 4.5366/121 → (548.9286 + 4.875)/122 = **4.5394/122 PASSED** (+0.0028)
-- Q4 → Iceberg table maintenance: 4.4505/195 → (867.8475 + 4.75)/196 = **4.4658/196 PASSED** (+0.0153)
+### Defect 1: WRONG PREMISE — agreed with coworker that "delete files pile up"
 
-All four topic rows remain comfortably above pass threshold. No status changes.
+Responder said: *"On format-v2 each DELETE produces position-delete files that pile up"* and *"DELETE FROM events WHERE event_date < DATE '2026-03-27' creates position-delete files"*. **Both claims are FALSE** for the engineer's exact query — `event_date` is the day-partition identity column.
+
+Verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): *"For partitioned tables, the Iceberg connector supports the deletion of entire partitions if the WHERE clause specifies filters only on the identity-transformed partitioning columns."* This is a **metadata-only operation** — drops whole partitions' data-file references from the new snapshot's manifest list, writes **ZERO position-delete files**.
+
+Position-delete files are written ONLY for row-level deletes whose WHERE clause filters on non-partition columns (e.g., `DELETE FROM events WHERE user_id = 42`), where Iceberg can't drop whole data files because surviving rows in the same file must be preserved.
+
+So:
+- `DELETE FROM events WHERE event_date < DATE '2026-03-27'` (partition column only) — **metadata-only**, fast, no delete files
+- `DELETE FROM events WHERE user_id = 42` (non-partition column) — **row-level**, writes position-delete files on v2 MoR tables
+
+The coworker's premise was wrong; the responder reinforced it.
+
+### Defect 2: Unnecessary Spark step
+
+Responder recommended `CALL iceberg.system.rewrite_position_delete_files(table=>'analytics.events')` as Step 1. **This is unnecessary** because the partition-aligned DELETE never wrote any position-delete files to compact. The procedure is a no-op (or skip) on this table. Responder is solving a problem the engineer doesn't have.
+
+### Defect 3: WRONG `expire_snapshots` parameter syntax
+
+Responder wrote:
+```sql
+ALTER TABLE events EXECUTE expire_snapshots(retention_duration => INTERVAL '7' DAY)
+```
+
+The **correct Trino 467 form** per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) and verified at `resources/17-iceberg-table-maintenance.md:59, 164, 188, 190, 210` (cited at least 5 times in r17):
+```sql
+ALTER TABLE iceberg.<schema>.events EXECUTE expire_snapshots(retention_threshold => '7d')
+```
+
+Parameter name is `retention_threshold` (NOT `retention_duration`), and value is a **VARCHAR duration literal** like `'7d'` (NOT `INTERVAL '7' DAY`). Running the responder's form on Trino 467 fails with an unknown-procedure-argument error.
+
+### Defect 4: "No single partition drop command" is misleading
+
+Responder said *"There is NO single partition drop command in Trino 467."* Technically true — Trino 467 has no `ALTER TABLE ... DROP PARTITION` DDL — but the framing buries the operational reality: **the partition-aligned `DELETE` IS the bulk partition drop on Iceberg**. It's metadata-only, atomic, and drops whole partitions in one snapshot commit. Telling an engineer "no single command exists" implies they're stuck cleaning up small pieces, when actually the DELETE they're already running IS the canonical solution.
+
+### Correct minimal answer
+
+```sql
+-- Step 1 — Drop the partition data (metadata-only, atomic, no delete files written).
+DELETE FROM iceberg.analytics.events WHERE event_date < DATE '2026-03-27';
+
+-- Step 2 — Reclaim physical storage on MinIO by expiring old snapshots
+-- that still reference the dropped data files.
+ALTER TABLE iceberg.analytics.events
+  EXECUTE expire_snapshots(retention_threshold => '7d');
+```
+
+That's it. Two statements, both Trino-native, no Spark hop, no position-delete-file compaction needed. (If GDPR sub-7-day urgency, drop to Spark or lower `iceberg.expire-snapshots.min-retention` per r17 §59 / §187.)
+
+### Resource coverage check — FINDABILITY GAP
+
+The canonical IS in `resources/17-iceberg-table-maintenance.md:162` (4th bullet of the "clear / empty an Iceberg table" leading canonical):
+
+> *"Position-delete files are written ONLY for PARTIAL row-level deletes... NOT for whole-table or whole-partition deletes. Partition-only deletes (WHERE filters only on identity-transformed partition columns) are also metadata-only per Trino docs."*
+
+But the **section header** is keyword-magnet for "clear / empty whole table" — NOT for the engineer's actual framing of *"GDPR purge of activity older than 90 days"*, *"DELETE WHERE event_date < cutoff"*, *"delete files pile up"*. The partition-aligned case is a parenthetical inside a whole-table-DELETE canonical.
+
+### Classification: LIGHT FIX-A — findability card in r17
+
+**Recommend** the teacher add a keyword-magnet card in `resources/17-iceberg-table-maintenance.md` (probably as a new LEADING CANONICAL near the existing whole-table card or in the myth-buster matrix) with these keyword anchors so the next "GDPR purge old partitions / delete files pile up / partition-aligned DELETE" question routes correctly:
+
+**Keyword anchors to add:** GDPR purge old partitions, data retention purge, delete activity older than N days, DELETE WHERE event_date < cutoff, drop old day partitions in bulk, delete files pile up, position delete files accumulating, partition-aligned DELETE metadata-only, no DROP PARTITION on Trino Iceberg, bulk partition drop equivalent, retention-based partition deletion.
+
+**Load-bearing facts to surface:**
+1. `DELETE FROM tbl WHERE <identity_partition_column> < cutoff` is **metadata-only** on Iceberg — no position-delete files written, drops data-file references atomically in one snapshot.
+2. Data bytes on MinIO persist until `expire_snapshots` drops the older snapshots that still reference them.
+3. **Correct syntax:** `ALTER TABLE iceberg.<schema>.<table> EXECUTE expire_snapshots(retention_threshold => '7d')` (VARCHAR `'7d'`, NOT `INTERVAL '7' DAY`; param name is `retention_threshold`, NOT `retention_duration`).
+4. `rewrite_position_delete_files` is NOT needed here — no position-delete files exist to compact.
+
+**Defang (DO-NOT-WRITE):** "DELETE on partitioned Iceberg always writes position-delete files" (FALSE for identity-partition-aligned WHERE); "`expire_snapshots(retention_duration => INTERVAL '7' DAY)`" (FALSE — param name and type both wrong); "must run Spark `rewrite_position_delete_files` after every DELETE" (FALSE for partition-aligned DELETE).
+
+The wrong-parameter-syntax slip (Defect 3) is partly responder hallucination — the canonical syntax IS in r17 in 5+ places. But pairing it with the partition-aligned-DELETE findability gap into ONE keyword-magnet card serves both defects: a single anchor block titled around "delete old partitions for GDPR" naturally co-locates the correct DELETE + correct expire_snapshots syntax.
+
+**Watch label:** `r17 partition-aligned-DELETE GDPR-purge keyword card iter1172`, re-probe next sweep with a "delete activity older than N days" / "drop old monthly partitions" framing; expect responder to land on `retention_threshold => '7d'` + no-spark-step + no-position-delete-files framing.
+
+---
+
+## Q4 — UPPER(email) sargability (PASS 4.375)
+
+Responder reached the load-bearing canonical: **normalize email at WRITE time** (dbt/Spark/app), then query the bare column. Matches `resources/23-sql-best-practices-olap.md:2562` directly: *"`WHERE LOWER(email) = 'me@x.com'` → Store email lowercased at ingest, then `WHERE email = 'me@x.com'`"*.
+
+Three supplementary mitigations also reasonable:
+1. Partition layout — generally not relevant if email isn't a partition column; framing as "DOES defeat partition pruning" overstates this. UPPER on a non-partition column doesn't affect partition pruning; it breaks **file-level min/max stat pruning** on the email column.
+2. `sorted_by` + `EXECUTE optimize` for Parquet min/max file-skip — correct mechanism, but only helps if the normalized form is queried.
+3. **Parquet bloom filters** framing: *"Iceberg writes them, Trino checks at scan time"* — accurate framing. Doesn't repeat the iter1160 pin-imprecision because the responder didn't claim Trino-side DDL syntax. Verified that Trino 467 docs DO list `parquet_bloom_filter_columns` as a valid CREATE TABLE property at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (the iter1160 pin's "469+" was about the `SET PROPERTIES` ALTER form per PR #24573, not CREATE TABLE — pin is slightly over-broad but not load-bearing for this Q4).
+
+Minor shave (-0.5 on Technical): "does NOT auto-scan the whole table but DOES defeat partition pruning" conflates partition pruning with file-level min/max pruning. For a non-partition column like `email`, `UPPER(email)` breaks file-level min/max pruning on email's Parquet stats, but doesn't affect partition pruning at all. The correct framing is *"breaks file-level min/max pruning on email's column stats; pruning on other (partition) columns still works"*. Engineer still arrives at right action (normalize at write time), so the shave is small.
+
+No FIX-A. r23 §2562 canonical and r28 sargability canonical both routed correctly.
+
+---
+
+## Summary — what's open after iter1172
+
+| Item | Type | Owner | Next step |
+|---|---|---|---|
+| Q2 HAVING `*1.0` recall slip | One-off responder slip | Watch only | Re-probe HAVING-ratio on a different scenario next sweep (conversion / attach / refund). NO resource fix. |
+| Q3 r17 partition-aligned-DELETE GDPR-purge findability card | LIGHT FIX-A | Teacher | Add keyword-magnet card in r17 covering: partition-aligned DELETE = metadata-only, `retention_threshold => '7d'` (not `retention_duration => INTERVAL '7' DAY`), no `rewrite_position_delete_files` needed for partition-aligned DELETE. Watch label `r17 partition-aligned-DELETE GDPR-purge keyword card iter1172`. |
+| Q4 partition-pruning vs file-level-pruning framing | Recall ceiling | — | NO-OP. Engineer reaches right answer; rephrasing nuance is recall noise, not a resource defect. |
+
+No new pins to add; no existing pin invalidated.

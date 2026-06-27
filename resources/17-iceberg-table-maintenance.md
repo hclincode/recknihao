@@ -154,6 +154,31 @@
 
 ---
 
+### LEADING CANONICAL — bulk-purge OLD DAY-PARTITIONS for retention / GDPR: a partition-aligned `DELETE` is METADATA-ONLY (NO delete files); then `expire_snapshots` reclaims storage
+
+> **Keyword anchors (route HERE):** GDPR purge old data, delete data older than 90 days, drop old partitions, retention deletion Iceberg, purge user activity older than N days, day-partitioned bulk delete, does DELETE on a partition column create delete files, partition-aligned delete metadata-only, remove whole partitions worth of data, delete files pile up after DELETE, free storage after deleting old data, expire_snapshots reclaim disk.
+
+> **THE ONE FACT:** a `DELETE` whose `WHERE` filters **ONLY on the identity partition column** (e.g. `event_date` on a `partitioning = ARRAY['day(event_ts)']` or `ARRAY['event_date']` table) is a **METADATA-ONLY** operation in Trino 467 — Iceberg commits a new snapshot that simply **drops the whole partitions' data-file references** from the manifest. It does **NOT** write position-delete files, does **NOT** read or rewrite the data, and is fast/atomic regardless of size. Verbatim from [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): *"For partitioned tables, the Iceberg connector supports the deletion of entire partitions if the WHERE clause specifies filters only on the identity-transformed partitioning columns."* The coworker's "delete files pile up" worry is **only true for ROW-LEVEL deletes** (`WHERE` on a non-partition column) — NOT for this partition-aligned purge.
+>
+> ```sql
+> -- ✅ COPY THIS — bulk purge of old day-partitions (metadata-only, NO delete files)
+> DELETE FROM iceberg.analytics.events
+> WHERE event_date < CURRENT_DATE - INTERVAL '90' DAY;   -- event_date is the partition column
+>
+> -- Then reclaim physical MinIO storage (old data files stay until no snapshot references them):
+> ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '7d');
+> ```
+>
+> **You do NOT need `rewrite_position_delete_files` here** — a partition-aligned delete writes no position-delete files, so there is nothing to compact. (That Spark procedure is for ROW-LEVEL MoR delete-file accumulation, a different problem.) After the `DELETE`, the only step to actually free disk is `expire_snapshots` (the data files remain time-travel-readable via `FOR VERSION AS OF` until the retention window expires). To purge faster than the 7-day floor, lower the catalog `iceberg.expire-snapshots.min-retention` or run expiry from Spark.
+>
+> **DO-NOT-WRITE (banned answers to the GDPR/retention-purge question):**
+>
+> | WRONG | WHY | RIGHT |
+> |---|---|---|
+> | "`DELETE FROM events WHERE event_date < cutoff` produces position-delete files that pile up." | FALSE for a **partition-aligned** delete (filter only on the identity partition column) — it's metadata-only, drops whole-partition file references, writes NO delete files. | "A partition-column-only `DELETE` is metadata-only — no delete files. Then run `expire_snapshots` to reclaim storage." |
+> | "Run Spark `rewrite_position_delete_files` after the purge to clean up the delete files." | There are NO position-delete files to compact after a partition-aligned delete — the step is unnecessary. | "Skip `rewrite_position_delete_files`; just `EXECUTE expire_snapshots(retention_threshold => '7d')`." |
+> | `EXECUTE expire_snapshots(retention_duration => INTERVAL '7' DAY)` | WRONG parameter name AND type. | `EXECUTE expire_snapshots(retention_threshold => '7d')` — the param is **`retention_threshold`**, a **varchar** like `'7d'`. |
+
 ### LEADING CANONICAL — clear / empty an Iceberg table in Trino 467: NO `TRUNCATE TABLE` (unsupported on the Iceberg connector); use `DELETE FROM tbl` (metadata-only) or `CREATE OR REPLACE TABLE`
 
 > **Keyword anchors:** TRUNCATE Iceberg Trino, TRUNCATE TABLE Iceberg, clear Iceberg table, empty an Iceberg table Trino, wipe a table before reload, reload staging table, DELETE FROM no WHERE Iceberg, whole table DELETE Iceberg, metadata-only delete Trino Iceberg, CREATE OR REPLACE TABLE Trino Iceberg, atomic table replace, clear all rows Iceberg.
