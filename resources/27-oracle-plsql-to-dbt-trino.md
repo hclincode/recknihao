@@ -3919,7 +3919,36 @@ Two boolean keys: `relation` (table comment) and `columns` (per-column comments)
 
 If your schema.yml `description:` doesn't show up under `SHOW COLUMNS` or in the BI tool's column hover, the cause is almost always: `persist_docs` is not set. `dbt docs generate` does NOT push to engine metadata.
 
-> **Cross-references:** §6.7H (dbt docs site / `{% docs %}` blocks — the YAML `description:` keys feed BOTH §6.7H and §6.7J). §6.7C (model contracts — separate mechanism, enforces declared-vs-actual schema, not comments).
+> **NOT the answer to "which dbt model generated THIS QUERY in Trino's query history":** `persist_docs` writes TABLE/COLUMN comments (which model created the *table*), NOT a marker in the *query text*. To attribute each query in the query history to its dbt model, use **`query-comment`** — see **§6.7L** below.
+
+> **Cross-references:** §6.7H (dbt docs site / `{% docs %}` blocks — the YAML `description:` keys feed BOTH §6.7H and §6.7J). §6.7C (model contracts — separate mechanism, enforces declared-vs-actual schema, not comments). §6.7L (`query-comment` — model name in the QUERY TEXT / query history, a different mechanism).
+
+---
+
+### 6.7L LEADING CANONICAL — dbt `query-comment` (auto-attach the dbt MODEL NAME to every query → visible in Trino's QUERY HISTORY)
+
+> **Keyword anchors:** which dbt model generated this query, tag queries with the dbt model name, dbt model in Trino query history, attribute Trino queries to dbt models, embed metadata in query text, query tagging dbt, SYS_CONTEXT-style query stamping, find the dbt model behind a slow query in the Web UI, dbt query-comment, query_comment JSON.
+
+> **THE FACT (verified at [docs.getdbt.com/reference/project-configs/query-comment](https://docs.getdbt.com/reference/project-configs/query-comment)):** dbt **automatically prepends/appends a comment to EVERY query it sends** — **on by default**, no config needed. By default the comment is a **JSON blob** containing the dbt version, profile/target, **`node_id`** (e.g. `model.my_project.fct_orders`), and `invocation_id`. That comment travels in the query text, so it shows up in Trino's query history — `SELECT query FROM system.runtime.queries` and the Trino Web UI both display it. This is the right tool for "which dbt model produced this query?" (audit / slow-query attribution) — distinct from `persist_docs` (§6.7J), which only stamps the *table*, not the *query*.
+
+```yaml
+# dbt_project.yml — customize the comment (optional; the default JSON already includes node_id)
+query-comment:
+  comment: "dbt model: {{ node.unique_id }} | run: {{ invocation_id }}"
+  append: true        # Trino: put the comment AFTER the SQL (some engines reject leading comments on certain statements)
+```
+
+```sql
+-- Find the dbt model behind a query in Trino's history (default JSON comment carries node_id):
+SELECT query_id, regexp_extract(query, 'model\.[A-Za-z0-9_.]+') AS dbt_model, state, "elapsed.cpu"
+FROM system.runtime.queries
+WHERE query LIKE '%"node_id"%'
+ORDER BY created DESC;
+```
+
+- **It's the query-history analog of Oracle `SYS_CONTEXT`-style stamping** — but for *which dbt model*, not *which user*. (For the current session USER inside a query, use Trino's `current_user`.)
+- **`append: true` is the safe setting on Trino** — a comment after the statement avoids the rare case where a leading comment trips a statement type; the default JSON comment is otherwise fine.
+- **DO-NOT-WRITE:** "Use `persist_docs` to see which dbt model generated each query in the history" — WRONG: `persist_docs` writes table/column COMMENTs (which model built the *table*), it does NOT put anything in the *query text* / query history. The query-history mechanism is `query-comment`. A hand-written `-- {{ this.name }}` inline comment works for ONE model but `query-comment` does it for ALL queries automatically.
 
 ---
 

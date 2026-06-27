@@ -1,170 +1,153 @@
-# Iter1179 Judge Feedback
+# Iter1180 Judge Feedback
 
-**Overall verdict:** PASS WITH LIGHT FIX-A on Q2 — Q1 watch CLOSES cleanly, Q3 + Q4 clean, but Q2 shipped a broken interval-overlap predicate (BOTH halves of the comparison are wrong AND the join carries a spurious ordering filter that drops valid pairs). Classification: **resource-sourced findability gap** — r07 has only the calendar × intervals canonical (interval-overlap for "active per day") and has NO canonical for "find pairs of overlapping intervals in the same table (self-join)" framing. Responder garbled the SaaS pairs question by trying to map from the calendar-day canonical it knew.
+**Overall verdict:** PASS WITH LIGHT FIX-A on Q4B — Q1 watch CLOSES cleanly, Q3 + Q4A clean, Q2 routed to a correct-but-two-step form when a clean one-step canonical exists (minor recall-ceiling shave), Q4B MISSED the canonical dbt `query-comment` mechanism and routed to `persist_docs` which answers a different question (table metadata, NOT query text). Classification: **resource-sourced gap** — grep of resources/ for `query.comment` / `query-comment` / `query_comment` returns ZERO matches; `persist_docs` IS documented (r27 §6.7J) and is the keyword-magnet that mis-routed the responder.
 
-Total iter1179 score: (4.875 + 1.75 + 5.0 + 4.75) / 4 = **4.09 / 5** — average pulled down by Q2 broken predicate.
+Total iter1180 score: (5.0 + 3.75 + 5.0 + 2.75) / 4 = **4.125 / 5** — Q1 watch-close + Q3 pin-perfect; Q2 minor route slip; Q4 pulled down by Part B miss.
 
 | Q | Topic | Score | Note |
 |---|---|---|---|
-| 1 | SQL best practices — string-fuzzy-match family / levenshtein abbreviation | 4.875 | WATCH CLOSE iter1178 |
-| 2 | Analytical query patterns — interval-overlap self-join PAIRS | 1.75 | BROKEN PREDICATE → LIGHT FIX-A |
-| 3 | SQL best practices — regexp_replace 2-arg / `$1` capture refs | 5.0 | clean |
-| 4 | Iceberg maintenance — multi-engine Spark+Trino concurrent reads/writes | 4.75 | clean (minor metastore-cache-ttl shave) |
+| 1 | Analytical query patterns — interval-overlap self-join PAIRS (two-sided predicate) | 5.0 | WATCH CLOSE iter1179 |
+| 2 | SQL best practices — count-by-value MAP per group (`histogram` vs `map_agg`+subquery) | 3.75 | correct result, two-step where one-step exists |
+| 3 | SQL best practices — `array_agg(x ORDER BY y)` ordered-array aggregation | 5.0 | pin-perfect |
+| 4 | Oracle PL/SQL → dbt+Trino — A) `current_user` for SYS_CONTEXT; B) dbt model name in QUERY HISTORY | 2.75 | A correct; B missed `query-comment` canonical → LIGHT FIX-A |
 
 ---
 
-## Q1 — Fuzzy city dedup, edit-distance for abbreviations (St. Louis vs Saint Louis, NYC vs New York City) — WATCH RE-PROBE
+## Q1 — Find PAIRS of overlapping bookings in same table (double-booked rooms, NULL check_out = ongoing) — WATCH RE-PROBE
 
-**Score: 4.875 / 5**
-- Technical accuracy: **5** — Correctly framed edit-distance as wrong tool for abbreviation expansion. `levenshtein_distance(string1, string2) -> bigint` verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) ("Returns the Levenshtein edit distance of `string1` and `string2`, i.e. the minimum number of single-character edits (insertions, deletions or substitutions) needed to change `string1` into `string2`"). The "St. Louis → Saint Louis = 4+ edits, NYC → New York City = 10+ edits" arithmetic is correct. Bonus: explicit warning that raising threshold causes false positives (St. Louis → St. Chicago shared prefix collision).
-- Beginner clarity: **5** — Concrete arithmetic on the engineer's literal example pair makes the wrong-tool message vivid. Lookup table mechanic explained with full SQL outline.
-- Practical applicability: **5** — Concrete recommendation: curated reference/lookup table (`abbreviation` → `canonical`) joined + deterministic normalize (`St.` → `Saint`, `NYC` → `New York City`), then `levenshtein_distance` as a **secondary typo fallback** on the normalized form. Engineer knows exactly what to build: a `city_aliases(alias, canonical)` table + a `COALESCE(a.canonical, raw_city)`-then-`levenshtein_distance` pipeline. No threshold tuning trap.
-- Completeness: **4.5** — Could have name-dropped phonetic-family (soundex / double-metaphone) as third option for true mis-spellings beyond ASCII edit-distance (e.g. `Smithe` vs `Smyth`); recall ceiling — Trino 467 has soundex but the question's literal frame is abbreviation-expansion, where phonetic is also the wrong tool. Not load-bearing.
+**Score: 5.0 / 5**
+- Technical accuracy: **5** — Two-sided overlap predicate verbatim correct: `a.check_in <= COALESCE(b.check_out, DATE '9999-12-31') AND b.check_in <= COALESCE(a.check_out, DATE '9999-12-31')` + `a.booking_id < b.booking_id` for dedupe-without-imposing-date-ordering. NULL = +infinity via `COALESCE(end, DATE '9999-12-31')` correctly handled. Matches r07:1813 "THE ONE FACT — the overlap test is TWO-SIDED" verbatim. Verified canonical correctness: two intervals `[a.start, a.end]`, `[b.start, b.end]` overlap **iff** `a.start <= b.end AND b.start <= a.end`.
+- Beginner clarity: **5** — Plain-English gloss of the two-sided check on each conjunct; explains why `COALESCE(check_out, DATE '9999-12-31')` treats NULL as "still ongoing = +infinity."
+- Practical applicability: **5** — Engineer copy-pastes against `room_bookings` and immediately gets correct double-booking detection. Account-id equi-key + `a.booking_id < b.booking_id` dedupe means hash-join plan + symmetric-pair elimination both handled without an extra DISTINCT pass.
+- Completeness: **5** — Defangs the iter1179 broken one-sided form inline: explicitly calls out `a.check_in <= b.check_in AND b.check_out > a.check_in` as a "calendar-shape leftover" that "drops valid overlaps." Cites r07. Perf note (hash-partitionable on room_id) implicit via clean shape.
 
 ### WATCH CLOSURE
 
-`r27 §4.3-STR-FAMILY levenshtein-threshold-vs-abbreviation iter1178` watch: **CLOSES**. iter1178 responder overclaimed "edit-distance <= 2 catches abbreviation expansions"; iter1179 responder explicitly says small thresholds **miss** abbreviation pairs (4+ edits apart) AND big thresholds **false-positive** (shared-prefix collisions like St. Louis → St. Chicago). The honest-no-overclaim framing is exactly what the watch was checking for. First-iteration re-probe close with structurally different framing (St. Louis / NYC vs iter1178's Acme Corp / ACME CORPORATION).
+`r07 PAIRS-of-overlapping-intervals self-join two-sided-predicate iter1179` watch: **CLOSES on first re-probe.** iter1179 responder shipped the one-sided calendar-shape leftover (bug #1 + bug #2 in iter1179 feedback); iter1180 responder uses the two-sided predicate cleanly AND inline-defangs the exact broken form that failed iter1179. r07:1807-1830 leading canonical + DO-NOT-WRITE block from the iter1179 LIGHT FIX-A landed exactly where it needed to land. Structurally different framing (double-booked rooms / `check_out NULL = ongoing` vs iter1179's deals / `end_date NULL = open`) — the canonical generalized cleanly across domains.
+
+Pattern: 14 of last 14 watches close on first re-probe — consistent with the "1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE" cadence.
 
 ---
 
-## Q2 — Find PAIRS of overlapping deals in same table (self-join) — BROKEN PREDICATE — LIGHT FIX-A
+## Q2 — Per-account count-by-event_type as a MAP `{'login':82,'api_call':14,'export':5}` directly via Trino aggregate
 
-**Score: 1.75 / 5**
-- Technical accuracy: **1** — Predicate is broken BOTH ways. See "Predicate analysis" below.
-- Beginner clarity: **3** — Plain English given, but the plain English itself encodes the bug (see below).
-- Practical applicability: **1** — Engineer copies SQL, ships analytics that BOTH (a) wrongly flag non-overlapping deal pairs as overlapping AND (b) silently drop valid overlapping pairs. Reverse-direction harm on a "detect anomalies" use case.
-- Completeness: **2** — Mentions ANALYZE + (account_id, start_date) sort hint as performance follow-ups, but the BASE query is wrong; perf advice is moot.
+**Score: 3.75 / 5**
+- Technical accuracy: **4** — `map_agg(event_type, event_count)` is a real Trino 467 aggregate (verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): `map_agg(key, value) -> map<K,V>` "Returns a map created from the input `key` / `value` pairs"). The two-step CTE form (subquery: `GROUP BY account_id, event_type` with `COUNT(*) AS event_count`; outer: `map_agg(event_type, event_count) GROUP BY account_id`) DOES produce the correct result. **But mis-frames `histogram` availability.** Responder said `histogram(event_type)` is "for a frequency map across ALL data with no per-account grouping." That's WRONG — `histogram` is an aggregate function and works fine inside `GROUP BY`. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): `histogram(x) -> map<K, bigint>` "Returns a map containing the count of the number of times each input value occurs." Like any aggregate, it produces one map PER GROUP when combined with `GROUP BY`.
+- Beginner clarity: **4** — Two clean code blocks, plain prose. But the "histogram is no-grouping only" caveat sets up the engineer to never reach for the cleanest form.
+- Practical applicability: **4** — Engineer ships a query that works correctly but is unnecessarily two-step. Engine cost is similar (both forms hash on `account_id`); cognitive cost is the extra CTE and the extra inner GROUP BY. For a "one map per account in one step" question, the canonical answer is `SELECT account_id, histogram(event_type) AS counts_by_type FROM events GROUP BY account_id` — single GROUP BY, no subquery, no separate count column. Same result, half the keystrokes, more discoverable shape.
+- Completeness: **3** — Missed the cleanest one-step `histogram(x) GROUP BY g` canonical. Routed to `map_agg(k, v)` which is the **right tool when the value is already a separately-computed aggregate** (e.g., `map_agg(event_type, latest_ts)` where `latest_ts = MAX(...)`) but NOT the cleanest tool when the value IS just the count. `histogram` is purpose-built for "count occurrences per value, as a map" — it bakes the `GROUP BY event_type` + `COUNT(*)` step inside the aggregate itself.
 
-### Predicate analysis (CRITICAL)
+### Source classification — recall-ceiling, NO RESOURCE FIX
 
-Responder's JOIN condition:
-
-```sql
-FROM deals a INNER JOIN deals b
-  ON a.account_id = b.account_id
- AND a.deal_id    < b.deal_id
- AND a.start_date <= b.start_date              -- BUG #1
- AND (b.end_date IS NULL OR b.end_date > a.start_date)  -- BUG #2 (trivially true given #1)
-```
-
-**Bug #1 — `a.start_date <= b.start_date` is a spurious ordering filter that DROPS valid overlapping pairs.**
-- `a.deal_id < b.deal_id` already de-duplicates the (a,b)/(b,a) symmetry — it does NOT imply anything about start dates because deal_id is an arbitrary surrogate key independent of start_date.
-- A pair where the lower-deal_id deal STARTS LATER than the higher-deal_id deal is silently dropped, even if the two date ranges DO overlap.
-- Example: `deals(deal_id=1, start='2026-03-01', end='2026-04-01')`, `deals(deal_id=2, start='2026-01-01', end='2026-05-01')` — same account. Deal 1 (Mar→Apr) sits entirely inside Deal 2 (Jan→May), so they OBVIOUSLY overlap. But: `a=deal_1`, `b=deal_2`, `a.deal_id(1) < b.deal_id(2)` passes, then `a.start_date('2026-03-01') <= b.start_date('2026-01-01')` is FALSE → pair is silently dropped.
-
-**Bug #2 — `b.end_date > a.start_date` is trivially true given Bug #1's ordering filter.**
-- Given Bug #1 forces `a.start <= b.start`, the test `b.end > a.start` becomes `b.end >= b.start >= a.start` — always true for valid intervals (`b.end >= b.start` is implied, and `b.start >= a.start` is Bug #1's filter).
-- So this clause does **NOT actually test overlap at all** — it is always true for valid intervals that passed Bug #1.
-- The REAL overlap constraint when `a.start <= b.start` is `b.start <= a.end` (i.e. "a hasn't ended before b starts"), i.e. `(a.end_date IS NULL OR a.end_date >= b.start_date)`. The responder tested the WRONG end — `b.end vs a.start` instead of `a.end vs b.start`.
-
-**Failure example (the prompt's diagnostic case).**
-- `a = ('2026-01-01', '2026-02-01')`, `b = ('2026-03-01', '2026-04-01')` — no overlap (a fully before b).
-- Responder's predicate: `a.start(Jan1) <= b.start(Mar1)` = TRUE; `b.end(Apr1) > a.start(Jan1)` = TRUE → **wrongly emitted as an overlapping pair**.
-
-**Correct canonical (closed intervals, NULL end = open / +infinity):**
-
-```sql
-FROM deals a JOIN deals b
-  ON a.account_id = b.account_id
- AND a.deal_id    < b.deal_id                                                       -- no-self + dedupe symmetry
- AND a.start_date <= COALESCE(b.end_date, DATE '9999-12-31')                        -- a starts on/before b ends
- AND b.start_date <= COALESCE(a.end_date, DATE '9999-12-31')                        -- b starts on/before a ends
-```
-
-The two-sided `a.start <= b.end AND b.start <= a.end` form (with `COALESCE` for open-ended NULL ends) is THE textbook interval-overlap predicate — works regardless of which deal starts first, and the `a.deal_id < b.deal_id` clause alone is sufficient to de-duplicate symmetric pairs without imposing a date ordering filter.
-
-### Source classification — resource-sourced findability gap
-
-`r07` interval-overlap canonical at §1674 ("LEADING CANONICAL — count active/open intervals on each day") covers the **calendar × intervals** pattern (active subscribers per day) — `calendar c JOIN intervals s ON s.start <= c.day AND (s.end IS NULL OR s.end > c.day)`. It is correct for that pattern.
-
-Grep evidence for the **PAIRS-IN-SAME-TABLE self-join** canonical:
-- Patterns searched: `pairs.{0,30}overlap | overlapping.{0,10}pair | self.join.{0,30}overlap | conflicting.{0,15}date | same.{0,5}entity.{0,30}overlap | two.{0,20}intervals.{0,30}overlap | a\.start.*<=.*b\.end | b\.start.*<=.*a\.end` across `resources/` → **ZERO matches**.
-- No canonical for "find pairs of overlapping intervals in the same table" exists. The responder pulled from the calendar × intervals shape (which is what r07 teaches) and garbled the predicate by trying to adapt `s.start <= c.day` (one-sided, calendar is a scalar) to a two-table self-join (which needs two-sided).
-
-Responder also explicitly attributed: "this is the r07 interval-overlap range join canonical" — that attribution is FALSE; r07's canonical is calendar × intervals, not self-join pairs.
-
-### FIX-A spec (recommended)
-
-Add a new card to **r07 immediately after §1841 CONTRAST card** (the three-time-series-patterns table) titled:
-
-> ### LEADING CANONICAL — find PAIRS of overlapping intervals in the SAME table (self-join, two-sided overlap predicate — NOT the calendar × intervals shape)
-
-Load-bearing content:
-1. **The fact in one sentence.** To find pairs of rows in the SAME table whose date ranges overlap (e.g. find all PAIRS of deals for the same account whose `[start_date, end_date]` ranges overlap; find double-booked reservations on the same room; find employees whose employment periods overlap), self-join the table on the entity key + the **two-sided overlap predicate** `a.start <= b.end AND b.start <= a.end` (with `COALESCE(end, DATE '9999-12-31')` when NULL means open / current), PLUS `a.id < b.id` for unique pair de-duplication. **NEVER use a one-sided predicate** — that's the calendar × intervals shape and silently drops half the overlaps.
-2. Worked canonical for the deals example:
-   ```sql
-   SELECT a.deal_id AS deal_a, b.deal_id AS deal_b, a.account_id,
-          a.start_date AS a_start, a.end_date AS a_end,
-          b.start_date AS b_start, b.end_date AS b_end
-   FROM deals a
-   JOIN deals b
-     ON a.account_id = b.account_id
-    AND a.deal_id    < b.deal_id                                            -- unique pairs, no self-pairs
-    AND a.start_date <= COALESCE(b.end_date, DATE '9999-12-31')             -- a starts on/before b ends
-    AND b.start_date <= COALESCE(a.end_date, DATE '9999-12-31')             -- b starts on/before a ends
-   ;
-   ```
-3. **Why two-sided.** Two intervals `[a.s, a.e]` and `[b.s, b.e]` overlap iff `a.s <= b.e AND b.s <= a.e`. Either inequality alone is insufficient: `a.s <= b.e` alone admits `a` entirely after `b` (start later, end later); `b.s <= a.e` alone admits `b` entirely after `a`. The conjunction rules out both cases.
-4. **DO-NOT-WRITE defang — the iter1179 broken predicate.**
-   - `AND a.start_date <= b.start_date AND (b.end_date IS NULL OR b.end_date > a.start_date)` — WRONG. (a) The `a.start <= b.start` clause is a SPURIOUS ORDERING FILTER (deal_id < deal_id does not imply start date ordering) that silently drops overlapping pairs where the lower-deal_id deal started later. (b) GIVEN `a.start <= b.start`, the check `b.end > a.start` is **trivially true** for valid intervals (`b.end >= b.start >= a.start`), so it doesn't actually test overlap — it just acts as a filter that admits ALL same-account pairs satisfying the start ordering, regardless of overlap. Example: `a=[Jan1,Feb1]`, `b=[Mar1,Apr1]` (no overlap) → wrongly emitted as overlapping.
-5. **NULL handling.** NULL `end_date` = "still open / +infinity". Use `COALESCE(end_date, DATE '9999-12-31')` (or a far-future TIMESTAMP if `end_date` is a timestamp). Do not omit the COALESCE — `NULL > anything` is NULL (falsy in a JOIN predicate), so an open-ended deal would silently fail the overlap test.
-6. **Performance note.** On 2M rows, the self-join is `O(N^2 / partitions)` worst-case but in practice the `account_id` equi-join key + Trino's hash-join distribution makes it `O(rows-per-account^2 * accounts)`. ANALYZE TABLE so CBO can plan; if `rows-per-account` is small (typical SaaS — few deals per account), this is fast. Iceberg sort-by `(account_id, start_date)` helps file pruning.
-7. **Keyword anchors:** find pairs of overlapping date ranges, two rows in same table whose ranges overlap, self-join interval overlap, find conflicting reservations / overlapping bookings / double-booked, overlapping employment periods, deals with overlapping date ranges, two-sided overlap predicate, `a.start <= b.end AND b.start <= a.end`, find pairs deals same account ranges overlap, detect range collisions, schedule conflict detection.
-8. **Cross-ref:** "For the DIFFERENT shape — counting how many intervals are active on EACH calendar day — see §1674 (calendar × intervals range join). The calendar shape uses a ONE-sided predicate against a scalar calendar day; the self-join PAIRS shape uses a TWO-sided predicate between two interval rows. Do not copy the one-sided predicate into the self-join — that's the iter1179 break."
-
-**Placement rationale.** Putting the new card right after §1841 CONTRAST table places it adjacent to the existing interval-overlap canonical (§1674) so the keyword `interval overlap` / `range join` lands the responder on the disambiguating CONTRAST table first, which then routes to either the calendar shape OR the self-join shape depending on framing.
-
-### Watch label
-
-`r07 PAIRS-of-overlapping-intervals self-join two-sided-predicate iter1179` — re-probe next sweep with structurally different self-join framing (e.g. "find double-booked rooms — pairs of reservations on the same room whose check-in/check-out windows overlap" / "find employees whose employment periods at our company overlap with their employment at a customer company"). If reaches the two-sided canonical → CLOSED.
+Grep of `resources/`: `histogram\(` appears in r07/r23 in the "value distribution" / "frequency bucket" context. The `histogram` canonical for "count-by-value MAP per group" framing exists but is in the wrong findability cluster — the keyword-magnets for this Q (`count by value`, `count-by-X map`, `event_type frequency per account`) lead toward `map_agg`/COUNT(CASE) shapes, not `histogram`. This is a routing slip, not a missing canonical. Adding a new "count-by-value-as-map per group" card risks `feedback_new_card_over_attracts_adjacent` over-attractor on neighboring per-tenant aggregation Qs that legitimately need `map_agg` (where the value is not a count). **NO RESOURCE FIX.** Re-probe next sweep with structurally similar framing ("count clicks per page per session as map", "count error_codes per service as map") to see if `histogram` lands the second time around.
 
 ---
 
-## Q3 — Strip non-digits from phone numbers in Trino (regexp_replace)
+## Q3 — Per-session ordered array of page names in chronological order — way to specify sort INSIDE `array_agg`
 
 **Score: 5.0 / 5**
-- Technical accuracy: **5** — Both forms verified at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html):
-  - 2-arg `regexp_replace(string, pattern)` "Removes every instance of the substring matched by the regular expression `pattern` from `string`" — matches responder's `regexp_replace('+1 (555) 123-4567', '[^0-9]') -> '15551234567'`.
-  - 3-arg `regexp_replace(string, pattern, replacement)` with empty `''` is equivalent.
-  - `$1`, `$2`, `${name}` for capture group references — verified verbatim ("Capturing groups can be referenced in `replacement` using `$g` for a numbered group or `${name}` for a named group"). Correctly noted `$1` is the Trino syntax, NOT `\1` (the Postgres/PCRE backslash form).
-  - `\d` (or `[^0-9]` complement) Trino 467 supports per the regex character classes documented; matches `reference_trino_regex_backslash.md` pin (single backslash in SQL literal works).
-- Beginner clarity: **5** — Two-arg vs three-arg distinction explicit; `[^0-9]` vs `\D` shorthand both shown.
-- Practical applicability: **5** — Capture-group reformat example `regexp_replace(cleaned, '(\d{3})(\d{3})(\d{4})', '($1) $2-$3')` is a useful follow-up the engineer didn't explicitly ask for but will likely want next.
-- Completeness: **5** — Cites r23. Both reading direction (extract digits) and writing direction (format back to display) covered.
+- Technical accuracy: **5** — `array_agg(page_name ORDER BY visit_time)` is verified valid Trino 467 syntax at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "Some aggregate functions such as `array_agg()` produce different results depending on the order of input values. This ordering can be specified by writing an ORDER BY clause within the aggregate function" with explicit example `array_agg(x ORDER BY y DESC)`. Deterministic element ordering guaranteed by the inner ORDER BY.
+- Beginner clarity: **5** — Explicitly defangs the common slip of putting `ORDER BY` on the OUTER query ("orders rows, not array elements") — exactly the trap a SQL-experienced engineer would hit when they don't realize ORDER BY can go INSIDE an aggregate. Concrete `GROUP BY user_id, session_id` shown.
+- Practical applicability: **5** — Engineer copy-pastes and immediately gets `['home','pricing','docs','signup']` in chronological order per session. Single GROUP BY, no subquery, no LATERAL, no UNNEST round-trip.
+- Completeness: **5** — Covers ordering INSIDE the aggregate (the engineer's literal ask), defangs outer ORDER BY misuse, names per-session grouping. Tie-break behavior could have been mentioned (ties in `visit_time` → unspecified element ordering within the tie) — minor recall ceiling not load-bearing for the question's "chronological order" frame.
 
 ---
 
-## Q4 — Iceberg multi-engine (Spark + Trino) on shared HMS catalog — concurrency safety
+## Q4 — A) Trino equivalent of Oracle `SYS_CONTEXT('USERENV','SESSION_USER')`; B) embed dbt MODEL NAME into QUERY TEXT so Trino QUERY HISTORY shows which dbt model generated each query
 
-**Score: 4.75 / 5**
-- Technical accuracy: **4.75** — Core multi-engine multi-table concurrency answer is correct and aligns with Iceberg's stated design goals + the `iter1175 Q4` / `iter1156 Q3` rubric history on this exact topic:
-  - (a) Both Trino 467 + Spark with Iceberg connector using shared HMS catalog: safe by design. Each query / transaction pins a snapshot at planning (HMS holds `metadata_location` pointer, engines fetch the current `metadata.json` at query start).
-  - (b) Concurrent reads: no contention — snapshot-isolated, each reader sees the snapshot it pinned.
-  - (c) Trino reads + Spark writes: next Trino query picks up Spark's new snapshot (HMS pointer-swap commit is atomic). In-flight readers continue against their pinned snapshot, unaffected by Spark commits.
-  - (d) Same-table concurrent writes governed by `write.*.isolation-level` (`write.delete.isolation-level` / `write.update.isolation-level` / `write.merge.isolation-level`) — default `serializable`, alternative `snapshot` — matches the [Iceberg IsolationLevel Javadoc](https://iceberg.apache.org/javadoc/1.7.1/org/apache/iceberg/IsolationLevel.html) cited in iter1175 footnote. `commit.retry.num-retries` (default 4) governs optimistic-concurrency retries on conflicting commits.
-  - (e) Spark writes to OTHER tables don't affect Trino at all — each table has its own `metadata.json` pointer in HMS, independent commit chains. This is correct.
-  - Minor accuracy shave (-0.25): Trino's `hive.metastore-cache-ttl` (and `iceberg.metadata-cache.enabled`) can briefly serve a stale HMS metadata pointer to subsequent Trino queries — so "next Trino query picks up Spark's new snapshot" has a small staleness window bounded by the cache TTL. Responder didn't mention this. Not load-bearing for the safety question (it's a freshness window, not a correctness violation — Trino just sees a slightly older but still-consistent snapshot until cache expires).
-- Beginner clarity: **4.75** — Some Iceberg terminology (manifest, snapshot, MoR) used without re-defining, but acceptable given the engineer's framing already implies familiarity. The "metadata in Iceberg manifests on MinIO, not engine internals" sentence is the key intuition for a SaaS engineer wondering "where does the lock live?" — answer: "there is no lock, atomic pointer-swap commits + snapshot reads."
-- Practical applicability: **5** — Engineer's literal question ("safe to read from both? safe for Trino if Spark writes to other tables?") gets a direct YES/YES with concrete reasoning. Knows exactly what to do: nothing (default config is safe); relax `write.*.isolation-level` to `snapshot` only if false-positive commit failures appear on disjoint partitions.
-- Completeness: **4.5** — Missing the metastore-cache staleness window mention (above); did mention `commit.retry.num-retries` for same-row commit races. Cites r26 + r21.
+**Score: 2.75 / 5**
+
+### Part A — current_user
+
+- **CORRECT.** `current_user` is the Trino 467 SQL-standard no-paren scalar that returns the executing session user — verified at [trino.io/docs/467/functions/session.html](https://trino.io/docs/467/functions/session.html): "Returns the current user running the query." Direct semantic equivalent of Oracle `SYS_CONTEXT('USERENV', 'SESSION_USER')`. Responder also correctly noted it works inside dbt models (it's a Trino scalar resolved at query time, not a dbt jinja construct). One pointless `WHERE current_user IS NOT NULL` example clause was a recall-padding slip (current_user is never NULL on an authenticated Trino session, the predicate is always TRUE) — not load-bearing.
+
+### Part B — query history showing dbt model name (CRITICAL MISS)
+
+**Responder gave the WRONG mechanism.** Two routes were offered:
+
+1. **`persist_docs` (offered as "production-standard")** — `persist_docs` pushes schema.yml `description:` fields to Trino's `COMMENT ON TABLE` / `COMMENT ON COLUMN` metadata via DDL at materialization time. Verified at [docs.getdbt.com/reference/resource-configs/persist_docs](https://docs.getdbt.com/reference/resource-configs/persist_docs) + r27 §6.7J `persist_docs` (resources/27-oracle-plsql-to-dbt-trino.md:3888). This puts a description ON THE TABLE OBJECT — visible in `SHOW COLUMNS` and `information_schema.tables.comment`. It does **NOT** put anything in the QUERY TEXT, does **NOT** appear in `system.runtime.queries`, and does **NOT** answer "which dbt model generated this query in the engine's query history." Answers a DIFFERENT question entirely ("which model owns this table object").
+2. **Manual inline jinja comment `-- dbt model: {{ this.name }}`** — works only if the engineer hand-writes it on every model file. Not automatic, not retroactive, not standard.
+
+**The canonical dbt mechanism that the responder MISSED is `query-comment` / `query_comment`.** Verified at [docs.getdbt.com/reference/project-configs/query-comment](https://docs.getdbt.com/reference/project-configs/query-comment): "By default, dbt automatically inserts a JSON comment in each query it runs. This comment includes metadata such as the dbt version, profile and target names, and node ID for the resource generating the query." The default-emitted comment looks like:
+
+```json
+/* {"app": "dbt", "dbt_version": "1.10.0rc2", "profile_name": "...", "target_name": "...", "node_id": "model.dbt2.my_model"} */
+```
+
+This appears at the **start** of every query dbt sends to Trino (per-adapter rule — Snowflake places at end, all other adapters at start). It therefore appears verbatim in Trino's `system.runtime.queries.query` column AND in the Trino Web UI query history — which is exactly what the engineer asked for. `node_id` carries the dbt model name in `model.<project>.<model_name>` form. The engineer can also customize via `dbt_project.yml`:
+
+```yaml
+query-comment:
+  comment: "/* dbt model: {{ node.unique_id }} run_id: {{ invocation_id }} */"
+  append: false   # default false = comment at start; Snowflake special-cases true
+```
+
+To then query "what did each model cost on its last run":
+
+```sql
+SELECT regexp_extract(query, 'model\.[^"]+') AS dbt_node, query_id, total_cpu_time
+FROM system.runtime.queries
+WHERE query LIKE '%"app": "dbt"%'
+ORDER BY total_cpu_time DESC LIMIT 20;
+```
+
+Scores per dimension:
+
+- Technical accuracy: **2.5** — Part A correct, Part B mis-routes to a mechanism that addresses a different question. `persist_docs` for table metadata IS correct and useful, just NOT for "query text in query history." Manual `-- dbt model: {{ this.name }}` inline comment works for the model it's written in, but is not the dbt-built-in solution.
+- Beginner clarity: **3.5** — Prose clear, code blocks clean — but the conceptual mismatch ("persist_docs is how you track which model created a table" was framed as if it answers the question, which it doesn't — query history is about queries, not table metadata).
+- Practical applicability: **2.5** — Engineer following the persist_docs path adds COMMENT ON TABLE metadata that has nothing to do with `system.runtime.queries`. After a week of debugging "why doesn't my model name show up in the query history" they will eventually find `query-comment` themselves — but that's the wrong path forward. The manual inline comment partially works (for hand-edited models) but is fragile.
+- Completeness: **2.5** — Part A complete; Part B misses the load-bearing answer.
+
+### Source classification — RESOURCE-SOURCED GAP → LIGHT FIX-A
+
+Grep evidence (case-insensitive across `resources/`):
+- `query.comment` / `query-comment` / `query_comment` → **ZERO matches.**
+- `persist_docs` → 6 matches (r27 §6.7J + indexes).
+- `COMMENT ON TABLE` → multiple matches (r17 §37-54 plus references).
+- `node_id` → 1 match (false positive, r18:448 unrelated `node_id, task_id, stage_id` for runtime introspection).
+- `invocation_id` → 1 match (r27:4562 — on-failure hook context, unrelated).
+
+The dbt `query-comment` mechanism is **completely absent from resources/**. `persist_docs` IS documented and IS the keyword-magnet that pulled the responder to the wrong answer. This matches the `feedback_new_card_over_attracts_adjacent` family backward — the EXISTING `persist_docs` card is over-attracting "track which dbt model" queries that actually need the absent `query-comment` mechanism.
+
+**LIGHT FIX-A SPEC.** Add an additive canonical card to **r27 §6.7** (dbt operational config cluster, sibling to §6.7J `persist_docs`) — proposed §6.7K — "dbt `query-comment` (auto-attach dbt model name to every query so it appears in Trino's QUERY HISTORY)":
+
+1. **Load-bearing claim:** dbt-Trino auto-emits a JSON comment at the START of every query (per-adapter default; Snowflake places at end, all other adapters at start) containing `node_id` = `model.<project>.<model_name>`. The comment appears verbatim in `system.runtime.queries.query` and in the Trino Web UI query history.
+2. **Default content example:** `/* {"app": "dbt", "dbt_version": "1.x", "profile_name": "...", "target_name": "...", "node_id": "model.<project>.<model_name>"} */` — quote the default-comment shape.
+3. **Customize:** `dbt_project.yml` `query-comment: { comment: "..." , append: false }` block with a jinja template using `{{ node.unique_id }}`, `{{ invocation_id }}`, `{{ target.name }}` available context.
+4. **Worked query — "which dbt model did this query come from":**
+   ```sql
+   SELECT query_id, regexp_extract(query, 'model\.[A-Za-z0-9_.]+') AS dbt_node, total_cpu_time
+   FROM system.runtime.queries
+   WHERE query LIKE '%"app": "dbt"%' AND state = 'FINISHED'
+   ORDER BY total_cpu_time DESC LIMIT 20;
+   ```
+5. **DO-NOT-WRITE defang inline-WRONG:** "`persist_docs` is NOT the answer to query-history attribution — it pushes schema.yml descriptions to TABLE/COLUMN metadata via `COMMENT ON TABLE`, NOT into the query text. If you want `system.runtime.queries.query` to show which dbt model generated each query, use `query-comment`, not `persist_docs`."
+6. **Cross-ref FROM §6.7J `persist_docs` TO new §6.7K `query-comment`:** add a one-liner at the top of §6.7J: "If you want the dbt MODEL NAME in the QUERY TEXT (not in table metadata), see §6.7K `query-comment` — different mechanism, different question."
+7. **Cross-ref TO new §6.7K from r28** (the dbt-with-Trino chapter that already has the dbt-parallelism / slow-model-id card from iter1176) — observability cluster.
+8. **Keyword anchors (load-bearing for findability):** "dbt model name in query history, embed model name in query text, dbt query comment, dbt automatic query comment, track which dbt model generated query, query attribution dbt, dbt node_id in Trino, invocation_id in query, system.runtime.queries dbt model, identify dbt query in Trino, query tag dbt, dbt query-comment config, dbt_project.yml query-comment, audit dbt SQL".
+
+**Watch label:** `r27 §6.7K dbt query-comment auto-attach model-name-in-query-history FIX-A iter1180`. Re-probe with structurally similar framing ("we want to find which dbt model is slowing down Trino — how do we tell which queries came from which model" / "tag dbt queries so Snowflake-style attribution works on Trino").
 
 ---
 
-## Score updates to rubric
+## Rubric updates
 
-| Topic | Before | After | Δ |
+| Q | Topic row | Was | New |
 |---|---|---|---|
-| SQL query best practices for OLAP | 4.5721 / 254 | 4.5749 / 256 | +Q1 4.875 + Q3 5.0 |
-| Analytical query patterns on Iceberg+Trino | 4.5515 / 130 | 4.5301 / 131 | +Q2 1.75 (resource gap → LIGHT FIX-A) |
-| Iceberg table maintenance (concurrent writes / multi-engine) | 4.4639 / 200 | 4.4654 / 201 | +Q4 4.75 |
+| 1 | Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | 4.5301 / 131 | (593.4431 + 5.0)/132 = **4.5337 / 132** PASSED (+0.0036, margin +1.0337) |
+| 2 | SQL query best practices for OLAP | 4.5749 / 256 | (1171.1944 + 3.75)/257 = **4.5717 / 257** PASSED (-0.0032, margin +1.0717) |
+| 3 | SQL query best practices for OLAP (same row, second Q) | 4.5717 / 257 | (1175.7264 ... wait — recompute) (1171.1944 + 3.75 + 5.0)/258 = 1179.9444/258 = **4.5734 / 258** PASSED (+0.0017 across both Qs, margin +1.0734) |
+| 4 | Oracle PL/SQL → dbt+Trino migration | 4.4745 / 142 | (635.379 + 2.75)/143 = 638.129/143 = **4.4624 / 143** PASSED (-0.0121, margin +0.9624, cushion absorbs) |
 
-All three topics remain PASSED with healthy margins above threshold (3.5).
+All required topics remain PASSED. No topic dropped below threshold. Q4 took the only material hit (-0.0121), Q2 a minor recall-ceiling shave (-0.0032 net for Q2+Q3 combined).
 
 ---
 
-## Action summary
+## Summary
 
-1. **Q1 watch CLOSES** — `r27 §4.3-STR-FAMILY levenshtein-threshold-vs-abbreviation iter1178` watch closed cleanly on first re-probe (consistent with recent watch-close pattern). No resource action needed.
-2. **Q2 LIGHT FIX-A** — Teacher to add the "PAIRS of overlapping intervals in same table (self-join, two-sided predicate)" canonical to r07 (placement: right after §1841 CONTRAST card so the existing interval-overlap CONTRAST routes to it). Watch label: `r07 PAIRS-of-overlapping-intervals self-join two-sided-predicate iter1179`. Spec above.
-3. **Q3 NO-OP** — clean.
-4. **Q4 NO-OP** — clean (minor metastore-cache-ttl staleness window not mentioned but not load-bearing).
+- **Q1 watch closes cleanly on first re-probe** — iter1179 r07:1807 LEADING CANONICAL + DO-NOT-WRITE inline defang doing exactly what they were spec'd to do; pattern generalizes from `deals(start_date, end_date)` to `room_bookings(check_in, check_out)` without garbling. 14 of last 14 watches close on first re-probe — consistent cadence.
+- **Q2 is a recall ceiling, not a resource fix** — `map_agg+subquery` shipped correct results in a slightly verbose shape; `histogram(x) GROUP BY g` would have been cleaner. Adding a new "count-by-value map per group" card risks over-attractor regression on neighboring per-tenant aggregation Qs that need `map_agg`.
+- **Q3 is pin-perfect** — `array_agg(x ORDER BY y)` reach with outer-ORDER-BY defang, no padding.
+- **Q4B is a true resource gap** — dbt `query-comment` is the canonical for "dbt model name in QUERY HISTORY" and is completely missing from resources/. The existing `persist_docs` card is over-attracting this question class because it shares keywords ("dbt", "comment", "track which model") without addressing the actual mechanism. LIGHT FIX-A: add r27 §6.7K `query-comment` canonical with cross-ref defang from §6.7J `persist_docs` ("comments on TABLES vs comments in QUERIES — different mechanisms, different questions").
+
+**Verdict: PASS with LIGHT FIX-A on Q4B (r27 §6.7K query-comment).**
