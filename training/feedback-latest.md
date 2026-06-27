@@ -1,226 +1,271 @@
-# Iter1159 — Judge Feedback
+# Iter1160 — Judge Feedback
 
-**Verdict: STRONG PASS NO-OP. Storage-tiering THIN ROW LIFTED.**
+**Verdict: 4.391 PASS NO-OP. Q1 micro-flat on query-perf-basics thin row; Q4 weakest but cushion absorbs it. No FIX-A.**
 
-Iter average = (4.75 + 5.00 + 4.875 + 4.9375) / 4 = **4.890625 STRONG PASS** (margin +1.390625). All four answers source-aligned and copy-pastable. **Q1 lifts the thinnest required-topic row (storage-tiering 4.1302/12 → 4.1779/13, +0.0477).** No findability gaps, no responder slips, no FIX-A. Sustains the 33-iter strong-pass band.
+Iter average = (4.125 + 4.9375 + 4.875 + 3.625) / 4 = **4.391 PASS** (margin +0.891). Q2 and Q3 source-verified canonical reaches; Q1 correct primary lever but bloom-filter completeness shave on the THIN-ROW question (essentially flat on query-perf-basics); Q4 misreads the Oracle source pattern as "validate against known list" instead of "stage→target with dedup" — both load-bearing canonicals (dbt incremental `merge` + `NOT EXISTS` anti-join against target) ARE in r27 but the responder didn't surface them. Classified as a Haiku interpretation slip per the pinned `feedback_synthesis_ceiling_stop_churning` and `feedback_responder_broken_secondary_alternative` families — NO RESOURCE FIX.
 
 | Q | Score | Topic touched | Status | Notes |
 |---|---|---|---|---|
-| Q1 MinIO age-based tiering for aging Iceberg data | **4.75** | Storage tiering on Trino+Iceberg+MinIO (THIN ROW LIFT) | STRONG PASS | `mc ilm tier add` (register cold tier) + `mc ilm rule add --transition-days 180 --transition-tier COLD_POOL` correct. Age-based-only caveat (NOT access-aware like AWS Intelligent-Tiering) correct. Keep `metadata/` on hot tier via prefix-scoped rule + dbt rollup mitigation both load-bearing and accurate. Lifts thinnest row 4.1302→4.1779 (+0.0477). |
-| Q2 strip ALL hyphens from product_code | **5.00** | SQL best practices OLAP (dialect) | STRONG PASS | `replace(product_code, '-', '')` 2-arg form REMOVES all occurrences — pin-perfect per docs verbatim signature. 3-arg form for replace-with. Regex correctly framed as overkill for literal-char removal. |
-| Q3 NEW customers per calendar month (first-ever order) | **4.875** | Analytical query patterns Iceberg+Trino | PASS | Two-CTE clean idiom: `DATE_TRUNC('month', MIN(order_date)) GROUP BY customer_id` pins each customer to ONE first-month row; outer COUNT per month gives true first-time customers; cumulative `SUM(...) OVER (ORDER BY order_month ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` as bonus. Window frame syntax canonical per Trino 467 docs. |
-| Q4 Oracle DATE → Trino DATE vs TIMESTAMP mapping | **4.9375** | Oracle PL/SQL → dbt/Trino migration | PASS | Oracle DATE includes h:m:s (no fractional, no tz) — VERIFIED at docs.oracle.com. Trino DATE = calendar-date-only — VERIFIED at trino.io/docs/current/language/types.html. Map → Trino TIMESTAMP (without tz); mapping to DATE silently drops time. Practical "today" undercounts example pin-perfect. Minor compl shave: didn't name `timestamp(0)` as the precision-exact match (Oracle DATE = 0 fractional). |
+| Q1 Iceberg file-level skipping levers beyond partitioning | **4.125** | Query performance basics (THIN ROW, essentially flat) | PASS | `sorted_by` + `EXECUTE optimize` + `ANALYZE` correct; "narrow per-file Parquet min/max" reasoning correct; future-writes-only caveat correct. Omits bloom filters (Parquet-bloom-filter Spark-write-side path is correct lever on Trino 467 since `parquet_bloom_filter_columns` is 469+). NO-OP (bloom omission not load-bearing; correct given 467 constraint). |
+| Q2 array contains-ALL of a target set | **4.9375** | SQL best practices OLAP (Trino array dialect) | STRONG PASS | TWO correct forms: `cardinality(array_except(target, user_flags)) = 0` AND `all_match(target, x -> contains(user_flags, x))` — exactly the r07 §1a.3 LEADING CANONICAL pair. UNNEST-EXISTS form correctly defanged as verbose. |
+| Q3 cumulative running total per account | **4.875** | Analytical query patterns Iceberg+Trino | STRONG PASS | `SUM(amount) OVER (PARTITION BY account_id ORDER BY payment_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` correct. Tie nuance accurate: default RANGE groups peers (same cumulative); explicit ROWS + tiebreaker for distinct totals. |
+| Q4 Oracle IF EXISTS guard → dbt restructure | **3.625** | Oracle PL/SQL → dbt+Trino | PASS (weakest) | General principle correct (procedural IF → set-based SELECT). MISREADS the Oracle pattern: gives validation-against-known-list forms (`WHERE order_id IN (SELECT FROM known_valid_orders)`, INNER JOIN against `valid_order_ids`, CASE-flag) instead of THE canonical translations of "stage→target with dedup": (a) dbt incremental `incremental_strategy='merge'` + `unique_key='order_id'` at r27 §322/§2098, OR (b) `INSERT INTO orders SELECT ... FROM staging WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.order_id = s.order_id)` at r27 §2292/§2387-2405. NO-OP (synthesis/interpretation slip — both canonicals present in r27; recall ceiling). |
 
 ---
 
-## Q1 — MinIO age-based tiering (STORAGE-TIERING THIN ROW LIFT)
+## Q1 — Iceberg file-level skipping levers (THIN-ROW probe on query-perf-basics)
 
 ### Engineer's framing
 
-Iceberg `events` table on MinIO is huge. Last 30 days queried constantly. Data older than ~6 months almost never touched but sits on the same storage. Way to AUTOMATICALLY move aging data to cheaper/slower storage by age while keeping it queryable? Main tradeoffs?
+500M-row Iceberg events table partitioned by day. Dashboard query filters by `user_id` (non-partition col), returns a few hundred rows but takes >1 min and scans every file in those day partitions. Date range partition pruning is fine; the user_id filter doesn't skip files. **Levers BEYOND partitioning to make a highly selective filter skip data at the FILE LEVEL?**
 
 ### Responder's answer (key shape)
 
-- **Routes to MinIO object-lifecycle layer, NOT Trino/Iceberg SQL.** Iceberg has no per-partition tier DDL; per pinned `r16 Mechanism A` the right knob is MinIO ILM.
-- Two commands:
-  - `mc ilm tier add` to register the cold backend (`COLD_POOL`)
-  - `mc ilm rule add --transition-days 180 --transition-tier COLD_POOL` scoped to the bucket/prefix.
-- **CRITICAL CAVEAT**: lifecycle is AGE-BASED ONLY (transition after N days since creation), NOT access-aware like AWS S3 Intelligent-Tiering. A hot partition older than the threshold still tiers.
-- Trino queries are transparent: MinIO rehydrates cold objects on GET (2x-10x slower latency for cold reads).
-- **Mitigation**: pre-aggregate older data into a dbt rollup/summary model on the hot tier so recurring dashboards read the small summary, not the cold raw.
-- **Critical scoping rule**: keep Iceberg `metadata/` directory on the HOT tier (scope rule to `data/` prefix only) — else every query pays cold latency just to plan.
-
-Cites `r16 Mechanism A`.
+- `ALTER TABLE iceberg.<schema>.events SET PROPERTIES sorted_by = ARRAY['user_id']` — Iceberg writer clusters rows by user_id within each file.
+- `ALTER TABLE iceberg.<schema>.events EXECUTE optimize(file_size_threshold => '128MB')` — rewrites EXISTING files in clustered order (sorted_by alone is future-writes-only).
+- `ANALYZE iceberg.<schema>.events` — refreshes column-level statistics so the optimizer/file pruner sees the new per-file min/max for user_id.
+- Mechanism explained: without sort, each file's user_id min/max spans the full domain (defeating skipping); with sort, files have narrow min/max ranges and the pruner can skip files whose range excludes the target user_id.
+- Cites r28.
 
 ### Source verification
 
-- **`mc ilm tier add` exists** — verified at [docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-tier/mc-ilm-tier-add/](https://docs.min.io/enterprise/aistor-object-store/reference/cli/mc-ilm-tier/mc-ilm-tier-add/): "creates a new remote storage tier to a supported storage services," registers a remote backend for lifecycle transitions. Supports MinIO/S3/Azure/GCS backends. Syntax `mc ilm tier add TIER_TYPE TARGET TIER_NAME --bucket value [OPTIONS]`. Conceptual framing matches verbatim.
-- **`mc ilm rule add --transition-days N --transition-tier NAME` exists** — verified at [docs.min.io/enterprise/aistor-object-store/administration/object-lifecycle-management/](https://docs.min.io/enterprise/aistor-object-store/administration/object-lifecycle-management/) "transition objects to that tier after a specified number of calendar days".
-- **Age-based-only caveat correct** — verified verbatim: "The documentation shows no evidence of access-pattern-based tiering. MinIO implements only calendar-day-based transitions, not automatic tier promotion/demotion based on usage frequency." (No Intelligent-Tiering equivalent in MinIO.)
-- **Prefix scoping for rules supported** — verified "rules support prefix targeting"; the `metadata/` vs `data/` carve-out is exactly the right operational pattern.
-- **Transparent rehydration on GET** — verified: "MinIO manages retrieving tiered objects on-the-fly without any additional application-side logic" — Trino reads continue to work, the engineer just pays cold-read latency.
-- **r16 / iter1140 cross-check**: r17 §expire_snapshots requirement (snapshot expiry must run before tiering can reclaim space, since live snapshots still reference data files) was load-bearing in iter1140 4.75 but NOT in this engineer's framing (which is about transitioning aging data, not reclaiming space). Recall ceiling shave only.
+- **`sorted_by` Iceberg table property** — verified at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Iceberg connector → Table properties). r28 §163 and §1231 frame it correctly: "sorted_by sharpens Parquet min/max stats for range pushdowns."
+- **`sorted_by` is future-writes-only without `EXECUTE optimize`** — verified at [trinodb/trino #26112](https://github.com/trinodb/trino/issues/26112). r28 §1233 already defangs this: "metadata-only change, existing files NOT physically re-sorted until you run `EXECUTE optimize`."
+- **`EXECUTE optimize(file_size_threshold => ...)`** — supported on Trino 467; per-partition WHERE on partition columns also supported. Verified at trino.io/docs/current/connector/iceberg.html.
+- **`ANALYZE` to refresh stats** — correct; ANALYZE writes Puffin sketches with per-column NDV that the CBO uses.
 
-### Scores
+### What's MISSING (completeness shave on a THIN ROW)
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.75 | All four MinIO claims (tier add command, transition-days/transition-tier rule, age-based-only, transparent rehydration) verify against docs.min.io. Conceptually pin-perfect. `mc ilm tier add` command syntax stripped down (didn't show `TIER_TYPE TARGET TIER_NAME --bucket value` full positional form) — minor compactness, not wrong. -0.25 for not showing the full positional form an engineer would actually type. |
-| Beginner clarity | 4.5 | Explains hot vs cold, transparent rehydration, the AGE-only mental model, and why metadata stays hot. Mostly clear; the "rehydrate" verb without unpacking is jargon-adjacent (an absolute beginner might not know it means "transparent read-through from the cold backend"). -0.5. |
-| Practical applicability | 5.0 | Engineer can copy-paste both `mc` commands. The metadata/data prefix scoping point alone saves them a planning-time catastrophe. The summary-model mitigation is exactly the right architectural move. |
-| Completeness | 4.75 | Transition mechanism, tradeoffs, prefix scoping, hot-rollup mitigation, age-only caveat all covered. Didn't mention the `expire_snapshots` weekly cleanup that lets tiering actually reclaim space (recall ceiling — not load-bearing for the engineer's "move data" framing, but would have been the icing). |
+The canonical lever set for **high-cardinality EQUALITY point lookups** (user_id = X) on Iceberg+Trino is:
 
-**Q1 average = (4.75 + 4.5 + 5.0 + 4.75) / 4 = 4.75**
+1. **Sort/cluster** (sorted_by + EXECUTE optimize) — narrows per-file min/max, prunes files whose range excludes the value. **Responder gave this.**
+2. **Parquet bloom filters** — probabilistic "definitely not in this file/row-group" check. For equality lookups, bloom filters are arguably the MORE DIRECT lever because min/max only helps once data is clustered; bloom skips files for unclustered data too. **Responder did NOT name this.**
+3. **Parquet page-level column indexes** — page-level min/max enables sub-row-group skipping ([trinodb/trino #11000](https://github.com/trinodb/trino/issues/11000)). Minor; not load-bearing.
 
-**Storage-tiering row update**: 4.1302/12 → (49.5624 + 4.75) / 13 = **4.1779/13 PASSED** (+0.0477, margin +0.6779). **No longer #1 thinnest required-topic.**
+### Production-stack constraint (CRITICAL — why the omission is partially justified)
+
+- **`parquet_bloom_filter_columns` table property is Trino 469+, NOT 467.** Verified at [trinodb/trino PR #24573](https://github.com/trinodb/trino/pull/24573) (merged for release 469, Jan 2025). r18 §1259 already pins this: "On Trino 467, setting this table property fails with 'unknown table property.'"
+- **READ-side bloom filter pushdown IS in Trino 467** — `parquet.use-bloom-filter=true` is default; Trino 467 reads bloom filters that already exist in files. Verified per r17 §935 + [trino.io/docs/current/object-storage/file-formats.html](https://trino.io/docs/current/object-storage/file-formats.html).
+- **WRITE-side bloom filter on Trino 467** goes through Spark Iceberg: `ALTER TABLE iceberg.x.y SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.user_id'='true')` from Spark + `CALL iceberg.system.rewrite_data_files`. Verified per r18 §1351.
+- A responder recommending `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY['user_id']` on this stack would have been **WRONG** — that's a 469+ syntax and would parse-error on 467.
+
+So the responder's omission of bloom filters is **partially justified**: NOT recommending the Trino-native bloom DDL is correct (it fails on 467), and the Spark-side bloom workflow is a heavier ask the engineer didn't request. But the COMPLETE answer would name the bloom-filter lever and route to the Spark workflow with the 467-vs-469 caveat (per r18 §1256-1351).
+
+### Classification
+
+- **Bloom-filter omission**: minor completeness shave on a THIN ROW probe. Not load-bearing because `sorted_by` + `EXECUTE optimize` alone DOES dramatically improve pruning for high-cardinality equality (sort clusters → narrow min/max → most files prune). Engineer's stated problem (>1 min for a hundred-row result) IS solved by sort+optimize alone in practice.
+- **Source-anchored**: r18 §1256-1351 covers the bloom-filter route with the version caveat, but it lives in the "Query performance regression diagnosis" resource not the perf-basics path. The responder's primary citation (r28) covers `sorted_by` cleanly; bloom is one resource hop away.
+
+### Verdict — Q1: 4.125 NO-OP
+
+- Acc 4.5 — sort/optimize/ANALYZE correct; future-writes-only caveat correct; mechanism (min/max narrowing) correct.
+- Clar 4.5 — beginner-friendly explanation of clustering and min/max stats; copy-pasteable DDL.
+- App 4.0 — engineer can act on this; minor practical ding for not naming bloom as the complementary lever for the high-cardinality equality case (Spark-side write property on 467).
+- Compl 3.5 — sort is one of three canonical levers; bloom + column indexes omitted; correct given 467 constraint on Trino-native bloom DDL but Spark route would have been the complete answer.
+
+**FIX-A decision: NO-OP.** Three reasons:
+1. The Trino-native bloom DDL (`parquet_bloom_filter_columns`) is NOT available on Trino 467 — adding it to a "perf basics" canonical risks an over-attractor card teaching responder to recommend a 469+ syntax. The 469-only carve-out is already at r18 §1259 + §1351.
+2. The Spark-side bloom workflow IS documented at r18 §1351 with the correct 467-vs-469 caveat — keyword-anchorable via "bloom filter on Iceberg events table" from a regression-diagnosis path, not a perf-basics path.
+3. Adding bloom to the perf-basics canonical risks the **`feedback_new_card_over_attracts_adjacent`** trap — sorted_by + EXECUTE optimize IS the correct primary lever for the "narrow min/max" question, and bloom is a different mechanism (probabilistic membership, not range pruning).
+
+**THIN-ROW MOVEMENT:** query-perf-basics 4.1893/26 → (108.9218 + 4.125)/27 = **4.1869/27 PASSED** (-0.0024, essentially flat — small drag because 4.125 is just under the running mean of 4.1893). Row stays #2-3 thinnest required-topic.
 
 ---
 
-## Q2 — Trino `replace` 2-arg form (DIALECT)
+## Q2 — array contains-ALL (STRONG PASS)
 
 ### Engineer's framing
 
-`product_code` column: some "ABC-123-XY" (with hyphens), some "ABC123XY". Want to strip ALL hyphens before joins. Does Trino have a plain string replace to remove all occurrences of a character, or is regex the only option?
+`users.feature_flags` is an `ARRAY<varchar>` (e.g., `ARRAY['beta_ui','new_checkout','dark_mode']`). Find users who have ALL flags in a target set (e.g., both `'new_checkout'` AND `'dark_mode'`, possibly more) — clean way to check "every element of target list is present in user's array" WITHOUT a separate `contains()` per flag.
 
 ### Responder's answer (key shape)
 
-- 2-arg `replace(string, search)` REMOVES all occurrences of `search`.
-- 3-arg `replace(string, search, replacement)` replaces.
-- `replace(product_code, '-', '')` strips hyphens.
-- Regex only needed for PATTERNS (non-alphanumeric, any digit), not for a literal char.
-- Cites `r27 §4.3`.
+Two equivalent forms:
+
+```sql
+-- Form 1: array_except subset test
+WHERE cardinality(array_except(ARRAY['new_checkout','dark_mode'], user_flags)) = 0;
+
+-- Form 2: all_match with lambda + contains
+WHERE all_match(ARRAY['new_checkout','dark_mode'], x -> contains(user_flags, x));
+```
+
+Defangs `CROSS JOIN UNNEST + EXISTS` as verbose/unnecessary. Cites r07 §1a.3 (contains-all-cousin-of-contains canonical).
 
 ### Source verification
 
-Verified at [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html):
-- `replace(string, search) → varchar` — "Removes all instances of search from string." (VERBATIM)
-- `replace(string, search, replace) → varchar` — "Replaces all instances of search with replace in string." (VERBATIM)
+- **`all_match(array, lambda)`** — verified at [trino.io/docs/current/functions/array.html](https://trino.io/docs/current/functions/array.html): "Returns whether all elements of an array match the given predicate." Returns true iff predicate holds for every element. `all_match(target, x -> contains(user_flags, x))` correctly tests "every target flag is in user_flags."
+- **`array_except(A, B)`** — verified at trino.io/docs/current/functions/array.html: "Returns an array of elements in `x` but not in `y`." `cardinality(array_except(target, user_flags)) = 0` correctly tests "target is subset of user_flags."
+- **`contains(array, element)`** — verified at trino.io/docs/current/functions/array.html. r07 §1a.3 LEADING CANONICAL.
+- **`cardinality(array)`** — verified at trino.io/docs/current/functions/array.html.
 
-Both forms operate on ALL instances. `replace(product_code, '-', '')` is canonical for hyphen-strip.
+Both forms are EXACT matches to r07 §1a.4 (lines 685-697) LEADING CANONICAL pair for "contains all" / array subset test. Keyword anchors at L683 ("array subset test", "does array contain ALL elements", "has all of", "check a user has all required flags") are doing their job — Haiku responder found the canonical via direct keyword match.
 
-### Scores
+### Verdict — Q2: 4.9375 STRONG PASS
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | Both arity claims verify verbatim against docs.trino.io. |
-| Beginner clarity | 5.0 | Crystal-clear yes-Trino-has-it answer; gives the exact one-line solution. |
-| Practical applicability | 5.0 | Copy-paste ready. |
-| Completeness | 5.0 | Both forms named, regex correctly scoped to patterns-not-literals. |
-
-**Q2 average = 5.0**
+- Acc 5.0 — both forms correct Trino 467.
+- Clar 5.0 — clear explanations, "B minus A is empty → every element of B is in A" mental model.
+- App 5.0 — copy-pasteable, both forms work on the engineer's exact schema.
+- Compl 4.75 — both canonical forms covered + UNNEST-EXISTS defang; minor recall shave for not naming the third equivalent `cardinality(array_intersect(target, user_flags)) = cardinality(target)` (less common, recall ceiling).
 
 ---
 
-## Q3 — NEW customers per calendar month (single-query)
+## Q3 — cumulative running total (STRONG PASS)
 
 ### Engineer's framing
 
-Count NEW customers acquired each calendar month, where "new" = their first-ever order. `orders(customer_id, order_date)` over several years. Clean single-query approach, or must it be two steps (find each customer's earliest order, then group by month)?
+`payments(account_id, payment_date, amount)`. Per row, cumulative total that account has paid so far INCLUDING that row, ordered by payment_date (100, 200, 50 → 100, 300, 350). Right window function shape, and do they need to be explicit about the frame?
 
 ### Responder's answer (key shape)
 
 ```sql
-WITH first_order AS (
-  SELECT customer_id,
-         DATE_TRUNC('month', MIN(order_date)) AS first_month
-  FROM orders
-  GROUP BY customer_id
-),
-new_per_month AS (
-  SELECT first_month AS order_month,
-         COUNT(*) AS new_customers
-  FROM first_order
-  GROUP BY first_month
-)
-SELECT order_month,
-       new_customers,
-       SUM(new_customers) OVER (
-         ORDER BY order_month
+SELECT account_id, payment_date, amount,
+       SUM(amount) OVER (
+         PARTITION BY account_id
+         ORDER BY payment_date
          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-       ) AS cumulative
-FROM new_per_month
-ORDER BY order_month;
+       ) AS cumulative_amount
+FROM payments
+ORDER BY account_id, payment_date;
 ```
 
-- Explains MIN per customer pins each to ONE row of their first-ever order.
-- Count per month = true new customers acquired.
-- Cumulative SUM OVER is optional bonus.
-- Cites `r07`.
+Explains `PARTITION BY` (per-account window), `ORDER BY` (chronological), `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (positional frame). Tie nuance: "the default RANGE frame groups tied rows together so both show the same cumulative; add a tiebreaker (ORDER BY payment_date, payment_id) for distinct per-row totals." Cites r07.
 
 ### Source verification
 
-- **Aggregates as window functions**: verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) — "All Aggregate functions can be used as window functions by adding the `OVER` clause." `SUM(...) OVER (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` is the standard Trino 467 cumulative-sum idiom.
-- **`DATE_TRUNC('month', x)`**: verified at [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) — accepts both date and timestamp; "SELECT date_trunc('month', TIMESTAMP '2022-10-20 05:10:00'); -- 2022-10-01 00:00:00.000". Works on `MIN(order_date)` where `order_date` is DATE (returns DATE).
-- **Logical correctness**: each customer has exactly ONE `MIN(order_date)` → one `first_month` value → one row in `first_order`. Grouping `first_order` by `first_month` and counting customers = true first-time customers per month. This is the clean two-level aggregate-then-aggregate idiom, structurally distinct from a broken first-vs-latest pairing.
-- The window-frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is the explicit cumulative form (the default `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` would also work here since `order_month` is unique per row, but `ROWS` is explicit and correct).
+- **`SUM() OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`** — verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) and [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (window frame spec). Matches r07 §2567-2590 Pattern A LEADING CANONICAL verbatim.
+- **Default frame is RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW when ORDER BY is present** — verified at trino.io/docs/current/functions/window.html: "If the frame is not specified, it defaults to `RANGE UNBOUNDED PRECEDING`, which is the same as `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`."
+- **RANGE includes ALL peers** (tied ORDER BY values) — verified per the Trino window docs: "This frame contains all rows from the start of the partition up to the last peer of the current row." All tied rows share the same cumulative value (sum through the end of the peer group).
+- **ROWS gives positional accumulation** with non-deterministic order among peers unless a unique tiebreaker is added — verified per r07 §2607 ROWS-vs-RANGE table.
+- **Tie explanation accuracy**: Responder's framing "default RANGE groups tied rows together so both show the same cumulative; add a tiebreaker for distinct per-row totals" is ACCURATE. The slight asymmetry — query uses explicit ROWS while explanation describes the RANGE default — is not contradictory: the responder is correctly noting that BOTH frames are valid choices and the engineer can pick based on whether tied-row semantics should share or distinguish. r07 §2601-2638 documents both Pattern 1 (default RANGE) and Pattern 2 (ROWS + unique tiebreaker) as canonical alternatives.
 
-### Scores
+### Verdict — Q3: 4.875 STRONG PASS
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | Two-level CTE structurally correct; both `DATE_TRUNC`, MIN, COUNT, and cumulative SUM OVER verified against Trino 467 docs. |
-| Beginner clarity | 4.75 | Explains the "MIN per customer pins each to one row" insight which is the key conceptual hop. Could spend one more sentence on why this beats a self-join. -0.25. |
-| Practical applicability | 5.0 | Single query, copy-paste ready, with the cumulative-by-month bonus an analyst will inevitably want. |
-| Completeness | 4.75 | Answers single-query vs two-step explicitly. Doesn't proactively address what happens if `order_date` is TIMESTAMP not DATE (DATE_TRUNC works on both, would still return month-start) — recall ceiling, not load-bearing. |
-
-**Q3 average = 4.875**
+- Acc 4.75 — query correct; RANGE-default + tie semantics correctly stated; small asymmetry between "uses ROWS in query" and "explains RANGE default for ties" is conceptually accurate (responder names both behaviors and the tiebreaker fix) but could have been tighter (showing both patterns side by side per r07 §2615-2638).
+- Clar 5.0 — explains PARTITION/ORDER/ROWS clearly.
+- App 5.0 — runnable query, tiebreaker advice actionable.
+- Compl 4.75 — covers the query, the tie nuance, and the tiebreaker fix; doesn't explicitly show the RANGE-default-no-frame variant as a second runnable equivalent (Pattern 1 at r07 §2615) — recall ceiling.
 
 ---
 
-## Q4 — Oracle DATE → Trino DATE vs TIMESTAMP
+## Q4 — Oracle IF EXISTS guard → dbt restructure (WEAKEST, but PASS)
 
 ### Engineer's framing
 
-Oracle DATE stores hours/minutes/seconds (not just calendar date); Trino DATE is date-only. Extracting Oracle DATE columns into Iceberg — map to Trino DATE or TIMESTAMP? What bugs show up if mapped wrong?
+Oracle stored proc pattern: `IF EXISTS (SELECT 1 FROM staging WHERE order_id=:id) THEN INSERT INTO orders ...`. dbt+Trino has no procedural IF / session vars. How do I restructure this existence-check-before-write into a dbt model?
 
 ### Responder's answer (key shape)
 
-- Map Oracle DATE → Trino TIMESTAMP (without tz), NOT date.
-- Oracle DATE = date + time (h:m:s, no fractional, no tz).
-- Trino DATE = date only.
-- Mapping to date SILENTLY DROPS time-of-day (`'2026-06-15 14:30:45'` → `'2026-06-15'`).
-- Mapping table: Oracle DATE → Trino `timestamp`; Oracle TIMESTAMP WITH TIME ZONE → `timestamp(p) with time zone`.
-- **Practical bug**: date-column time-window predicates (`WHERE d >= '2026-06-15' AND d < '2026-06-16'`) lose rows with intraday times → mysteriously low "today" counts.
-- Cites `r27 §4.1`.
+States the general principle: no procedural IF in Trino/dbt — restructure as SET-BASED SELECT. Three forms:
 
-### Source verification
+- Form 1: `WHERE order_id IN (SELECT order_id FROM known_valid_orders)`
+- Form 2: `INNER JOIN validation.valid_order_ids v ON s.order_id = v.order_id`
+- Form 3: `CASE WHEN order_id IN (...) THEN 'validated' ELSE 'unvalidated' END AS status`
 
-- **Oracle DATE includes h:m:s, no fractional, no tz** — verified verbatim at [docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/Data-Types.html](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/Data-Types.html): "For each `DATE` value, Oracle stores the following information: year, month, day, hour, minute, and second." Fixed 7 bytes. No fractional seconds, no timezone.
-- **Trino DATE is calendar-date-only** — verified at [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html): "Calendar date (year, month, day)" with no time component.
-- **Trino TIMESTAMP without time zone** — verified: defaults to `TIMESTAMP(3)` (millisecond precision); "effectively a combination of the `DATE` and `TIME(P)` types." Configurable precision up to picoseconds.
-- **Trino TIMESTAMP WITH TIME ZONE** — verified: also defaults to `TIMESTAMP(3)` with stored timezone (UTC / numeric offset / IANA name). Mapping Oracle TIMESTAMP WITH TIME ZONE → Trino `timestamp(p) with time zone` is correct.
-- **Silent-time-loss bug + low-today-count example**: structurally correct. An Iceberg DATE column for an Oracle DATE source would coerce the time component out at ingestion (Spark/Iceberg writer truncates `to_date(ts)`), producing the exact undercount pattern responder describes.
-- **Precision nuance** (recall ceiling): Oracle DATE has zero fractional seconds, so `timestamp(0)` is the precision-exact target. `timestamp` (defaults to `timestamp(3)`) or `timestamp(6)` works in practice (extra precision is unused / always zero). Not load-bearing.
+Cites r27.
 
-### Scores
+### What's WRONG / MISSING
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | All four type-system claims (Oracle DATE includes time / no fractional / no tz; Trino DATE date-only) verify verbatim against vendor docs. Mapping table correct. |
-| Beginner clarity | 5.0 | Concrete `'2026-06-15 14:30:45'` → `'2026-06-15'` example makes the silent-truncation bug viscerally obvious. |
-| Practical applicability | 5.0 | Mapping table + concrete "today" undercount bug an engineer would actually hit. Engineer knows exactly what Iceberg column type to declare. |
-| Completeness | 4.75 | Covers DATE and TIMESTAMP WITH TIME ZONE mappings. Could mention that `timestamp(0)` is the precision-exact target (Oracle DATE has 0 fractional digits); didn't name the precision. Recall ceiling — `timestamp` default (`timestamp(3)`) works fine in practice. |
+The Oracle source pattern is **"IF EXISTS in staging THEN INSERT INTO orders"** — i.e., the proc reads from a SOURCE (staging), checks for existence, and writes to a TARGET (orders). The natural dbt translations are:
 
-**Q4 average = 4.9375**
+1. **Direct set-based form** (the pure existence-check → existence-driven insert):
+   ```sql
+   -- dbt model on the orders side
+   INSERT INTO orders
+   SELECT ... FROM staging
+   WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.order_id = staging.order_id)
+   ```
+   This is the **"insert from staging if not already present in target"** anti-join shape. r27 §2292/§2352/§2387-2405 documents NOT EXISTS as the LEADING CANONICAL anti-join with three-valued-logic caveats.
+
+2. **Idiomatic dbt form** (the flagship Oracle→dbt translation):
+   ```sql
+   {{ config(
+       materialized='incremental',
+       incremental_strategy='merge',
+       unique_key='order_id'
+   ) }}
+   SELECT ... FROM {{ source('raw','staging') }}
+   ```
+   dbt-trino compiles this to `MERGE INTO orders USING staging ON (order_id) WHEN NOT MATCHED THEN INSERT ...`. This is r27 §322 LEADING CANONICAL (Oracle MERGE → dbt incremental `merge`) and r27 §2098 (flagship translation table row).
+
+The responder's three forms answer a DIFFERENT question — "filter source rows against a known-valid lookup list" — not the Oracle pattern. They are all valid Trino SQL but the engineer copy-pasting them gets a `WHERE order_id IN (...)` filter against a `known_valid_orders` table that doesn't exist in their schema.
+
+### Source verification (canonicals ARE in r27)
+
+- **r27 §322** (LEADING CANONICAL incremental_strategy table): `MERGE INTO target USING source ON ... WHEN NOT MATCHED THEN INSERT` → `incremental_strategy='merge'` + `unique_key='<pk>'`. "THE DEFAULT TARGET FOR ORACLE MERGE PROCEDURES."
+- **r27 §2098** (flagship translation table): "`MERGE INTO ... USING ... ON ... WHEN MATCHED THEN UPDATE WHEN NOT MATCHED THEN INSERT` → dbt incremental model with `incremental_strategy='merge'`, `unique_key='...'`. dbt-trino generates the Trino MERGE INTO SQL. **The flagship translation.**"
+- **r27 §2292/§2387-2405** (NOT EXISTS canonical): `INSERT INTO target SELECT ... FROM source WHERE NOT EXISTS (SELECT 1 FROM target t WHERE t.id = source.id)`. Three-valued-logic safety noted; LeftSemiHashJoin decorrelation confirmed in EXPLAIN.
+
+Both canonicals are FINDABLE in r27. The responder's interpretation slip — reading "IF EXISTS check before INSERT" as "validate against a known list" instead of "stage → target with dedup" — missed both.
+
+### Classification
+
+- **Source-correct (r27 has both canonicals)** — confirmed via grep at §322, §2098, §2292, §2387-2405.
+- **Responder synthesis/interpretation slip** — read the source pattern direction backwards (validation-list filter vs anti-join against target / merge upsert).
+- **Recurrence family**: matches the pinned `feedback_synthesis_ceiling_stop_churning.md` and `feedback_responder_broken_secondary_alternative.md` — construction principles correct (set-based not procedural) but final pattern-mapping step trips.
+- **NOT a resource gap** — the canonicals are present with strong keyword anchors ("MERGE INTO", "incremental_strategy='merge'", "NOT EXISTS", "anti-join"). The responder's path through r27 hit the dialect/conversion section instead of the flagship MERGE translation.
+
+### Verdict — Q4: 3.625 PASS (weakest in iter, NO-OP)
+
+- Acc 3.75 — three forms are valid Trino SQL; the procedural→set-based principle is correct; misinterpretation of the source pattern is a synthesis slip not a factual error.
+- Clar 4.0 — explains mindset shift well.
+- App 3.5 — engineer can't directly use the three forms to translate their specific Oracle proc; they'd need to either invent a `known_valid_orders` table that doesn't exist, or figure out for themselves that the canonical answer is incremental `merge` with `unique_key='order_id'`.
+- Compl 3.25 — misses BOTH dbt incremental `merge` (r27 §322/§2098) AND NOT EXISTS anti-join (r27 §2292) — the two canonical translations for this exact pattern. Principle correct, specifics off.
+
+**FIX-A decision: NO-OP.** Reasons:
+1. Both canonical translations ARE in r27 with strong keyword anchors. The responder's interpretation slip is per-question variance not a findability gap.
+2. Adding a new "IF EXISTS guard → dbt" card risks the `feedback_new_card_over_attracts_adjacent` trap — the canonicals at §322/§2098/§2292 are correct and shouldn't be churned.
+3. Pattern matches `feedback_synthesis_ceiling_stop_churning`: the responder lifted a generic procedural-vs-set-based principle correctly but mapped to the wrong specific canonical. The discipline is to re-probe in next sweep, not add a card.
+
+**Watch label**: `r27 IF-EXISTS-staging-guard → dbt interpretation slip iter1160`. Re-probe next sweep with different IF-EXISTS-guard-before-INSERT phrasing to confirm one-off vs recurrent. Candidate re-probes:
+- "Oracle proc does `IF NOT EXISTS (SELECT 1 FROM target WHERE id=:id) THEN INSERT INTO target ...` — how do I do this in dbt with Trino?"
+- "How do I translate an Oracle 'check-then-insert' upsert pattern (proc reads :id, checks if present in target, inserts if absent) into a dbt-trino model?"
+- "Oracle stored procedure loops through staging rows, INSERTs each into orders only if order_id not already in orders — dbt equivalent?"
+
+If recurs across phrasings → consider additive top-of-r27 myth row or §6 routing-anchor pointing IF-EXISTS-guard queries explicitly at §322 (incremental merge) + §2292 (NOT EXISTS anti-join). If ONE-OFF → leave canonicals untouched.
 
 ---
 
-## Topic updates
+## Topic-row updates (one decimal of precision)
 
-| Topic | Before | After | Δ | Status |
+| Topic | Before | Delta | After | Status |
 |---|---|---|---|---|
-| Storage tiering on Trino+Iceberg+MinIO (THIN ROW) | 4.1302/12 | **4.1779/13** | +0.0477 | PASSED, margin +0.6779 |
-| SQL best practices OLAP (Q2 dialect) | 4.5742/227 | **4.5760/228** | +0.0018 | PASSED, margin +1.0760 |
-| Analytical query patterns on Iceberg+Trino (Q3) | 4.5132/109 | **4.5174/110** | +0.0042 | PASSED, margin +1.0174 |
-| Oracle PL/SQL → dbt/Trino migration (Q4) | 4.4654/129 | **4.4683/130** | +0.0029 | PASSED, margin +0.9683 |
+| Query performance basics | 4.1893/26 | -0.0024 (Q1=4.125 just under mean) | **4.1869/27** | PASSED, margin +0.6869 (essentially flat thin row) |
+| SQL query best practices for OLAP | 4.5760/228 | +0.0015 | **4.5775/229** | PASSED, margin +1.0775 |
+| Analytical query patterns on Iceberg+Trino | 4.5174/110 | +0.0032 | **4.5206/111** | PASSED, margin +1.0206 |
+| Oracle PL/SQL → dbt+Trino | 4.4683/130 | -0.0064 (Q4=3.625 below mean) | **4.4619/131** | PASSED, margin +0.9619 |
 
-**ALL required topics REMAIN PASSED.** Iter average = 4.890625 STRONG PASS (margin +1.390625).
+All required topics REMAIN PASSED.
 
-### Thinnest-margin order after iter1159
+---
 
-1. **storage-tiering 4.1779/13** (+0.6779, **LIFTED**) — still thinnest, but no longer at 4.13
-2. dbt-snapshots-SCD2 4.1549/19 (+0.6549, untouched)
-3. query-perf-basics 4.1893/26 (+0.6893, untouched)
+## Thinnest-margin order after iter1160
+
+1. storage-tiering 4.1779/13 (+0.6779, untouched)
+2. dbt-snapshots-SCD2 4.1549/19 (+0.6549, untouched)  — actually thinner than (3) below if we sort by margin
+3. query-perf-basics 4.1869/27 (+0.6869, Q1 micro-drag)
 4. cost-considerations 4.3258/24 (+0.8258, untouched)
 5. query-perf-regression-diagnosis 4.3436/21 (+0.8436, untouched)
 6. Iceberg-maintenance 4.4489/190 (+0.9489, untouched)
 7. Iceberg-partition-design 4.4581/49 (+0.9581, untouched)
-8. Oracle-migration 4.4683/130 (+0.9683, **Q4 lift**)
-9. federation 4.50244/312 (untouched)
+8. Oracle-migration 4.4619/131 (+0.9619, Q4 drag)
+9. federation 4.50244/312 (untouched, fragile-PASS preserved)
 10. dbt-sources-freshness 4.5105/9 (untouched)
-11. Analytical-query-patterns 4.5174/110 (+1.0174, **Q3 lift**)
-12. SQL-best-practices-OLAP 4.5760/228 (+1.0760, **Q2 lift**)
+11. Analytical-query-patterns 4.5206/111 (+1.0206, Q3 lift)
+12. SQL-best-practices-OLAP 4.5775/229 (+1.0775, Q2 lift)
 13. CBO/ANALYZE 4.6105/22 (untouched)
 14. improving-complex-SQL-perf-dbt 4.6111/25 (untouched)
+
+Margin order (smallest first): dbt-snapshots-SCD2 (+0.6549) → query-perf-basics (+0.6869) → storage-tiering (+0.6779). Three rows clustered around +0.65-0.69 margin — sustained breadth probing on each is the right discipline; no targeted FIX-A churn needed.
 
 ---
 
 ## Pattern observation
 
-33-iter sustainment band continues. The iter1140 r16/r17 storage-tiering LIGHT FIX-A (introduced `mc ilm tier add` + `--transition-days/--transition-tier` flags + the `metadata/` hot-tier carve-out + expire_snapshots cleanup caveat) has now held across 12→13 questions including this iter1159 re-probe with the engineer-friendly "huge events table, last 30d hot, 6mo+ cold" framing. The responder reached the canonical cleanly, named the AGE-only caveat without prompting, and added a dbt rollup mitigation that wasn't strictly asked but is the right architectural recommendation for the SaaS dashboard use case.
+34-iter sustainment band continues. iter1160 4.391 PASS NO-OP fits the same envelope as iter1153 4.281, iter1156 3.656, iter1150 3.781 — thin-margin iters where a synthesis-ceiling slip on one of four questions pulls the iter average toward but not through the threshold. The discipline holds: classify synthesis slips as NO-OP (per pinned `feedback_synthesis_ceiling_stop_churning`), confirm with re-probe, do NOT churn the canonical.
 
-The pinned `feedback_responder_overwarning_folklore.md` lesson holds — responder did NOT over-warn against MinIO tiering as "complex/risky"; gave the direct mechanism + tradeoffs + mitigation. The pinned `feedback_responder_broken_secondary_alternative.md` also held — Q3 secondary cumulative-SUM addition was correct and didn't introduce a broken alternative.
+The Q4 misread is the most informative finding this iter: a Haiku interpretation slip on direction-of-data-flow ("validate source against list" vs "insert source into target with dedup"). Same family as iter1146 Q2 broken-2-level / iter1150 Q1 incremental misroute — construction principle correct, specific canonical not surfaced. Both canonicals (incremental merge at r27 §322 and NOT EXISTS anti-join at r27 §2292) ARE present in resources, with strong keyword anchors. Re-probe to confirm one-off vs recurrent.
 
-**Source-verified outcomes this iter:** 0 findability gaps; 0 responder slips; 0 over-warning folklore; 0 dialect errors; 2 minor recall-ceiling shaves (Q4 `timestamp(0)` precision-exact match not named; Q1 expire_snapshots caveat not named — neither load-bearing for the question framing). **RECOMMENDATION = NO-OP.**
+**Q1 takeaway for the THIN ROW**: bloom filter omission on Trino 467 is partially justified by the production-stack constraint (parquet_bloom_filter_columns is 469+ syntax). NOT recommending the wrong-version DDL is the right call. The completeness gap is the Spark-side write path — but that's a heavier ask the engineer didn't request. Net assessment: query-perf-basics row remains thin but stable; needs continued breadth probing with direct-framing questions (per the iter1159 storage-tiering lift pattern), not a FIX-A.
 
-**Lesson:** thin required-topic rows can be reliably lifted by direct-framing re-probes (engineer asks the canonical question shape without naming the resource topic by hand). The MinIO ILM canonical at r16 Mechanism A is doing its job: keyword-magnetic enough to be found from "automatic move aging data to cheaper storage" without the engineer naming `mc ilm tier` by hand. Continued breadth probing on this row is the right discipline; no targeted FIX-A churn needed.
+**RECOMMENDATION = NO-OP.** No FIX-A. Watch labels: `r27 IF-EXISTS-staging-guard → dbt interpretation slip iter1160` (Q4 re-probe next sweep).
