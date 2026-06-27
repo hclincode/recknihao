@@ -241,7 +241,7 @@ Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io
 | Trino CALL procedure | Trino 467 argument style | Purpose |
 |---|---|---|
 | `rollback_to_snapshot` | **Positional** `('schema', 'table', <snapshot_id>)` — NOT named args. | Revert table state. The `ALTER TABLE ... EXECUTE rollback_to_snapshot(<snapshot_id>)` form is Trino 469+ (documented as **positional** at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — e.g. `ALTER TABLE testdb.customer_orders EXECUTE rollback_to_snapshot(8954597067493422955)`). |
-| `register_table` | Named args `(schema_name => ..., table_name => ..., metadata_file => ...)` (schema/table split). | Re-attach a dropped table from a surviving `v*.metadata.json`. |
+| `register_table` | Trino 467 named args: `(schema_name => ..., table_name => ..., table_location => '<table DIRECTORY>')` + optional `metadata_file_name => '<bare filename>'`. **Trino's 3rd arg is the table DIRECTORY, NOT a metadata.json path** — there is NO `metadata_file` / `metadata_location` arg on Trino (those are Spark's arg / the HMS column name). | Re-attach a dropped table from a surviving `metadata/*.metadata.json`. |
 
 **Anything else you saw in Iceberg docs is Spark-only on this stack. Specifically, these are Spark CALL procedures that Trino 467 does NOT implement (do NOT translate them to `EXECUTE <name>` — Trino will return `Procedure not registered`):**
 
@@ -908,7 +908,7 @@ SET SESSION iceberg.target_max_file_size = '256MB';
 | Remove orphan files | `CALL iceberg.system.remove_orphan_files(table => 'analytics.events', older_than => current_timestamp - interval '3' day, dry_run => true)` (run with `dry_run => true` first to preview; re-run without it to delete) | `ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d')` — **NO `dry_run` parameter in Trino**; preview from Spark. Trino enforces a 7-day minimum-retention floor; values shorter than `'7d'` are rejected. |
 | Rewrite manifests | `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')` | Not available on Trino 467 — use Spark `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')`. Available as `ALTER TABLE iceberg.analytics.events EXECUTE optimize_manifests` on Trino 470+ (Feb 2025). |
 | Rollback to snapshot | `CALL iceberg.system.rollback_to_snapshot(table => 'analytics.events', snapshot_id => 4823511203987654321)` (named args) | `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)` (positional args — the only Trino 467 form). The `ALTER TABLE ... EXECUTE rollback_to_snapshot(<id>)` syntax (positional bigint per trino.io/docs/current/connector/iceberg.html) requires Trino 469+ and does NOT work on Trino 467. |
-| Re-register a dropped table | `CALL iceberg.system.register_table(table => 'analytics.events', metadata_file => 's3a://lakehouse/.../v18.metadata.json')` (named args) | `CALL iceberg.system.register_table(schema_name => 'analytics', table_name => 'events', metadata_file => 's3a://lakehouse/.../v18.metadata.json')` (named args, schema/table split) |
+| Re-register a dropped table | **Trino 467:** `CALL iceberg.system.register_table(schema_name => 'analytics', table_name => 'events', table_location => 's3a://lakehouse/analytics/events')` — 3rd arg is the table DIRECTORY (Trino auto-finds the latest metadata.json); add optional `metadata_file_name => '00018-....metadata.json'` (BARE filename) to pin a version. **NO `metadata_file` / `metadata_location` arg on Trino.** | **Spark:** `CALL iceberg.system.register_table(table => 'analytics.events', metadata_file => 's3a://lakehouse/.../v18.metadata.json')` (Spark's args: combined `table` + full-path `metadata_file`) |
 
 > **Trino rollback on Trino 467 — use `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <id>)`.** On Trino 467 (the current production version), the only supported rollback syntax is `CALL iceberg.system.rollback_to_snapshot('schema', 'table', <snapshot_id>)` with **positional** VARCHAR, VARCHAR, BIGINT arguments. The `ALTER TABLE iceberg.<schema>.<table> EXECUTE rollback_to_snapshot(<id>)` table-procedure form was added in **Trino 469** (released Jan 2025) and does **not** exist on Trino 467 — attempting it fails with a syntax / procedure error. **The Trino 469+ EXECUTE form is documented as POSITIONAL** at [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — the docs example is `ALTER TABLE testdb.customer_orders EXECUTE rollback_to_snapshot(8954597067493422955)`, a single positional bigint snapshot_id. Prefer the positional form in production examples post-cluster-upgrade; do NOT write `EXECUTE rollback_to_snapshot(snapshot_id => <id>)` as the canonical form (the docs do not show the named-arg syntax). **Do NOT use the Spark `CALL iceberg.system.rollback_to_snapshot(table => '...', snapshot_id => ...)` named-argument form from Trino either** — Trino's `CALL` requires positional arguments.
 
@@ -3842,24 +3842,31 @@ Some catalog configurations expose this as `DROP TABLE iceberg.analytics.events 
 
 ### Recovery procedure: `register_table` against a surviving metadata file
 
-If a table was dropped without `PURGE`, the Iceberg metadata files in MinIO under `metadata/v*.metadata.json` are intact. You can re-attach the table to the Hive Metastore by pointing `register_table` at the most recent metadata file:
+If a table was dropped without `PURGE`, the Iceberg metadata files in MinIO under `metadata/*.metadata.json` are intact. You re-attach the table to the Hive Metastore with `register_table`. **The Trino and Spark argument shapes DIFFER** — verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html):
 
 ```sql
--- Trino 467 (named args: schema_name, table_name, metadata_file).
+-- ✅ Trino 467 — args: schema_name, table_name, table_location (the table DIRECTORY, NOT a metadata.json path),
+--    + OPTIONAL metadata_file_name (a BARE filename, not a path). Omit it and Trino auto-picks the latest metadata.json.
 CALL iceberg.system.register_table(
-  schema_name   => 'analytics',
-  table_name    => 'events',
-  metadata_file => 's3a://lakehouse/analytics/events/metadata/v18.metadata.json'
+  schema_name        => 'analytics',
+  table_name         => 'events',
+  table_location     => 's3a://lakehouse/analytics/events'            -- the table base DIRECTORY
+  -- , metadata_file_name => '00018-9f...e2.metadata.json'            -- OPTIONAL: bare filename to pin a specific version
 );
 
--- Spark equivalent (named args: table, metadata_file).
+-- Spark equivalent — args: table (combined), metadata_file (FULL path). Spark's shape, NOT Trino's.
 CALL iceberg.system.register_table(
   table         => 'analytics.events',
-  metadata_file => 's3a://lakehouse/analytics/events/metadata/v18.metadata.json'
+  metadata_file => 's3a://lakehouse/analytics/events/metadata/00018-9f...e2.metadata.json'
 );
 ```
 
-**How to find the right `metadata_file`.** The `metadata/` directory under the table's base path contains one `v<N>.metadata.json` file per metadata version. The highest-numbered one is the latest:
+> **DO-NOT-WRITE (Trino `register_table` arg traps):**
+> - `metadata_file => '<full path>'` in the **Trino** call — **WRONG: `metadata_file` is Spark's arg, not Trino's.** Trino takes `table_location` (the directory) + optional `metadata_file_name` (bare filename).
+> - `metadata_location => '<path>'` in **either** call — **WRONG: `metadata_location` is the HMS *column name* (the pointer HMS stores), NOT a procedure argument.** See [resource 21 § HMS metadata_location](21-hive-metastore-iceberg.md).
+> - Passing the full `.../metadata/xxxxx.metadata.json` PATH as Trino's `metadata_file_name` — it must be the **bare filename only** (`xxxxx.metadata.json`), with the directory given separately in `table_location`.
+
+**How to find the right metadata file.** The `metadata/` directory under the table's base path contains the `*.metadata.json` files. For Trino you usually just pass `table_location` and let it auto-pick the latest; to pin a version, take the highest-numbered metadata file's **bare name** for `metadata_file_name`:
 
 ```
 # From the MinIO web console or `mc` CLI:
@@ -3878,7 +3885,7 @@ If you also see a `version-hint.text` file in `metadata/`, it points to the curr
 1. **Find the table's base path in MinIO.** This is typically `s3a://<warehouse-bucket>/<schema>/<table>/`. Check the catalog warehouse property if you don't remember the convention.
 2. **List the `metadata/` directory** under that base path. Confirm `v*.metadata.json` files are present (if they're gone, the table was probably PURGE'd or the bucket has lifecycle rules that swept them).
 3. **Identify the latest metadata version.** Highest `v<N>` in the file name, or whatever `version-hint.text` says.
-4. **Run `register_table`** with that metadata file path (see Trino form above).
+4. **Run `register_table`** — on Trino, pass `table_location` = the table's base directory (Trino auto-finds the latest metadata.json); pin a version with the optional bare `metadata_file_name` (see Trino form above). (Spark instead takes the full-path `metadata_file`.)
 5. **Verify the recovery**:
    ```sql
    SELECT COUNT(*) FROM iceberg.analytics.events;

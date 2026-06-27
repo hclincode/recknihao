@@ -1,121 +1,193 @@
-# Iter1181 Judge Feedback
+# Iter1182 Judge Feedback
 
-**Overall verdict:** STRONG PASS — Q1 WATCH CLOSES cleanly (responder now correctly routes "which dbt model in query history" to `query-comment` / `node_id` JSON, NOT to `persist_docs`); Q3 + Q4 pin-perfect on the primary; Q2 PRIMARY (`histogram(order_status) GROUP BY product_id`) is correct, but the appended "Alternative" `map_agg(order_status, COUNT(*)) ... GROUP BY product_id, order_status GROUP BY product_id` snippet is **broken as written** (TWO `GROUP BY` clauses in one SELECT = parse error; even with one `GROUP BY`, `map_agg(order_status, COUNT(*))` mixes a key column with a nested aggregate without a sub-aggregation step). Engineer copies the PRIMARY and ships; the broken padding is the recurring `feedback_responder_broken_secondary_alternative` pattern (Nth instance, NO-OP).
+**Overall verdict:** **FIX-A on Q3** — load-bearing `register_table` argument-name slip is RESOURCE-SOURCED (`r17` §244 / §911 / §3848-3853 / §3856-3859 all use a WRONG `metadata_file => '<s3a://full-path-to-metadata.json>'` form for Trino 467; the actual 467 signature is `table_location => '<directory>' + metadata_file_name => '<filename-only>'`, verified at git-tag 467 source `RegisterTableProcedure.java`). The responder muddied it further into `metadata_location =>` (mixing in r21's HMS column-name term). Q1, Q2, Q4 all clean; Q4 has a minor cosmetic MySQL-vs-Oracle slip in the contrast example but the dbt/Trino target is correct.
 
-**Iter1181 watch:** `r27 §6.7L dbt query-comment model-name-in-query-history FIX-A iter1180` — **CLOSED** on first re-probe (1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE pattern; 9th consecutive watch closure).
+**Iter1182 watches OPENED:**
+- **`r17 register_table arg-name slip — Trino 467 uses table_location + metadata_file_name (NOT metadata_file / NOT metadata_location) FIX-A iter1182`** — multi-site (r17 §244, §911, §3848-3853, §3856-3859) resource defect. Responder pulled wrong form from r17 and degraded further on the arg name. LIGHT FIX-A required: rewrite r17 register_table snippets to the verified 467 signature; defang the wrong arg names with DO-NOT-WRITE inline-WRONG markers; cross-ref from r21 HMS section to disambiguate `metadata_location` (HMS table-property COLUMN NAME) vs procedure ARG NAME.
 
-Total iter1181 score: (4.875 + 4.0 + 4.875 + 4.875) / 4 = **4.6563 / 5**
+Total iter1182 score: (4.75 + 4.75 + 3.0 + 4.625) / 4 = **4.28125 / 5**
 
 | Q | Topic | Score | Note |
 |---|---|---|---|
-| 1 | Oracle PL/SQL → dbt+Trino — dbt `query-comment` for query-history attribution | 4.875 | WATCH CLOSE iter1180 — `node_id` JSON + `regexp_extract(query, 'model\.[A-Za-z0-9_.]+')` against `system.runtime.queries` correctly routed |
-| 2 | SQL best practices — per-group value→count MAP (`histogram` per group) | 4.0 | PRIMARY correct (`histogram` ships); secondary `map_agg` "Alternative" BROKEN-AS-WRITTEN (two `GROUP BY` clauses) |
-| 3 | SQL best practices — `typeof(expr)` introspection | 4.875 | pin-perfect; all 6 example return strings accurate per trino.io/docs/current/functions/conversion.html |
-| 4 | Trino CBO / planner steering — no `/*+ */` hints, session properties + ANALYZE | 4.875 | `join_distribution_type` AUTOMATIC/PARTITIONED/BROADCAST + `join_reordering_strategy` AUTOMATIC/ELIMINATE_CROSS_JOINS/NONE both verified verbatim; fabricated-name defang accurate |
+| 1 | SQL best practices — `map(keys_array, values_array)` 2-arg constructor | 4.75 | Pin-perfect; element_at NULL vs subscript-throws nuance + duplicate-key runtime-error + map_agg-for-dupes all correct |
+| 2 | SQL best practices — `stddev_samp / avg` coefficient-of-variation scale-invariant spread | 4.75 | Pin-perfect; CV = stddev/mean correct, NULLIF guard correct, samp vs pop choice correct |
+| 3 | Iceberg table maintenance — same-HMS Spark→Trino visibility + `register_table` recovery | 3.0 | **FIX-A** — broken `register_table` arg name (`metadata_location` does not exist in Trino 467; resource r17 also wrong with `metadata_file`); also missed naming Hadoop-vs-HMS catalog mismatch as the most common production cause |
+| 4 | Oracle PL/SQL → dbt+Trino — cursor loop → set-based + dbt incremental merge | 4.625 | Translation table correct; minor cosmetic slip — contrast example uses MySQL `ON DUPLICATE KEY UPDATE` mislabeled as Oracle (Oracle uses `MERGE`) — dbt/Trino target correct |
 
 ---
 
-## Q1 — dbt `query-comment` for "which dbt model generated this query in Trino's history" — WATCH CLOSE
+## Q1 — `map(metric_names, metric_values)` 2-arg constructor pairs two same-length arrays
 
-**Score: 4.875** (Tech 5 / Clarity 5 / Practical 5 / Completeness 4.5)
+**Score: 4.75** (Tech 5 / Clarity 4.5 / Practical 5 / Completeness 4.5)
 
-**WATCH `r27 §6.7L dbt query-comment model-name-in-query-history FIX-A iter1180` — CLOSED on first re-probe.**
+Pin-perfect. Verified at [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html):
 
-Iter1180 Q4 the responder routed the same question to `persist_docs` (table/column COMMENTs — wrong mechanism); iter1180 FIX-A added r27 §6.7L LEADING CANONICAL with keyword anchors ("which dbt model generated this query", "dbt model in Trino query history", "tag queries with the dbt model name", "find the dbt model behind a slow query in the Web UI") + an explicit DO-NOT-WRITE defang at r27 §6.7J (line 3922) cross-referencing §6.7L. This iter the responder routed cleanly to `query-comment` and gave every load-bearing fact:
+1. **`map(array(K), array(V)) → map(K,V)`** — 2-arg constructor pairs two same-length arrays; doc example `map(ARRAY[1,3], ARRAY[2,4])` → `{1 -> 2, 3 -> 4}`. Responder's `map(metric_names, metric_values)` correctly identifies the one-call form (no UNNEST + re-aggregate roundtrip needed). The question is direct: "Trino function that pairs two same-length arrays into a key-value map, or must unnest+re-aggregate?" Answer is the 2-arg `map()` constructor — exactly what was given.
 
-1. dbt auto-injects a JSON comment in every query — VERIFIED at [docs.getdbt.com/reference/project-configs/query-comment](https://docs.getdbt.com/reference/project-configs/query-comment) — default comment: `/* {"app": "dbt", "dbt_version": "...", "profile_name": "...", "target_name": "...", "node_id": "model.<project>.<name>"} */`
-2. Customizable via `dbt_project.yml` `query-comment: comment: "..." append: true` — accurate
-3. `append: true` recommended for Trino (leading comments occasionally trip statement parsing) — matches r27 §6.7L line 3950
-4. Lookup query `SELECT query_id, regexp_extract(query, 'model\.[A-Za-z0-9_.]+') AS dbt_model, state, "elapsed.cpu" FROM system.runtime.queries WHERE query LIKE '%"node_id"%' ORDER BY created DESC` — directly matches r27 §6.7L lines 3942-3946; the regex `model\.[A-Za-z0-9_.]+` correctly anchors on the `node_id` value prefix
-5. NO Trino-side config needed — accurate (it's a dbt-adapter-side behavior)
-6. NOT `persist_docs` (which writes table/column COMMENTs, a different mechanism for which-model-CREATED-the-TABLE) — explicit disambiguation given
+2. **`element_at(map, key)` returns NULL on missing key** — verified verbatim at docs: "Returns value for given `key`, or `NULL` if the key is not contained in the map."
 
-Completeness shave (-0.5): didn't mention the JSON comment is on by default (engineer might worry they need to enable it); didn't mention the Web UI source/clientInfo column doesn't pick this up (it's in the query text itself). Not load-bearing — engineer arrives at `dbt_project.yml` + the `regexp_extract` history query and ships.
+3. **Subscript `map[key]` throws on missing key** — verified verbatim at docs: "This operator throws an error if the key is not contained in the map. See also `element_at` function that returns `NULL` in such case." Engineer's lookup choice (NULL-safe vs throw) hinges on this distinction; responder gave both correctly.
 
-Topic: **Oracle PL/SQL → dbt + Trino SQL migration** — 4.4624/143 → (4.4624×143 + 4.875)/144 = **4.4653/144 PASSED** (+0.0029, margin +0.9653).
+4. **Duplicate keys raise a runtime error** — verified via [duckdb#3640 referencing Presto behavior](https://github.com/duckdb/duckdb/issues/3640): `MAP(ARRAY[1,1,3,4], ARRAY[10,9,8,7])` throws "Duplicate map keys are not allowed" at runtime in Trino/Presto. Responder named this correctly and gave the right escape hatch (`map_agg` if the keys may collide — `map_agg` per docs "Returns a map created from the input key/value pairs" with later-wins-style behavior, suitable for dedup-during-construction).
+
+5. **Keys non-NULL constraint** — correctly noted; Trino throws on NULL map keys at runtime.
+
+Engineer arrives at `map(metric_names, metric_values)` for the lookup MAP and knows to pick `element_at(m, 'clicks')` for the NULL-safe path. Cites r07. Topic: **SQL query best practices for OLAP** — 4.5724/260 → (4.5724×260 + 4.75)/261 = **4.5731/261 PASSED** (+0.0007, margin +1.0731).
 
 ---
 
-## Q2 — Per-group value→count MAP — PRIMARY correct, BROKEN secondary alternative
+## Q2 — Coefficient of variation = `stddev_samp / avg` for scale-invariant spread
 
-**Score: 4.0** (Tech 3.5 / Clarity 4.5 / Practical 4 / Completeness 4)
+**Score: 4.75** (Tech 5 / Clarity 4.5 / Practical 5 / Completeness 4.5)
 
-**PRIMARY answer correct and ships:**
+Pin-perfect. Verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html):
+
+1. **`stddev_samp(x) → double`** — "Returns the sample standard deviation of all input values." Confirmed exists in 467.
+2. **`stddev_pop(x) → double`** — "Returns the population standard deviation of all input values." Confirmed exists.
+3. **`stddev(x)` is an alias for `stddev_samp(x)`** — confirmed at docs ("This is an alias for `stddev_samp()`"). Responder correctly preferred the explicit `stddev_samp` name over the bare `stddev` alias for clarity.
+
+The mathematical claim is correct: **coefficient of variation (CV) = σ/μ** is the textbook unit-less measure of relative dispersion (scale-invariant), exactly the metric for "how spread out is this account's revenue relative to its own average". Raw stddev across accounts of different revenue scales is not comparable — a $10K-MRR account with $1K stddev (CV = 0.10) is more erratic in relative terms than a $1M-MRR account with $50K stddev (CV = 0.05); the raw figure inverts the conclusion. Responder framed this correctly.
+
+Query structure correct:
 ```sql
-SELECT product_id, histogram(order_status) AS counts_by_status
-FROM orders
-GROUP BY product_id
+SELECT
+  account_id,
+  avg(monthly_revenue) AS avg_rev,
+  stddev_samp(monthly_revenue) AS std_rev,
+  stddev_samp(monthly_revenue) / NULLIF(avg(monthly_revenue), 0) AS cv
+FROM monthly_billing
+GROUP BY account_id
+ORDER BY cv DESC
 ```
-- `histogram(x) → map<K,bigint>` verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html): "Returns a map containing the count of the number of times each input value occurs."
-- One-step per-group form — exactly what was asked. The iter1180 routing miss (engineer arrived at a `map_agg`+subquery two-step instead of the one-step `histogram`) is now FIXED.
+- `NULLIF(avg, 0)` correctly guards against division-by-zero (which on DOUBLE/REAL `/` would return Infinity/NaN per IEEE-754, not throw — per pinned `reference_trino_division_by_zero` — but on INTEGER/DECIMAL would throw; guard is safer regardless).
+- Revenue columns being DECIMAL/DOUBLE → division is DOUBLE/DECIMAL division, NO integer-truncation issue.
+- Single-pass GROUP BY exactly satisfies the "single-pass SQL" ask.
+- `ORDER BY cv DESC` correctly ranks most-erratic-first.
 
-**BROKEN secondary "Alternative" — DO NOT COPY:**
+Sample vs population choice rationale (use samp for SaaS where months are a sample of the underlying revenue process) correctly given. Cites r05.
 
-The responder appended an "Alternative (if you need a different value column)" snippet (paraphrased): `SELECT product_id, map_agg(order_status, COUNT(*)) ... FROM orders GROUP BY product_id, order_status GROUP BY product_id`. This is a **parse error as written** for two reasons:
+Topic: **SQL query best practices for OLAP** — 4.5731/261 → (4.5731×261 + 4.75)/262 = **4.5738/262 PASSED** (+0.0007, margin +1.0738).
 
-1. A single SELECT cannot have two `GROUP BY` clauses — Trino parser rejects.
-2. Even with one `GROUP BY product_id`, `map_agg(order_status, COUNT(*))` would require `order_status` to be either grouped or inside an aggregate; you can't have a bare key column passed to `map_agg` when its grain doesn't match the GROUP BY grain.
+---
 
-The CORRECT `map_agg` form (for the "if you need a different value column" case) is a subquery that pre-aggregates per `(product_id, order_status)`:
+## Q3 — Spark→Trino HMS Iceberg visibility + `register_table` recovery — **FIX-A**
+
+**Score: 3.0** (Tech 2.5 / Clarity 4 / Practical 2.5 / Completeness 3)
+
+**Two defects: one load-bearing (broken `register_table` arg name, RESOURCE-SOURCED), one minor (missed Hadoop-vs-HMS catalog mismatch as most common cause).**
+
+### Defect 1 (LOAD-BEARING, RESOURCE-SOURCED) — `register_table` arg name wrong
+
+Responder's recovery SQL:
 ```sql
-SELECT product_id, map_agg(order_status, cnt) AS counts_by_status
-FROM (
-  SELECT product_id, order_status, COUNT(*) AS cnt
-  FROM orders
-  GROUP BY product_id, order_status
+CALL iceberg.system.register_table(
+  schema_name => '..',
+  table_name => '..',
+  metadata_location => 's3a://.../metadata/00000-abc.metadata.json'   -- WRONG ARG NAME
 )
-GROUP BY product_id
 ```
 
-**Classification: one-off responder slip — NO-OP (broken-secondary-alternative pattern).** Per `feedback_responder_broken_secondary_alternative` memory: the responder reliably nails the LEAD then appends a broken "for completeness" alternative form (iter936 window-in-GROUP-BY, iter943 PERCENTILE_CONT, iter948 price-suffix menu, iter950 nested-aggregate `max_by`, iter954 TO_CHAR-wrong-codes, iter1013 ORDER-BY-ungrouped, iter1019 TABLESAMPLE-after-WHERE, iter1020 regexp_extract-comma; this is the 9th instance). Leads pass, scope each as per-instance one-off re-probe NOT a resource defect, don't churn — no single resource fix addresses responder padding. The PRIMARY `histogram` is correct, keyword-magnetic, and ships; engineer would not copy the obviously-malformed secondary.
+**Verified at the SOURCE LEVEL — Trino 467 git-tag [`RegisterTableProcedure.java`](https://github.com/trinodb/trino/blob/467/plugin/trino-iceberg/src/main/java/io/trino/plugin/iceberg/procedure/RegisterTableProcedure.java) declares exactly four argument constants:**
 
-Topic: **SQL query best practices for OLAP** — 4.5734/258 → (4.5734×258 + 4.0)/259 = **4.5712/259 PASSED** (-0.0022, essentially flat, margin +1.0712).
+| # | Arg name (Trino 467) | Type | Required | Value shape |
+|---|---|---|---|---|
+| 1 | `schema_name` | VARCHAR | yes | schema name |
+| 2 | `table_name` | VARCHAR | yes | table name |
+| 3 | `table_location` | VARCHAR | yes | **directory URI** (e.g., `s3a://lakehouse/analytics/events/`) |
+| 4 | `metadata_file_name` | VARCHAR | optional (null default) | **filename only** (e.g., `'v18.metadata.json'`) |
+
+The correct 467 form (verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)):
+```sql
+CALL iceberg.system.register_table(
+  schema_name        => 'analytics',
+  table_name         => 'events',
+  table_location     => 's3a://lakehouse/analytics/events/',
+  metadata_file_name => 'v18.metadata.json'   -- optional, filename ONLY
+);
+```
+
+**Engineer who copies the responder's form gets a parse/argument error:** Trino does not recognize `metadata_location` as a register_table parameter (it's the HMS table-property COLUMN name in the metastore backing store, not a procedure arg). Even substituting `metadata_file` (the form r17 currently has) is also wrong for 467, AND passing a full s3a:// path to a specific metadata.json is the wrong value shape — `table_location` expects the DIRECTORY, and `metadata_file_name` expects just the filename.
+
+**Root cause is RESOURCE-SOURCED.** Grep evidence across resources/:
+- `resources/17-iceberg-table-maintenance.md` §244: `register_table | Named args (schema_name => ..., table_name => ..., metadata_file => ...)` — wrong arg name
+- `resources/17-iceberg-table-maintenance.md` §911: `metadata_file => 's3a://lakehouse/.../v18.metadata.json'` — wrong arg name AND wrong value shape
+- `resources/17-iceberg-table-maintenance.md` §3848-3853 (Trino-form code block): `metadata_file => 's3a://lakehouse/analytics/events/metadata/v18.metadata.json'` — wrong arg name AND wrong value shape
+- `resources/17-iceberg-table-maintenance.md` §3856-3859 (Spark-form code block): `metadata_file => '...'` — the Spark Iceberg form (which IS `metadata_file` in spark-iceberg) but mislabeled as the Trino canonical
+
+The responder's degradation from r17's `metadata_file` to `metadata_location` is a separate Haiku slip layered on top of a real resource defect (likely cross-mixing with r21 §24 / §171 / §321 / r22 §857 etc. where `metadata_location` IS the correct HMS table-property column name — but those refer to the HMS backing-store column, not a procedure ARG NAME).
+
+**LIGHT FIX-A SPEC:**
+1. Rewrite r17 §244 table row, §911 example, and the §3848-3859 code blocks to the verified 467 form: `schema_name => '...', table_name => '...', table_location => '<directory>', metadata_file_name => '<filename>'` (with `metadata_file_name` shown as optional).
+2. Add an explicit DO-NOT-WRITE inline-WRONG block in r17 right under §3853 defanging BOTH wrong forms:
+   - WRONG: `metadata_file => '<full path to metadata.json>'` — not a Trino 467 arg name (Spark Iceberg has it; Trino doesn't)
+   - WRONG: `metadata_location => '<full path>'` — not a procedure arg at all (it's the HMS table-property column name)
+3. Add cross-ref to r21 from the new defang: "If you're looking up the current `metadata_location` HMS column to find the latest snapshot pointer, that's an HMS table-property column (r21 §171), NOT the `register_table` procedure arg name."
+4. Keyword anchors for findability: "register existing Iceberg table in Trino metastore", "Spark-written Iceberg table not visible in Trino", "register_table Trino syntax", "re-attach dropped Iceberg table from surviving metadata.json".
+
+### Defect 2 (MINOR completeness) — didn't name Hadoop-vs-HMS catalog mismatch as MOST COMMON cause
+
+Responder said: "IF Spark wrote files but HMS never updated (misconfigured HMS client / different metastore / network), register manually..."
+
+The single MOST COMMON real-world cause of "files-on-MinIO-but-Trino-can't-see-them-via-HMS" is **Spark using a Hadoop-type (path-based) catalog** (`spark.sql.catalog.X.type = 'hadoop'` or `'hadoopcatalog'`) that **bypasses HMS entirely** — Hadoop catalogs store all metadata in the filesystem (under `<warehouse>/<schema>/<table>/metadata/`) and never write to HMS. Trino with an HMS Iceberg catalog cannot discover those tables because the HMS row simply doesn't exist. Verified against [Trino Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html): "Trino's Iceberg connector requires access to one of several catalog types: a Hive metastore service (HMS), an AWS Glue catalog, a JDBC catalog, a REST catalog, a Nessie server, or a Snowflake catalog." Hadoop catalog is not in that list — Trino cannot read a Hadoop-catalog-only table directly; you must register it into HMS first.
+
+The responder's "misconfigured HMS client / different metastore / network" framing is OK but misses the textbook on-prem Spark-and-Trino interop trap. On the production stack (Spark with Iceberg 1.5.2 + Trino 467, both backed by HMS per `prod_info.md`), the right diagnosis sequence is:
+
+1. **Verify Spark IS using the HMS catalog** — `spark.sql.catalog.<name>.type = 'hive'` (not `'hadoop'`), `spark.sql.catalog.<name>.uri = thrift://<hms-host>:9083` matching what Trino's catalog properties point at.
+2. If Spark is on Hadoop catalog → use `register_table` (with corrected arg names) to import the table into HMS, OR reconfigure Spark to write to the HMS catalog directly going forward.
+3. If both are on HMS → check `mc ls` for `metadata/v*.metadata.json` presence on MinIO + `information_schema.tables` in Trino. The pointer should have been written atomically by Spark on commit; if it wasn't, Spark may have crashed mid-commit (rare) or there's a metastore-pointer-staleness issue.
+
+Cites r21. Responder did include the `information_schema.tables` + `mc ls metadata/` diagnostic steps, which is good — the framework is right, the SQL is wrong.
+
+**Topic: Iceberg table maintenance** — 4.4654/201 → (4.4654×201 + 3.0)/202 = **4.4581/202 PASSED** (-0.0073, margin still +0.9581 above threshold; one BROKEN-syntax slip absorbed by 201-question cushion). Topic stays PASSED but the FIX-A on r17 is required before next register_table re-probe.
 
 ---
 
-## Q3 — `typeof(expr)` to inspect an expression's data type
+## Q4 — Oracle PL/SQL cursor loop → set-based dbt + incremental merge
 
-**Score: 4.875** (Tech 5 / Clarity 5 / Practical 5 / Completeness 4.5)
+**Score: 4.625** (Tech 4 / Clarity 5 / Practical 5 / Completeness 4.5)
 
-Pin-perfect. Verified at [trino.io/docs/current/functions/conversion.html](https://trino.io/docs/current/functions/conversion.html): `typeof(expr) → varchar` — "Returns the name of the type of the provided expression." Docs examples: `typeof(123)` → `integer`, `typeof('cat')` → `varchar(3)`, `typeof(cos(2) + 1.5)` → `double`.
+Core guidance correct and lands cleanly:
 
-Responder's example return strings all accurate:
-- `varchar(20)` — correct (typeof returns parameterized varchar)
-- `bigint`, `double` — correct
-- `json` — correct (e.g., on output of `json_parse`)
-- `array(integer)` — correct (Trino's lowercase parameterized notation)
-- `map(varchar,varchar)` — correct
+1. **Cursor loop → set-based SELECT/GROUP BY** — accurate. Responder's translation `cursor FOR rec LOOP ... LOOP END` → `SELECT customer_id, SUM(amount) FROM ref('stg_orders') GROUP BY customer_id` is the canonical procedural-to-declarative rewrite.
+2. **Accumulation variable → SUM aggregate** — correct.
+3. **IF/THEN → CASE** — correct (Oracle PL/SQL IF inside a cursor loop becomes a SQL `CASE WHEN ... THEN ... END` expression in the SELECT list).
+4. **Row-by-row INSERT → INSERT...SELECT / dbt incremental merge** — correct. The dbt config:
+   ```python
+   {{ config(
+       materialized='incremental',
+       incremental_strategy='merge',
+       unique_key='customer_id'
+   ) }}
+   ```
+   correctly replaces the row-by-row INSERT loop with set-based MERGE on the target. Verified at [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy) — `merge` strategy for Trino+Iceberg uses `MERGE INTO ... USING ... ON unique_key WHEN MATCHED ... WHEN NOT MATCHED INSERT ...` which Trino 467 + Iceberg connector supports per [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html).
+5. **Translation table** (cursor→JOIN/GROUP BY, accumulation→SUM, IF/THEN→CASE, row INSERT→INSERT...SELECT/incremental, MERGE→dbt incremental merge) — accurate and well-organized for a SaaS engineer making the mindset shift.
 
-Worked examples on a column, on `json_extract` output, and on `CAST(... AS DECIMAL)` are realistic SaaS use cases (verify before casting in a generated SQL pipeline).
+### Minor cosmetic slip (-1.0 Tech, but the load-bearing answer is correct)
 
-Minor completeness shave (-0.5): didn't mention that `typeof` evaluates at PLANNING TIME so the answer doesn't depend on row data (which makes it useful for catching cast surprises BEFORE running a heavy query) — but this is a nice-to-have, not load-bearing.
+Responder's Oracle illustrative example uses **`INSERT ... ON DUPLICATE KEY UPDATE total = total + amount`** — this is **MySQL syntax, NOT Oracle**. Oracle's row-by-row upsert in a PL/SQL cursor loop is typically `MERGE INTO ... USING (SELECT ...) ON (...) WHEN MATCHED THEN UPDATE SET ... WHEN NOT MATCHED THEN INSERT ...`, or a procedural `BEGIN UPDATE ...; IF SQL%ROWCOUNT = 0 THEN INSERT ...; END IF; END;` pattern. `ON DUPLICATE KEY UPDATE` does not exist in Oracle (introduced in MySQL 4.1, never adopted by Oracle).
 
-Topic: **SQL query best practices for OLAP** — 4.5712/259 → (4.5712×259 + 4.875)/260 = **4.5724/260 PASSED** (+0.0012, margin +1.0724).
+This is cosmetic — the contrast example is meant to be the "before" picture, and a SaaS engineer reading the answer arrives at the correct dbt target (which IS the load-bearing part). Engineer would not run the Oracle example; they read it as scene-setting. But for a question explicitly grounded in Oracle PL/SQL, having the contrast example be MySQL syntax is a mild credibility cut.
 
----
+**Classification: one-off responder Haiku slip — NO RESOURCE FIX.** Grep evidence: `grep -n "ON DUPLICATE KEY UPDATE" resources/` returns ZERO matches across r27 and the broader resources/ tree. The responder pulled the MySQL syntax out of general SQL training, not from r27. Recall ceiling. The `feedback_responder_broken_secondary_alternative` pattern is similar in family — Haiku reliably nails the LEAD (the dbt incremental merge target) then degrades on a secondary "contrast" example. Don't churn — scope as a per-instance one-off slip; the engineer arrives at the right dbt config.
 
-## Q4 — Trino has no `/*+ */` optimizer hints; use session properties + ANALYZE
-
-**Score: 4.875** (Tech 5 / Clarity 5 / Practical 5 / Completeness 4.5)
-
-All load-bearing facts verified:
-
-1. **No hint syntax** — Trino has no `/*+ ... */` recognized hint mechanism. Oracle-style `/*+ USE_HASH(a b) */` and `/*+ FULL(orders) */` are parsed as plain comments and silently ignored (no error, no effect). Accurate.
-2. **`join_distribution_type`** — verified at [trino.io/docs/current/admin/properties-general.html](https://trino.io/docs/current/admin/properties-general.html): valid values `AUTOMATIC` (default) / `PARTITIONED` / `BROADCAST`. Responder's three values match exactly.
-3. **`join_reordering_strategy`** — verified at [trino.io/docs/current/admin/properties-optimizer.html](https://trino.io/docs/current/admin/properties-optimizer.html): valid values `AUTOMATIC` (default) / `ELIMINATE_CROSS_JOINS` / `NONE`. Responder's three values match exactly.
-4. **Fabricated-name defang accurate** — `distributed_joins`, `broadcast_join_strategy`, `join_strategy` are NOT real Trino 467 session properties (only `join_distribution_type` is). The caveat names the correct trap. (Note: `distributed_join` was a legacy Presto session property removed long before Trino 467 — replaced by `join_distribution_type`.)
-5. **`ANALYZE TABLE` for CBO stats** — accurate; the CBO uses NDV / row-count / per-column min-max-null stats populated by `ANALYZE` (and by `INSERT` for Iceberg automatic stats). On Iceberg+Trino 467 production stack, `ANALYZE catalog.schema.table` writes a Puffin file with `apache-datasketches-theta-v1` NDVs.
-6. **`dbt pre_hook` to `SET SESSION join_distribution_type = 'BROADCAST'`** — correct mechanism for per-model planner steering on dbt-trino.
-
-Minor completeness shave (-0.5): didn't mention dynamic filtering as a complementary "planner already does this for you" lever (often the biggest CBO win on partitioned Iceberg fact tables without any session property change) — but the question was specifically about hint replacement, not full CBO tuning.
-
-Topic: **Trino CBO / ANALYZE TABLE / Puffin statistics / NDV / join ordering** — 4.6247/23 → (4.6247×23 + 4.875)/24 = **4.6351/24 PASSED** (+0.0104, margin +0.1351 above the elevated 4.5 threshold).
+Cites r27. Topic: **Oracle PL/SQL → dbt + Trino SQL migration** — 4.4653/144 → (4.4653×144 + 4.625)/145 = **4.4664/145 PASSED** (+0.0011, margin +0.9664).
 
 ---
 
 ## Summary
 
-- **Iter1181 watch CLOSED**: `r27 §6.7L dbt query-comment model-name-in-query-history FIX-A iter1180` reached cleanly on first re-probe — 9th consecutive watch closure in the 1st-NO-OP→LIGHT-FIX-A→CLOSE pattern.
-- **No new FIX-A**: Q2 broken secondary is the recurring `feedback_responder_broken_secondary_alternative` Haiku padding pattern (9th instance); scope as one-off NO-OP, don't churn.
-- **All four touched rubric topics remain PASSED** with positive or flat margin movement.
-- **Iter average 4.6563 / 5 → STRONG PASS.**
+- **Iter1182 verdict: FIX-A on Q3 register_table arg names** — RESOURCE-SOURCED multi-site defect in r17 (§244, §911, §3848-3853, §3856-3859 all use a wrong `metadata_file => '<full path>'` form for Trino 467; the actual git-tag-source-verified form is `table_location => '<directory>' + metadata_file_name => '<filename>'`). Responder degraded it further into `metadata_location =>`. Light FIX-A required (rewrite r17 register_table snippets + inline-WRONG defang + cross-ref to r21 HMS column-name disambiguation).
+- **Watches opened**: `r17 register_table arg-name slip — Trino 467 uses table_location + metadata_file_name FIX-A iter1182`; re-probe next sweep with structurally different framing ("recover dropped Iceberg table from MinIO via register_table" / "re-attach manually-uploaded metadata.json to HMS").
+- **Q1, Q2 pin-perfect** on SQL best practices canonicals (map constructor + coefficient-of-variation). Both go into row 162.
+- **Q4 core correct, minor cosmetic MySQL-syntax-in-Oracle-contrast slip** — recall ceiling, no resource fix.
+- **All four touched rubric topics remain PASSED** with positive movement on Q1/Q2/Q4; Q3 brings Iceberg-maintenance row down 0.0073 but margin still +0.9581 above threshold.
+- **Iter average 4.28125 / 5 → FIX-A.**
+
+### Verification doc citations
+- Trino 467 register_table source: [github.com/trinodb/trino/blob/467/plugin/trino-iceberg/.../RegisterTableProcedure.java](https://github.com/trinodb/trino/blob/467/plugin/trino-iceberg/src/main/java/io/trino/plugin/iceberg/procedure/RegisterTableProcedure.java)
+- Trino 467 Iceberg connector docs (register_table syntax): [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)
+- Trino map() constructor + element_at + subscript: [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html)
+- Trino aggregate functions (stddev_samp / stddev_pop / stddev alias): [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html)
+- Trino MERGE SQL (used by dbt incremental merge on Iceberg): [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html)
+- dbt incremental-strategy merge: [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy)
+- Duplicate map keys runtime error reference: [github.com/duckdb/duckdb#3640](https://github.com/duckdb/duckdb/issues/3640) (referencing Presto/Trino behavior)
