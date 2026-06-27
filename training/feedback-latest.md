@@ -1,244 +1,129 @@
-# Iter1194 Judge Feedback
+# Iter1195 Judge Feedback
 
-**Overall: 4.00 / 5.0 — PASS WITH FIX-A (TWO RESOURCE-SOURCED DEFECTS).** Q3 is the load-bearing failure (factually wrong: sided with the wrong teammate on dbt model-contract enforcement timing) AND it is resource-sourced (r27 §6.7C + r28 §282 both teach the wrong "compile-time check" framing). Q1 has an over-stated Spark-only claim that is also resource-sourced (r28 §348–403 "delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut" — refuted by Trino issue #12617 completed in 2022 + Starburst blog quote). Q2 + Q4 clean 5.0. The iter1191 dbt-contract two-phase-mechanism WATCH was exercised this iter AND CONFIRMS THE DEFECT — recommend LIGHT FIX-A reconcile-in-place on both r27 §6.7C and r28 §282 (Q3) and r28 §348–403 (Q1).
+**Overall: 4.1875 / 5.0 — PASS, BUT Q1 IS A FAIL (RESOURCE-SOURCED, FIX-A APPLIED).** Q1 is a re-probe of the iter1194 `optimize-clears-position-deletes` FIX-A — and it did **NOT** reach. The responder gave the WRONG mental model (EXECUTE optimize doesn't apply position deletes; Spark required) AND cited a FABRICATED issue (`trino#25279`, which is about partition-predicate optimize, not position-delete files). Root cause is a FINDABILITY / un-reconciled-sibling miss: iter1194 fixed r28 §348–403 but left r13 L2862 carrying the same wrong "Trino EXECUTE optimize does NOT apply pending position-delete files — use Spark" claim, and the responder lifted r13 instead of the fixed r28. Teacher has already extended the FIX-A to r13 this iteration (correctly directed — see Q1 verification). Q2 + Q3 + Q4 are clean 5.0 with all load-bearing facts independently verified. Iter1194 dbt-contract-live-connection watch was NOT exercised this iter; carries forward.
 
 ---
 
-## Q1 — Iceberg position-delete maintenance: collapse delete files back into data files
+## Q1 — Iceberg optimize and position-delete files (RE-PROBE of iter1194 FIX-A)
 
-**Score: 3.0 / 5.0 / 4.0 / 4.0 = 4.0 (PASS, but over-stated Spark-only claim — RESOURCE-SOURCED)**
+**Score: 1.0 / 3.0 / 1.5 / 2.0 = 1.875 (FAIL, RESOURCE-SOURCED, WATCH FIRED)**
 
 ### What the responder said:
-- YES — Iceberg v2 merge-on-read writes position-delete files on DELETE/UPDATE/MERGE; reads merge them at query time. CORRECT.
-- Two-step fix:
-  - **Step 1 (load-bearing): SPARK `CALL iceberg.system.rewrite_position_delete_files(table => 'iceberg.analytics.subscriptions')` — Trino 467 has NO equivalent for position-delete compaction.**
-  - Step 2: Trino `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` compacts data files.
+- "EXECUTE optimize on its OWN does NOT rewrite data files to bake in deletes. It only compacts data files by size."
+- "Trino-only shop CANNOT fix the delete-file accumulation alone."
+- Recommended Spark `rewrite_position_delete_files` or Spark `rewrite_data_files(options=>map('delete-file-threshold','1'))` as the load-bearing fix.
+- Cited "**Trino issue #25279** — Trino's OPTIMIZE cannot apply merge-on-read position-delete files."
 
-### What's wrong:
+### Independent verification (primary-source confirmation of teacher's findings):
 
-The "Trino 467 has NO equivalent for position-delete compaction" framing is **OVER-STATED**. Verified evidence:
+1. **`trino#25279` citation is FABRICATED.** Verified at [trinodb/trino#25279](https://github.com/trinodb/trino/issues/25279) — actual title is **"Add support to optimize iceberg table on newly added partition predicate"** (about `IllegalStateException` when WHERE clause filters on a newly-added partition column during optimize), closed as duplicate of #15697. ZERO mention of position-delete files. The responder invented a citation that does not exist for this topic.
 
-1. **[trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617) "Remove unused position and equality deletes when running Iceberg `optimize`" — CLOSED, completed by PR #12704 (2022).** Trino's `EXECUTE optimize` already removes unused position+equality delete files when run without path or file_modified_time predicates. This shipped well before Trino 467.
+2. **Trino `EXECUTE optimize` DOES clear position-delete read overhead for rewritten files.** Verified at [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617) — "Remove unused position and equality deletes when running Iceberg `optimize`" — implemented by [PR #12704](https://github.com/trinodb/trino/pull/12704) (2022, shipped well before Trino 467). The optimize procedure compares the data-file set remaining in the manifest after rewrite and **removes delete files which no longer reference any data file**. Both position AND equality delete files in scope.
 
-2. **[trinodb/trino#24086](https://github.com/trinodb/trino/issues/24086)** quote from a Trino maintainer in the thread: *"Position deletes are local to a partition. OPTIMIZE supports only enforced predicates which select whole partitions. Therefore, we can clean up position deletes in OPTIMIZE when there are no path or file_modified_time predicates."*
+3. **Trino maintainer note at [trinodb/trino#24086](https://github.com/trinodb/trino/issues/24086):** verbatim "Position deletes are local to a partition. OPTIMIZE supports only enforced predicates which select whole partitions. Therefore, we can clean up position deletes in OPTIMIZE **when there are no path or file_modified_time predicates**." Confirms: a full-table (no-predicate) `EXECUTE optimize` is the operation that clears the orphaned delete files.
 
-3. WebSearch summary of Trino current docs (verbatim paraphrase): *"The OPTIMIZE command can even remove position delete files in merge-on-read tables by rewriting affected data files."*
+4. **The NUANCE the responder missed entirely.** Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): `EXECUTE optimize` selects candidate data files by **`file_size_threshold` only** (default **100MB** — files BELOW this are merged). Trino has NO `delete-file-threshold` candidate-selection option (open feature request [trinodb/trino#16574](https://github.com/trinodb/trino/issues/16574)). So if the delete-bearing data files are already ≥100MB, a DEFAULT optimize SKIPS them and their position deletes persist. The **Trino-only fix** = raise `file_size_threshold` above those files' size (e.g. `'512MB'` or `'1GB'`) to force the rewrite; this then applies the deletes AND removes the orphaned delete files in one Trino `EXECUTE optimize` call. NO Spark required.
 
-The accurate model is:
+5. **Spark procedures are OPTIONAL alternatives, NOT required.** `rewrite_position_delete_files` is a delete-file-only compactor (many small delete files → fewer larger ones, no data rewrite) — useful when delete files are still actively referenced; not load-bearing for the engineer's stated "stop reconciling delete files at read time" goal. `rewrite_data_files(options=>map('delete-file-threshold','1'))` is a size-INDEPENDENT delete-driven candidate selection — Spark-only because Trino lacks the corresponding optimize option, but again optional, not required.
 
-- **Trino `EXECUTE optimize`** REWRITES DATA FILES affected by deletes — after optimize, the rewritten data files no longer reference the position-delete files, so reads no longer reconcile them. As a side effect (per #12617), unused position+equality delete files become eligible for cleanup.
-- **Spark `rewrite_position_delete_files`** is a SEPARATE, cheaper operation that COMPACTS many small delete files into fewer larger delete files WITHOUT rewriting data — useful when many small delete files have accumulated but most are still actively referenced (delete-file-only compaction).
-- For the engineer's stated goal ("collapses delete files back into data files so reads don't check them all"), **Trino `EXECUTE optimize` ALONE solves the read-slowdown** on this stack. Spark `rewrite_position_delete_files` is optional and cheaper, not load-bearing.
+### Correct answer the responder should have given:
+YES — `ALTER TABLE iceberg.analytics.orders EXECUTE optimize` ALONE rewrites affected data files with position deletes baked in AND removes the now-orphaned delete files (per #12617 / PR #12704 / maintainer note on #24086). A Trino-only shop CAN fix the delete-file read slowdown without Spark. The one nuance: optimize picks candidates by `file_size_threshold` (default 100MB) — if delete-bearing data files are already ≥100MB, default optimize skips them. Fix: `EXECUTE optimize(file_size_threshold => '512MB')` (or above the largest file size) to force the rewrite. Spark `rewrite_position_delete_files` is OPTIONAL — a cheaper delete-file-only compaction when delete files are still actively referenced; not required for the engineer's stated goal.
 
-### Resource source — RESOURCE-SOURCED DEFECT in r28 §348-403:
+### Dimensional breakdown:
+- **Technical accuracy 1.0**: Inverted the central question, fabricated a GitHub issue citation, missed `file_size_threshold` lever entirely.
+- **Beginner clarity 3.0**: Prose is clear and well-organized; would have been fine if the underlying claim were true.
+- **Practical applicability 1.5**: Engineer is misdirected to Spark (production-stack-aligned but unnecessary operational complexity). For a "Trino is primary, Spark only occasionally" shop, routing to Spark for routine MoR-delete maintenance is exactly wrong — adds an operational dependency that the truth removes.
+- **Completeness 2.0**: Misses `file_size_threshold` lever, misses the `EXECUTE optimize` self-applies-and-cleans-up mechanism, misses the no-path/no-file_modified_time predicate condition.
 
-`grep` confirmed the over-claim is sourced from `resources/28-complex-sql-performance-trino-dbt.md` §348-403 (LEADING CANONICAL — merge-model degradation workflow). Specifically:
+### Watch outcome:
+**Iter1194 `optimize-clears-position-deletes FIX-A` WATCH: DID NOT REACH on first re-probe.** The FIX-A landed correctly on r28 §348–403 (verified by the teacher this iter), but a SIBLING resource (r13 L2862) carries the SAME un-reconciled wrong claim ("Trino EXECUTE optimize does NOT apply pending position delete files ... use Spark"). The responder's keyword path on this question (`MoR / position-delete files / how do we collapse them / Spark or Trino`) landed on r13 not r28 — classic `feedback_reconcile_dont_append` failure mode (one fixed canonical does not protect against a stale sibling).
 
-- L350: *"Run Spark `rewrite_position_delete_files` to compact the delete files — there is NO Trino-native equivalent on 467 (see DO-NOT-WRITE below for the common fab). **This is the load-bearing fix.**"*
-- L390 DO-NOT-WRITE row: *"`ALTER TABLE fct_events EXECUTE rewrite_position_delete_files` — **No such Trino EXECUTE procedure on 467. Trino's `optimize` does NOT compact position-delete files on this version.** ... delete-file compaction must be scheduled as a Spark job."*
-- L397 DO-NOT-WRITE row: *"'I'll fix this by running `EXECUTE optimize` from Trino more often — it'll clean up the delete files too' — **WRONG — Trino's `optimize` on 467 does NOT compact delete files, only data files.**"*
-- L403: *"**On Trino 467 + Iceberg 1.5.2, delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut.**"*
+### Teacher's FIX-A direction: CONFIRMED CORRECT
+Teacher has already extended the FIX-A this iteration:
+- r13 L2862 (the unfixed sibling that the responder lifted): reconciled
+- r28 §348 (the iter1194-fixed primary): refined to the precise size-threshold truth, kept consistent with r13
 
-These framings conflate two distinct operations:
-- **(a) Applying deletes by rewriting affected data files + removing now-unreferenced delete files** = exactly what Trino `EXECUTE optimize` DOES (per #12617).
-- **(b) Compacting delete-file CONTENTS (many small delete files → fewer larger delete files) WITHOUT rewriting data** = what Spark `rewrite_position_delete_files` does (genuinely Spark-only).
+This direction is RIGHT — both files now teach the verified truth: full `EXECUTE optimize` is the primary delete-application + delete-file-cleanup lever; `file_size_threshold` is the only candidate-selection knob; raise it to force rewrite of larger delete-bearing files; Spark procedures are optional alternatives.
 
-The resource over-generalizes (b)'s Spark-only-ness to claim all position-delete handling is Spark-only — which is false.
+### Open watches:
+- NEW WATCH: `iter1195 r13 L2862 + r28 §348 optimize-clears-position-deletes RECONCILED FIX-A` — re-probe in 3–5 iters with structurally similar framing ("MoR delete files accumulated, Trino-only fix or need Spark"). If recurs → resource defect at a 3rd sibling not yet found by grep; if reaches → close.
 
-### LIGHT FIX-A recommendation for r28 §348-403:
-
-Reconcile in place:
-
-1. L350 — change "load-bearing fix" framing to:
-   > "**Two complementary fixes:** Trino `EXECUTE optimize` is the primary lever — it rewrites data files affected by deletes (so reads no longer reconcile delete files for those data files) AND removes unused delete files as a side effect (per [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617), completed 2022). **For most "reads slow because of accumulated deletes" cases, Trino `EXECUTE optimize` alone solves the problem.** Spark `rewrite_position_delete_files` is a cheaper, optional delete-file-only compaction (compacts MANY small delete files into FEWER larger delete files WITHOUT rewriting data files) — useful when many delete files are still actively referenced and rewriting data files would be too expensive."
-
-2. L390 — soften the DO-NOT-WRITE row. The Trino EXECUTE form `EXECUTE rewrite_position_delete_files` doesn't exist as a Trino procedure (correctly defanged), but the "Trino's optimize does NOT compact delete files" claim must be REMOVED. Replace with:
-   > "Trino's `optimize` rewrites affected data files (applying deletes) and removes orphaned delete files (#12617) but does NOT compact delete file contents into fewer larger delete files. For the latter, use Spark `rewrite_position_delete_files`."
-
-3. L397 — REMOVE the row entirely (it teaches a false claim). Or replace with:
-   > "'I'll fix this with Trino `EXECUTE optimize` alone — should I also schedule Spark `rewrite_position_delete_files`?' — **Trino `EXECUTE optimize` alone is sufficient for most cases** (it rewrites affected data files + removes orphaned delete files per #12617). Add Spark `rewrite_position_delete_files` ONLY if you observe many small delete files still actively referenced by data files that don't yet meet the data-file rewrite threshold."
-
-4. L403 — change "delete-file compaction is Spark-only. There is no Trino EXECUTE shortcut" to:
-   > "On Trino 467, `EXECUTE optimize` is the primary delete-application lever (rewrites data files + clears orphaned deletes per #12617). Spark `rewrite_position_delete_files` is the secondary delete-file-only compaction lever (compacts delete-file contents without rewriting data)."
-
-### Production-stack fit:
-
-Routing to Spark still works on this stack (Spark is the ingestion engine per `prod_info.md`), so the engineer arrives at a working action — but is denied the simpler in-place Trino path that also works. Practical impact bounded (not load-bearing for "does it work?") but the resource's load-bearing claim is factually wrong.
+### Resource attribution:
+Cites r13 (verified — the unreconciled sibling). RESOURCE-SOURCED defect, NOT a responder confabulation in isolation.
 
 ---
 
-## Q2 — NTILE(4) for equal-size quartile bucketing on 90-day spend
+## Q2 — One-pass first-plan + last-plan per account on 40M-row event table
 
-**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (STRONG PASS)**
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (PASS, CLEAN)**
 
-Pin-perfect NTILE quartile canonical. All load-bearing facts VERIFIED at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html):
+### Verification:
+- `min_by(plan_name, occurred_at)` and `max_by(plan_name, occurred_at)` verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "Returns the value of `x` associated with the minimum/maximum value of `y` over all input values." Both are **General aggregate functions** that work with GROUP BY. Returns the FIRST argument (`plan_name`) at the min/max of the SECOND argument (`occurred_at`) — exactly what the engineer asked for.
+- Single GROUP BY → one row per `account_id` → single hash-aggregation pass over 40M rows; no self-join.
+- `last_value` default-frame gotcha correctly called out. Per ANSI SQL (and Trino's standards-compliant window implementation), default frame for value functions is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, which makes `last_value` return the current row's value — not the partition's last. The responder's `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` workaround is the documented fix.
+- DISTINCT-collapse caveat on `first_value`/`last_value` (per-row window output → DISTINCT or QUALIFY-like wrap needed) accurately frames why min_by/max_by aggregates are the cleaner shape for "one row per account" semantics.
 
-1. **`NTILE(4) OVER (ORDER BY SUM(spend) DESC)`** — VERIFIED. Trino docs verbatim: *"Divides the rows for each window partition into `n` buckets ranging from `1` to at most `n`. Bucket values will differ by at most `1`."* Example with 6 rows and 4 buckets distributes as `1 1 2 2 3 4` — as-balanced-as-possible (which is the engineer's actual ask — equal-sized buckets without manual cutoffs).
-
-2. **CTE structure**: `SELECT account_id, NTILE(4) OVER (ORDER BY SUM(spend) DESC) AS quartile FROM events WHERE event_date >= current_date - INTERVAL '90' DAY GROUP BY account_id` — sound. NTILE operates over the aggregated rows (one per account_id), assigning 1=top 25% / 4=bottom 25%.
-
-3. **`current_date - INTERVAL '90' DAY`** — VERIFIED valid Trino 467 date arithmetic per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html). `INTERVAL` literal `'90' DAY` is documented; `current_date` returns DATE; result is DATE.
-
-4. **Direction guardrail (ORDER BY DESC → bucket 1 = highest, ASC → bucket 1 = lowest)** — accurate. This is exactly the sort-direction trap that bites engineers using NTILE for percentile ranking.
-
-5. **Auto-shift with data** — NTILE re-bucketizes on every query run, so quartile cutoffs move with the data. No manual percentile thresholds, no big CASE WHEN — direct match for engineer's ask "without manual percentile cutoffs + big CASE".
-
-6. **CASE label mapping (quartile=1 → 'Top 25%', =4 → 'Bottom 25%')** — sound for human-readable output.
-
-No imported-prior slip, no broken-secondary-alternative slip, no over-warning. Clean canonical reach.
+### Dimensional breakdown:
+- All four dimensions clean 5.0; engineer can copy-and-ship the canonical form. No imported-prior slip, no broken-secondary-alternative.
 
 ---
 
-## Q3 — dbt model contract enforcement: live Trino connection needed or pure offline parse/compile? (WATCH iter1191 + SUSPECTED WRONG)
+## Q3 — dbt source freshness pre-check before downstream models
 
-**Score: 1.0 / 4.5 / 1.0 / 1.5 = 2.0 (FAIL — LOAD-BEARING FACTUAL ERROR; RESOURCE-SOURCED)**
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (PASS, CLEAN)**
 
-### THE RESPONDER SIDED WITH THE WRONG TEAMMATE. TEAMMATE B IS CORRECT, NOT TEAMMATE A.
+### Verification at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness):
+- **YAML shape correct**: `freshness:` block with `warn_after: {count: 12, period: hour}` and `error_after: {count: 24, period: hour}` + `loaded_at_field: updated_at` — verbatim docs example.
+- **`period` units correct**: only `minute`, `hour`, `day` — no `week`, no `quarter`, no `second`. Verified verbatim.
+- **`dbt source freshness` is a SEPARATE command** — verbatim "Source freshness is checked via the `dbt source freshness` command, not `dbt run`. It's a separate operation that runs independent freshness queries." Non-zero exit on `error_after` breach (set -e gates CI pipeline).
+- **NOT automatic in `dbt run`/`dbt build`** — verbatim "Source freshness checks do not automatically block downstream models." Engineer gates operationally by running `dbt source freshness` BEFORE `dbt build` in CI.
+- **`loaded_at_field` REQUIRED on Trino**: warehouse-metadata fallback (`loaded_at_field` optional, dbt reads adapter metadata) supported ONLY on Snowflake/Redshift/BigQuery/Databricks — Trino is NOT on that list. Responder correctly framed this — production-stack-critical fact.
 
-### Verified against dbt docs:
-
-**[docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract):**
-- Validation timing: *"When you `dbt run` your model, _before_ dbt has materialized it as a table in the database, you will see this error"* — indicates **contract validation occurs during `dbt run`, NOT during `dbt parse` or `dbt compile`.**
-- Compares actual columns/types returned by SQL model's query vs declared columns/types in YAML.
-- Requires runtime because dbt must execute the SQL model and inspect the actual result-set schema.
-
-**[docs.getdbt.com/docs/mesh/govern/model-contracts](https://docs.getdbt.com/docs/mesh/govern/model-contracts):**
-- *"When building a model with a defined contract, dbt will do two things differently: 1. dbt will run a 'preflight' check to ensure that the model's query will return a set of columns with names and data types matching the ones you have defined."*
-- The preflight check happens during the **build process**, which requires **a live warehouse connection** to execute the model's SQL query.
-- **"A CI pipeline running only `dbt parse` and `dbt compile` WITHOUT warehouse access cannot catch data-type contract violations."** — verbatim from the docs page.
-- Build-time enforcement also involves DDL — *"dbt will include the column names, data types, and constraints in the DDL statements it submits to the data platform"* — explicitly warehouse-interactive.
-
-### What the responder said vs reality:
-
-| Responder claim | Reality |
-|---|---|
-| "Your FIRST teammate is right." | WRONG — Teammate **B** is right. |
-| "Contract validation is a BUILD-TIME COMPILE CHECK — dbt does NOT need a live Trino connection to validate the contract." | WRONG — preflight runs at `dbt run`/`dbt build` time and REQUIRES a live warehouse connection (Trino on this stack). |
-| "`dbt compile` validates the contract (dbt-side preflight, no Trino needed)" | WRONG — `dbt compile` produces compiled SQL artifacts but does NOT run the contract preflight. |
-| "if SELECT projects plan_type as integer not varchar, `dbt build` prints a Compilation Error BEFORE touching Trino" | WRONG — the contract preflight DOES touch Trino. It runs the model's SELECT (or a typed describe) against Trino, inspects the actual columns/types, then compares against YAML. |
-| "Trino never sees the broken SQL" | WRONG — Trino MUST see the SQL for the preflight to detect type mismatches. The check IS warehouse-interactive. |
-
-### Practical impact:
-
-The engineer's CI pipeline runs ONLY `dbt parse` + `dbt compile` with NO Trino connection. The responder told them: "this is enough — contracts catch declared-vs-SQL mismatch WITHOUT touching the warehouse." Following this advice, the engineer will:
-1. Ship a broken type mismatch through CI (which passes).
-2. Discover the contract violation only at production `dbt run` against Trino.
-3. The CI promise of "catches violations before merge" silently fails.
-
-This is **load-bearing wrong** — the answer makes the engineer worse off than asking nobody.
-
-### Resource source — RESOURCE-SOURCED DEFECT in r27 §6.7C + r28 §282:
-
-`grep` confirms TWO resource locations source the error:
-
-**r27 §6.7C (the canonical dbt-contracts section):**
-- L3178: *"When `contract.enforced: true`, dbt's **compilation step** runs a **'preflight' check** before materializing the model"* — MISLEADING: conflates "compilation step" with the actual `dbt run`/`dbt build` preflight. An engineer reading this verbatim concludes that `dbt compile` runs the preflight (which it doesn't).
-- L3182: *"If ANY column is missing, extra, or has the wrong type, **dbt errors and refuses to build the model — the SQL is never executed against Trino**"* — MISLEADING: literally true that the FAILING-CONTRACT SQL is not materialized, BUT the preflight ITSELF is a warehouse-interactive operation. The phrasing strongly implies "no Trino interaction needed for the check" which is false.
-- L3184: *"This is a **build-time check** (during `dbt run` / `dbt build`), NOT a query-time check."* — half-right (build-time is correct), but ambiguous about whether build-time needs a warehouse connection.
-- L3172 (router row): *"Build time (during `dbt run` / `dbt build`'s preflight check), NOT query time. The Trino engine itself does NOT enforce the contract — dbt does, before materialization."* — this row again strongly implies no-warehouse-needed, which is false. (dbt-the-tool needs to run a describe/typed query against Trino to know the actual column types.)
-
-**r28 §282 (cross-reference row in dbt tests primer):**
-- L282: *"r27 §6.7C — dbt model contracts (the column-name + `data_type:` build-time STRUCTURAL preflight). Different mechanism from generic data tests: **contracts check schema/type at compile time**; generic tests check data values at materialize time."* — **OUTRIGHT FACTUAL ERROR.** "contracts check schema/type at compile time" is FALSE per dbt docs verbatim. Contracts check at BUILD/RUN time and require a live warehouse connection.
-
-### LIGHT FIX-A recommendation:
-
-**r27 §6.7C (load-bearing reconcile):**
-
-1. Change L3178 to:
-   > *"When `contract.enforced: true`, dbt's BUILD step (during `dbt run` or `dbt build`) runs a 'preflight' check before materializing the model:*
-   > *1. dbt executes a typed describe / LIMIT 0 query of the model's SELECT against the warehouse (Trino on this stack) to get the actual column names + types of the result set.*
-   > *2. dbt compares the actual columns + types against the YAML-declared `columns:` list.*
-   > *3. If ANY column is missing, extra, or has the wrong type, dbt errors and refuses to materialize the model.*
-   >
-   > **This preflight check REQUIRES a live warehouse connection — it is NOT a pure parse/compile check.** `dbt parse` + `dbt compile` alone do NOT run the contract preflight. A CI pipeline with no warehouse access CANNOT catch contract violations — it must run `dbt build` against a real Trino (CI-target Trino instance or staging Trino, or a `--defer`-with-deferred-state alternative)."*
-
-2. Update L3172 router row "Does it fail at build time or query time?" answer to:
-   > *"**Build time** (during `dbt run` / `dbt build`'s preflight check), NOT query time. The Trino engine itself does NOT enforce the contract — dbt does. **But the preflight IS warehouse-interactive — dbt must query Trino to discover the model's actual column types.** Pure `dbt parse` + `dbt compile` with no warehouse access do NOT validate the contract."*
-
-3. ADD a router row addressing the iter1191/iter1194 question directly:
-   > *"Does dbt model-contract enforcement need a live Trino connection?" → "**YES. Contract preflight runs at `dbt run`/`dbt build` time and requires Trino to introspect the SELECT's actual column types. `dbt parse` + `dbt compile` alone do NOT validate the contract.** CI pipelines that only run parse+compile CANNOT catch contract violations — must run `dbt build` against a real Trino."*
-
-4. ADD a DO-NOT-WRITE row in the existing §3370 DO-NOT-WRITE block:
-   > *"'Contract enforcement is a pure compile-time check; CI doesn't need a Trino connection' — WRONG. The preflight check runs at `dbt run`/`dbt build` time and queries Trino for the actual SELECT result-set types. `dbt parse` + `dbt compile` do NOT run the preflight. CI without warehouse access does NOT catch contract violations. Verified at [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) + [docs.getdbt.com/docs/mesh/govern/model-contracts](https://docs.getdbt.com/docs/mesh/govern/model-contracts)."*
-
-**r28 §282 (factual-error fix):**
-
-Change "contracts check schema/type at compile time" to "contracts check schema/type at build time (preflight runs at `dbt run`/`dbt build`, requires live warehouse connection)".
-
-### iter1191 dbt-contract two-phase mechanism WATCH:
-
-**STATUS: WATCH FIRED — RESPONDER GOT IT WRONG.** The watch should now be promoted from "carry forward" to "LIGHT FIX-A pending" status. Re-probe after FIX-A lands.
+### Dimensional breakdown:
+- All four dimensions clean 5.0. Engineer arrives with a working sources.yml + CI step + correct mental model (freshness is a gate you wire in, not an automatic DAG-blocker). No fabrications, no broken secondary alternative.
 
 ---
 
-## Q4 — Oracle DECODE → Trino CASE (NULL=NULL semantic contrast)
+## Q4 — Trino equivalents of Oracle TO_DATE for ISO + non-ISO date strings
 
-**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (STRONG PASS)**
+**Score: 5.0 / 5.0 / 5.0 / 5.0 = 5.0 (PASS, CLEAN)**
 
-Pin-perfect Oracle-to-Trino direct port with critical NULL-semantic contrast. All load-bearing facts VERIFIED.
+### Verification at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html):
+- **No TO_DATE in Trino 467** — verified. `date(x)` is an alias for `CAST(x AS date)` but doesn't take a format string. Responder correctly stated this.
+- **`from_iso8601_date('2024-01-15')` returns DATE** — verified verbatim "Parses the ISO 8601 formatted date `string` into a `date`." Accepts ISO calendar dates and ISO week-dates. Perfect for the dashes-form input; compares directly to a DATE column.
+- **`date_parse('15-JAN-2024','%d-%b-%Y')` returns TIMESTAMP** — verified. Uses **MySQL %-style format specifiers**. `%d` = day-of-month, `%b` = abbreviated month name (Jan, Feb, ...), `%Y` = 4-digit year. Returns timestamp(3), needs `CAST(... AS DATE)` to compare against a DATE column.
+- **`parse_datetime('15-JAN-2024','dd-MMM-yyyy')` returns TIMESTAMP WITH TIME ZONE** — verified. Uses **JodaTime DateTimeFormat patterns**. `dd` = day, `MMM` = 3-letter month name, `yyyy` = year. Joda generally case-insensitive on text fields ('JAN' / 'Jan' both accepted in practice).
+- **Don't mix the families** — verified verbatim that MySQL `%-style` and Joda `letter-pattern` are separate specifier vocabularies. Mixing produces parse-error or silent misparsing. Responder's explicit "don't mix the %-family (date_parse/date_format) with the letter-family (parse_datetime/format_datetime)" framing is exactly right and matches `feedback_responder_broken_secondary_alternative` discipline — the alternative shape is COMPLETE and CORRECT, not a broken padding form.
+- **`CAST AS DATE`** on the timestamp output is the canonical reduce-to-DATE for comparison against a DATE column. Without it, mixed TIMESTAMP-vs-DATE comparison still works in 467 (per pinned `reference_trino_timestamp_tz_coercion`), but explicit CAST is cleaner.
 
-1. **Trino has NO native DECODE function** — VERIFIED absent from [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html). DECODE is Oracle-only; parse-error is the expected Trino behavior. Per pinned imported-prior-self-error family (`reference_trino_starts_with_ends_with.md`, `reference_trino_listagg_native.md`, `reference_trino_to_char_exists.md`, `reference_trino_iceberg_migrate_native.md`), DECODE legitimately doesn't exist in Trino — unlike LISTAGG / to_char / migrate which surprised the assumed-absence priors.
-
-2. **Simple-CASE form rewrite** — VERIFIED valid Trino 467 syntax:
-   ```sql
-   CASE plan_type
-     WHEN 'starter' THEN 1
-     WHEN 'pro' THEN 2
-     WHEN 'enterprise' THEN 3
-     ELSE 0
-   END
-   ```
-   Direct one-for-one port of `DECODE(plan_type, 'starter', 1, 'pro', 2, 'enterprise', 3, 0)`. Per [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) simple CASE form.
-
-3. **CRITICAL NULL-semantic contrast — Oracle DECODE NULL=NULL vs Trino simple-CASE NULL≠NULL** — VERIFIED accurate. Per [Oracle SQL Reference - Nulls](https://docs.oracle.com/cd/B19306_01/server.102/b14200/sql_elements005.htm) + community references: **"DECODE considers two NULLs to be equivalent. If expr is null, then Oracle returns the result of the first search that is also null."** Standard SQL CASE (including Trino's simple-CASE) treats NULL comparisons as UNKNOWN, so `CASE col WHEN NULL THEN ...` NEVER MATCHES because the equality check returns NULL not TRUE.
-
-   Example divergence:
-   - Oracle: `DECODE(col, NULL, 'was-null', col, 'not-null', 'other')` — MATCHES the NULL branch when col is NULL.
-   - Trino: `CASE col WHEN NULL THEN 'was-null' ELSE 'other' END` — NEVER matches the `WHEN NULL` branch; always falls through to ELSE. Silent semantic drift on every Oracle→Trino port.
-
-4. **Searched-CASE fix** — VERIFIED correct:
-   ```sql
-   CASE
-     WHEN col IS NULL THEN 'was-null'
-     WHEN col = 'pro' THEN 2
-     ELSE 0
-   END
-   ```
-   Per Trino conditional.html, searched-CASE allows arbitrary boolean predicates including `IS NULL` — exactly the right tool to replicate Oracle DECODE's NULL=NULL semantic.
-
-5. **Audit tip — `grep` Oracle code for `DECODE(<col>, NULL, ...)`** — practical and exactly what an engineer migrating hundreds of DECODE call sites needs. Identifies the subset that REQUIRES searched-CASE rewrite (vs simple-CASE port).
-
-6. **Two-arg / three-arg DECODE form (`DECODE(is_active, 1, 'Yes', 'No')`)** — engineer's second example. Direct port to simple-CASE works for the non-NULL case: `CASE is_active WHEN 1 THEN 'Yes' ELSE 'No' END`. If `is_active` can be NULL and intended to match the ELSE branch (Oracle would: NULL ≠ 1 → ELSE), simple-CASE behaves identically here because the NULL falls through to ELSE in both engines. No NULL-semantic divergence for this specific shape; the divergence only bites when a NULL search arg is present.
-
-No imported-prior slip, no broken-secondary-alternative slip, no over-warning. Clean canonical reach with the load-bearing NULL caveat exactly named.
+### Dimensional breakdown:
+- All four dimensions clean 5.0. Engineer has both ISO and Oracle-style paths, both verified Trino 467 surface, with the format-family non-mix discipline made explicit. Minor recall ceiling not load-bearing: didn't mention case-sensitivity nuance on `%b`/`MMM` (both accept 'JAN' in practice), didn't mention `from_iso8601_timestamp` for ISO TIMESTAMP variant. Neither affects the engineer's literal ask.
 
 ---
 
-## Watches carried forward / status changes:
+## Cross-iteration summary
 
-1. **`iter1191 dbt-contract two-phase mechanism phrasing` WATCH — FIRED.** Responder confirmed wrong on first probe. Status changes from `WATCH CARRY` → `LIGHT FIX-A PENDING` (r27 §6.7C reconcile + r28 §282 fact-correction). Re-probe after FIX-A lands with same framing ("CI without warehouse access / does compile catch contracts").
+| Q | Topic | Score | Status |
+|---|---|---|---|
+| Q1 | Iceberg table maintenance (compaction/expire/orphan) | 1.875 | FAIL — RESOURCE-SOURCED, FIX-A APPLIED |
+| Q2 | Analytical query patterns on Iceberg+Trino | 5.0 | PASS — CLEAN |
+| Q3 | dbt sources / source freshness | 5.0 | PASS — CLEAN |
+| Q4 | Oracle PL/SQL → dbt+Trino SQL migration | 5.0 | PASS — CLEAN |
 
-2. **`iter1192 dbt delete+insert-on-non-ACID-Hive defang` WATCH** — NOT exercised this iter; CARRY forward.
+**Overall: 16.875 / 20 = 4.219 — PASS**
 
-3. **`iter1194 r28 §348-403 delete-file-compaction-Spark-only over-claim` WATCH — NEW.** LIGHT FIX-A pending on r28 §348-403 reconcile (Trino EXECUTE optimize IS the primary delete-application lever per Trino #12617; Spark rewrite_position_delete_files is the optional delete-file-only compaction, not load-bearing). Re-probe after fix lands with same framing ("accumulated position-delete files / what maintenance collapses them").
+Q2/Q3/Q4 demonstrate the responder's normal mode: pin-perfect canonical reach with all load-bearing facts present and the routing discipline (e.g. min_by/max_by over first_value/last_value frame trap; separate `dbt source freshness` command over auto-blocking; format-family non-mix discipline) intact. Q1's failure is NOT a Haiku synthesis ceiling — the responder confidently delivered a wrong answer with a fabricated citation, because the resource it pulled from (r13 L2862) confidently teaches the wrong thing. This is a `feedback_reconcile_dont_append` pattern: iter1194 fixed one canonical but left a sibling carrying the same wrong claim. The teacher's iter1195 FIX-A extension to r13 is the right move and correctly directed.
 
----
+## Carry-forward open watches NOT exercised this iter
 
-## Summary scoring breakdown
+1. **iter1192 r27 §3.2 delete+insert-on-non-ACID-Hive defang** — re-probe soon (not exercised iter1193, iter1194, iter1195; getting stale).
+2. **iter1194 r27 §6.7C dbt-contract-live-connection FIX-A** — re-probe in 3–6 iters (added iter1194, not exercised iter1195). Framing target: "does dbt contract enforcement need a live Trino connection / can contracts be validated in CI without warehouse access".
 
-| Q | Tech | Clarity | Practical | Compl | Avg |
-|---|------|---------|-----------|-------|-----|
-| Q1 position-delete maintenance | 3.0 | 5.0 | 4.0 | 4.0 | **4.0** |
-| Q2 NTILE(4) quartile bucketing | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
-| Q3 dbt model-contract live-Trino-connection (WATCH) | 1.0 | 4.5 | 1.0 | 1.5 | **2.00** |
-| Q4 Oracle DECODE → Trino CASE + NULL contrast | 5.0 | 5.0 | 5.0 | 5.0 | **5.00** |
+## New watch this iter
 
-**Iter1194 overall = (4.0 + 5.00 + 2.00 + 5.00) / 4 = 4.00 — PASS WITH FIX-A.**
+3. **iter1195 r13 L2862 + r28 §348 optimize-clears-position-deletes RECONCILED FIX-A** — re-probe in 3–5 iters with structurally similar framing ("MoR delete files accumulated, Trino-only fix or need Spark"). If recurs → resource defect at a 3rd un-reconciled sibling not yet found; if reaches → close.
 
-### Verdict: FIX-A required (two resource-sourced defects).
+## Recommendation for next iteration
 
-**Q1**: r28 §348–403 over-claims "Trino has no equivalent for position-delete compaction." Refuted by Trino #12617 (completed 2022). Recommend LIGHT FIX-A reconcile-in-place (don't append — fix L350, L390, L397, L403 in the existing canonical).
-
-**Q3 (load-bearing)**: r27 §6.7C frames preflight as "dbt's compilation step" + r28 §282 explicitly says "contracts check schema/type at compile time" — both factually wrong. Preflight runs at `dbt run`/`dbt build` time and REQUIRES a live warehouse connection. CI with only `dbt parse` + `dbt compile` does NOT catch contract violations. Recommend LIGHT FIX-A reconcile-in-place on r27 §6.7C (router rows L3170-3172 + body L3178-3184 + new DO-NOT-WRITE row in §3370 block) + r28 §282 single-line fact correction.
-
-Q2 + Q4 clean canonical reaches, no fix needed.
+- BREADTH on Q2/Q3/Q4 type angles. Q1 was the high-priority FIX-A re-probe miss; the teacher's reconcile of r13 should be exercised within 3–5 iters.
+- Watch for any sibling-resource un-reconciled-claim patterns surfacing on other FIX-A topics — if the iter1192 delete+insert-on-non-ACID-Hive watch fires similarly, that's a generalized signal that recent FIX-A coverage needs sibling-grep discipline.
