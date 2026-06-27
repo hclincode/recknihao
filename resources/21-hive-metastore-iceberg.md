@@ -75,31 +75,39 @@ Schema, partitions, file lists, per-file min/max stats, row counts — everythin
 
 ### The two migration commands
 
-Both run from **Spark SQL** (not Trino — Trino does not implement the migration stored procedures).
+> **`migrate` is NATIVE in Trino 467 — you do NOT need Spark for it.** Trino 467's Iceberg connector implements the `system.migrate` procedure (and `system.add_files` / `system.add_files_from_table`) directly — verified in the Procedures section of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html). The Trino call uses **named arguments**: `CALL iceberg.system.migrate(schema_name => 'analytics', table_name => 'events')`. The `snapshot` (shadow-copy) procedure is the only one of this family that is **Spark-only** — it is NOT in Trino 467's procedure list. **DO-NOT-WRITE:** "Trino cannot convert/migrate a Hive Parquet table to Iceberg — you must use Spark" / "Trino does not implement `system.migrate`" — both WRONG for Trino 467.
 
-#### Option 1: `CALL catalog.system.migrate()` — in-place, permanent
+#### Option 1: `CALL iceberg.system.migrate(...)` — in-place, permanent (Trino-native)
 
 Replaces the Hive table definition with Iceberg metadata **without rewriting any data files**. After the call, the table is an Iceberg table. The original Hive table definition is gone.
 
 ```sql
--- Spark SQL — convert a Hive Parquet table to Iceberg in-place
-CALL iceberg.system.migrate('analytics.events');
+-- ✅ Trino 467 (native) — convert a Hive Parquet table to Iceberg in-place (NAMED args)
+CALL iceberg.system.migrate(schema_name => 'analytics', table_name => 'events');
+
+-- Optional: recurse into nested subdirectories of the table location
+CALL iceberg.system.migrate(schema_name => 'analytics', table_name => 'events', recursive_directory => 'true');
+
+-- (Spark SQL equivalent uses the positional dotted form:)
+-- CALL iceberg.system.migrate('analytics.events');
 ```
 
 What actually happens:
-1. Spark reads the existing Parquet file list from HMS (or the file system).
+1. Trino (or Spark) reads the existing Parquet file list from HMS (or the file system).
 2. It builds Iceberg snapshot + manifest metadata on top of those existing files.
 3. HMS's table definition is updated to point at the new Iceberg `metadata.json`.
 4. **No Parquet files are moved, renamed, or rewritten.** The data bytes on MinIO are untouched.
 
-Completion time is proportional to the number of files, not the data size. A 100 GB table with 500 Parquet files typically takes 1–5 minutes.
+Completion time is proportional to the number of files, not the data size. A 100 GB table with 500 Parquet files typically takes 1–5 minutes. **Table schema, partitioning, properties, and location are copied from the source Hive table.**
 
-#### Option 2: `CALL catalog.system.snapshot()` — shadow copy, non-destructive
+> **Alternative — register specific files without converting the whole table: `add_files`.** Trino 467 also has `CALL iceberg.system.add_files(schema_name => ..., table_name => ..., source_table => '"hive"."schema"."tbl"')` (and `add_files_from_table`) to add existing Parquet files from a Hive table or a location into an EXISTING Iceberg table — useful for incremental backfills. Also Trino-native, no Spark needed.
 
-Creates a **new Iceberg table** that references the same Parquet files as the original Hive table. The original Hive table continues to exist unchanged. Use this to validate Iceberg behavior before committing to a full migration.
+#### Option 2: `CALL catalog.system.snapshot()` — shadow copy, non-destructive (Spark-only)
+
+Creates a **new Iceberg table** that references the same Parquet files as the original Hive table. The original Hive table continues to exist unchanged. Use this to validate Iceberg behavior before committing to a full migration. **`snapshot` is the one procedure in this family that Trino 467 does NOT implement — run it from Spark SQL.** (If you don't need the non-destructive shadow step, just run `migrate` directly from Trino.)
 
 ```sql
--- Spark SQL — create an Iceberg shadow table without touching the Hive table
+-- Spark SQL ONLY — create an Iceberg shadow table without touching the Hive table
 CALL iceberg.system.snapshot('analytics.events', 'analytics.events_iceberg');
 ```
 
@@ -128,9 +136,9 @@ ALTER TABLE iceberg.analytics.events
 SET TBLPROPERTIES ('format-version' = '2');
 ```
 
-**Hive-MIGRATED tables (via Spark's `migrate()`) default to Iceberg format version 1**, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations on a migrated table, upgrade it to v2 with the `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` above. Read-only tables and append-only tables do not need v2.
+**Hive-MIGRATED tables (via the `migrate()` procedure — whether run from Trino or Spark) default to Iceberg format version 1**, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations on a migrated table, upgrade it to v2 with the `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` above. Read-only tables and append-only tables do not need v2.
 
-> **IMPORTANT — this v1 default applies ONLY to tables produced by Spark's `migrate()` procedure. It does NOT apply to brand-new tables.** A **NEW** Iceberg table created with `CREATE TABLE` on **Trino 467** — or by a dbt-trino `materialized='table'` / `'incremental'` model — **defaults to `format_version = 2`** (the Trino Iceberg `format_version` table property has defaulted to `2` since **Trino 419**, well before 467; verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)). So **`MERGE INTO` / row-level `DELETE` / `UPDATE` work out of the box on new Trino-created Iceberg tables — you do NOT need to set `format_version=2` first.** Only LEGACY Hive-migrated v1 tables need the explicit v1→v2 upgrade. Keyword anchors: do I need format_version 2 before MERGE, Trino 467 default format_version new table, new CREATE TABLE v2 default, migrated v1 vs new-table v2. **DO-NOT-WRITE:** "Default Iceberg tables are format v1, set format_version=2 before MERGE" — WRONG for new Trino-created tables (they are already v2); it is true ONLY for Spark-`migrate()`-produced tables. See also [resource 17 §formats](17-iceberg-table-maintenance.md) and [resource 25](25-iceberg-format-internals.md) for the new-table v2 default.
+> **IMPORTANT — this v1 default applies ONLY to tables produced by Spark's `migrate()` procedure. It does NOT apply to brand-new tables.** A **NEW** Iceberg table created with `CREATE TABLE` on **Trino 467** — or by a dbt-trino `materialized='table'` / `'incremental'` model — **defaults to `format_version = 2`** (the Trino Iceberg `format_version` table property has defaulted to `2` since **Trino 419**, well before 467; verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)). So **`MERGE INTO` / row-level `DELETE` / `UPDATE` work out of the box on new Trino-created Iceberg tables — you do NOT need to set `format_version=2` first.** Only LEGACY Hive-migrated v1 tables need the explicit v1→v2 upgrade. Keyword anchors: do I need format_version 2 before MERGE, Trino 467 default format_version new table, new CREATE TABLE v2 default, migrated v1 vs new-table v2. **DO-NOT-WRITE:** "Default Iceberg tables are format v1, set format_version=2 before MERGE" — WRONG for new Trino-created tables (they are already v2); it is true ONLY for tables produced by the `migrate()` procedure (Trino-native or Spark). See also [resource 17 §formats](17-iceberg-table-maintenance.md) and [resource 25](25-iceberg-format-internals.md) for the new-table v2 default.
 
 ### Summary of limitations
 
@@ -138,13 +146,14 @@ SET TBLPROPERTIES ('format-version' = '2');
 |---|---|
 | `migrate()` is permanent | The original Hive table definition is replaced. Run `snapshot()` first if you want a safety net. |
 | `snapshot()` shares files | Do not delete the Hive table's data directory after creating a snapshot — the Iceberg copy reads those files too. |
-| Runs from Spark, not Trino | Trino does not implement `CALL system.migrate()`. Use a Spark session or a Spark-based notebook. |
+| `migrate` runs from Trino OR Spark | **Trino 467 implements `CALL iceberg.system.migrate(schema_name => ..., table_name => ...)` natively** (named args). Only `snapshot` (shadow copy) is Spark-only. Don't tell anyone Trino can't migrate Hive→Iceberg — it can. |
+| `rewrite_manifests` post-step runs from Spark | The manifest-consolidation follow-up (`rewrite_manifests`) is Spark-only on this stack — Trino 467 has no `rewrite_manifests` (and `optimize_manifests` is Trino 470+, not 467). |
 | Migrated table starts at format v1 | No delete files until you `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')`. |
 | Run `rewrite_manifests` after migration | Skipping this leaves the table with a poorly-structured manifest that slows Trino query planning. |
 
 ### The bottom line
 
-If you have existing Hive Parquet tables and want to move them to Iceberg: run `CALL iceberg.system.migrate('your_schema.your_table')` from Spark. It completes in minutes regardless of data size. No ETL pipeline needed, no data copy, no downtime window proportional to table size.
+If you have existing Hive Parquet tables and want to move them to Iceberg: run `CALL iceberg.system.migrate(schema_name => 'your_schema', table_name => 'your_table')` **directly from Trino 467** (named args; Spark's positional `migrate('schema.table')` form also works if you prefer Spark). It completes in minutes regardless of data size. No ETL pipeline needed, no data copy, no downtime window proportional to table size. The only Spark-only pieces are the non-destructive `snapshot` shadow-copy step and the `rewrite_manifests` follow-up.
 
 ---
 
