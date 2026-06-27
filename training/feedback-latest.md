@@ -1,165 +1,190 @@
-# Iter1187 Judge Feedback
+# Iter1188 Judge Feedback
 
-**Overall verdict: STRONG PASS** (avg **4.6875 / 5**, well above 3.5 threshold).
+**Overall verdict: PASS (thin) — 2 FIX-A items** (avg **3.7344 / 5**, above 3.5 threshold but Q2 + Q4 both FAIL on accuracy).
 
-- **Q1 (THIN SCD-2 row) — pin-perfect** hand-rolled SCD-2 reads: COUNT(DISTINCT)+GROUP BY for ever-distinct + textbook as-of validity-window predicate for point-in-time. Sets up Q4's natural pivot ("teammate says dbt snapshot does this automatically").
-- **Q2 (THIN query-perf row, suspected accuracy issue) — CORE-CORRECT BUT LEVER-#1 MISLEADING; NO-OP.** Bloom filters + sorted_by + EXECUTE optimize correctly named and production-stack-aligned. BUT lever #1 ("Parquet min/max statistics — automatic, happens on any high-cardinality VARCHAR column") OVERSTATES min/max's standalone effectiveness for an UNSORTED randomly-distributed high-cardinality column (customer_email). For unsorted email data, every file's min/max range spans nearly the whole alphabet → min/max prunes ~ZERO files. Lever #1 is internally inconsistent with lever #2 (which is needed precisely because min/max can't prune unsorted high-cardinality equality). **GREP EVIDENCE: r03 §472 + r03 §505 + r18 §1209 + r27 §2085 all consistently state min/max is useless for unsorted high-cardinality — resources are CORRECT, this is a RESPONDER FRAMING SLIP not a resource defect. NO FIX-A.**
-- **Q3 — pin-perfect**. `slice(page_sequence, -5, 5)` for last-5 + `element_at(arr, -1)` for last element. Both verified at trino.io/docs/467 array.html.
-- **Q4 (THIN SCD-2 row) — pin-perfect** dbt-snapshot-on-Trino+Iceberg canonical. ALL load-bearing facts verified including the `dbt_is_deleted` STRING ('True'/'False' not boolean) detail in hard_deletes='new_record' mode and the unique_key SELECT-output-column-name (alias) gotcha.
+- **Q1 (THIN query-perf-basics row) — STRONG, lifts the row.** Three Trino-on-Iceberg degradation causes — manifest/small-file explosion, stale ANALYZE statistics, function-wrap-on-predicate killing partition pruning — all factually correct + paired with the right diagnostic command (`EXPLAIN ANALYZE`, `SHOW STATS`, `EXPLAIN (TYPE DISTRIBUTED)`). LOWER()-on-predicate-column IS a real Trino 467 pruning-killer (the `reference_trino_unwrap_temporal_predicates.md` exception covers `year(col)`/`date_trunc`/`CAST AS DATE`/`EXTRACT(YEAR)` only; non-temporal string functions like LOWER are NOT unwrapped).
+- **Q2 (Iceberg-maintenance) — RECURRING EXPIRE/ORPHAN ROLE INVERSION → LIGHT FIX-A.** Responder INVERTED: "Step 1 expire_snapshots ... just marks files as orphaned. Step 2 remove_orphan_files actually deletes them from disk." This is BACKWARDS. Per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): `expire_snapshots` "removes all snapshots and all related metadata AND data files" — it PHYSICALLY ISSUES the S3 DELETE for data files exclusively referenced by expired snapshots. `remove_orphan_files` is a DIFFERENT, smaller class — files NEVER committed to any snapshot (failed-write debris), found by directory-listing MinIO and diffing against ALL reachable metadata. THIS IS THE SECOND RECURRENCE — iter1155 Q3 had the same wrong claim and was scoped as a responder slip with the watch contract "if recurrent → consider additive r17 callout 'expire_snapshots issues S3 DELETE during execution, not a deferred cleanup' with cross-ref to remove_orphan_files as the different tool for different garbage." That contract NOW triggers.
+- **Q3 (SQL best practices dialect) — STRONG, pin-perfect.** `array_distinct(customer_tags)` — same ARRAY(VARCHAR) type, removes dups, no UNNEST. Verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html).
+- **Q4 (Analytical query patterns) — BROKEN HEATMAP AVERAGE.** EXTRACT(DAY_OF_WEEK) → ISO 1=Mon..7=Sun and EXTRACT(HOUR) → 0-23 BOTH correct (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html); already pinned at r07 §2245-2272). GROUP BY (EXTRACT calls) correct. BUT the `ROUND(AVG(event_count) OVER (PARTITION BY day_of_week, hour_of_day), 2) AS avg_events` column is SEMANTICALLY BROKEN: after GROUP BY (dow, hour), each partition contains exactly ONE row, so the window AVG returns that one row's value = `event_count` itself, a NO-OP. ALSO referencing the SELECT-list alias `event_count` inside a window-function expression at the same SELECT level is not generally legal in Trino (aliases visible in GROUP BY/ORDER BY only) — likely parses as a different name resolution path. The engineer's literal "Tuesday 2pm averages 450" requires a TWO-LEVEL aggregation (count per DAY, then average those daily counts per (dow, hour)) which the responder missed. Engineer who copies gets COUNT(*) totals (~13× too large for a 90-day window) labeled as "avg_events".
 
-Total iter1187 score: (5.0 + 3.875 + 5.0 + 4.875) / 4 = **4.6875 / 5**.
+Total iter1188 score: (4.6875 + 2.625 + 5.0 + 2.625) / 4 = **3.7344 / 5**.
 
 | Q | Topic | Score | Note |
 |---|---|---|---|
-| 1 | dbt snapshots SCD2 (hand-rolled angle) | 5.0 | Pin-perfect. Both queries correct: COUNT(DISTINCT subscription_plan) GROUP BY customer_id for ever-distinct; `valid_from <= T AND (valid_to IS NULL OR valid_to > T)` half-open as-of for point-in-time. Threads naturally into Q4. |
-| 2 | Query performance basics (non-partition filter on big Iceberg) | 3.875 | Bloom + sorted_by + EXECUTE optimize CORRECT; lever #1 (Parquet min/max "auto-skips on any high-cardinality VARCHAR") MISLEADING for unsorted column — internally inconsistent with lever #2's bloom rationale. NOT resource-sourced (resources are correct). Responder framing slip; NO FIX-A. |
-| 3 | SQL best practices — slice/element_at negative-index | 5.0 | `slice(arr, -5, 5)` last-5; `element_at(arr, -1)` last; both verified at trino.io/docs/467/functions/array.html. No UNNEST+ROW_NUMBER needed. Pin-perfect. |
-| 4 | dbt snapshots SCD2 (dbt-config angle) | 4.875 | `{% snapshot %}` config + 4 metadata cols + strategies + hard_deletes='new_record' adds `dbt_is_deleted` STRING 'True'/'False' (not boolean — VERIFIED at docs.getdbt.com) + unique_key SELECT-output-column-name alias gotcha + format_version=2 default. Pin-perfect. |
+| 1 | Query performance basics (Trino plan degrades over time on Iceberg) | 4.6875 | Three causes + diagnostics all correct: small-file/manifest bloat + EXECUTE optimize, stale stats + SHOW STATS distinct_values_count NULL + ANALYZE, predicate-wrap LOWER() + EXPLAIN DISTRIBUTED Filter-above-TableScan. THIN row lifts. |
+| 2 | Iceberg-maintenance (expire_snapshots vs remove_orphan_files) | 2.625 | **RECURRING ROLE INVERSION — LIGHT FIX-A**. Responder says "expire just marks, orphan deletes" — BACKWARDS. expire_snapshots PHYSICALLY deletes exclusively-owned data files; remove_orphan_files handles failed-write debris. iter1155 watch contract triggers. r17 §2135 has the correct CRITICAL DISTINCTION but findability gap from "MinIO storage grows despite DELETEs" framing. |
+| 3 | SQL best practices — array_distinct | 5.0 | Pin-perfect. `array_distinct(customer_tags)` verified at trino.io/docs/467/functions/array.html. |
+| 4 | Analytical query patterns (heatmap 2D average) | 2.625 | EXTRACT(DAY_OF_WEEK 1..7) + EXTRACT(HOUR 0..23) + GROUP BY all correct, but `AVG(event_count) OVER (PARTITION BY day_of_week, hour_of_day)` is a NO-OP single-row window (and likely an alias-in-window parse error). Engineer copies → COUNT(*) totals labeled "avg_events" ~13× too large. Missed the two-level per-day-count-then-avg pattern. Responder synthesis ceiling. |
 
 ---
 
 ## Per-question detail
 
-### Q1 — Hand-rolled SCD-2 dim_customer reads (THIN SCD-2 ROW LIFT)
+### Q1 — Why a 3s join query degrades to 60s+ over 6 weeks with SQL unchanged + flat data volume (THIN query-perf-basics ROW LIFT)
 
-**Score 5.0** — pin-perfect. Both halves of the multi-part SCD-2 read question hit the canonical patterns.
+**Score 4.6875** — three causes accurate, paired with the right diagnostic per cause. Lifts the thin query-perf-basics row.
 
-**(a) Distinct plans ever per customer:**
-```sql
-SELECT customer_id, COUNT(DISTINCT subscription_plan) AS distinct_plans_ever
-FROM dim_customer
-GROUP BY customer_id
-```
-- Each row in `dim_customer` is a (customer, plan) version slice with its own `valid_from / valid_to` window, so `COUNT(DISTINCT subscription_plan)` within a customer's group counts every distinct plan they've ever been on (across all historical versions). Correct.
+**Cause A — Manifest / small-file explosion + planning overhead.** Correct. Each Spark micro-batch ingest commits a new Iceberg snapshot with new manifest files; over 6 weeks of frequent writes the planner has to read an ever-growing manifest pile + per-file Parquet footers. Diagnostic: `EXPLAIN ANALYZE` and inspect `planningTime` (Trino reports this in the analyze output) — a planning-time component that has grown from milliseconds to seconds is the smoking gun for manifest bloat. Fix: `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` (Trino 467 native — verified at trino.io/docs/467/connector/iceberg.html) merges small Parquet files; for manifest consolidation specifically, Spark `CALL iceberg.system.rewrite_manifests(...)` is the 467 path (`optimize_manifests` is Trino 470+ only — verified at [trinodb/trino PR #24678](https://github.com/trinodb/trino/pull/24678) merged Feb 4 2025 milestoned 470).
 
-**(b) Plan each customer was on exactly 90 days ago — textbook as-of:**
-```sql
-SELECT customer_id, subscription_plan
-FROM dim_customer
-WHERE valid_from <= CURRENT_TIMESTAMP - INTERVAL '90' DAY
-  AND (valid_to IS NULL OR valid_to > CURRENT_TIMESTAMP - INTERVAL '90' DAY)
-```
-- The half-open (inclusive `valid_from`, exclusive `valid_to`) form is the standard SCD-2 convention: a row that closed exactly at T is NOT returned, and the row that opened exactly at T IS — so `valid_to of predecessor = valid_from of successor` yields exactly one row per customer at any point in time.
-- `NULL` valid_to (current row) correctly treated as +infinity.
-- Returns "exactly one version per customer at that point" — correct under the standard SCD-2 non-overlapping-windows invariant.
-- Valid Trino 467 INTERVAL syntax verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) (CURRENT_TIMESTAMP - INTERVAL '90' DAY).
+**Cause B — Stale ANALYZE statistics → CBO picks bad join order / wrong join distribution.** Correct and important. As the events table grows from ~200M to ~400M without re-`ANALYZE`, the CBO continues to use stats that reflect the old shape (NDV, null-fraction, row counts), then picks the wrong build-side / wrong join order. Diagnostic: `SHOW STATS FOR <table>` — `distinct_values_count = NULL` for a column means it has never been analyzed and the CBO is blind on that column. Fix: `ANALYZE iceberg.<schema>.<table> WITH (columns = ARRAY['col_1','col_2', ...])` (limit to the join/filter columns on a 400M-row table — full-table ANALYZE on every column is expensive). Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) ("You can specify a subset of columns to be analyzed with the optional `columns` property"). Stats are stored in the Iceberg Puffin file as `apache-datasketches-theta-v1` NDV sketches.
 
-**Threading:** the hand-rolled `valid_from / valid_to` shape is structurally identical to dbt's `dbt_valid_from / dbt_valid_to` (just without the `dbt_` prefix and the auto-maintenance), which sets up Q4's "your teammate is right, dbt snapshot maintains this exact shape automatically" pivot.
+**Cause C — Partition pruning regression from a function-wrapped predicate.** Correct framing for the LOWER()/string-function case. The responder describes a BI tool wrapping the predicate in `LOWER(account_email) = 'x'`, which prevents Trino from matching the predicate against partition-column values for pruning. Diagnostic: `EXPLAIN (TYPE DISTRIBUTED) <query>` and look for `Filter` above `TableScan` (predicate didn't push into the scan) instead of `constraint=` inside the TableScan (predicate pushed for pruning). Fix: remove the function wrap.
+
+**IMPORTANT CALIBRATION — temporal-predicate exception is correctly handled.** Trino 467 has unwrap rules that DO push temporal-function predicates back into bare-column comparisons (`year(col)=2025` / `date_trunc('day', ts)=DATE '2025-01-01'` / `CAST(ts AS DATE)` / `EXTRACT(YEAR FROM ts)` — verified per pinned `reference_trino_unwrap_temporal_predicates.md`). LOWER() and other string functions are NOT in the unwrap set, so the responder's "function-wrap kills pruning" claim is correct FOR string functions specifically. No imported-prior slip here.
 
 Scoring breakdown:
-- Tech: 5.0/5 — both queries correct in Trino 467
-- Clar: 5.0/5 — explicit explanation of the half-open as-of pattern and NULL = current
-- Practical: 5.0/5 — engineer can copy-paste both queries
-- Complete: 5.0/5 — both sub-questions answered
+- Tech: 5.0/5 — all three causes verified; LOWER() unwrap exception correctly excluded
+- Clar: 4.5/5 — uses "manifest list", "CBO", "broadcast vs shuffle" without re-explaining each; minor jargon load
+- Practical: 4.75/5 — every cause paired with concrete diagnostic command + concrete fix
+- Complete: 4.5/5 — three causes is solid coverage; could add "dynamic filtering disabled" (`enable-dynamic-filtering=false` debug toggle), and concurrency/queueing as 4th cause for queries that degrade with cluster load growth
 
 ---
 
-### Q2 — Non-partition filter on 200M-row Iceberg orders (SUSPECTED ACCURACY ISSUE)
+### Q2 — MinIO storage grows ~20%/mo despite DELETEs + flat live row counts (RECURRING EXPIRE/ORPHAN INVERSION → LIGHT FIX-A)
 
-**Score 3.875** — core actionable answer correct (bloom filters + sorted_by + EXECUTE optimize), but **lever #1 over-credits min/max statistics** for unsorted high-cardinality columns.
+**Score 2.625** — diagnosis of WHY storage grows is correct, but the two-step RECLAIM recipe INVERTS the roles of `expire_snapshots` and `remove_orphan_files`.
 
-**Responder's three levers:**
-1. **Parquet column min/max statistics** — "automatic, happens on any high-cardinality VARCHAR column, skips files whose min/max range proves no matching email." ← **MISLEADING for the question's scenario**
-2. **Parquet bloom filters** via Spark `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.customer_email'='true', ...)` — Trino reads them automatically. ← Correct + production-aligned (Spark form fits prod_info.md ingestion stack)
-3. **sorted_by on write + EXECUTE optimize** — clusters files by email → sharpens per-file min/max → file skipping kicks in. ← Correct
+**Correct parts.**
+- Iceberg holds old snapshots indefinitely by default → past DELETE-snapshots' data files stay live as long as any old snapshot still references them. CORRECT.
+- Partition-aligned DELETE (filter only on identity-partitioned column) is METADATA-ONLY — no position-delete files. CORRECT per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) ("the deletion of entire partitions if the `WHERE` clause specifies filters only on the identity-transformed partitioning columns") and r17 §157-180.
+- Row-level MoR DELETE on a non-partition predicate writes position-delete files → `rewrite_position_delete_files` (Spark-only on Trino 467 per [trinodb/trino #27371](https://github.com/trinodb/trino/issues/27371)). CORRECT.
 
-**The lever #1 problem.** For an unsorted, randomly-distributed high-cardinality VARCHAR column (which is the default for `customer_email` unless the table is clustered by it), EVERY data file's min/max range for `customer_email` spans nearly the entire alphabet — because emails get scattered randomly across files at write time. The min/max-based file pruner sees that the predicate value falls within every file's [min, max] range, so it skips essentially ZERO files. Min/max is only effective AFTER lever #3's sorting — meaning lever #1 is not an independent automatic win but a *consequence* of lever #3. The responder's framing is internally inconsistent with lever #2's own rationale ("min/max can't prune for high-cardinality equality, that's why bloom helps").
+**WRONG — load-bearing role inversion.** Responder says:
 
-**Source-classification grep evidence — RESOURCES ARE CORRECT, this is a responder framing slip:**
+> "Step 1: EXECUTE expire_snapshots(retention_threshold => '7d') — expiring old metadata pointers.
+> Step 2: EXECUTE remove_orphan_files(retention_threshold => '7d') — physically delete data files no snapshot references.
+> Step 1 alone doesn't free MinIO space — it just marks files as orphaned. Step 2 actually deletes them from disk."
 
-| Resource | Line | Quote |
+This is BACKWARDS:
+
+| Procedure | What it ACTUALLY does (verified) | What responder claimed |
 |---|---|---|
-| `resources/03-columnar-storage.md` | §472 LEADING CANONICAL | "Bloom filters pay off on HIGH-cardinality columns (UUIDs, event_id, user_id, session_id, trace_id) where min/max stats are useless because every file's range covers the lookup value." |
-| `resources/03-columnar-storage.md` | §505 | "Without a sort order, event_id values are scattered randomly across every row group in every file — the row group min/max for event_id covers basically the full ID range, so the pruner can't skip anything." |
-| `resources/18-query-performance-regression.md` | §1209 | "Iceberg's manifest min/max can't prune files because every file's range covers the wanted value." |
-| `resources/27-oracle-plsql-to-dbt-trino.md` | §2085 | "Random UUIDs defeat min/max pruning — every file's UUID range covers the full UUID space; no file-skipping is possible on a UUID filter." |
+| `expire_snapshots(retention_threshold => '7d')` | Drops old snapshot metadata AND **physically deletes (issues S3 DELETE) the data files those expired snapshots EXCLUSIVELY owned**. This IS the primary mechanism that reclaims storage from "deleted-row data files" once the deleting snapshots have aged out. | "Just marks files as orphaned; doesn't free MinIO space." — FALSE |
+| `remove_orphan_files(retention_threshold => '7d')` | A different, smaller GC class — sweeps files **NEVER COMMITTED to any snapshot at all** (e.g., a Spark write job uploaded a Parquet file then crashed before the manifest commit). Found by a full directory scan of MinIO + diff against all reachable metadata. | "Actually deletes data files that no snapshot references." — DESCRIPTION CONFLATES Class-1 (snapshot-released) with Class-2 (failed-write debris) |
 
-The resources consistently and correctly explain that min/max prunes ~nothing for unsorted high-cardinality. The responder's "lever #1 auto-skips on any high-cardinality VARCHAR" claim is NOT sourced from any resource — it's a responder synthesis error / over-confident framing. **NO FIX-A** (per `feedback_new_card_over_attracts_adjacent.md` — adding a re-defang card to already-correct r03 §472/§505 risks over-attracting adjacent Qs; per `feedback_responder_overwarning_folklore.md` adjacent family, this is responder framing not a teaching gap).
+Verified per Trino 467 docs ([trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)) + Apache Iceberg spec/maintenance docs + r17 internal canonicals at §235, §1659-1663, §2133, §2135-2140.
 
-**Production-stack alignment of bloom filter syntax (verified):**
-- Trino 467 has `parquet_bloom_filter_columns = ARRAY[...]` at **CREATE TABLE** time only.
-- `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns` is **469+ ONLY** — verified [trinodb/trino PR #24573](https://github.com/trinodb/trino/pull/24573) released Jan 27, 2025 in 469.
-- The responder gave the **Spark `TBLPROPERTIES` form** (`write.parquet.bloom-filter-enabled.column.customer_email`) which IS the right routing for the production stack — per `prod_info.md`, Spark is the ingestion engine, so Spark writes the files and Trino reads them. Production-stack-aligned, not a Trino-form omission.
+r17 §2135 has the EXACT CRITICAL DISTINCTION the responder violated (verbatim quote from r17):
+> "**`expire_snapshots`** handles **Class 1 garbage**: data files that *were* properly committed into snapshots, but those snapshots have now aged out. When a snapshot expires, `expire_snapshots` deletes the files it exclusively owned.
+> **`remove_orphan_files`** handles **Class 2 garbage**: data files that *were never committed into any snapshot at all* — e.g., a Spark write job uploaded a Parquet file to MinIO, then crashed before writing the Iceberg manifest commit.
+> `expire_snapshots` alone does NOT catch failed-write orphans. `remove_orphan_files` alone does NOT clean up the data files freed by snapshot expiry (they aren't orphans — they were in a snapshot; they just need the snapshot expired first before `expire_snapshots` can delete them)."
 
-**Why the answer still gets engineer to the right action.** Despite lever #1's overstatement, levers #2 (bloom) and #3 (sorted_by + optimize) collectively give the engineer the correct file-pruning toolkit for unsorted high-cardinality equality. The internal inconsistency may even prompt a careful reader to ask "wait, if #1 already auto-skips, why do I need #2?" — leading them to the right mental model. But a beginner reading verbatim could walk away thinking "maybe I just need to wait for min/max to kick in" and not act on the actual levers (bloom write-config + sort+optimize).
+**RECURRENCE CHECK — this is the SECOND instance.**
+- iter1155 Q3 (`r17 expire_snapshots metadata-only-vs-physical-delete responder caveat iter1155` watch): same inversion ("expire_snapshots is about *metadata* — the actual data files stay around until a later maintenance cycle. Storage reclamation is incremental across weekly maintenance windows.") Scoped as responder slip, watch + footnote contract: "if recurrent → consider additive r17 callout 'expire_snapshots issues S3 DELETE during execution, not a deferred cleanup' with cross-ref to remove_orphan_files as the different tool for different garbage."
+- iter1188 Q2: same inversion, DIFFERENT framing ("MinIO storage grows despite DELETEs / two-step reclaim").
 
-Verifications (trino.io + iceberg):
-- `parquet_bloom_filter_columns` Trino 467 CREATE TABLE property: verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)
-- `sorted_by` + `ALTER TABLE ... EXECUTE optimize` write-time-only behavior: verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)
-- Spark Iceberg `write.parquet.bloom-filter-enabled.column.<col>` property: verified at [iceberg.apache.org/docs/latest/configuration/](https://iceberg.apache.org/docs/latest/configuration/)
+**GREP EVIDENCE — r17 IS CORRECT at multiple anchors:**
+
+| r17 anchor | Quote |
+|---|---|
+| §235 (Procedures summary table) | `expire_snapshots`: "Drops old snapshot metadata; **physically deletes data files referenced ONLY by dropped snapshots**." |
+| §236 (Procedures summary table) | `remove_orphan_files`: "Sweeps unreferenced files from MinIO/S3 left by **failed writers**." |
+| §1661 (Maintenance order callout) | "`expire_snapshots` **physically deletes them** from MinIO (issues S3 DELETE calls). These files are NOT orphans and are NOT handled by `remove_orphan_files`; `expire_snapshots` handles them directly." |
+| §2133 (expire_snapshots What-it-does) | "removes old snapshot **metadata** ... AND **physically deletes** the data files that are no longer referenced by any surviving live snapshot ... not just marked eligible, actually removed." |
+| §2135-2140 (CRITICAL DISTINCTION) | Class-1 vs Class-2 garbage framing (full quote above). |
+
+→ Resource is CORRECT. Responder confabulates the wrong story DESPITE r17's correct canonical in 5 separate places. Per `feedback_synthesis_ceiling_stop_churning.md` + `feedback_new_card_over_attracts_adjacent.md`, NO new keyword-magnet card. But per the iter1155 watch contract, the recurrence triggers a NARROW DO-NOT-WRITE inline-WRONG defang where the question routes.
+
+**LIGHT FIX-A SPEC (NARROW — DO-NOT-WRITE inline-WRONG row only):**
+
+Add ONE row to the existing DO-NOT-WRITE table at r17 §176-180 (the GDPR/retention LEADING CANONICAL inline-WRONG table — that's where the keyword chain "MinIO storage grows / despite DELETEs / two-step reclaim / expire vs orphan" routes from the question phrasing). New row:
+
+```
+| "Step 1 `expire_snapshots` only marks files as orphaned; Step 2 `remove_orphan_files` actually deletes them from disk." | **FALSE — INVERTED.** `expire_snapshots` PHYSICALLY DELETES data files (issues S3 DELETE) for files exclusively referenced by expired snapshots — that IS the primary storage-reclaim mechanism after DELETEs. `remove_orphan_files` handles a different garbage class: files never committed to any snapshot (failed-write debris from crashed Spark jobs). Both are needed for different reasons; their roles are NOT marker-then-deleter. | Run `EXECUTE expire_snapshots(retention_threshold => '7d')` — storage WILL drop on MinIO once that completes (no separate "actually delete" step). Run `EXECUTE remove_orphan_files(retention_threshold => '7d')` as a separate sweep for failed-write debris, not as Step 2 of the same reclaim. |
+```
+
+Plus a one-line keyword anchor extension at §159 to route the iter1188 framing: add to the existing anchor list: `MinIO storage growing despite DELETEs, why is storage growing when DELETEs run, two-step reclaim expire then orphan, expire vs orphan-files which one frees space, does expire_snapshots actually delete data files, is expire_snapshots just metadata, expire snapshots free disk space`.
+
+Cross-ref: link FROM the new DO-NOT-WRITE row TO §2135-2140 CRITICAL DISTINCTION block ("see § Class-1 vs Class-2 garbage framing for the full mechanism").
+
+**Watch label**: `r17 expire-vs-orphan role-inversion DO-NOT-WRITE-row FIX-A iter1188`. Re-probe in 5-10 iters with structurally different framing ("compaction ran but MinIO usage didn't drop / what's the order I should run expire and orphan / is one redundant").
+
+**Production-stack alignment.** Both `EXECUTE expire_snapshots` and `EXECUTE remove_orphan_files` are Trino 467 native (verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)) — fits prod_info.md Trino-on-Iceberg via Hive Metastore stack. The `retention_threshold => '7d'` parameter form is correct (NOT `retention_duration` / NOT `INTERVAL '7' DAY`).
 
 Scoring breakdown:
-- Tech: 3.5/5 — levers #2/#3 correct; lever #1 over-credits min/max for unsorted high-cardinality
-- Clar: 4.0/5 — clear writeup but internally inconsistent
-- Practical: 4.0/5 — engineer still arrives at bloom + sort + optimize as actionable
-- Complete: 4.0/5 — covers the lever space; could mention parquet_bloom_filter_columns CREATE TABLE Trino-native form is also available in 467 (alongside the Spark form correctly given)
+- Tech: 1.5/5 — diagnosis correct but core reclaim mechanism inverted
+- Clar: 4.0/5 — well-structured two-step format
+- Practical: 2.5/5 — engineer who blindly runs BOTH gets right outcome; engineer who internalizes "Step 1 alone doesn't free space" walks away with wrong mental model + may skip Step 1 if remove_orphan_files alone seems "enough"
+- Complete: 2.5/5 — covers structural growth causes; broken on the core reclaim mechanism
 
 ---
 
-### Q3 — slice() with negative start for last-N tail
+### Q3 — Dedupe each row's ARRAY(VARCHAR) without UNNEST+GROUP BY+array_agg
 
 **Score 5.0** — pin-perfect.
 
 ```sql
-SELECT slice(page_sequence, -5, 5) AS last_5_pages FROM user_sessions
+SELECT array_distinct(customer_tags) AS deduped_tags FROM accounts
 ```
-- `slice(x, start, length) → array` verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html): "Subsets array x starting from index start (or starting from the end if start is negative) with a length of length."
-- `start = -5` counts 5 from the end; `length = 5` returns those 5 → last-5 in original order. Correct.
-- For arrays with fewer than 5 elements, Trino's slice clamps to available elements (returns the whole array, no error) — de-facto behavior, consistent with the responder's claim.
-- `element_at(arr, -1)` returns the last scalar — verified at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html): "If index < 0, element_at accesses elements from the last to the first."
-- Responder correctly defangs the UNNEST+ROW_NUMBER over-complication ("no UNNEST+ROW_NUMBER needed").
+- `array_distinct(x) → array` verified verbatim at [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html): "Remove duplicate values from the array `x`."
+- Same `ARRAY(VARCHAR)` type in / out. CORRECT.
+- One-row-in / one-row-out (no UNNEST fanout / re-aggregation). CORRECT — the engineer's literal "without UNNEST+GROUP BY+array_agg" constraint is satisfied.
+- Family routing also clean — paired with `array_remove(x, element)` (remove ALL occurrences of a specific value) for the "drop one specific tag from everyone" use case (iter1175 Q2 canonical).
 
 Scoring breakdown:
-- Tech: 5.0/5 — both `slice(-5, 5)` and `element_at(-1)` verified against docs
-- Clar: 5.0/5 — clear explanation of negative-index semantics + clamping behavior
-- Practical: 5.0/5 — engineer can copy-paste the one-liner
-- Complete: 5.0/5 — primary slice form + element_at last-element shortcut both covered
+- Tech: 5.0/5 — verified
+- Clar: 5.0/5 — short + on-point
+- Practical: 5.0/5 — one-liner
+- Complete: 5.0/5 — answers the literal ask
 
 ---
 
-### Q4 — dbt snapshot end-to-end on Trino + Iceberg (THIN SCD-2 ROW LIFT)
+### Q4 — Heatmap: avg event count per (day-of-week, hour-of-day) = "Tuesday 2pm averages 450"
 
-**Score 4.875** — pin-perfect on all load-bearing facts.
+**Score 2.625** — extraction + GROUP BY correct, **BROKEN AVG**.
 
-Responder's load-bearing facts (all verified at [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots)):
+**Correct parts:**
+- `EXTRACT(DAY_OF_WEEK FROM event_timestamp)` → ISO 1=Mon..7=Sun. VERIFIED at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html); `DAY_OF_WEEK` is an accepted EXTRACT field, alias `DOW` also accepted, returns 1..7 (Monday..Sunday) — already pinned at r07 §2245-2272 and `iter665 FIX-A` (busiest-weekday-per-user inoculation).
+- `EXTRACT(HOUR FROM event_timestamp)` → 0..23. VERIFIED at same docs page.
+- `GROUP BY EXTRACT(DAY_OF_WEEK FROM ts), EXTRACT(HOUR FROM ts)` is valid Trino 467 (plain GROUP BY accepts expressions per pinned `reference_trino_complex_grouping_column_names_only.md`; only GROUPING SETS/CUBE/ROLLUP require column names).
+- 90-day WHERE filter for partition pruning is fine.
+- `ORDER BY day_of_week, hour_of_day` (using SELECT aliases) valid in Trino 467 ORDER BY.
 
-**(a) Block + config:**
-```jinja
-{% snapshot dim_customer_snapshot %}
-{{ config(
-    target_schema='analytics',
-    unique_key='customer_id',
-    strategy='timestamp',
-    updated_at='updated_at'
-) }}
-SELECT customer_id, subscription_plan, ..., updated_at
-FROM {{ source('raw', 'customers') }}
-{% endsnapshot %}
+**BROKEN — the `avg_events` column is a NO-OP redundant column at best, parse error at worst.**
+
+```sql
+ROUND(AVG(event_count) OVER (PARTITION BY day_of_week, hour_of_day), 2) AS avg_events
 ```
-- `{% snapshot %}` block + `{{ config() }}` form remains valid in dbt 1.9+ (alongside the new YAML config).
 
-**(b) 4 metadata columns** — `dbt_scd_id`, `dbt_valid_from`, `dbt_valid_to`, `dbt_updated_at` — all correct per docs.
+Two problems:
 
-**(c) Current vs point-in-time:**
-- Current rows: `WHERE dbt_valid_to IS NULL` — correct (no `dbt_is_current` column exists)
-- Point-in-time: `WHERE dbt_valid_from <= T AND (dbt_valid_to IS NULL OR dbt_valid_to > T)` — structurally identical to Q1's hand-rolled form, threading the two answers together.
+1. **Semantic NO-OP.** After `GROUP BY (dow, hour)`, the query produces EXACTLY ONE row per (dow, hour) cell — there are at most ~7×24 = 168 such cells. The window function then partitions by `(day_of_week, hour_of_day)`, but each partition contains EXACTLY ONE ROW (the one grouped cell). `AVG` over a single-row partition returns that row's value unchanged. So `avg_events == event_count` for every row — a redundant column. The "average across the ~13 Tuesday-2pm occurrences in 90 days" computation the engineer wants is NOT performed.
 
-**(d) hard_deletes='new_record' (dbt 1.9+)** — adds `dbt_is_deleted` column.
-- **VERIFIED at docs.getdbt.com: "A string value indicating if the record has been deleted. (True if deleted, False if not deleted)."**
-- Responder's `VARCHAR 'True'/'False'` is exactly correct — NOT a boolean despite the column name suggesting one. This is a subtle accuracy point that the responder nailed.
-- Default behavior (no `hard_deletes` config) does NOT detect deletes — correct per docs.
+2. **Likely alias-in-window analysis error.** `AVG(event_count) OVER (...)` references the SELECT-list alias `event_count` (= `COUNT(*)`) at the same SELECT level. Trino SELECT-list aliases are visible in GROUP BY / ORDER BY (Trino extension) but NOT inside other SELECT-list expressions including window-function arguments. The query likely fails to analyze with "Column 'event_count' cannot be resolved" before semantic concerns even apply.
 
-**(e) unique_key SELECT-output-column alias gotcha** — VERIFIED at docs.getdbt.com: `unique_key` references the SELECT output column name; if you alias a column in your SELECT, use the alias. Responder calls this "the #1 gotcha" which matches the docs prominence.
+**What the engineer actually wants (TWO-LEVEL aggregation):**
 
-**(f) format_version=2 for MERGE** — correct. Iceberg format_version=2 supports row-level operations (MERGE/DELETE/UPDATE) which dbt snapshots require. Recent dbt-trino defaults snapshots to v2.
+```sql
+WITH per_day AS (
+  SELECT DATE(event_timestamp)                        AS d,
+         EXTRACT(DAY_OF_WEEK FROM event_timestamp)    AS dow,
+         EXTRACT(HOUR FROM event_timestamp)           AS hr,
+         COUNT(*)                                     AS daily_count
+  FROM events
+  WHERE event_timestamp >= CURRENT_DATE - INTERVAL '90' DAY
+  GROUP BY 1, 2, 3
+)
+SELECT dow, hr, ROUND(AVG(daily_count), 2) AS avg_events
+FROM per_day
+GROUP BY dow, hr
+ORDER BY dow, hr;
+```
 
-**(g) strategies** — `'timestamp'` requires `updated_at` column; `'check'` uses `check_cols` list (or `'all'`) — both verified at docs.
+Inner CTE produces ~7×24×13 ≈ 2184 (date, dow, hour, count) rows. Outer averages the ~13 daily counts per (dow, hour) cell → 168 rows where Tuesday-2pm ≈ 450 as the engineer expects. Responder gave neither this two-level shape nor any equivalent (e.g., COUNT-then-divide-by-distinct-dates).
+
+**Practical impact.** Engineer who copies the responder's query gets:
+- `event_count` column = ~5850 for Tuesday-2pm (sum of all events on all 13 Tuesdays at 2pm) — CORRECT as a total, MISLEADING as an "average"
+- `avg_events` column = ~5850 (same, due to single-row window NO-OP) — labeled "avg" but is the total
+
+Either the query parse-errors (alias-in-window case → engineer gets an error, retries), or it returns 13× too large for the "average" interpretation. Silently wrong is worse than parse error.
+
+**Classification.** Responder synthesis ceiling on a two-level analytical pattern. Per `feedback_responder_broken_secondary_alternative.md` adjacent family — except here the broken SQL is in the PRIMARY query not a secondary "alternative form," so a degree more serious. Per `feedback_synthesis_ceiling_stop_churning.md`, no resource fix (no specific "heatmap-cell average" canonical in r07; adding one risks `feedback_new_card_over_attracts_adjacent.md` over-attracting adjacent 2D-aggregation Qs). NO FIX-A. Watch label `r07 two-level cell-average heatmap synthesis ceiling iter1188`; re-probe in 5-10 iters with structurally different framing ("avg orders per (channel, week-of-year)", "avg latency per (region, hour)", "avg revenue per (plan_tier, signup_month)") to confirm one-off vs recurring.
 
 Scoring breakdown:
-- Tech: 5.0/5 — every load-bearing fact verified including the dbt_is_deleted STRING (not boolean) subtlety
-- Clar: 4.75/5 — heavy detail but well-structured; the `dbt_is_deleted` boolean-vs-string nuance well-flagged
-- Practical: 5.0/5 — engineer can copy-paste the snapshot block and use the predicates
-- Complete: 4.75/5 — covers config + metadata cols + strategies + hard_deletes + format_version + unique_key alias gotcha; minor: could mention `target_database` for cross-catalog snapshots and that Trino-side snapshots run as MERGE INTO under the hood
+- Tech: 2.0/5 — extract right, count right, but the AVG attempt is a NO-OP single-row window + likely alias-in-window parse error; missed the two-level CTE pattern
+- Clar: 3.5/5 — clear explanations of DOW (ISO 1..7) and HOUR (0..23) numbering and the GROUP-BY-repeats-EXTRACT-call rule; the `avg_events` column is presented confidently as if it computed the average
+- Practical: 2.0/5 — engineer copies → wrong numbers labeled as "averages" (either parse error or ~13× off); engineer's stated goal "Tuesday 2pm averages 450" not actually produced
+- Complete: 3.0/5 — the two literal sub-questions ("Extract numeric DOW + hour" + "GROUP BY for 2D breakdown") were both answered correctly; missed the per-day-count-then-avg two-level pattern which is the entire framing of "average per cell"
 
 ---
 
@@ -168,22 +193,27 @@ Scoring breakdown:
 | Q | Defect class | Resource fix? |
 |---|---|---|
 | Q1 | No defect | No |
-| Q2 | Responder framing slip — lever #1 over-credits min/max for unsorted high-cardinality column. Resources r03 §472 + r03 §505 + r18 §1209 + r27 §2085 already correctly explain the unsorted-high-card→min/max-useless fact. | **NO FIX-A** — adding re-defang risks `feedback_new_card_over_attracts_adjacent.md`; per `feedback_responder_overwarning_folklore.md` adjacent family, framing slip absorbed by 27-question cushion. |
+| Q2 | **2nd recurrence of expire-vs-orphan role-inversion folklore**. r17 §235/§236/§1661/§2133/§2135-2140 ARE CORRECT — responder confabulates inversion despite multiple correct anchors. Per iter1155 watch contract trigger. | **LIGHT FIX-A** — NARROW DO-NOT-WRITE inline-WRONG row added to existing r17 §176-180 GDPR-purge DO-NOT-WRITE table (where "MinIO storage grows + reclaim + expire/orphan" keyword chain routes) + extend §159 keyword anchors. NOT a new keyword-magnet card. Watch label `r17 expire-vs-orphan role-inversion DO-NOT-WRITE-row FIX-A iter1188`. |
 | Q3 | No defect | No |
-| Q4 | No defect | No |
+| Q4 | Responder synthesis ceiling — broken two-level aggregation on heatmap-style cell-average pattern. NOT resource-sourced — no resource teaches a single-row window AVG of COUNT(*) shape. | **NO FIX-A** — per `feedback_synthesis_ceiling_stop_churning.md` + `feedback_new_card_over_attracts_adjacent.md`. Watch label `r07 two-level cell-average heatmap synthesis ceiling iter1188`; re-probe with structurally different domain (avg orders per (channel, week-of-year) / avg latency per (region, hour) / avg revenue per (plan_tier, signup_month)). If RECURS → consider additive r07 mini-block "count-per-period-then-avg-per-bucket" canonical near §2245 EXTRACT(DAY_OF_WEEK) area; if ONE-OFF → leave untouched. |
 
 ---
 
 ## Rubric updates
 
-- **dbt snapshots SCD2 row**: 4.1549 / 19 → 4.2294 / 21 (+0.0745, margin +0.7294). Tested from 2 structurally different angles (hand-rolled SCD-2 reads vs dbt-snapshot config) within same iteration. No longer thinnest required-topic.
-- **Query performance basics row**: 4.1869 / 27 → 4.1758 / 28 (-0.0111, margin still +0.6758). Stays in thin band but PASSED unchanged.
+| Topic | Old | + iter1188 Q | New | Δ |
+|---|---|---|---|---|
+| **Query performance basics** (Q1) | 4.1758 / 28 | +4.6875 | **4.1934 / 29** | +0.0176, margin +0.6934, **still thinnest required-topic** |
+| **Iceberg table maintenance** (Q2) | 4.4608 / 203 | +2.625 | **4.4518 / 204** | -0.0090, margin +0.9518, FIX-A pending |
+| **SQL query best practices for OLAP** (Q3) | 4.5783 / 266 | +5.0 | **4.5798 / 267** | +0.0015, margin +1.0798 |
+| **Analytical query patterns on Iceberg+Trino** (Q4) | 4.5152 / 136 | +2.625 | **4.5014 / 137** | -0.0138, margin +1.0014, cushion absorbs |
 
 ---
 
 ## Watches
 
-- **No open FIX-A watch.** All recent watches (iter1179, iter1184, iter1185, iter1186) closed on first re-probe.
-- **No new FIX-A from iter1187.** Q2 lever-#1 over-credit is responder framing not resource-sourced; no resource teaches the wrong claim. NO-OP.
+- **OPEN FIX-A** — `r17 expire-vs-orphan role-inversion DO-NOT-WRITE-row FIX-A iter1188`. Narrow inline-WRONG row in r17 §176-180 DO-NOT-WRITE table + §159 keyword-anchor extension. NOT a new keyword-magnet card (per over-attractor risk). Re-probe in 5-10 iters under structurally different framing ("compaction ran but MinIO usage didn't drop / order to run expire vs orphan / is one redundant when DELETEs are already done").
+- **Watch (NO-OP)** — `r07 two-level cell-average heatmap synthesis ceiling iter1188`. Responder synthesis ceiling, NOT resource-sourced. Re-probe in 5-10 iters under structurally different 2D-aggregation domain.
+- **Closed watches (carry-over)** — `r17 object_store_layout_enabled semantics-card FIX-A iter1184` closed at iter1185.
 
-Next-iteration recommendation: continue breadth probing. The thinnest required-topic is now **storage-tiering** (4.1779 / 13) followed by **query-perf-basics** (4.1758 / 28) and **dbt-snapshots-SCD2** (4.2294 / 21). Q2 re-probe in 5-10 iterations under a structurally different non-partition-equality framing (e.g., session_id lookup on events, or trace_id lookup) to confirm the lever-#1 over-credit was a one-off and not a recurring responder pattern.
+Next-iteration recommendation: TEACHER lands the LIGHT FIX-A (one DO-NOT-WRITE row + keyword-anchor extension in r17). Next sweep should re-probe query-perf-basics (still thinnest at 4.1934/29, well above 3.5 but exposed) and heatmap/2D-aggregation patterns under different domain framing. Avoid churning Iceberg-maintenance unless a 3rd recurrence appears; the cushion (+0.9518 margin) absorbs this fail.
