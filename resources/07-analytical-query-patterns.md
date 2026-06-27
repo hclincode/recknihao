@@ -1842,6 +1842,28 @@ format('%.2f%%', conversion_rate * 100)   -- '7.32%'   (%% = a literal percent s
 - **Why the `||`/`concat` form is a TYPE ERROR:** Trino's `||` operator and `concat()` are **VARCHAR-only** and do **NOT** implicitly cast a number to varchar. Per [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) verbatim: *"Trino will not convert between character and numeric types."* So `ROUND(100.0 * conversion_rate, 2) || '%'` never compiles — it raises a type error, not the `'7.32%'` you wanted. **If you must concatenate a number with text, CAST the number to varchar first:** `CAST(ROUND(100.0 * conversion_rate, 2) AS varchar) || '%'`. Prefer `format()` for cleanliness.
 - Same printf-style spec as the [§3.1A `format()` canonical in resource 23 (line ~574: `format('%.1f%%', 87.5)` -> `'87.5%'`)](23-sql-best-practices-olap.md) — that card is the general reference for `format()` directives; this card is the percent-STRING-specific landing.
 
+##### DISPLAY a large COUNT as a COMPACT K/M/B STRING (e.g. `1250000` -> `'1.25M'`, `890000` -> `'890K'`) — `format_number(n)` is a BUILT-IN, do NOT hand-write a CASE
+
+> **Keyword anchors (READ THIS FIRST if your question contains any of these):** compact number display · abbreviated number · K/M/B suffix · show 1.25M instead of 1250000 · 890K format · human-readable count · magnitude formatter · shorten big numbers for a dashboard · thousands/millions/billions suffix · format a large integer compactly · format_number Trino.
+
+> **THE ONE FACT:** Trino 467 HAS a built-in **`format_number(number) → varchar`** that renders a numeric value as a compact unit-suffixed string (`K`/`M`/`B`/`T`/`Q`) — verified at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) (built-in since Trino Release 357). You do **NOT** need to hand-write a CASE with `1e6`/`1e3` thresholds for this.
+
+```sql
+-- ✅ COPY THIS — compact magnitude label for a dashboard
+SELECT format_number(revenue) AS revenue_label FROM daily_revenue;
+-- format_number(123456)  -> '123K'
+-- format_number(890000)  -> '890K'
+-- format_number(1000000) -> '1M'
+-- format_number(1250000) -> '1.25M'
+-- format_number(1234567890) -> '1.23B'
+```
+
+- `format_number` takes a **BIGINT or DOUBLE** and returns a `varchar` with ~3 significant figures + a unit symbol. It is exactly the "1.25M / 890K" magnitude-compression formatter — no CASE, no manual thresholds.
+- **DO-NOT-WRITE:**
+  - "Trino has no built-in K/M/B magnitude formatter — hand-write a `CASE WHEN n>=1e6 THEN ...`" — **FALSE.** `format_number(n)` is the built-in; the CASE is unnecessary (and a manual CASE typically renders `'890.00K'` with trailing zeros rather than the clean `'890K'`).
+  - "`format_number` is just general numeric formatting, not magnitude compression" — **FALSE.** Its entire purpose is the unit-symbol (K/M/B) compaction; the docs examples are `format_number(123456)='123K'`, `format_number(1000000)='1M'`.
+- **Carve-out vs `format_data_size` (different function, different output space):** `format_data_size` renders **BYTES** with binary IEC units (`'1MB'`, `'2.3GB'`) and is an **EXAMPLE SQL UDF**, *not* a built-in — for byte sizes you must define it (or CASE). `format_number` renders **raw COUNTS** with K/M/B decimal units (`'1.25M'`) and **IS a built-in**. Use `format_number` for counts/revenue/users; do not confuse it with the bytes formatter.
+
 ##### LEADING CANONICAL — share of a SUBSET over the GRAND TOTAL (final-assembly form — single-pass conditional-SUM / FILTER, no CTE cross-join) (iter636 PIN — FIX-A: subset-share final-assembly column-scope bug)
 
 > **Keyword anchors (READ THIS FIRST if your question contains any of these):** what share of revenue comes from the top quintile · what percent of total revenue comes from the top decile · top 20% revenue as a fraction of all revenue · subset sum over grand total · ratio of a filtered sum to the overall sum · what fraction of total X are Y · percent of total from a subset · share of revenue from the top X% / top N customers / top quintile / top decile / top quartile · how much of total revenue do the top spenders account for · subset/total revenue ratio · share of total contributed by a flagged subset · final assembly of share-from-subset · top_20_revenue / total_revenue.
