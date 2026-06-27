@@ -131,12 +131,20 @@ The freshly-migrated table has one manifest entry per pre-existing Parquet file 
 **2. (Optional) Upgrade to format version 2 if you need row-level deletes:**
 
 ```sql
--- Spark SQL — upgrade from Iceberg v1 to v2 format
+-- Trino 467 (this stack's primary engine) — upgrade from Iceberg v1 to v2 format.
+-- SET PROPERTIES (not SET TBLPROPERTIES), underscored property name, UNQUOTED bigint.
+ALTER TABLE iceberg.analytics.events
+SET PROPERTIES format_version = 2;
+```
+
+```sql
+-- Spark SQL equivalent (only if you are doing the bump from a Spark session).
+-- TBLPROPERTIES + hyphenated 'format-version' + quoted '2' is the SPARK/Hive dialect.
 ALTER TABLE iceberg.analytics.events
 SET TBLPROPERTIES ('format-version' = '2');
 ```
 
-**Hive-MIGRATED tables (via the `migrate()` procedure — whether run from Trino or Spark) default to Iceberg format version 1**, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations on a migrated table, upgrade it to v2 with the `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` above. Read-only tables and append-only tables do not need v2.
+**Hive-MIGRATED tables (via the `migrate()` procedure — whether run from Trino or Spark) default to Iceberg format version 1**, which does not support delete files (used by `MERGE INTO` and row-level `DELETE` statements). If you plan to use those operations on a migrated table, upgrade it to v2. **On this Trino-primary stack use the Trino form `ALTER TABLE ... SET PROPERTIES format_version = 2`** (above); the `SET TBLPROPERTIES ('format-version'='2')` form is Spark/Hive dialect — see the DO-NOT-WRITE note below. Read-only tables and append-only tables do not need v2. **DO-NOT-WRITE (through Trino):** `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')` — Trino 467 has NO `SET TBLPROPERTIES` clause (it's `SET PROPERTIES`) and the Iceberg property is the underscored `format_version` taking an UNQUOTED integer, not the hyphenated quoted `'format-version'='2'`; pasting the Spark form into Trino fails to parse. Trino: `SET PROPERTIES format_version = 2`.
 
 > **IMPORTANT — this v1 default applies ONLY to tables produced by Spark's `migrate()` procedure. It does NOT apply to brand-new tables.** A **NEW** Iceberg table created with `CREATE TABLE` on **Trino 467** — or by a dbt-trino `materialized='table'` / `'incremental'` model — **defaults to `format_version = 2`** (the Trino Iceberg `format_version` table property has defaulted to `2` since **Trino 419**, well before 467; verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)). So **`MERGE INTO` / row-level `DELETE` / `UPDATE` work out of the box on new Trino-created Iceberg tables — you do NOT need to set `format_version=2` first.** Only LEGACY Hive-migrated v1 tables need the explicit v1→v2 upgrade. Keyword anchors: do I need format_version 2 before MERGE, Trino 467 default format_version new table, new CREATE TABLE v2 default, migrated v1 vs new-table v2. **DO-NOT-WRITE:** "Default Iceberg tables are format v1, set format_version=2 before MERGE" — WRONG for new Trino-created tables (they are already v2); it is true ONLY for tables produced by the `migrate()` procedure (Trino-native or Spark). See also [resource 17 §formats](17-iceberg-table-maintenance.md) and [resource 25](25-iceberg-format-internals.md) for the new-table v2 default.
 
@@ -148,7 +156,7 @@ SET TBLPROPERTIES ('format-version' = '2');
 | `snapshot()` shares files | Do not delete the Hive table's data directory after creating a snapshot — the Iceberg copy reads those files too. |
 | `migrate` runs from Trino OR Spark | **Trino 467 implements `CALL iceberg.system.migrate(schema_name => ..., table_name => ...)` natively** (named args). Only `snapshot` (shadow copy) is Spark-only. Don't tell anyone Trino can't migrate Hive→Iceberg — it can. |
 | `rewrite_manifests` post-step runs from Spark | The manifest-consolidation follow-up (`rewrite_manifests`) is Spark-only on this stack — Trino 467 has no `rewrite_manifests` (and `optimize_manifests` is Trino 470+, not 467). |
-| Migrated table starts at format v1 | No delete files until you `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')`. |
+| Migrated table starts at format v1 | No delete files until you bump to v2. **Trino (this stack):** `ALTER TABLE ... SET PROPERTIES format_version = 2`. (Spark dialect: `SET TBLPROPERTIES ('format-version' = '2')` — do NOT paste that into Trino; Trino uses `SET PROPERTIES` + underscored `format_version` + unquoted `2`.) |
 | Run `rewrite_manifests` after migration | Skipping this leaves the table with a poorly-structured manifest that slows Trino query planning. |
 
 ### The bottom line
