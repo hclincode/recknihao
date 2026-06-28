@@ -1,179 +1,149 @@
-# Iteration 1233 — Judge Feedback
+# Iteration 1234 — Judge Feedback
 
-**Verdict: 4.6875 STRONG PASS (margin +1.1875).** Q1 + Q3 + Q4 clean technically; Q2 is 4.0 BORDERLINE on a framing self-contradiction (canonical SQL is correct, but "Oracle syntax ports directly with zero changes" framing is factually wrong — Oracle places `IGNORE NULLS` INSIDE the parens, Trino requires OUTSIDE, and the engineer's parse error was EXACTLY from that placement difference). Iter average = (4.875 + 4.0 + 4.875 + 5.0)/4 = **18.75/4 = 4.6875**.
+## Verdict
 
-**ITER1232 LIGHT FIX-A REACHED — `r27 §6.7A1 custom-generic-test-schema.yml-test_-prefix-drop` watch CLOSES.** Q1 this iteration is the re-probe; responder produced a pin-perfect answer (4.875), modern `tests/generic/` + `{% test name(model,...) %}` block-name-drops-test_ + bare-name schema.yml call + the precise dbt-prepends-test_ error mechanism + legacy `{% macro test_NAME %}` backward-compat note. The §6.7A1 card is keyword-magnetic on the test_-prefix-trap question family.
+**Overall: 3.5625 — BARELY PASS at threshold.** Q3 is a substantive FAIL (2.125) on the dbt-incremental-merge late-arriving-older-row scenario with TWO compounding errors: (1) factually-wrong claim about Trino MERGE syntax, (2) wrong cross-run solution. Q2 is a borderline-pass (3.0) responder-recall-slip on the well-documented "no expressions inside ROLLUP" rule. Q1 and Q4 are clean.
 
-- **Q2 framing slip (NOT load-bearing, NO FIX-A).** Responder said "your Oracle syntax ports directly with zero changes" but Oracle SQL is `LAST_VALUE(x IGNORE NULLS) OVER (...)` (inside parens) and Trino 467 requires `LAST_VALUE(x) IGNORE NULLS OVER (...)` (outside parens between args and OVER). Verified via [trinodb/trino#1244](https://github.com/trinodb/trino/pull/1244) test cases `lag(c2, 1) IGNORE NULLS over (...)` — null-treatment clause goes between closing args paren and OVER. The engineer's parse error came precisely from porting the inside-parens form. Responder's *displayed Trino SQL is correct* (placement outside parens, UNBOUNDED PRECEDING..CURRENT ROW look-back frame, IGNORE NULLS support claim on FIRST_VALUE/LAST_VALUE/NTH_VALUE/LAG/LEAD all correct), but the "zero changes" claim contradicts the SQL and the engineer's own Q stem. **GREP EVIDENCE — resource coverage is excellent, not a content gap**: r07 §1500-1670 has a LEADING CANONICAL forward-fill block + a DO-NOT-WRITE table with five grep-findable WRONG/RIGHT rows (`LAST_VALUE(col IGNORE NULLS) OVER (...)` ❌ vs `LAST_VALUE(col) IGNORE NULLS OVER (...)` ✅, same for FIRST_VALUE/LAG/LEAD/NTH_VALUE) + the mnemonic "close the args, then IGNORE NULLS, then OVER". r23 §2168-2218 has a parallel DO-NOT-WRITE row also pinned with verbatim parse error message `mismatched input 'IGNORE'`. So the placement-DIFFERENTIAL claim has full resource coverage. This is a recall-ceiling slip on the framing claim, not a content gap. Aligns with `feedback_responder_broken_secondary_alternative.md` / `feedback_responder_overwarning_folklore.md` family — per-instance one-off, NO FIX-A. SOFT WATCH `iter1233 Q2 IGNORE-NULLS Oracle-vs-Trino placement-zero-changes-framing`: re-probe 4-8 iters with similar Oracle-port-to-Trino LOCF framing.
-- **Q1/Q3/Q4 clean.** Q1 modern + legacy custom-generic-test pin-perfect against docs.getdbt.com/best-practices/writing-custom-generic-tests (verbatim "macro name `test_<NAME>`, but call it by `<NAME>` in schema.yml — drop the prefix"). Q3 dbt var() top-level vars block + `{{ var('name', default) }}` two-arg form + CLI `--vars '{name: val}'` YAML-dict-string + precedence CLI > project > default all verbatim verified against docs.getdbt.com/docs/build/project-variables; INTERVAL '{{ var(...) }}' DAY interpolation correctly renders to valid Trino INTERVAL '7' DAY. Q4 `date_trunc('month'|'quarter', x)` mapping pin-perfect against trino.io/docs/467/functions/datetime.html with the exact unit list "millisecond, second, minute, hour, day, week, month, quarter, year" and same-type-as-input return.
-
-Per-question summary:
-- **Q1 4.875** — custom generic test: modern `tests/generic/test_amount_order.sql` + `{% test amount_order(model, column_a, column_b) %}` block (BARE name, no test_ prefix) + schema.yml `- amount_order: {column_b: gross_amount}` bare-name call + dbt-prepends-test_ error mechanism explanation + legacy `{% macro test_amount_order %}` in macros/ backward-compat note all correct. **iter1232 FIX-A REACHED — watch CLOSES.**
-- **Q2 4.0** — IGNORE NULLS forward-fill: SQL pin-perfect (placement outside parens, UNBOUNDED PRECEDING..CURRENT ROW look-back frame, supported on FIRST/LAST/NTH_VALUE + LAG/LEAD); "Oracle ports directly with zero changes" framing CONTRADICTS the displayed SQL and the engineer's parse error. Resource coverage of the placement difference is excellent (r07 + r23 both have DO-NOT-WRITE rows + grep-findable WRONG/RIGHT token tables + mnemonic). Recall-ceiling slip on framing claim, NO FIX-A.
-- **Q3 4.875** — dbt var() lookback: top-level vars: in dbt_project.yml + `{{ var("lookback_days", 7) }}` two-arg form + CLI `--vars '{lookback_days: 7}'` YAML-dict-string + CLI > project > default precedence + don't-use-{% set %} caveat (compile-time constant, not CLI-overridable) all correct. INTERVAL string interpolation renders to valid Trino.
-- **Q4 5.0** — `date_trunc('month'|'quarter', event_date)` mapping pin-perfect; unit list, return-type, week-ISO-Monday all verified.
-
-**NO new FIX-A warranted.** Q2 slip is recall-ceiling on a Trino-vs-Oracle DIFFERENTIAL claim that's already documented at length in r07 + r23 (the responder produced the correct Trino SQL — only the framing about "zero changes" is wrong). Resource coverage on the IGNORE NULLS placement difference is among the strongest in the corpus.
-
-**WATCH STATE:**
-- **CLOSED:** `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop` — Q1 4.875 PIN-PERFECT.
-- **NEW SOFT WATCH:** `iter1233 Q2 IGNORE-NULLS Oracle-vs-Trino placement-zero-changes-framing` — re-probe 4-8 iters with similar Oracle-port-to-Trino LOCF framing. Expect responder to call out the inside-vs-outside placement difference rather than claim "zero changes."
-- **CARRIED OPEN WATCHES** (continued from iter1232): iter1231 NEXT_DAY-closing-note-contradicts; iter1230 EXISTS-over-warning + ::cast; iter1215 strpos-3-arg CEILING (no churn); iter1213 session_properties / (+)-mnemonic; iter1229 @v1-Spark-syntax; iter1208 width_bucket-boundary.
-
-**Topic routing this iter:**
-- Q1 → "dbt model contracts" (4.4230/15 → 4.4513/16 PASSED, margin +0.9513; consistent with iter1232 Q3 routing for custom-generic-test family)
-- Q2 → "Analytical query patterns on Iceberg+Trino" (4.5749/165 → 4.5715/166 PASSED, margin +1.0715; LOCF / forward-fill canonical)
-- Q3 → "Improving complex SQL performance on Trino with dbt" (4.5415/52 → 4.5478/53 PASSED, margin +1.0478; dbt mechanics for env-specific defaults)
-- Q4 → "Oracle PL/SQL → dbt+Trino" (4.4573/198 → 4.4600/199 PASSED, margin +0.9600; Oracle dialect rewrite)
-
-All four required topics remain PASSED with healthy margins. All required topics in the rubric continue PASSED. No regression risk identified.
+**FIX-A RECOMMENDATION: YES — LIGHT FIX-A WARRANTED on Q3 (findability + myth-defang).** See §FIX-A SPEC at end.
 
 ---
 
-## Q1 — Engineer hit "Could not find generic test 'test_amount_order'": named macro `test_amount_order` + schema.yml `- test_amount_order: {column_a: net_amount, column_b: gross_amount}`. Where does the file live, the full macro block, EXACT schema.yml entry that resolves?
+## Per-question scores
 
-**Score: 4.875** — Acc 5.0 / Clar 4.5 / App 5.0 / Compl 5.0
+### Q1 — Iceberg time travel to wall-clock time (FOR TIMESTAMP AS OF) — 4.375
 
-Responder shape:
-- **Diagnosis**: `Could not find generic test 'test_amount_order'` = the `test_` prefix trap (dbt prepends `test_` at lookup → searches for `test_test_amount_order` → not found).
-- **Modern preferred form**:
-  - File: `tests/generic/test_amount_order.sql` (file NAME can include the test_ prefix freely; only the BLOCK name must drop it)
-  - Macro block:
-    ```jinja
-    {% test amount_order(model, column_a, column_b) %}
-    SELECT * FROM {{ model }}
-    WHERE {{ column_a }} > {{ column_b }}
-       OR {{ column_a }} IS NULL
-       OR {{ column_b }} IS NULL
-    {% endtest %}
-    ```
-    — block name `amount_order` BARE (no `test_` prefix).
-- **schema.yml entry**:
-  ```yaml
-  models:
-    - name: fct_orders
-      columns:
-        - name: net_amount
-          data_tests:
-            - amount_order:
-                column_b: gross_amount
-  ```
-  — call by bare name `amount_order`, `column_a` resolves from `name: net_amount` context.
-- **Why error happens**: dbt prepends `test_` at lookup, so YAML `- test_amount_order:` makes dbt search for macro `test_test_amount_order` (doesn't exist).
-- **Legacy alternative**: `{% macro test_amount_order(...) %}` in `macros/test_amount_order.sql` STILL backward-compatible; YAML call identical bare `amount_order:` (dbt strips the `test_` prefix from the macro name to match the YAML).
+| Dim | Score | Reasoning |
+|---|---|---|
+| Acc | 4.0 | Primary answer `FOR TIMESTAMP AS OF TIMESTAMP '2026-06-18 09:00:00'` correct and verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html). Snapshot-closest-not-after semantics correct. 7-day retention caveat correctly raised. **MINOR SLIP — `FOR VERSION AS OF '<snapshot_id>'` aside with snapshot_id QUOTED**: Trino 467 docs show numeric snapshot_id is BIGINT unquoted (`FOR VERSION AS OF 8954597067493422955`); only NAMED tags/branches take quoted strings (`FOR VERSION AS OF 'historical-tag'`). Engineer copying `'<numeric_snapshot_id>'` from $snapshots hits a type mismatch and recovers by removing quotes. Not load-bearing (engineer's actual ask was wall-clock time, not snapshot_id). |
+| Clar | 4.5 | Wall-clock-to-snapshot mapping mechanism explained well. |
+| App | 4.5 | Engineer arrives at working query for the stated wall-clock-time use case. |
+| Compl | 4.5 | Covers TIMESTAMP form + retention caveat + VERSION-AS-OF aside. |
 
-**Load-bearing facts VERIFIED:**
+**Routing**: Iceberg table maintenance (matches iter1229/iter1232 routing for time-travel/snapshot questions).
 
-1. **Modern `{% test NAME(model, ...) %}` block in `tests/generic/`** — verified verbatim at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) (WebFetched this iter): block syntax shown as `{% test is_even(model, column_name) %} ... {% endtest %}`, file paths `tests/generic/` (preferred) or `macros/` (legacy).
-2. **Block name does NOT include `test_` prefix** — verbatim from docs: "Key point: The test block name does NOT include the `test_` prefix."
-3. **schema.yml call by bare name, dbt prepends `test_`** — verbatim from docs: "dbt prepends `test_` to the lookup. If your macro is named `{% test amount_order %}`, dbt finds it as `test_amount_order`." Engineer's YAML `- test_amount_order:` causes dbt to search `test_test_amount_order` → `Could not find generic test`.
-4. **Legacy `{% macro test_NAME %}` form backward-compatible** — historically dbt supported `{% macro test_NAME %}` in `macros/` with the `test_` prefix auto-stripped at lookup; the modern `{% test NAME %}` block in `tests/generic/` is preferred but the macro form still resolves. Responder correctly noted both.
+### Q2 — ROLLUP for subtotals + grand total in ONE scan — 3.0
 
-**Minor shave (Compl -0.0):** Could have explicitly called out that the engineer's file may need to be MOVED from `macros/` to `tests/generic/` IF they used the `{% test ... %}` block form (which only works in `tests/generic/` not `macros/`); but the answer is clear that the BLOCK NAME is the actual error so the file location is secondary. Not load-bearing.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Acc | 2.0 | **CONFIRMED PARSE-TIME BUG**. Responder wrote `GROUP BY ROLLUP(plan_tier, date_trunc('month', billing_date))` — VERIFIED at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (WebFetched this iter): *"Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed."* Trino 467 ROLLUP / CUBE / GROUPING SETS accept COLUMN NAMES (or ordinals) ONLY — `date_trunc('month', billing_date)` IS an expression and will FAIL analysis. Engineer copying the SQL hits a parse error. The fix (pre-compute `date_trunc('month', billing_date) AS billing_month` in a CTE, then `ROLLUP(plan_tier, billing_month)`) is NOT shown. The CASE GROUPING(...) logic itself is technically sound but moot because the query won't run. GROUPING SETS ((plan_tier), ()) aside also uses bare column name — correct. |
+| Clar | 4.0 | ROLLUP-vs-GROUPING-SETS distinction taught well; GROUPING() function explained. |
+| App | 2.5 | Engineer hits parse error, has to debug the fix from scratch. |
+| Compl | 3.5 | Right shape (ROLLUP + GROUPING() + label CASE) for the question, but the exact syntax fails. |
 
-Engineer leaves with: exact file path + exact macro block (bare name) + exact schema.yml call (bare name) + crystal-clear "dbt prepends test_" mechanism. **iter1232 FIX-A `r27 §6.7A1 custom-generic-test-schema.yml-test_-prefix-drop` REACHED — watch CLOSES.** **Topic routed to "dbt model contracts"** (data-integrity test declaration, same routing as iter1232 Q3 + iter1216/1218/1221/1229 Q3 accepted_values/not_null/relationships).
+**Classification: RESPONDER RECALL SLIP on well-documented + findable content** — `Trino-complex-grouping-column-names-only` pinned memory + r28 §452/§580/§589 prominently anchor this rule with DO-NOT-COPY `date_trunc(...)` examples and pre-compute-in-CTE-then-ROLLUP-over-name pattern. The keyword chain "ROLLUP + date_trunc + month" should have routed to the disambiguation card; it did not. **NOT a content gap. NO FIX-A** — per `feedback_responder_broken_secondary_alternative.md` family adjacent (responder reached the correct PATTERN at the conceptual level but slipped on the documented Trino-vs-Postgres/Snowflake syntactic constraint). Recall ceiling.
 
----
+**Routing**: Analytical query patterns on Iceberg+Trino.
 
-## Q2 — Forward-fill NULLs: `account_daily(account_id, snapshot_date, feature_flag)` one row/account/day, `feature_flag` only on change days (most NULL). Need each row to carry last non-null `feature_flag` up to that date. Oracle `LAST_VALUE(feature_flag IGNORE NULLS) OVER (...)` parse-errors in Trino on IGNORE NULLS. Does Trino support IGNORE NULLS, and the correct forward-fill pattern?
+### Q3 — dbt incremental merge late-arriving older row — 2.125 (FAIL)
 
-**Score: 4.0** — Acc 3.5 / Clar 3.5 / App 4.5 / Compl 4.5
+| Dim | Score | Reasoning |
+|---|---|---|
+| Acc | 1.5 | **TWO COMPOUNDING FACTUAL ERRORS.** |
+| Clar | 3.5 | Code shape explained clearly; the conclusions are clearly stated (just wrong). |
+| App | 1.5 | Engineer follows advice → target row STILL gets overwritten by older row → silent data corruption in production. |
+| Compl | 2.0 | Misses the canonical dbt-trino-native answer (`incremental_predicates`) entirely. |
 
-Responder shape:
-- **YES, Trino 467 supports IGNORE NULLS.**
-- **Canonical SQL**:
-  ```sql
-  LAST_VALUE(feature_flag) IGNORE NULLS OVER (
-    PARTITION BY account_id ORDER BY snapshot_date
-    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-  ) AS feature_flag_filled
-  ```
-- Supported on `LAST_VALUE`, `FIRST_VALUE`, `NTH_VALUE`, `LAG`, `LEAD` in 467.
-- **Said "your Oracle syntax ports directly with zero changes."**
+**Error 1 — FACTUALLY WRONG: "Trino MERGE does NOT support WHEN MATCHED AND condition (Snowflake/Databricks extension)."** VERIFIED at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) (WebFetched this iter):
+- `WHEN MATCHED [ AND condition ] THEN DELETE`
+- `WHEN MATCHED [ AND condition ] THEN UPDATE SET ( column = expression [, ...] )`
+- `WHEN NOT MATCHED [ AND condition ] THEN INSERT [ column_list ] VALUES (expression, ...)`
 
-**Load-bearing facts VERIFIED:**
+Docs explicitly show `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE`. Resource r27 §2171, §2174, §2187 verbatim teach multi-branch `WHEN MATCHED AND s.op='d' THEN DELETE` / `WHEN MATCHED AND s.op IN ('u','c','r') THEN UPDATE SET ...` and explicitly state "Multiple `WHEN MATCHED [AND condition]` branches are supported." The responder propagated the EXACT myth that r13 §5514 flags as "a very common AI-generated mistake" — but the responder ALSO mis-attributed the limitation to TRINO (the r13 warning is about default dbt-compiled MERGE not adding the AND, NOT about Trino MERGE syntax). This is an imported-prior (Snowflake-MERGE-vs-Trino-MERGE) recurrence.
 
-1. **IGNORE NULLS supported on first_value/last_value/nth_value/lag/lead in Trino 467** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): "By default, null values are respected. If `IGNORE NULLS` is specified, all rows where x is null are excluded from the calculation."
-2. **Placement is OUTSIDE parens, between args and OVER** — verified via [trinodb/trino#1244](https://github.com/trinodb/trino/pull/1244) test cases `lag(c2, 1) IGNORE NULLS over (partition by c3 order by c1 asc)` — null-treatment clause goes between closing args paren and OVER.
-3. **UNBOUNDED PRECEDING..CURRENT ROW look-BACK frame** is the canonical LOCF shape. Correct.
-4. **Responder's displayed SQL is CORRECT Trino 467 syntax** — placement outside parens, look-back frame, supported function.
+**Error 2 — WRONG CROSS-RUN SOLUTION: pre-dedupe staging via `ROW_NUMBER() PARTITION BY subscription_id ORDER BY updated_at DESC` + `WHERE rn = 1` does NOT solve the asked scenario.** The engineer's stated scenario is a CROSS-RUN ordering bug:
+- This run's batch has ONE row for `subscription_id=X` with `updated_at=yesterday` (the late row).
+- `rn=1` keeps it (it's the only row for that key in THIS batch).
+- The merge's `WHEN MATCHED THEN UPDATE` then unconditionally overwrites the target's `updated_at=this-morning` row with the older `updated_at=yesterday` row.
+- Result: target now holds the older data. The "idempotent: only updates if source has a newer updated_at" conclusion is FALSE.
 
-**Framing slip (Acc -1.5, Clar -1.5) — "your Oracle syntax ports directly with zero changes" is FACTUALLY WRONG.**
+Pre-dedupe ROW_NUMBER solves the WITHIN-BATCH dup case (one batch has two rows for the same key). That is a different problem from what was asked.
 
-- Oracle places IGNORE NULLS INSIDE the parens: `LAST_VALUE(feature_flag IGNORE NULLS) OVER (...)`.
-- Trino 467 requires IGNORE NULLS OUTSIDE the parens: `LAST_VALUE(feature_flag) IGNORE NULLS OVER (...)`.
-- The engineer's parse error came PRECISELY from porting Oracle's inside-parens form to Trino.
-- So there IS a required change: move IGNORE NULLS outside the parens.
-- The responder's CANONICAL SQL shows the correct OUTSIDE-parens placement, so the displayed code WORKS — but the framing claim "zero changes" CONTRADICTS the displayed SQL and the engineer's own Q stem ("parse-errors in Trino on IGNORE NULLS").
+**Missing — the correct dbt-trino-native answer is `incremental_predicates`.** VERIFIED at [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy) (WebFetched this iter):
+```jinja
+{{ config(
+    materialized='incremental',
+    unique_key='subscription_id',
+    incremental_strategy='merge',
+    incremental_predicates=[
+        "DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"
+    ]
+) }}
+```
+dbt-trino adds the listed predicate to the MERGE's ON clause alongside `DBT_INTERNAL_DEST.subscription_id = DBT_INTERNAL_SOURCE.subscription_id`. When the source is OLDER than the dest, the ON clause evaluates FALSE → NOT MATCHED branch. (Caveat: with `unique_key` set, dbt's default `WHEN NOT MATCHED THEN INSERT` would then attempt to insert a duplicate key — this is a known nuance and a reason why some adapters route the predicate to `WHEN MATCHED AND ...` instead. r13 §5529 hedges this with "ON clause (or as additional AND ... predicates depending on adapter version)" — accurate hedge for the dbt-trino case.) This canonical lives at **resources/13-postgres-to-iceberg-ingestion.md §5516-5529** and is NOT anchored or cross-referenced from r27/r28's dbt-merge sections where the question's keywords ("late-arriving older row", "only update if newer", "merge overwrite", "blindly overwrite target") naturally lead.
 
-**GREP EVIDENCE — resource coverage is excellent, NOT a content gap:**
-- `r07 §1500-1670` LEADING CANONICAL forward-fill block has a DO-NOT-WRITE table with five grep-findable WRONG/RIGHT rows:
-  - `LAST_VALUE(col IGNORE NULLS) OVER (...)` ❌ PARSE ERROR
-  - `LAST_VALUE(col) IGNORE NULLS OVER (...)` ✅
-  - (parallel rows for FIRST_VALUE / LAG / LEAD / NTH_VALUE)
-- Plus the mnemonic: "Close the args paren, then `IGNORE NULLS`, then `OVER` — three tokens in that order."
-- `r23 §2168-2218` parallel DO-NOT-WRITE row pinned with verbatim parse error message `mismatched input 'IGNORE'`.
+**Routing**: Improving complex SQL performance on Trino with dbt (matches iter1162 Q4 routing for dbt incremental_strategy questions).
 
-So the placement-DIFFERENTIAL claim has full resource coverage. This is a recall-ceiling slip on the framing claim, not a content gap. Engineer who copies the SQL gets a working query but is left confused about why their original parse-errored if "zero changes" needed.
+### Q4 — Oracle NVL2 → Trino CASE / IF — 4.75
 
-**NO FIX-A** — recall-ceiling slip on a framing claim, aligns with `feedback_responder_broken_secondary_alternative.md` / `feedback_responder_overwarning_folklore.md` family (per-instance one-off, no resource fix). SOFT WATCH `iter1233 Q2 IGNORE-NULLS Oracle-vs-Trino placement-zero-changes-framing` re-probe 4-8 iters.
+| Dim | Score | Reasoning |
+|---|---|---|
+| Acc | 5.0 | Trino 467 has NO NVL2 — verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) (conditional functions are CASE / IF / COALESCE / NULLIF / TRY only). `CASE WHEN col IS NOT NULL THEN 'has a value' ELSE 'is null' END` valid. `IF(col IS NOT NULL, 'has a value', 'is null')` valid (Trino IF is 3-arg). NVL → COALESCE mapping correct. NULLIF → NULLIF identity correct. |
+| Clar | 4.5 | Mapping table is clean. |
+| App | 5.0 | Bulk find-replace regex suggestion is actionable. |
+| Compl | 4.5 | Covers both CASE and IF forms; adjacent NVL/NULLIF mappings noted. |
 
-Engineer leaves with: correct working Trino SQL + accurate support claim + minor confusion about whether Oracle's syntax really ports unchanged. The SQL is what's load-bearing; the framing is what's docked. **Topic routed to "Analytical query patterns on Iceberg+Trino"** (LOCF / forward-fill canonical).
+**Routing**: Oracle PL/SQL → dbt+Trino migration.
 
 ---
 
-## Q3 — dbt var() for dev(7d) vs prod(90d) lookback. Where to declare the var + default, how to reference in model SQL (is `CURRENT_TIMESTAMP - INTERVAL '{{ var("lookback_days") }}' DAY` correct?), how to override on CLI vs CI default.
+## Direct answers to teacher's three explicit questions
 
-**Score: 4.875** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.5
+### (1) Is Q2 a recall slip vs content gap?
 
-Responder shape:
-- **Declare in `dbt_project.yml` TOP-LEVEL `vars:`**:
-  ```yaml
-  vars:
-    lookback_days: 90  # prod default
-  ```
-- **Reference in model SQL**:
-  ```sql
-  WHERE event_ts >= CURRENT_TIMESTAMP - INTERVAL '{{ var("lookback_days", 7) }}' DAY
-  ```
-  — two-arg `var(name, default)` form; Jinja renders to `INTERVAL '7' DAY` which IS valid Trino 467.
-- **CLI override**: `dbt run --select events --vars '{lookback_days: 7}'` for dev.
-- **Prod CI uses the 90 default** (no `--vars` flag).
-- **Precedence**: CLI `--vars` > `dbt_project.yml` `vars:` > function default `var('name', 7)`.
-- **Don't use `{% set %}`** for this — compile-time constant, not CLI-overridable.
+**RECALL SLIP, not content gap.** Resources cover this rule prominently:
+- Pinned memory `reference_trino_complex_grouping_column_names_only.md` explicitly: "GROUPING SETS/CUBE/ROLLUP accept COLUMN NAMES ONLY (no expressions; pre-compute in CTE); plain GROUP BY accepts expressions."
+- r28 §452, §580, §589 anchor it with DO-NOT-COPY `date_trunc(...)` examples + the pre-compute-then-ROLLUP-over-bare-name canonical.
+- r27 (referenced via r28 cross-link) also defangs the Postgres/Snowflake-allowed-inside-ROLLUP imported prior.
 
-**Load-bearing facts VERIFIED:**
+The keyword chain "ROLLUP + date_trunc + month/quarter" should have routed to the disambiguation card; recall didn't reach it. NO content fix needed.
 
-1. **Top-level `vars:` block in dbt_project.yml** — verified verbatim at [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables).
-2. **`{{ var("name", default) }}` two-arg form** — verified: `select '{{ var("event_type", "default_value") }}' as event_type`.
-3. **CLI `--vars '{name: val}'`** YAML-dict-string syntax — verified: `$ dbt run --vars '{event_type: signup, region: us}'`; JSON form `'{"event_type": "signup"}'` also valid.
-4. **Precedence CLI > project > function default** — verified verbatim: "Variables passed via `--vars` override `dbt_project.yml` definitions."
-5. **Trino INTERVAL string-quoted integer literal** — `INTERVAL '7' DAY` is valid Trino 467 syntax; Jinja renders the `{{ var(...) }}` to `7` before SQL parse, so the final SQL is `INTERVAL '7' DAY`. Correct.
-6. **`{% set %}` is compile-time constant, not CLI-overridable** — correct; `{% set X = 7 %}` bakes the value at parse time, no way to override from CLI. The responder's caveat is sound.
+### (2) Is the Q3 Trino-MERGE-conditional claim wrong?
 
-**Minor shave (Compl -0.5):** Could mention `target.name == 'dev'` profile-target branching as an alternative for environment-specific defaults — e.g., `{{ var('lookback_days', 7 if target.name == 'dev' else 90) }}` — but unprompted; the var()+CLI override approach the engineer asked about is correct and complete.
+**YES, FACTUALLY WRONG.** Verified at trino.io/docs/467/sql/merge.html — Trino 467 MERGE supports `WHEN MATCHED [ AND condition ] THEN UPDATE SET ...` / `THEN DELETE` and `WHEN NOT MATCHED [ AND condition ] THEN INSERT ...`. Docs example: `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE`. r27 §2171/§2174/§2187 already teach the correct Trino MERGE multi-branch + AND-condition pattern. The responder's misattribution to "Snowflake/Databricks extension" is an imported-prior error (likely confusion between "default dbt-compiled MERGE omits the AND condition" and "Trino MERGE syntax doesn't support the AND condition").
 
-Engineer leaves with: exact yaml block location + exact var() reference + working CLI command + clear precedence + correct INTERVAL interpolation pattern. **Topic routed to "Improving complex SQL performance on Trino with dbt"** (dbt mechanics for env-specific deployment patterns).
+### (3) Is a LIGHT FIX-A warranted for Q3 findability?
+
+**YES — LIGHT FIX-A WARRANTED.** Both sub-issues recur if left:
+- The "Trino MERGE doesn't support WHEN MATCHED AND" myth is propagated by Snowflake/Databricks-trained LLMs. This is the 8th instance of an imported-prior assumed-absence error against Trino syntax (after starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL).
+- The "only update if newer" / "late-arriving older row" canonical answer (`incremental_predicates=['DBT_INTERNAL_DEST.x < DBT_INTERNAL_SOURCE.x']`) lives at r13 §5516-5529 but is NOT anchored from the r27/r28 dbt-merge sections where the question's keywords lead.
+
+#### FIX-A SPEC — exactly where to anchor
+
+**Anchor 1 (r27 §4.6 / §6.8 area — dbt-merge canonical):** Add a 5-7 line callout near the existing dbt-incremental-merge CANONICAL (around r27 §6.8 is-incremental WHERE-clause guardrail neighborhood, or §4.6 MERGE section after §2187 "Correct claims preserved" list) with:
+- Keyword anchors: "late-arriving older row", "out-of-order updated_at", "merge overwrites newer with older", "only update if source is newer", "guard against stale row overwriting fresh row in incremental merge".
+- Load-bearing fact: Trino MERGE syntactically SUPPORTS `WHEN MATCHED AND ... THEN UPDATE` (see r27 §2171 / §2187 — cross-ref); but dbt-compiled MERGE does NOT emit the AND condition by default.
+- The dbt-trino-native solution: `incremental_predicates=['DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at']` (cross-ref to r13 §5516-5529 for the full canonical).
+- DO-NOT-WRITE row: "Trino MERGE doesn't support WHEN MATCHED AND condition — it's Snowflake/Databricks only" — INLINE-MARK WRONG, point at the r27 §2187 list of "Correct claims preserved — Trino-valid".
+
+**Anchor 2 (r28 around line 382 — incremental_predicates partition-pruning lever):** Add a 3-line sibling row next to the existing partition-aligned-merge `incremental_predicates` row noting the second use case: "only-update-if-newer" semantics for late-arriving CDC, with cross-ref to r13 §5516-5529.
+
+**Anchor 3 (r13 §5514 — defang myth more sharply):** The existing CRITICAL warning at r13 §5514 ("a very common AI-generated mistake is to claim dbt compiles `WHEN MATCHED AND s.updated_at > t.updated_at THEN UPDATE SET ...`") is currently dbt-scoped. Add one sentence disambiguating dbt-COMPILED MERGE (doesn't add the AND by default) from TRINO MERGE SYNTAX (supports the AND — see r27 §2171/§2187). This closes the imported-prior loop.
+
+**Watch label**: `iter1234 Trino-MERGE-WHEN-MATCHED-AND-myth + r13-incremental_predicates-only-update-if-newer findability + cross-ref FIX-A`. Re-probe within 4-8 iters under framings like:
+- "late-arriving row in dbt incremental, target already has newer, how to guard"
+- "dbt merge only update if source is newer"
+- "Trino MERGE conditional update — does it support WHEN MATCHED AND"
+
+If the re-probe lands the `incremental_predicates` canonical AND correctly states Trino MERGE supports `WHEN MATCHED AND ...`, watch closes. Same family as iter948 r07 HAVING-trims-memory and iter1226 r17/r21 table_changes-MoR — recurring AI-misconception traced to a resource findability gap.
 
 ---
 
-## Q4 — Oracle `TRUNC(date,'MM')` / `TRUNC(date,'Q')` errors in Trino (numeric rounding). Trino equivalent for month/quarter boundaries — function name + arg mapping.
+## Patterns this iteration
 
-**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
+1. **Imported-prior assumed-absence — 8th instance.** Q3 "Trino MERGE doesn't support WHEN MATCHED AND" follows the same pattern as starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL — assuming a foreign-looking feature isn't in Trino. This pattern is now systematic enough that the teacher might consider a unified myth-defang index in r27 / r28 (one place LLMs can land that lists "Trino DOES have X — Snowflake/Databricks prior is wrong").
+2. **Complex-grouping expression-allowed prior — recurrence.** Q2 echoes the `Trino-complex-grouping-column-names-only` pinned memory error. Recall ceiling on findable content.
+3. **Cross-run vs within-batch dedup confusion (Q3).** Pre-dedupe-to-rn=1 is a common LLM auto-pilot answer that DOESN'T address the cross-run late-arriving-older-row scenario. This is a NEW responder-pattern note — worth tracking if recurs.
+4. Q1 minor `FOR VERSION AS OF '<snapshot_id>'` quoted-string slip is a recall ceiling (not load-bearing for the wall-clock question), passive monitor only.
 
-Responder shape:
-- **Use `date_trunc(unit, date_or_timestamp)`** — Trino's equivalent.
-- **Month**: `date_trunc('month', event_date)` for first-of-month.
-- **Quarter**: `date_trunc('quarter', event_date)` for first-of-quarter.
-- **Args**: `date_trunc(unit, date_or_timestamp)`, unit a string literal, returns same type as input.
-- **Units**: `millisecond / second / minute / hour / day / week (Monday ISO) / month / quarter / year`.
+---
 
-**Load-bearing facts VERIFIED:**
+## Rubric topic updates this iteration
 
-1. **`date_trunc(unit, x)` signature** — verified verbatim at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_trunc(unit, x) → [same as input]`.
-2. **Unit list verbatim**: "millisecond, second, minute, hour, day, week, month, quarter, year" — matches responder's list exactly.
-3. **Week is ISO Monday-start** — consistent with the documented `week()` function returning "ISO week of the year" (1-53), which uses Monday as week-start per ISO 8601.
-4. **Return type same as input** — verified: `date_trunc('month', timestamp_col)` returns timestamp; `date_trunc('month', date_col)` returns date.
-5. **Why Oracle TRUNC fails in Trino**: Trino `truncate(x)` is numeric-only (rounds toward zero), no second-arg date string. The responder correctly framed this as "numeric rounding" — engineer's TRUNC parse error mechanism explained.
+| Topic | Prior | Q | Score | New |
+|---|---|---|---|---|
+| Iceberg table maintenance | 4.4393/229 | Q1 | 4.375 | 4.4391/230 (-0.0002) |
+| Analytical query patterns on Iceberg+Trino | 4.5715/166 | Q2 | 3.0 | 4.5621/167 (-0.0094) |
+| Improving complex SQL performance on Trino with dbt | 4.5478/53 | Q3 | 2.125 | 4.5029/54 (-0.0449) |
+| Oracle PL/SQL → dbt+Trino migration | 4.4600/199 | Q4 | 4.75 | 4.4615/200 (+0.0015) |
 
-No slips. Pin-perfect. Engineer leaves with: direct Oracle→Trino function mapping + complete unit list + return-type clarity + why-Oracle-TRUNC-fails diagnosis. **Topic routed to "Oracle PL/SQL → dbt+Trino SQL migration"** (canonical Oracle dialect rewrite, same routing as prior TRUNC and TO_CHAR Oracle-fn re-probes).
+All topics still PASS healthy margins. Overall iter1234 avg = **3.5625 PASS at threshold** (would have been ~4.5+ without Q3).

@@ -3661,6 +3661,32 @@ The `MAX(order_date)` **MUST be wrapped in a subquery** — `(SELECT MAX(...) FR
 
 Subtract a fixed lookback window (here 3 days) so late-arriving rows still get caught. `incremental_strategy='merge'` + `unique_key` guarantees idempotence: matched rows update in place, unmatched insert — re-running the same lookback window produces no duplicates.
 
+> **READ THIS IF your question is about a LATE row OVERWRITING a NEWER one — keyword anchors: "late-arriving older row overwrites newer", "out-of-order updates", "only update if the incoming row is newer", "stale row overwrites fresh row", "merge blindly overwrites with the older value", "guard merge against older updated_at", "don't overwrite a newer target row", "update only when source updated_at > target updated_at".** This is a DIFFERENT problem from the lookback above (which is about *catching* late rows). Here the late row IS caught — the worry is that it's OLDER than what's already in the target, and a plain merge would clobber the fresh value.
+>
+> **Two facts settle it:**
+>
+> 1. **TRINO MERGE *DOES* support a conditional matched branch.** `WHEN MATCHED AND <condition> THEN UPDATE SET ...` (and `WHEN MATCHED AND <condition> THEN DELETE`) is **valid Trino 467 MERGE syntax** — verified at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) (docs example: `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE`) and used in the canonical CDC MERGE at §4.6 (`WHEN MATCHED AND s.op = 'd' THEN DELETE`). It is **NOT** a Snowflake/Databricks-only extension. So a hand-written MERGE can guard the update with `WHEN MATCHED AND DBT_INTERNAL_SOURCE.updated_at > DBT_INTERNAL_DEST.updated_at THEN UPDATE SET ...`.
+>
+> 2. **dbt's COMPILED merge omits that AND by default** — dbt generates a bare `WHEN MATCHED THEN UPDATE SET ...` (no predicate), so every matched row is overwritten unconditionally, **older or newer**. To inject the guard into a dbt-managed merge, use the **`incremental_predicates`** config — do NOT hand-edit the compiled SQL:
+>
+> ```sql
+> {{ config(
+>     materialized='incremental',
+>     incremental_strategy='merge',
+>     unique_key='subscription_id',
+>     incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]
+> ) }}
+> ```
+>
+> This adds the target-side predicate so only rows where the incoming `updated_at` is strictly newer participate in the UPDATE — i.e. "only update if source is newer." Full mechanism + the explicit-column-list compiled-MERGE shape at **[resource 13 § incremental_predicates / out-of-order guard](13-postgres-to-iceberg-ingestion.md)** (the `DBT_INTERNAL_DEST` / `DBT_INTERNAL_SOURCE` alias canonical).
+>
+> **Pre-deduping the staging batch to one-row-per-key (`ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) = 1`) is NECESSARY but NOT SUFFICIENT** — it removes duplicate keys *within a single batch*, but it does NOT stop an older batch row from overwriting a NEWER row already committed to the target by an *earlier run*. The cross-run guard is the `incremental_predicates` comparison above, not the within-batch dedupe.
+>
+> | DO NOT write | Why it's wrong |
+> |---|---|
+> | "Trino MERGE can't do `WHEN MATCHED AND cond THEN UPDATE` — that's a Snowflake/Databricks extension." | **FALSE.** Trino 467 MERGE supports the conditional matched branch ([sql/merge.html](https://trino.io/docs/467/sql/merge.html); §4.6 canonical). The absent shorthand is `UPDATE SET *` / `INSERT *`, not the `AND condition`. |
+> | "Pre-dedupe staging to `rn=1` makes the merge only-update-if-newer." | Half-true: it dedupes *within* the batch but does NOT protect a target row written by a *prior* run from an older late arrival. Add `incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]` for the cross-run guard. |
+
 **DO-NOT-WRITE callout (load-bearing — both bullets are invalid SQL or anti-patterns):**
 
 > **(i) NEVER write a bare aggregate directly in a `WHERE` clause** — for example `WHERE order_date >= MAX(order_date)`, `WHERE x > MIN(x)`, `WHERE cnt < COUNT(*)`. Aggregate functions are not allowed in `WHERE` in Trino (or any ANSI-SQL engine). They MUST be wrapped in a subquery: `WHERE order_date >= (SELECT MAX(order_date) FROM {{ this }})`. **(ii) NEVER write the convoluted full-history re-scan `WHERE id IN (SELECT id FROM {{ this }} WHERE load_date < CURRENT_DATE) OR load_date >= ...` as a delta filter.** That clause forces the model to re-read every historic row from the target on every run, defeating the entire purpose of `materialized='incremental'`. The canonical delta filter is a single subquery-wrapped `MAX(...)` comparison, not an IN-against-the-target.
