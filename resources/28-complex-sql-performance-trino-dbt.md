@@ -239,7 +239,7 @@ models:
 That's it — four columns, four kinds of generic test, one YAML file. dbt compiles each test entry to a `SELECT`:
 - `unique` → `SELECT user_id FROM fct_users WHERE user_id IS NOT NULL GROUP BY user_id HAVING COUNT(*) > 1` (returns duplicated IDs; zero rows = PASS).
 - `not_null` → `SELECT * FROM fct_users WHERE email IS NULL` (returns the bad rows; zero rows = PASS).
-- `accepted_values` → `SELECT status FROM fct_users WHERE status NOT IN ('active','churned','trial')` (returns rows whose value is outside the allowed set; zero rows = PASS).
+- `accepted_values` → `SELECT status FROM fct_users WHERE status NOT IN ('active','churned','trial')` (returns rows whose value is outside the allowed set; zero rows = PASS). **CRITICAL NULL TRAP — `accepted_values` does NOT catch NULL.** It validates only the **non-NULL** values (per [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests)): the compiled `WHERE col NOT IN (...)` with `NULL NOT IN (...)` evaluates to **UNKNOWN** (not TRUE) under SQL three-valued logic, so NULL rows are silently EXCLUDED from the failing set — a NULL in `status` **PASSES** `accepted_values` unnoticed. To fail the build on BOTH a NULL and an out-of-set literal (e.g. `'none'`), put TWO tests on the column: `- accepted_values: {values: [...]}` **AND** `- not_null`. `accepted_values` alone is NOT enough when NULL is one of the bad values you are trying to reject.
 - `relationships` → `SELECT * FROM fct_users f WHERE f.tenant_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {{ ref('dim_tenants') }} t WHERE t.tenant_id = f.tenant_id)` (returns rows with orphan FKs; zero rows = PASS).
 
 ### The build-gating fact — what `dbt test` and `dbt build` actually do
