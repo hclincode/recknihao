@@ -545,14 +545,20 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 >
 > **Tradeoffs to surface:** (a) cold-tier reads are slower — queries that hit cold data run longer (factor of 2x–10x is typical depending on the cold backend); (b) the lifecycle policy is bucket-/prefix-scoped, not Iceberg-snapshot-aware, so if `expire_snapshots` later prunes the snapshot that referenced a cold-tier file, MinIO's separate orphan-cleanup still has to remove it from the cold tier (cold-tier deletes may bill differently if the cold backend is external); (c) cold-tier compatibility with MinIO's erasure-coding and replication settings depends on the cold target — verify on the specific MinIO version per the docs link above.
 >
-> #### Mechanism B — Per-table compression choice (zstd for archive vs snappy for hot) via Trino `WITH (compression_codec = 'ZSTD')`
+> #### Mechanism B — Compression codec choice (zstd for archive) — on Trino 467 this is CATALOG-wide, NOT per-table
 >
-> **Layer:** Iceberg table property (Trino SQL). **Visibility to Trino:** Trino chooses the codec on write per table. **Granularity:** WHOLE-TABLE only — Iceberg's `compression_codec` is a table-level property, NOT per-partition. **This is NOT tiering** in the storage-class sense — it does not move data to cheaper hardware. It just reduces the bytes-on-disk for a given table by trading CPU at write/read for storage.
+> **Layer:** Iceberg write codec. **Granularity on Trino 467:** **CLUSTER/CATALOG-WIDE, not per-table.** **This is NOT tiering** in the storage-class sense — it does not move data to cheaper hardware; it reduces bytes-on-disk by trading write/read CPU for storage.
 >
-> **The mechanism:** when creating the archive-shaped table (lower-write-rate, cold-read-rate), declare a higher-compression codec. Trino + Iceberg 1.5.2 support `compression_codec` values `NONE`, `SNAPPY` (default), `LZ4`, `ZSTD`, `GZIP` per [trino.io/docs/current/connector/iceberg.html § "Table properties"](https://trino.io/docs/current/connector/iceberg.html).
+> **The 467 reality (verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)):** Trino 467 has **no per-table `compression_codec` table property** — that property was added in **Trino 477** ([trinodb/trino#25755](https://github.com/trinodb/trino/pull/25755)), and the session form (`SET SESSION iceberg.compression_codec`) in **473** ([#24851](https://github.com/trinodb/trino/pull/24851)). On 467 the codec for **Trino-written** files is the **catalog config** `iceberg.compression-codec` in `etc/catalog/iceberg.properties` (values `NONE`/`SNAPPY`/`LZ4`/`ZSTD`/`GZIP`; **default already `ZSTD`**) — one setting for the whole catalog. So you cannot, from Trino 467 SQL, give an archive table a different codec than a hot table.
+>
+> **How to actually get a per-table archive codec on this stack:**
+> - **Upgrade path:** on Trino 477+, `WITH (compression_codec = 'ZSTD')` / `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` become available per-table.
+> - **Spark path (works today):** set the codec per-table from the SPARK writer via the native-Iceberg property — `ALTER TABLE iceberg.analytics.events_archive SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')`. Spark-written files then use that codec; Trino-written files still use the catalog default. This is the only per-table compression lever on a 467+Spark stack.
+> - **Default is already good:** the catalog default is ZSTD, so archive tables already get ~ZSTD-level compression without any per-table config — per-table tuning mostly matters if you want a *lighter* codec (e.g. SNAPPY) on a hot table, which again is catalog-wide on 467.
 >
 > ```sql
-> -- Trino 467 — archive-shaped table with zstd compression for cold storage cost reduction
+> -- Trino 467 — archive-shaped table. NOTE: no compression_codec in WITH (...) on 467 (it's 477+);
+> -- the catalog default ZSTD already applies to Trino-written files.
 > CREATE TABLE iceberg.analytics.events_archive (
 >   event_id     BIGINT,
 >   tenant_id    VARCHAR,
@@ -561,26 +567,14 @@ These are the absolutes most often stated incorrectly when an engineer asks "wha
 >   payload      JSON
 > )
 > WITH (
->   format            = 'PARQUET',
->   compression_codec = 'ZSTD',                       -- vs default SNAPPY; ~30-40% smaller files, slower write
->   partitioning      = ARRAY['month(occurred_at)']
+>   format       = 'PARQUET',
+>   partitioning = ARRAY['month(occurred_at)']
 > );
+> -- Per-table ZSTD on a Spark-written archive table (Spark SQL):
+> --   ALTER TABLE iceberg.analytics.events_archive SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd');
 > ```
 >
-> **From dbt-trino (Iceberg-catalog model):**
->
-> ```python
-> {{ config(
->     materialized='table',
->     properties={
->         'format': "'PARQUET'",
->         'compression_codec': "'ZSTD'",
->         'partitioning': "ARRAY['month(occurred_at)']"
->     }
-> ) }}
-> SELECT * FROM {{ source('events', 'events_raw') }}
-> WHERE occurred_at < CURRENT_DATE - INTERVAL '90' DAY
-> ```
+> > **DO-NOT-WRITE on Trino 467:** `WITH (compression_codec = 'ZSTD')`, `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'`, `SET SESSION iceberg.compression_codec = 'ZSTD'`, or a dbt-trino model `properties={'compression_codec': "'ZSTD'"}` — ALL error on 467 (`table property 'compression_codec' does not exist` / unknown session property). The per-table/per-session forms are 477+/473+. On 467, dbt-trino cannot set compression per-model; it's the catalog config `iceberg.compression-codec` (default ZSTD). See [resource 11 § "Default Parquet compression codec"](11-lakehouse-storage-sizing.md) for the full canonical.
 >
 > **Note on the partition key name.** The Iceberg connector's table-property name is `partitioning` (per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html)); dbt-trino passes the dict keys verbatim into `WITH (...)`, so the dbt key is also `'partitioning'`. The Hive connector's analogous property is `partitioned_by` — but Hive is a different connector. The production stack on this repo is Iceberg, so use `'partitioning'`. See [resource 28 § LEADING CANONICAL — dbt-trino partition key for Iceberg vs Hive](28-complex-sql-performance-trino-dbt.md) for the full three-surface contrast block (raw-Trino DDL, dbt-trino Iceberg config, dbt-trino Hive config).
 >

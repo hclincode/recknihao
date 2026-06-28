@@ -259,57 +259,53 @@ Parquet compression depends heavily on the column's data shape. Use this table t
 
 **Iceberg 1.4.0 and later (including 1.5.x in production) use Zstd as the default Parquet write codec — not Snappy.** Zstd gives 20–30% better compression than Snappy at moderate CPU cost. For event data that is written once and queried later, Zstd is the right default.
 
-> **LEADING CANONICAL — Trino-Iceberg compression: the ONE correct property name + DDL forms.** Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Connector → Iceberg → Table properties). On this stack (Trino 467 + Iceberg 1.5.2), compression is exposed under the **Trino table property `compression_codec`**, with valid values `'ZSTD'`, `'SNAPPY'`, `'GZIP'`, `'LZ4'`, `'NONE'`.
+> **LEADING CANONICAL — Trino-Iceberg compression on 467: it is a CATALOG config, NOT a table property (the `compression_codec` table property is 477+).** Verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (Connector → Iceberg). **On Trino 467 the documented Iceberg TABLE-property list is: `format`, `partitioning`, `sorted_by`, `location`, `format_version`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties` — `compression_codec` is NOT in it.** On 467, the codec Trino uses when **Trino itself writes** Iceberg data is set by the **catalog configuration property** `iceberg.compression-codec` (values `NONE` / `SNAPPY` / `LZ4` / `ZSTD` / `GZIP`; **default `ZSTD`**), set in the catalog file `etc/catalog/<name>.properties` and applied cluster-wide:
 >
-> **At table creation — flat `name = value` pairs in `WITH (...)`:**
->
-> ```sql
-> -- Canonical Trino 467 CREATE TABLE with explicit ZSTD compression.
-> CREATE TABLE iceberg.analytics.events (
->   event_id     BIGINT,
->   tenant_id    BIGINT,
->   event_name   VARCHAR,
->   occurred_at  TIMESTAMP(6) WITH TIME ZONE,
->   payload      MAP(VARCHAR, VARCHAR)
-> )
-> WITH (
->   format            = 'PARQUET',
->   compression_codec = 'ZSTD',
->   partitioning      = ARRAY['day(occurred_at)']
-> );
+> ```properties
+> # etc/catalog/iceberg.properties  (coordinator + workers; restart to apply)
+> iceberg.compression-codec=ZSTD
 > ```
 >
-> **On an existing table — `ALTER TABLE ... SET PROPERTIES` with a BARE identifier:**
+> **Version cutoffs (do not offer a 467 user a form that does not exist yet):**
+> - **Per-table `compression_codec` property** (`WITH (compression_codec='ZSTD')` / `ALTER TABLE ... SET PROPERTIES compression_codec='ZSTD'`) — **Trino 477+ only** ([trinodb/trino#25755](https://github.com/trinodb/trino/pull/25755), which also dropped the session form). NOT on 467 — it parse/validation-errors with `Catalog 'iceberg' table property 'compression_codec' does not exist`.
+> - **Session property `iceberg.compression_codec`** (`SET SESSION iceberg.compression_codec='ZSTD'`) — **Trino 473+** ([trinodb/trino#24851](https://github.com/trinodb/trino/pull/24851)). NOT on 467.
+> - So on **467 specifically**, the ONLY Trino-side compression lever is the **catalog config** above. There is no per-table and no per-session override from Trino on 467.
+>
+> **This question's table is SPARK-written** (a 50M-events/day Spark Structured Streaming writer) — and a writer's own config governs the codec of the files IT writes, NOT the reader's catalog setting. For a Spark-written Iceberg table, the codec is the **native-Iceberg table property** `write.parquet.compression-codec`, set from Spark:
 >
 > ```sql
-> -- Canonical Trino 467 alter — bare identifier on the LHS, string literal on the RHS.
+> -- Spark SQL (this is the right call for a Spark writer — sets the codec for Spark-written files)
 > ALTER TABLE iceberg.analytics.events
->   SET PROPERTIES compression_codec = 'ZSTD';
+>   SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd');
 > ```
 >
-> This applies to **future writes only**. Existing Parquet files keep their original codec until you re-compact via `ALTER TABLE iceberg.analytics.events EXECUTE optimize` (Trino 467) or `CALL iceberg.system.rewrite_data_files(table => 'analytics.events')` (Spark).
+> **How to CHECK the current codec (Trino-side, read-only):** the native key shows up in the `$properties` metadata table if a writer set it explicitly:
 >
-> **Verify via `SHOW CREATE TABLE`** — the rendered DDL shows the current `compression_codec` in the `WITH (...)` clause; if absent, the table inherits the catalog/session default (Zstd on Iceberg 1.5.2+).
+> ```sql
+> SELECT key, value
+> FROM iceberg.analytics."events$properties"
+> WHERE key LIKE '%compression%';   -- e.g. write.parquet.compression-codec = 'snappy'
+> ```
 >
-> **DO-NOT-WRITE — the three native-Iceberg / Spark name spillovers that will parse-error or no-op on Trino 467:**
+> If the row is **absent**, no explicit codec is stored and each writer used its own default (Spark/Iceberg ≥1.4.0 default ZSTD; Trino-written files use the catalog `iceberg.compression-codec` default ZSTD). Changing the codec applies to **future writes only**; to re-compress existing files, re-write them (Spark `CALL iceberg.system.rewrite_data_files(...)`, or Trino `ALTER TABLE ... EXECUTE optimize` which re-writes data files using Trino's catalog codec).
 >
-> | DO NOT write (native Iceberg / Spark name) | What it actually is | Correct Trino 467 form |
+> **DO-NOT-WRITE — banned compression claims on Trino 467:**
+>
+> | DO NOT write | Why it's wrong on 467 | Correct 467 form |
 > |---|---|---|
-> | `WITH (... properties = map('write.parquet.compression-codec', 'snappy'))` | Trino's `WITH (...)` takes FLAT `property_name = expression` pairs (per [trino.io/docs/current/sql/create-table.html](https://trino.io/docs/current/sql/create-table.html)). There is no `properties` wrapper key in Trino's WITH clause and no `map(...)` value form here. This shape is borrowed from the native-Iceberg metadata JSON layout. | `WITH (format = 'PARQUET', compression_codec = 'SNAPPY')` |
-> | `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` | `SET TBLPROPERTIES` is **Spark SQL** syntax. `write.parquet.compression-codec` is the **native Iceberg** table-property key (read by Spark/the Iceberg Java API). Trino does not expose that key under its `WITH` namespace. | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` |
-> | `ALTER TABLE ... SET PROPERTIES "write.parquet.compression-codec" = 'zstd'` (or `'write.parquet.compression-codec' = 'zstd'`) | Same root cause — `write.parquet.compression-codec` is the native Iceberg key, NOT a Trino property; the quoting form (double-quote or string-literal) is also wrong. Trino's `SET PROPERTIES` takes BARE identifiers on the LHS (only the value is quoted), per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html). | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` |
+> | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` (or `WITH (compression_codec='ZSTD')`) on **Trino 467** | `compression_codec` is **not a 467 Iceberg table property** — it was added in **Trino 477** ([#25755](https://github.com/trinodb/trino/pull/25755)). On 467 it errors `table property 'compression_codec' does not exist`. | Trino-written files: set the **catalog** config `iceberg.compression-codec=ZSTD`. Spark-written files: Spark `SET TBLPROPERTIES ('write.parquet.compression-codec'='zstd')`. |
+> | `SET SESSION iceberg.compression_codec = 'ZSTD'` on **Trino 467** | The session compression property is **Trino 473+** ([#24851](https://github.com/trinodb/trino/pull/24851)); not registered on 467. | Catalog config `iceberg.compression-codec` (467 has no session/table override). |
+> | "`SHOW CREATE TABLE` shows the `compression_codec` in `WITH(...)`" on 467 | 467 never stores `compression_codec` as a table property, so it never renders in `SHOW CREATE TABLE`. | Read `"<table>$properties"` for the native `write.parquet.compression-codec` key (only present if a writer set it). |
 >
-> **Meta-rule:** in Trino, use Trino's dialect names. Native Iceberg / Spark property and API names do not parse against the Trino connector's WITH-clause namespace and will fail with `Property 'write.parquet.compression-codec' does not exist` or similar.
+> **Native Iceberg ↔ engine compression-name map:**
 >
-> **Native Iceberg ↔ Trino name translation (the most-asked compression pairs):**
+> | Engine / surface | How to set the write codec |
+> |---|---|
+> | **Trino 467 (this stack)** | **Catalog config only:** `iceberg.compression-codec=ZSTD` in `etc/catalog/iceberg.properties` (cluster-wide; default ZSTD). NO per-table / per-session form until 473 (session) / 477 (table property). |
+> | Spark / native Iceberg (the WRITER here) | `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` — governs Spark-written files. |
+> | Iceberg Java API | `table.updateProperties().set(TableProperties.PARQUET_COMPRESSION, "zstd").commit()` |
 >
-> | Engine / surface | Compression property name | Compression set syntax |
-> |---|---|---|
-> | **Trino 467 (this stack)** | `compression_codec` (BARE identifier) | `WITH (compression_codec = 'ZSTD')` or `SET PROPERTIES compression_codec = 'ZSTD'` |
-> | Native Iceberg / Spark | `write.parquet.compression-codec` (string key in the properties map) | `TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` |
-> | Iceberg Java API | `TableProperties.PARQUET_COMPRESSION` constant | `table.updateProperties().set(PARQUET_COMPRESSION, "zstd").commit()` |
->
-> If you operate this table from Spark (e.g., a Spark Structured Streaming writer), use the native-Iceberg `TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` form there — that is the right call inside Spark. From Trino, **always** use `compression_codec`. See [§ Trino dialect ↔ native-Iceberg name translation](#trino-dialect--native-iceberg-name-translation-meta-canonical) below for the broader translation table.
+> **Does compression meaningfully affect Trino read/query speed?** For columnar analytics scans the cost is **I/O-bound** (bytes pulled from MinIO), not CPU-decompress-bound, so ZSTD's ~2–3× smaller files usually make scans FASTER despite slightly higher per-MB decompress cost — the "Snappy decompresses faster so reads are better" intuition is the wrong axis for scan-heavy analytics. ZSTD is the right default (and IS the Iceberg/Trino default on this stack).
 
 > **Note for Iceberg < 1.4.0:** Snappy was the default before 1.4.0. If you're on an older version, the Zstd switch is worth applying explicitly.
 

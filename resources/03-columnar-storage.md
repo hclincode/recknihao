@@ -186,12 +186,41 @@ Parquet uses dictionary encoding *by default* for low-cardinality string columns
 
 ### LEADING CANONICAL — How do I set Parquet compression on this stack (Trino 467 + Iceberg 1.5.2)?
 
-> **The ONE correct Trino-Iceberg compression property and its valid values.** Verified against [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (Connector → Iceberg → Table properties). On Trino 467, the table property is **`compression_codec`** (one Trino-side identifier, BARE — no quotes on the LHS), with valid values exactly `'ZSTD'`, `'SNAPPY'`, `'GZIP'`, `'LZ4'`, `'NONE'`. Iceberg 1.5.2's default is `ZSTD`; SaaS engineers rarely need to override.
+> **On Trino 467, compression is a CATALOG CONFIG, not a table property.** Verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (Connector → Iceberg). **Trino 467's Iceberg TABLE-property allow-list is exactly: `format`, `partitioning`, `sorted_by`, `location`, `format_version`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `data_location`, `extra_properties` — `compression_codec` is NOT in it.** The per-table `compression_codec` property was added in **Trino 477** ([trinodb/trino #25755](https://github.com/trinodb/trino/pull/25755)); the per-session form `SET SESSION iceberg.compression_codec='ZSTD'` was added in **Trino 473** ([#24851](https://github.com/trinodb/trino/pull/24851)). Neither exists on 467.
 >
-> **(a) At table creation — FLAT `name = value` pairs in `WITH (...)`:**
+> **(a) Trino-written files — set the codec via the CATALOG configuration (cluster-wide, default ZSTD):**
+>
+> ```properties
+> # etc/catalog/iceberg.properties  (coordinator + every worker; restart to apply)
+> iceberg.compression-codec=ZSTD
+> # Valid values: NONE | SNAPPY | LZ4 | ZSTD | GZIP  (default: ZSTD)
+> ```
+>
+> This is the ONLY Trino-side compression lever on 467. There is no per-table override and no per-session override from Trino. ZSTD is the default; SaaS engineers rarely need to change it.
+>
+> **(b) Spark-written tables — use the NATIVE Iceberg table property from Spark:**
 >
 > ```sql
-> -- Canonical Trino 467 DDL — explicit ZSTD on a partitioned events table.
+> -- Spark SQL (Spark's writer reads this; governs codec for files Spark writes).
+> ALTER TABLE iceberg.analytics.events
+>   SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd');
+> ```
+>
+> **(c) Inspect the current codec from Trino (read-only):** the `$properties` metadata table surfaces the native key if a writer set it explicitly.
+>
+> ```sql
+> SELECT key, value
+> FROM iceberg.analytics."events$properties"
+> WHERE key LIKE '%compression%';   -- e.g. write.parquet.compression-codec = 'zstd'
+> ```
+>
+> If the row is **absent**, no writer set an explicit codec and each writer used its own default (Spark/Iceberg >= 1.4.0 default ZSTD; Trino-written files use the catalog `iceberg.compression-codec` default ZSTD). Changing the codec affects FUTURE writes only — to re-compress existing files, re-write them (Spark `CALL iceberg.system.rewrite_data_files(...)`, or Trino `ALTER TABLE ... EXECUTE optimize` which re-writes data files using Trino's catalog codec).
+>
+> **(d) Canonical Trino 467 CREATE TABLE — note the WITH clause does NOT include compression on 467:**
+>
+> ```sql
+> -- Canonical Trino 467 DDL for a partitioned events table.
+> -- Compression is governed by catalog config iceberg.compression-codec (default ZSTD on this stack).
 > CREATE TABLE iceberg.analytics.events (
 >   event_id    BIGINT,
 >   tenant_id   BIGINT,
@@ -200,34 +229,24 @@ Parquet uses dictionary encoding *by default* for low-cardinality string columns
 >   payload     MAP(VARCHAR, VARCHAR)
 > )
 > WITH (
->   format            = 'PARQUET',
->   compression_codec = 'ZSTD',
->   partitioning      = ARRAY['day(occurred_at)']
+>   format       = 'PARQUET',
+>   partitioning = ARRAY['day(occurred_at)'],
+>   sorted_by    = ARRAY['occurred_at']
 > );
 > ```
 >
-> **(b) On an existing table — `ALTER TABLE ... SET PROPERTIES` with a BARE identifier on the LHS:**
+> **DO-NOT-WRITE on Trino 467 (each of these will parse/validation-error or no-op):**
 >
-> ```sql
-> -- Canonical Trino 467 alter — bare identifier on the LHS, string literal on the RHS.
-> -- Affects NEW writes only. To recompress existing files, also run EXECUTE optimize.
-> ALTER TABLE iceberg.analytics.events
->   SET PROPERTIES compression_codec = 'ZSTD';
->
-> -- Recompress existing data files with the new codec (Trino-native):
-> ALTER TABLE iceberg.analytics.events EXECUTE optimize;
-> ```
->
-> **DO-NOT-WRITE on Trino 467 (each of these will parse-error or no-op):**
->
-> | DO NOT write | Why it's wrong | Correct Trino form |
+> | DO NOT write on Trino 467 | Why it's wrong on 467 | Correct 467 form |
 > |---|---|---|
-> | `WITH (format = 'PARQUET', properties = map('write.parquet.compression-codec', 'snappy'))` | Trino's `WITH (...)` takes FLAT `property_name = expression` pairs ([trino.io/docs/current/sql/create-table.html](https://trino.io/docs/current/sql/create-table.html)). There is no `properties` wrapper key and no `map(...)` value form here — that shape is borrowed from the native-Iceberg metadata-JSON layout. | `WITH (format = 'PARQUET', compression_codec = 'SNAPPY')` |
-> | `WITH (..., "write.parquet.compression-codec" = 'snappy')` | `write.parquet.compression-codec` is the **NATIVE Iceberg** property key (used by Spark and the Iceberg Java API). It is NOT a Trino WITH-clause property. Trino exposes compression under the name `compression_codec`. Pasting it into Trino fails with `Property 'write.parquet.compression-codec' does not exist`. | `WITH (..., compression_codec = 'SNAPPY')` |
-> | `ALTER TABLE ... SET PROPERTIES ('compression_codec' = 'ZSTD')` (string-literal LHS) | `SET PROPERTIES` takes BARE identifiers on the LHS per [trino.io/docs/current/sql/alter-table.html](https://trino.io/docs/current/sql/alter-table.html). Only the value is quoted. | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` |
-> | `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` | `SET TBLPROPERTIES` is **Spark SQL** syntax + native-Iceberg key. Trino's clause is `SET PROPERTIES` with the Trino name `compression_codec`. | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` |
+> | `WITH (format = 'PARQUET', compression_codec = 'ZSTD', ...)` <span title="banned on 467">WRONG-on-467</span> | `compression_codec` is **NOT a 467 Iceberg table property** (the per-table form was added in Trino 477, [#25755](https://github.com/trinodb/trino/pull/25755)). On 467 it errors `Catalog 'iceberg' table property 'compression_codec' does not exist`. | Drop `compression_codec` from the WITH clause; set `iceberg.compression-codec=ZSTD` in the catalog config (already the default). |
+> | `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` <span title="banned on 467">WRONG-on-467</span> | Same 477+ cutoff — `SET PROPERTIES compression_codec` is also a 477+ form. On 467 it errors `table property 'compression_codec' does not exist`. | Catalog config `iceberg.compression-codec=ZSTD` (Trino-written files); Spark `SET TBLPROPERTIES ('write.parquet.compression-codec'='zstd')` for Spark-written files. |
+> | `SET SESSION iceberg.compression_codec = 'ZSTD'` <span title="banned on 467">WRONG-on-467</span> | Session compression property is **Trino 473+** ([#24851](https://github.com/trinodb/trino/pull/24851)); not registered on 467. | Catalog config (only lever on 467). |
+> | `WITH (format = 'PARQUET', properties = map('write.parquet.compression-codec', 'snappy'))` | Trino's `WITH (...)` takes FLAT `name = expression` pairs ([trino.io/docs/467/sql/create-table.html](https://trino.io/docs/467/sql/create-table.html)). There is no `properties` wrapper key and no `map(...)` value form here — that shape is borrowed from the native-Iceberg metadata-JSON layout. | Drop the wrapper; set compression via catalog config on 467. |
+> | `WITH (..., "write.parquet.compression-codec" = 'snappy')` | `write.parquet.compression-codec` is the **NATIVE Iceberg** property key (Spark / Iceberg Java API). It is NOT a Trino WITH-clause property on any Trino version. Pasting it into Trino fails with `Property 'write.parquet.compression-codec' does not exist`. | Trino-side: catalog config `iceberg.compression-codec`. Spark-side: `SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')`. |
+> | `ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.compression-codec' = 'zstd')` on Trino | `SET TBLPROPERTIES` is **Spark SQL** syntax; Trino has no `TBLPROPERTIES` clause. | Run that statement from **Spark** (it's the Spark form). From Trino, the only 467 lever is the catalog config. |
 >
-> **Meta-rule:** in Trino, use Trino's dialect names. Native Iceberg / Spark property and API names do not parse against the Trino Iceberg connector. See [§ Trino dialect ↔ native-Iceberg name translation in resource 11](11-lakehouse-storage-sizing.md#trino-dialect--native-iceberg-name-translation-meta-canonical) for the full translation table covering compression, file format, target file size, snapshot timestamp, WITH-clause shape, and `SET PROPERTIES` LHS form.
+> **Meta-rule:** in Trino, use Trino's dialect names AND respect the version cutoff. Native Iceberg / Spark property and API names do not parse against the Trino Iceberg connector, AND a Trino property added in 473/477 will not exist on 467 either. See [§ Default Parquet compression codec in resource 11](11-lakehouse-storage-sizing.md#default-parquet-compression-codec) for the full canonical (catalog-config vs Spark-TBLPROPERTIES vs version-cutoff vs how-to-CHECK).
 
 ---
 

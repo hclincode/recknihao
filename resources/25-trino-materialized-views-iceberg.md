@@ -107,8 +107,9 @@ The properties in the `WITH (...)` clause configure the **hidden Iceberg storage
 | `partitioning` | Iceberg partition spec for the storage table | Match the dominant filter on the MV (e.g., `ARRAY['event_date']` for a date-filtered dashboard) |
 | `format_version` | Iceberg spec version: `1` or `2` | `2` (required for MoR features; default in modern Iceberg) |
 | `sorted_by` | Iceberg sort-order for files | The second-most-common filter (after partitioning) |
-| `compression_codec` | Page compression for Parquet | `'ZSTD'` (default in recent Iceberg) |
 | `storage_schema` | Where the storage table lives — defaults to the view's own schema | Move to a separate `iceberg.analytics_mv_storage` schema if you want OPA grants to differ |
+
+> **Note on Parquet compression for the MV storage table (Trino 467):** compression is NOT a per-table/per-MV property on 467 — it is the **catalog config** `iceberg.compression-codec` in `etc/catalog/iceberg.properties` (default `ZSTD`; values `NONE` / `SNAPPY` / `LZ4` / `ZSTD` / `GZIP`), cluster-wide. The per-table `compression_codec` property was added in **Trino 477** ([trinodb/trino #25755](https://github.com/trinodb/trino/pull/25755)); the per-session `iceberg.compression_codec` is **Trino 473+** ([#24851](https://github.com/trinodb/trino/pull/24851)). On 467, do **NOT** put `compression_codec` in the MV's `WITH (...)` clause — Trino will reject it with `Catalog 'iceberg' table property 'compression_codec' does not exist`. ZSTD is the default and the right choice for analytics scans, so most MVs need no action. See [resource 11 § Default Parquet compression codec](11-lakehouse-storage-sizing.md#default-parquet-compression-codec) for the full canonical.
 
 **Why `partitioning` matters for an MV:** queries against the MV get the same partition-pruning benefit as queries against a regular Iceberg table. A 30-day dashboard that filters by `event_date >= CURRENT_DATE - 7` will only read 7 partitions of the storage table, not the full 30.
 
