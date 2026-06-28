@@ -1,172 +1,187 @@
-# Iter1200 Judge Feedback
+# Iter1201 Judge Feedback
 
-**Overall: 4.625 / 5.0 — PASS. Q1 PRIORITY WATCH CLOSES. Q4 soft WATCH CLOSES on the lead BUT with a broken-secondary slip (timestamp-minus-timestamp).** Two clean 5.0s (Q1 format_version dialect canonical, Q3 dbt hard_deletes), one 4.5 (Q2 two-level-aggregation pattern correct but inner CTE column reference sloppy), one 4.0 (Q4 lead correct but age example uses `timestamp - timestamp` which Trino does NOT support per `-` operator). Q4 slip is a per-instance responder lapse, NOT resource-sourced — r27 §4.2 L771 explicitly bans `dt - SYSDATE`-style timestamp subtraction and routes to `date_diff`. No FIX-A. Carry-forward watches NOT exercised this iter: soft iter1197 generate_schema_name macro; light-monitor iter1199 r17 position-delete adjacent.
+**Overall: 4.156 / 5.0 — PASS.** Q1 (5.0) THIN-ROW LIFT lands cleanly on the thinnest topic (dbt snapshots SCD2). Q2 (4.875) PERCENTILE_CONT → approx_percentile canonical pin-perfect. Q3 (3.75) root-cause **correct** (`on_schema_change='append_new_columns'` is exactly r13 §5527–5540 canonical) but **TWO mechanism slips on `--full-refresh` semantics** — both are RESPONDER inference (NOT resource-sourced). Q4 (3.0) Option A (CAST) correct but **Option B "concat() handles mixed types" is WRONG** (concat is varchar-only, same rule as `||`) AND the **`format()` printf-style canonical was missed entirely** — the canonical lives in r23 §3.1A LEADING CANONICAL + r27 §7A.3.1. Pure FINDABILITY gap; no resource defect.
 
----
+**Per-question scores:**
 
-## Q1 (PRIORITY WATCH) — Trino 467 `format_version` upgrade after Hive→Iceberg migrate
+| Q | Topic | Acc | Clar | App | Compl | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | dbt snapshots SCD2 — point-in-time as-of join | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 | SQL best practices — PERCENTILE_CONT in Trino | 5 | 4.5 | 5 | 5 | **4.875** |
+| Q3 | Postgres→Iceberg ingestion — on_schema_change + --full-refresh | 3 | 4 | 4 | 4 | **3.75** |
+| Q4 | Oracle PL/SQL → Trino — `\|\|` mixed-type concat | 2.5 | 4 | 3 | 2.5 | **3.0** |
 
-**Score: 5 / 5 / 5 / 5 = 5.0**
-
-### What the responder said
-- Trino form: `ALTER TABLE iceberg.analytics.accounts SET PROPERTIES format_version = 2;`
-- Three load-bearing dialect distinctions correctly named:
-  1. **`SET PROPERTIES`** (Trino), NOT `SET TBLPROPERTIES` (Spark/Hive).
-  2. **Underscored `format_version`** (Trino), NOT hyphenated `'format-version'` (Spark/Iceberg-native).
-  3. **Unquoted integer `2`** (Trino), NOT quoted string `'2'` (Spark).
-- Routing: migrated tables default to v1 (no row-level deletes → MERGE / dbt incremental MERGE fails); new Trino-created tables already default to v2; v1→v2 bump enables MERGE.
-
-### Verification (primary sources)
-- [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — verbatim ALTER form: `ALTER TABLE table_name SET PROPERTIES format_version = 2;` (unquoted name, unquoted integer; CONFIRMED via WebFetch this iter).
-- The Spark/Iceberg-native form `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` is the recognized Iceberg PROCEDURE / Spark Iceberg connector form and is documented by Iceberg, not Trino. Pasting Spark's hyphenated quoted form into Trino yields a parse / unknown-property error — the responder's framing is correct.
-- r21 §137 / §159 already carries this canonical with the exact same dialect contrast — responder cleanly reached the right card.
-
-### PRIORITY WATCH STATUS: **CLOSES** (1st re-probe)
-
-Watch label: `iter1196 r21 format_version SET PROPERTIES` — the iter1196 r21 §137-159 reconcile (Trino-form FIRST, Spark-form clearly defanged as wrong-engine) lands on first re-probe. All three dialect axes (statement, property name, value type) verbalized by the responder.
-
-### Verdict
-Pin-perfect canonical for the v1→v2 post-migrate upgrade. No defect, no FIX-A.
+Iteration mean **4.156** — passing.
 
 ---
 
-## Q2 — Two-level aggregation (busy-hour heatmap: average per day, NOT total)
+## Q1 — dbt snapshot SCD2 as-of join (point-in-time)
 
-**Score: 4.5 / 5 / 4 / 4.5 = 4.5**
+**Score: 5 / 5 / 5 / 5 = 5.00 — THIN-ROW LIFT on the #1 thinnest passing topic.**
 
 ### What the responder said
 ```sql
-WITH tickets_per_cell AS (
-  SELECT event_date,
-         day_of_week(event_date) AS dow,
-         hour(created_at)         AS hour_of_day,
-         COUNT(*)                 AS ticket_count
-  FROM tickets
-  WHERE created_at >= current_timestamp - INTERVAL '90' DAY
-  GROUP BY event_date, day_of_week(event_date), hour(created_at)
-)
-SELECT dow, hour_of_day, CAST(AVG(ticket_count) AS BIGINT) AS avg_tickets_per_day
-FROM tickets_per_cell
-GROUP BY dow, hour_of_day
-ORDER BY ...
+SELECT ...
+FROM events e
+INNER JOIN accounts_snapshot s
+  ON e.account_id = s.account_id
+ AND e.event_timestamp >= s.dbt_valid_from
+ AND (s.dbt_valid_to IS NULL OR e.event_timestamp < s.dbt_valid_to);
 ```
+Explained that `WHERE dbt_valid_to IS NULL` gives **only the currently active row** (the trap the engineer described), while the half-open range predicate `[dbt_valid_from, dbt_valid_to)` joins each event to **the row active at its timestamp**.
 
-The **PATTERN** is correct: inner GROUP BY produces one row per (date, dow, hour) tuple with that day's count; outer GROUP BY averages across the ~13 occurrences of each (dow, hour) cell over the 90-day window. This is the canonical two-level fix for "AVG per day" vs "raw COUNT" heatmaps.
-
-### Verification (primary sources)
-- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (verified via WebFetch): `day_of_week(x)` returns ISO day 1=Monday…7=Sunday; `hour(x)` returns 0…23. Both accept date/timestamp/timestamp-with-tz.
-- Two-level aggregation pattern is standard Trino: inner pre-aggregate → outer aggregate over inner results. Single-pass `AVG(COUNT(*) OVER (...))` does NOT exist (nested aggregates illegal); CTE form is the canonical fix.
-
-### Accuracy nit (-0.5 Acc, -1 App)
-**`event_date` is ungrounded.** The inner SELECT references `event_date` and groups by `event_date`, but the source table (per the engineer's framing) has only `created_at` TIMESTAMP. As written the query throws `Column 'event_date' cannot be resolved`. The intended form is one of:
-```sql
-SELECT CAST(created_at AS DATE) AS event_date, ...
-GROUP BY CAST(created_at AS DATE), day_of_week(CAST(created_at AS DATE)), hour(created_at)
-```
-or
-```sql
-SELECT date_trunc('day', created_at) AS event_date, ...
-GROUP BY date_trunc('day', created_at), day_of_week(date_trunc('day', created_at)), hour(created_at)
-```
-
-Per the eval directive, the load-bearing thing is the **PATTERN** (this two-level-average heatmap was historically a synthesis-ceiling FAIL — see `feedback_synthesis_ceiling_stop_churning.md` family). The responder reaches the pattern cleanly, which is the recall win. Engineer copy-pastes, hits the missing-column error, infers `event_date` is meant to be derived, and adds the CAST in ~10 seconds. Not catastrophic, but the SQL as printed is not directly runnable.
+### Verification
+- [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots) — `dbt_valid_to IS NULL` denotes the currently-active row (no `dbt_is_current` column).
+- Canonical SCD-2 half-open interval pattern; matches r09 §348 + iter1158/iter1187 prior canonicals.
+- `INNER JOIN` correctly drops events whose timestamp predates the earliest snapshot row (defensible; documented as the standard rule). LEFT JOIN with NULL-handling is a valid variant for "give me the event row even if no snapshot exists yet" but not what the question asked.
 
 ### Verdict
-Pattern-level recall is the historically-hard part and the responder lands it. The `event_date` derivation slip is a per-instance copy-trap, NOT a resource defect — r07 two-level-aggregate canonicals consistently show explicit `CAST(... AS DATE)` derivations. Recall ceiling, NO FIX-A. Per `feedback_responder_broken_secondary_alternative.md` adjacent family (broken-secondary in-line in a otherwise-correct primary block).
+Pin-perfect SCD-2 point-in-time join — same shape as the iter1158 / iter1187 / iter1200 canonicals, applied here to **events joined to a dbt snapshot** specifically. The thin-row lift is clean.
 
 ---
 
-## Q3 — dbt snapshots: detecting hard deletes via `hard_deletes` config
+## Q2 — Trino 467 PERCENTILE_CONT availability + grouped P50/P90 by priority
 
-**Score: 5 / 5 / 5 / 5 = 5.0**
+**Score: 5 / 4.5 / 5 / 5 = 4.875**
 
 ### What the responder said
-- Config: `hard_deletes='invalidate'` — when a row disappears from source, dbt stamps `dbt_valid_to = run time` so the row no longer matches `WHERE dbt_valid_to IS NULL` (no longer looks "current").
-- Alternative: `hard_deletes='new_record'` inserts a marker row with `dbt_is_deleted=True` (explicit deletion audit trail).
-- Shows the snapshot config block with `strategy='timestamp'`, `updated_at`, `unique_key`.
+- `PERCENTILE_CONT` does **NOT** exist in Trino 467.
+- Use `approx_percentile(time_to_close_minutes, 0.5)` and `approx_percentile(time_to_close_minutes, 0.9)` GROUP BY priority.
+- **Array form** for multi-percentile single pass: `approx_percentile(col, ARRAY[0.5, 0.9, 0.95, 0.99])` → returns array of percentiles in one aggregation.
+- Implementation: **T-Digest** (not HyperLogLog — HLL is for `approx_distinct`).
+- **No published standard error figure** for approx_percentile (matches my pinned `reference_trino_approx_percentile_error.md` — the 2.3% figure is documented for `approx_distinct` only).
+- Only the approximate form is exposed; no `MEDIAN()` and no `PERCENTILE_DISC`.
 
-### Verification (primary sources)
-- [docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes) (verified via WebFetch): three valid values
-  - `ignore` (default) — no action on disappeared rows; the engineer's stuck-as-current symptom.
-  - `invalidate` — "Invalidates the deleted records by setting `dbt_valid_to` to the current time" — matches responder's framing verbatim.
-  - `new_record` — "Tracks deleted records as new rows using the `dbt_is_deleted` meta field" — matches responder's framing.
-- Introduced in **dbt 1.9** (or "Latest" track). The legacy field name is `invalidate_hard_deletes=true` for pre-1.9; responder doesn't mention the legacy name but didn't have to — engineer is on a current dbt + dbt-trino setup (production stack).
-- The marker row example from docs:
-  ```
-  id | dbt_is_deleted | dbt_valid_from | dbt_valid_to
-  1  | True           | 2024-05-20...  | 2024-06-03...
-  1  | False          | 2024-06-03...  | NULL
-  ```
-  confirms the `new_record` insert-on-delete semantics the responder described.
+### Verification
+- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `approx_percentile` overloads: single percentile + array percentiles + weighted variants. T-Digest implementation confirmed via Trino source. No `percentile_cont` / `percentile_disc` / `median` in 467.
+- Array form returns `array(double)` for fraction-array input — exactly what the responder described.
+- The "no published standard error" caveat matches my pinned reference (only `approx_distinct` has the 2.3% figure documented).
+
+### Minor shaves
+- (-0.5 Clar) The phrase "T-Digest is a probabilistic sketch — sub-percent error in practice for typical distributions" is hedged but a beginner reader may want one concrete example of the typical-error magnitude. Not load-bearing.
 
 ### Verdict
-Pin-perfect dbt 1.9+ canonical. Engineer copies the `hard_deletes='invalidate'` line into the snapshot config and the missing-validity-window bug is fixed. No defect, no FIX-A.
+Pin-perfect Trino 467 percentile canonical with the load-bearing dialect distinction (Postgres `PERCENTILE_CONT` absent → `approx_percentile` is the equivalent). Single-pass array form is the right operational guidance for "P50 + P90 in one query."
 
 ---
 
-## Q4 (SOFT WATCH) — Trino SYSDATE equivalent (no-TZ "now")
+## Q3 — Incremental Iceberg model + added column + `--full-refresh` on dbt-trino
 
-**Score: 3.5 / 4.5 / 3.5 / 4.5 = 4.0**
+**Score: 3 / 4 / 4 / 4 = 3.75 — CORE GUIDANCE CORRECT, TWO MECHANISM SLIPS.**
 
 ### What the responder said
-- **Lead (correct):** "The Trino function is `localtimestamp`" — returns `TIMESTAMP` (no TZ) = session local wall clock, matches Oracle SYSDATE.
-- **Lead example (correct):** `WHERE event_time > localtimestamp - INTERVAL '1' DAY` — `TIMESTAMP - INTERVAL` is supported in Trino.
-- **Lead disambiguation (correct):** `current_timestamp` returns TIMESTAMP WITH TIME ZONE.
-- **Broken secondary:** "For age: `(localtimestamp - created_at) AS age_since_creation`" — **INCORRECT in Trino 467**.
-- Side note: AT TIME ZONE to strip tz (acceptable framing).
+- **Root cause** (correct, resource-sourced at r13 §5527–5540): `on_schema_change` defaults to `'ignore'`, which silently drops the new `region` column from the compiled INSERT/MERGE — that's why post-change events still show `region` populated but historical 6 months are NULL.
+- **Fix**: set `on_schema_change='append_new_columns'` + run `dbt run --select fct_events --full-refresh`.
+- **CLAIM A** (mechanism): "`--full-refresh` sets `is_incremental()` false, reruns entire SELECT, table is rewritten from scratch — for `materialized='incremental'` this is a **MERGE INTO that touches every row**."
+- **CLAIM B** (downstream safety): "Downstream models remain queryable — they see the old table until the new one is fully written, then Trino switches the metadata pointer (**Iceberg atomic swap**); queries do **NOT** fail mid-run." Also: "if `--full-refresh` killed mid-run, Iceberg snapshot isolation → readers see old or fully-committed new."
 
-### Verification (primary sources)
+### Verification
 
-**Lead verified (WATCH CLOSES):**
-- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (WebFetch this iter): "`localtimestamp` — Returns the current timestamp as of the start of the query, with 3 digits of subsecond precision." Returns `TIMESTAMP` without time zone (vs. `current_timestamp` → `TIMESTAMP WITH TIME ZONE`). Matches Oracle SYSDATE no-TZ semantics.
-- r27 §4.2-NOW (L815-L817) carries this verbatim: `localtimestamp` → `TIMESTAMP` (no TZ) — session-local wall clock. Responder reached the right card.
+**Root cause + fix — CORRECT.** Verified at [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) + r13 §5527 (`on_schema_change` default IS `'ignore'`, NOT `'fail'`) + r13 §5614 canonical config. Engineer takes the right action.
 
-**Broken secondary — `TIMESTAMP - TIMESTAMP` with `-` operator is NOT supported in Trino:**
-- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) operators table (WebFetch verified): only `timestamp - interval` is listed; `timestamp - timestamp` is NOT a supported binary operator. The example `timestamp '2012-08-08 01:00' - interval '29' hour` is the only subtraction form documented.
-- **`(localtimestamp - created_at)` throws** in Trino — the engine has no rewrite for raw timestamp-minus-timestamp into INTERVAL DAY TO SECOND (that's a Postgres/Oracle interval-arithmetic semantic; Postgres does it natively, Trino does not).
-- The canonical Trino form is `date_diff('day', created_at, localtimestamp)` (returns bigint days) or another unit (`'second'`, `'millisecond'`) per use case.
+**CLAIM A — MECHANISM WRONG.** [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) verbatim (WebFetch this iter):
+> "To force dbt to rebuild the entire incremental model from scratch, use the `--full-refresh` flag on the command line. **This flag will cause dbt to drop the existing target table in the database before rebuilding it for all-time.**"
 
-### Source-anchor check — RESPONDER SLIP, NOT RESOURCE-SOURCED
+And [docs.getdbt.com/reference/resource-configs/full_refresh](https://docs.getdbt.com/reference/resource-configs/full_refresh) verbatim:
+> "The `--full-refresh` flag will force dbt to `drop cascade` the existing table before rebuilding it."
 
-`grep -n` on `resources/27-oracle-plsql-to-dbt-trino.md`:
-- **L771 explicitly bans it:** `| dt - SYSDATE (interval) | date_diff('day', current_timestamp, dt) returns bigint | Trino doesn't subtract timestamps to get a bare number; use date_diff. |`
+→ `--full-refresh` on an incremental model is a **DROP + CREATE-TABLE-AS-SELECT** rebuild, NOT a `MERGE INTO`. The responder's "MERGE INTO that touches every row" is the WRONG mechanism. On dbt-trino specifically the actual statement emitted depends on the model's `on_table_exists` config (default `'rename'` → temp-build + ALTER RENAME swap; `'replace'` → `CREATE OR REPLACE TABLE`; `'drop'` → drop + create) — see r28 §964 LEADING CANONICAL. **None of these are MERGE.** Mechanically, `--full-refresh` causes `is_incremental()` to evaluate FALSE, so the incremental-only `WHERE` predicate is **skipped**, and dbt builds the full table from scratch.
 
-The resource carries the exact translation row that would have prevented this slip. The responder reached the `localtimestamp` card for the lead but produced the broken `timestamp - timestamp` example independently. Per `feedback_responder_broken_secondary_alternative.md` family — recurring pattern of a correct lead followed by an in-line broken "for completeness" example. **Per-instance one-off, NO resource fix.**
+**CLAIM B — TOO ABSOLUTE.** The "atomic Iceberg metadata commit" claim is **contingent on `on_table_exists`**:
+- `on_table_exists='replace'` → `CREATE OR REPLACE TABLE` → ONE atomic Iceberg metadata commit, readers never see missing/empty. (r28 §964 verbatim.)
+- `on_table_exists='rename'` (the dbt-trino DEFAULT) → temp-build then `ALTER TABLE ... RENAME` swap — effectively atomic.
+- `on_table_exists='drop'` → `DROP TABLE` then `CREATE TABLE` — **REAL WINDOW** where the table does not exist; downstream queries fail with "table does not exist."
 
-### SOFT WATCH STATUS: **CLOSES on the lead** (1st re-probe)
+The responder didn't qualify with `on_table_exists`. Engineer on default `'rename'` won't see breakage, but engineer on `'drop'` will. Mid-run failures DO happen on `'drop'`. The "Iceberg atomic swap" framing also conflates Iceberg's snapshot isolation (which is real for concurrent **writes** to the SAME table) with the cross-statement DROP+CREATE window (a different mechanism).
 
-Watch label: `soft iter1197 localtimestamp SYSDATE`. The primary question was "Trino function for current date+time WITHOUT tz (like SYSDATE)?" — responder named `localtimestamp` directly with correct return type, contrasts with `current_timestamp`. Watch closes on the lead. The age-example slip is a separate broken-secondary that does NOT reopen the watch but earns a -1 on Acc and -1.5 on App because the engineer copies the broken form and hits a runtime / type error.
+### Slip categorization
+Both Claim A (MERGE INTO mechanism) and Claim B (atomic-swap absoluteness) are **responder inference, NOT resource-sourced**. r13 §5527 + §5614 covers `on_schema_change` accurately. r28 §964 LEADING CANONICAL covers `on_table_exists` with the four-row table accurately. The responder reached `on_schema_change` cleanly but didn't compose the `--full-refresh`-mechanism story from the right cards.
 
-### Score breakdown
-- **Accuracy 3.5:** Lead correct; broken `timestamp - timestamp` example is a factual error in Trino.
-- **Beginner clarity 4.5:** Clear contrast `localtimestamp` vs `current_timestamp`; jargon explained.
-- **Practical applicability 3.5:** Engineer pastes the age example, hits parse / type error, re-derives via `date_diff`. The lead-only piece is directly actionable; the age piece is not.
-- **Completeness 4.5:** Covers the lead, the contrast, the WHERE form, AT TIME ZONE strip; broken age form pulls Compl from 5 to 4.5.
+Per `feedback_responder_broken_secondary_alternative.md` family — the lead (root cause + `append_new_columns` fix) is correct; the responder appended mechanism narration that wasn't asked-for and got it wrong.
+
+### Per-instance vs resource defect
+- The MERGE-INTO-on-full-refresh claim is a Trino+dbt-trino mechanism error.
+- Resource state: r28 §964 already covers `on_table_exists`. r13 §5527 covers `on_schema_change`. No resource teaches the WRONG mechanism — this is purely a responder synthesis slip.
+
+**NO FIX-A.** Per-instance slip. Re-probe in 3–6 iters with framing "what does `--full-refresh` actually do to an Iceberg incremental model on dbt-trino" to test whether the slip recurs (then it would be a candidate for a card consolidating r13 + r28).
 
 ### Verdict
-Lead is the answer to the question as asked and it lands. The age example is the recurring `feedback_responder_broken_secondary_alternative.md` pattern — secondary form unsolicited, broken, ignored by skilled engineers but a copy-trap for new ones. **NO resource fix** (r27 §4.2 L771 already carries the exact ban); responder slip only. Re-probe in 3-6 iters under a structurally similar framing ("age in days from created_at vs SYSDATE") to confirm the slip is per-instance and not recurring.
+Engineer leaves with the correct action (`on_schema_change='append_new_columns'` + `--full-refresh`) and a wrong mental model of what `--full-refresh` does. Actionable but mechanism-inaccurate.
 
 ---
 
-## Cross-cutting observations
+## Q4 — Oracle `||` mixed-type concat → Trino type error: must we CAST everything, or is there a function?
 
-- **Two clean 5.0s on two distinct dialect canonicals** (Q1 Trino format_version, Q3 dbt 1.9+ hard_deletes). Both reached the right card with all dialect distinctions verbalized.
-- **Q2 synthesis-ceiling stays closed** — the two-level-aggregation pattern (historically a FAIL family per `feedback_synthesis_ceiling_stop_churning.md`) was reached cleanly. Only the column-derivation in the inner CTE was sloppy; the load-bearing pattern is correct.
-- **Q4 broken-secondary recurs** — `feedback_responder_broken_secondary_alternative.md` family active again. 9th-or-10th instance in this rolling pattern: correct lead + uninvited broken alternative. Continue per-instance scoring, do NOT churn resources (no single resource fix addresses responder padding).
-- **No imported-prior slips this iter.** No over-warning folklore.
-- **No FIX-A this iter.** All four answers either pin-perfect (Q1, Q3) or recoverable recall-ceiling/copy-trap (Q2 event_date, Q4 timestamp-minus-timestamp).
+**Score: 2.5 / 4 / 3 / 2.5 = 3.0**
 
-### Carry-forward watches
-- **CLOSED THIS ITER:** `iter1196 r21 format_version SET PROPERTIES` (Q1, 1st re-probe). `soft iter1197 localtimestamp SYSDATE` (Q4 lead, 1st re-probe).
-- **NEW LIGHT-MONITOR:** Q4 broken-secondary `localtimestamp - created_at` — responder slip, NOT resource defect; r27 §4.2 L771 already bans it. Re-probe in 3-6 iters under similar framing to confirm per-instance.
-- **NOT EXERCISED:** soft `iter1197 generate_schema_name` macro surface. Light-monitor `iter1199 r17 position-delete adjacent` (Spark `rewrite_position_delete_files` vs Trino optimize tradeoff framing).
+### What the responder said
+- Trino `||` is varchar-only; integers are a type error (correct).
+- **Option A — CAST each integer AS VARCHAR** (recommended): correct, matches r27 §7A.3.1 RIGHT option A.
+- **Option B — "Use concat() function instead: `concat('Account #', account_id, ' — active for ', days_since_login, ' days')` — concat() (if your Trino version has it) MAY handle implicit type coercion more gracefully."**
+- Said Option A is safest/most readable.
+- **DID NOT mention `format()` at all.**
 
-### Topic score updates
-| Topic | Prev avg / N | This iter Q-score | New avg / N |
-|---|---|---|---|
-| Iceberg table maintenance | 4.4350 / 212 | Q1 5.0 | 4.4377 / 213 |
-| Analytical query patterns on Iceberg+Trino | 4.5295 / 146 | Q2 4.5 | 4.5293 / 147 |
-| dbt snapshots SCD2 | 4.2294 / 21 | Q3 5.0 | 4.2644 / 22 |
-| Oracle PL/SQL → dbt + Trino | 4.4737 / 161 | Q4 4.0 | 4.4708 / 162 |
+### Verification — Option B is WRONG
 
-All four topics remain PASSED with healthy margins. No topic flips status. dbt snapshots SCD2 stays thinnest (4.2644).
+[trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) verbatim (WebFetch this iter):
+> `concat(string1, ..., stringN) → varchar`
+
+[trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) verbatim:
+> "Trino will not convert between character and numeric types. For example, a query that expects a varchar will not automatically convert a bigint value to an equivalent varchar."
+
+→ `concat()` is **also varchar-only** — same type-error behavior as `||`. The responder's "concat() MAY handle implicit type coercion more gracefully" is FALSE and directly contradicts r27 §7A.3.1 L4513 verbatim:
+> "In Trino, **`CONCAT(...)` and `||` require ALL arguments to be character types (VARCHAR / CHAR)**. Cast every non-VARCHAR argument explicitly with `CAST(... AS VARCHAR)`, or use `format('...%d...%s...', a, b)` instead."
+
+r23 §3.1A L690 LEADING CANONICAL (keyword anchors include "format vs concat") shows the exact answer the responder should have given:
+```sql
+format('Account #%d — active for %d days', account_id, days_since_login)
+```
+- `%d` accepts BIGINT/INTEGER directly.
+- `%s` accepts already-VARCHAR or any value (formats whatever's there).
+- Returns VARCHAR; no CAST per integer.
+
+This is the **load-bearing canonical** for "don't CAST everything" string-building. The responder missed it entirely.
+
+### Slip categorization
+- **Option B (concat-coerces) is a WRONG SECONDARY ALTERNATIVE** — broken-secondary-alternative family (`feedback_responder_broken_secondary_alternative.md`), 11th-or-so instance. Lead (CAST) is correct; the appended "for completeness" alternative is broken.
+- **Missing `format()` is a FINDABILITY gap** — not a resource defect (the canonical EXISTS in r23 §3.1A AND r27 §7A.3.1, AND r27 L995 Oracle-`||` translation table row already cross-refs `format('FQ-%d', year_int)` with "See §7A.3.1 for the canonical fix"). The keyword path "Oracle `||` / type error varchar vs integer / concat function handling mixed types" did NOT reach those canonicals — instead the responder routed to a general "concat is varchar-only" hand-wave and made up Option B.
+
+### Light findability FIX-A — RECOMMENDED (small, additive)
+
+The resource CONTENT is correct (r23 §3.1A LEADING CANONICAL + r27 §7A.3.1 RIGHT-option-B both teach `format()` for mixed-type building). The gap is keyword routing on the **Oracle migration entry path**.
+
+**Concrete recommendation** (light, additive cross-ref — NOT a content rewrite):
+1. In **r27 §7A.3 / §7A.3.1**: add a one-line keyword anchor at the section opening like `> **Keyword anchors:** Oracle || varchar vs integer error, Trino concat function mixed types, build string without casting every integer, format vs concat, printf-style alternative to CAST AS VARCHAR.` This makes the keyword path "concat function handling mixed types" find §7A.3.1 directly.
+2. Confirm the cross-ref at **r23 §3.1A** keyword anchors already includes "format vs concat" / "Oracle || implicit coerce" (it already does at L692 + L951 → r27 cross-ref). NO change needed on r23 side.
+
+**Rationale**:
+- Pure findability (no content change) — low risk of `feedback_new_card_over_attracts_adjacent` over-attraction.
+- The two canonicals already exist and are correct; only the keyword path needs widening.
+- Q4 is a recurring pattern (Oracle engineers migrating || string-building) — worth strengthening.
+
+**WATCH label**: `iter1201 r27 §7A.3.1 Oracle-|| concat-mixed-types findability` — re-probe in 3–6 iters with framing similar to "Oracle `||` works on integers, Trino throws type error, is there a concat function that handles mixed types" to confirm the responder now lands at `format()` instead of inventing Option B.
+
+### Verdict
+Engineer leaves with a working Option A (CAST per integer) but misled by a wrong Option B (concat-coerces is false) and never sees the printf-style `format()` answer they actually asked for ("is there a Trino concat function handling mixed types?" — yes, `format()` is the printf-style answer). LIGHT findability FIX-A recommended on r27 §7A.3.1.
+
+---
+
+## Carry-forward watches
+
+- **CLOSED THIS ITER**: none (no priority watches active for re-probe this iter).
+- **Soft (continuing)**: `iter1197 generate_schema_name macro surface-area` — re-probe in 4–8 iters with explicit "use dbt macros to control schema" framing. Not exercised this iter.
+- **Light-monitor (continuing)**: `iter1199 r17 position-delete adjacent` — Spark `rewrite_position_delete_files` tradeoff framing. Not exercised this iter.
+- **Light-monitor (continuing)**: `iter1200 timestamp-subtraction broken-secondary` — re-probe under similar Oracle SYSDATE-age framing in 2–5 iters. Not exercised this iter.
+- **NEW watch this iter**: `iter1201 r27 §7A.3.1 Oracle-|| concat-mixed-types findability` (Q4) — see Q4 above. LIGHT FIX-A recommended (additive keyword-anchor only).
+- **NEW light-monitor this iter**: `iter1201 dbt --full-refresh mechanism on incremental` (Q3) — responder said "MERGE INTO that touches every row" + "atomic swap" without `on_table_exists` qualifier. Re-probe in 3–6 iters with explicit `--full-refresh` framing to see if the slip recurs.
+
+---
+
+## Topic score updates
+
+- **dbt snapshots SCD2**: 4.2644/22 → **4.2964/23** (Q1 = 5.0; +0.0320; thinnest required topic, margin +0.7964)
+- **SQL query best practices for OLAP**: 4.5827/269 → **4.5838/270** (Q2 = 4.875; +0.0011; margin +1.0838)
+- **Postgres-to-Iceberg ingestion**: 4.4979/173 → **4.4936/174** (Q3 = 3.75; -0.0043; margin +0.9936)
+- **Oracle PL/SQL → dbt + Trino SQL migration**: 4.4708/162 → **4.4618/163** (Q4 = 3.0; -0.0090; margin +0.9618)
+
+All required topics remain PASSED with healthy margins. Thinnest remaining = **dbt snapshots SCD2 (4.2964)** — climbed +0.032 this iter but stays #1 thinnest.
