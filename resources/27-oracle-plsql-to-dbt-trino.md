@@ -3994,6 +3994,62 @@ dbt build --select source_status:fresher+         # stage 2 — only rebuild wha
 
 ---
 
+### 6.7M LEADING CANONICAL — `generate_schema_name` macro (per-environment / per-developer schema names; the "all my targets write to the SAME schema" fix)
+
+> **Findability anchor (read FIRST if your question contains any of these):** dbt dev/staging/prod all land in the same schema / overwrite each other; want `dev` → `dev_analytics`, `staging` → `staging_analytics`, `prod` → `analytics`; per-environment schema; per-developer schema so devs don't clobber each other; `generate_schema_name` macro — what to put in it and where the file goes; `+schema:` config produced a weird PREFIXED name like `analytics_marketing` instead of `marketing`; custom schema name; `generate_schema_name_for_env`; control target schema by environment on dbt-trino.
+
+**The mechanism.** dbt computes the schema a model is built into by calling the `generate_schema_name(custom_schema_name, node)` macro. `custom_schema_name` is the per-model `+schema:` config (in `dbt_project.yml` or a model `config()`), or `none` if you never set one. **dbt's DEFAULT `generate_schema_name` does NOT just use your custom name — it PREFIXES it with the target schema** (verified at [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas)):
+
+```jinja
+-- dbt's BUILT-IN default (do not copy — shown to explain the surprise):
+{% macro generate_schema_name(custom_schema_name, node) -%}
+    {%- set default_schema = target.schema -%}
+    {%- if custom_schema_name is none -%}
+        {{ default_schema }}                                  {# no +schema set → just the profile's schema #}
+    {%- else -%}
+        {{ default_schema }}_{{ custom_schema_name | trim }}  {# +schema: marketing → analytics_marketing (PREFIXED!) #}
+    {%- endif -%}
+{%- endmacro %}
+```
+
+This is why `+schema: marketing` with `schema: analytics` in the profile produces **`analytics_marketing`**, not `marketing` — and why three targets that ALL set `schema: analytics` in `profiles.yml` all land in **`analytics`** (same schema, clobbering each other). The fix is to **override the macro** in your project.
+
+**THE FIX for "dev → `dev_analytics`, staging → `staging_analytics`, prod → `analytics`".** Create the file **`macros/generate_schema_name.sql`** (dbt auto-discovers any macro of this name in `macros/` and uses it instead of the built-in):
+
+```jinja
+-- macros/generate_schema_name.sql
+{% macro generate_schema_name(custom_schema_name, node) -%}
+    {%- set default_schema = target.schema -%}   {# profile schema, e.g. 'analytics' #}
+    {%- if custom_schema_name is not none -%}
+        {# honor an explicit per-model +schema: (prefixed, dbt's collision-safe default behavior) #}
+        {{ default_schema }}_{{ custom_schema_name | trim }}
+    {%- elif target.name == 'prod' -%}
+        {{ default_schema }}                      {# prod → analytics #}
+    {%- else -%}
+        {{ target.name }}_{{ default_schema }}    {# dev → dev_analytics, staging → staging_analytics #}
+    {%- endif -%}
+{%- endmacro %}
+```
+
+Keep `schema: analytics` in all three `profiles.yml` targets; the macro derives the env prefix from `target.name` (the target you pass via `dbt run --target dev|staging|prod`). On **dbt-trino**, the returned name is the **Trino SCHEMA** inside the catalog — the catalog comes from the profile's `catalog`/`database` key (e.g. `iceberg`), so the model lands at `iceberg.dev_analytics.<model>`. The macro controls only the schema segment, not the catalog.
+
+**Built-in shortcut — `generate_schema_name_for_env`.** dbt ships this helper: in **prod** (`target.name == 'prod'`) it uses the custom schema as-is (or `target.schema` if none); in **every other env** it uses `target.schema` ONLY (ignores the custom name). To adopt it, the override is one line:
+
+```jinja
+-- macros/generate_schema_name.sql
+{% macro generate_schema_name(custom_schema_name, node) -%}
+    {{ generate_schema_name_for_env(custom_schema_name, node) }}
+{%- endmacro %}
+```
+
+…then give each developer a distinct `schema:` in their own `profiles.yml` (e.g. `alice_dev`) so non-prod runs are naturally isolated. Use this when you want **per-developer** isolation; use the hand-rolled `target.name`-prefixing macro above when you want fixed **per-environment** names (`dev_analytics` / `staging_analytics`).
+
+> **DO-NOT-WRITE / CRITICAL:** Do NOT write a custom `generate_schema_name` that returns just `{{ custom_schema_name }}` (dropping `default_schema` / the env discriminator) — that makes every environment and every developer write to the SAME schema and silently overwrite each other (the exact bug being fixed). Always include an environment- or target-derived discriminator. Also: `generate_schema_name` runs at PARSE time and must wrap logic that reads `target`/`node` — it cannot query Trino. The sibling macro **`generate_database_name`** controls the CATALOG segment the same way (rarely needed on this stack — the catalog is usually fixed to `iceberg`).
+
+> **Cross-references:** §"dbt connection & secrets" (profiles.yml / `env_var()` / `target`) for how targets + `schema:` are declared; §6.7F for `--target` / selector usage. Custom schema docs: [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas).
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:
