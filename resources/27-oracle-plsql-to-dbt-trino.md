@@ -2545,6 +2545,49 @@ What this means in practice:
 
 **Cross-references.** §6.7G (`var()` for per-run knobs — the sibling mechanism). §6.7H (dbt-docs site — note: `env_var()` values are read at parse time, so the *expanded* host/schema show up in docs unless they are `DBT_ENV_SECRET_*`). §6.7 routing anchor (full Q-keyword → canonical map for dbt-OPS questions).
 
+### LEADING CANONICAL — setting Trino SESSION properties from dbt (`session_properties` in profiles.yml) — the right way to apply `query_max_memory_per_node` etc. across models
+
+> **Findability anchor (read FIRST if your question contains any of these):** set a Trino SESSION property for dbt models; `SET SESSION query_max_memory_per_node` for dbt; heavy dbt model crashes Trino with EXCEEDED_LOCAL_MEMORY_LIMIT / memory error; apply a session property to ALL models without a per-model pre_hook; does on-run-start set a session var for my models; does a pre_hook session setting persist; where to put `query_max_memory_per_node` / `query_max_run_time` / `join_distribution_type` for dbt; dbt-trino session_properties; global Trino session setting for dbt.
+
+**The one fact.** dbt issues each model build on its **own Trino connection**, and Trino session properties are **connection-scoped** (a `SET SESSION` lasts only for that connection). So WHERE you set the property determines whether it reaches the model. Three tiers, from best to worst for "apply to many models":
+
+| Mechanism | Where | Connection behavior | Use it for |
+|---|---|---|---|
+| **`session_properties:`** (BEST for global) | `profiles.yml` under the output target | Applied to **EVERY** connection dbt opens — so it's active for **every model**, no per-model config. | The clean global answer: `query_max_memory_per_node`, `query_max_run_time`, `join_distribution_type`, etc. for the whole project (or per-target dev/prod). |
+| **`pre_hook="SET SESSION ..."`** | a model's `config()` (or a folder-level `+pre_hook` in `dbt_project.yml`) | Runs in the **SAME** connection as the model that follows → the session property **IS active** for that model. | Scoping a property to ONE model or one folder of heavy models. |
+| **`on-run-start: ["SET SESSION ..."]`** | `dbt_project.yml` project hook | Runs **ONCE at invocation start in a SEPARATE connection** that then closes → the session property is **GONE before any model runs**. **Does NOT work for session vars.** | Only for side effects that don't depend on connection state (logging to an audit table, `CALL` a procedure). NOT for `SET SESSION` you want models to see. |
+
+**The canonical fix for "heavy models OOM Trino — set `query_max_memory_per_node` once":**
+
+```yaml
+# profiles.yml — applies to EVERY model dbt builds on this connection
+my_project:
+  target: prod
+  outputs:
+    prod:
+      type: trino
+      host: trino.internal
+      user: "{{ env_var('TRINO_USER') }}"
+      password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+      catalog: iceberg
+      schema: analytics
+      threads: 4
+      session_properties:                      # <- Trino SET SESSION props, applied to every connection
+        query_max_memory_per_node: '8GB'
+        query_max_run_time: '4h'
+```
+
+Verified at [docs.getdbt.com/docs/core/connect-data-platform/trino-setup](https://docs.getdbt.com/docs/core/connect-data-platform/trino-setup): *"`session_properties` — Sets Trino session properties used in the connection."* Run `SHOW SESSION` in Trino to see the available property names. If only a couple of models are heavy, prefer a folder-scoped `+pre_hook` (or per-model `pre_hook`) so the larger memory grant applies only where needed.
+
+> **DO-NOT-WRITE — banned answers for "set a Trino session property from dbt":**
+> | DO NOT write | Why it's wrong |
+> |---|---|
+> | `iceberg.query_max_memory_per_node=8GB` (or `query_max_memory_per_node=...`) in `etc/catalog/iceberg.properties` | **FABRICATED.** Query-memory limits are **cluster-level coordinator config** — `query.max-memory-per-node` in **`etc/config.properties`** (a hyphenated *system* config, NOT a per-catalog property and NOT `iceberg.`-prefixed). The Iceberg catalog file has no such property; this neither parses as a catalog prop nor is the dbt-side answer. To raise it per-query from dbt, use `session_properties` (profile) or `pre_hook`/`SET SESSION query_max_memory_per_node` (model). |
+> | Put `SET SESSION query_max_memory_per_node='8GB'` in `on-run-start` and expect models to inherit it | **WRONG — separate connection.** `on-run-start` runs once in its own connection that closes before model builds; the session prop never reaches the models. Use `session_properties` (global) or `pre_hook` (per-model, same connection). |
+> | "Trino has no way for dbt to set session properties globally — you must pre_hook every model" | **FALSE.** `profiles.yml` `session_properties:` applies to every connection = every model, no per-model repetition. |
+
+> **Cross-references.** §6.7G (`var()`), the profiles.yml canonical above (`session_properties` is a sibling profile key), and [resource 18 §"query memory / EXCEEDED_LOCAL_MEMORY_LIMIT"](18-query-performance-regression.md) for the cluster-side `query.max-memory-per-node` / `query.max-memory` config and resource-group alternatives.
+
 ---
 
 ## 6. Worked end-to-end example: a nightly rollup procedure

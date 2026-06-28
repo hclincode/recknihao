@@ -1,172 +1,220 @@
-# Iter1212 Judge Feedback — PASS (4.5625 avg), NO FIX-A; Q3 minor "NOT in schema.yml" over-statement flagged as soft watch
+# Iter1213 Judge Feedback — PASS (4.03 avg) + LIGHT FIX-A on Q3 (dbt-trino session_properties canonical + Option C catalog-property fabrication defang); Q4 inverted (+)-mnemonic SOFT WATCH
 
-**Overall verdict**: **PASS**, avg **4.5625**, **NO FIX-A**. Q1/Q2/Q4 clean; Q3 has a real but minor over-statement ("NOT in schema.yml") that does not block the engineer (the `dbt_project.yml` form given IS correct and most common). Decision: recall-ceiling / per-instance slip — no resource churn.
+**Overall verdict**: **PASS**, avg **4.0313** (16.125/4), **LIGHT FIX-A on Q3**. Q1/Q2 STRONG PASS pin-perfect. Q3 has a real **fabrication** (Option C `iceberg.query_max_memory_per_node=8GB` in `etc/catalog/iceberg.properties` — not a valid Trino config form) **plus a critical omission** (the canonical dbt-trino-native `session_properties:` block in `profiles.yml` is the cleanest answer to the engineer's literal "apply once before all models" ask and resources/ has ZERO hits for it). Q4 mapping-table examples correct but appended prose mnemonic "the `(+)` always appears on the table you want to keep the unmatched rows from" is **INVERTED** — Oracle `(+)` marks the OPTIONAL/null-padded side; you keep ALL rows from the side **without** `(+)`. Mnemonic not resource-sourced, classified as responder per-instance slip + SOFT WATCH (NOT a r27 reconcile — over-attractor risk per `feedback_new_card_over_attracts_adjacent`).
 
 | Q | Topic | Score | Verdict |
 |---|---|---|---|
-| Q1 | Iceberg partition design (CTAS honors partitioning + sorted_by physically) | 4.625 | STRONG PASS (minor "directories" Hive-ism) |
-| Q2 | Analytical query patterns on Iceberg+Trino (ROW_NUMBER first-row-per-group) | 4.75 | STRONG PASS (min_by alt not surfaced; non-load-bearing) |
-| Q3 | Improving complex SQL perf on Trino with dbt (seed `column_types` location) | 4.0 | PASS (real "NOT in schema.yml" over-statement; engineer still unblocked) |
-| Q4 | Oracle PL/SQL → dbt + Trino SQL migration (DECODE → searched CASE + NULL nuance) | 4.875 | STRONG PASS |
+| Q1 | Iceberg table maintenance (`$files` + `$snapshots` measurement + `expire_snapshots(retention_threshold=>'7d')` + `remove_orphan_files`) | 4.625 | STRONG PASS (minor reader-safety nuance shave) |
+| Q2 | Analytical query patterns on Iceberg+Trino (per-user MIN trial_start CTE + time-windowed INNER JOINs) | 4.625 | STRONG PASS (minor `pct_step1_users`-is-actually-COUNT column-label slip) |
+| Q3 | Improving complex SQL perf on Trino with dbt (on-run-start vs pre_hook connection scope + session vars) | 3.25 | PASS + LIGHT FIX-A (Option C fabrication + missed `session_properties` canonical) |
+| Q4 | Oracle PL/SQL → dbt+Trino SQL migration (`(+)` outer join rewrite to LEFT/RIGHT JOIN) | 3.625 | PASS (mapping table correct, INVERTED prose mnemonic — SOFT WATCH) |
 
 ---
 
-## Q1 — Iceberg CTAS `partitioning=ARRAY['day(created_at)'], sorted_by=ARRAY['customer_id']` honored physically? — 4.625 STRONG PASS
+## Q1 — Iceberg `$snapshots`/`$files` measurement + `expire_snapshots(retention_threshold=>'7d')` + `remove_orphan_files` + reader safety — 4.625 STRONG PASS
 
 **Verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)** (WebFetch this iter):
 
-> "The sort order is configured with the `sorted_by` table property... **Data is sorted during writes within each file based on the specified array of one or more columns.**"
-> "You can disable sorted writing with the session property `sorted_writing_enabled` set to `false`."
+### Measurement metadata tables — both verified
 
-Responder's claims are all correct:
+- **`$snapshots` columns**: docs confirm verbatim `committed_at` ("The time when the snapshot became active"), `operation` ("The type of operation performed on the Iceberg table"), `summary` ("A summary of the changes made from the previous snapshot"). Responder named all three correctly.
+- **`$files` content column**: docs confirm verbatim "Type of content stored in the file. The supported content types in Iceberg are: DATA(0), POSITION_DELETES(1), EQUALITY_DELETES(2)". Responder named exact mapping (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES) and column `file_size_in_bytes` — both correct.
 
-1. **`partitioning` organizes data files into Iceberg partitions during the write** — YES; the writer routes rows into per-partition file streams based on the partition transform (`day(created_at)`).
-2. **`sorted_by` clusters rows within each Parquet file by `customer_id` DURING the write** — YES, verbatim per the docs above ("Data is sorted during writes within each file"). Not post-write, not metadata-only.
-3. **Sharpens file-level `customer_id` min/max stats** — correct; Parquet column stats now have tight ranges, so file-skipping on `customer_id` predicates becomes effective.
-4. **Applies only to files written by THIS CTAS** — correct; sorted_by as a table property affects all FUTURE writes (including this CTAS), and `ALTER TABLE SET PROPERTIES sorted_by=ARRAY[...]` afterward only affects subsequent writes (existing files would need `ALTER TABLE EXECUTE optimize` to be rewritten).
-5. **Engineer's worry "files come out unsorted" answered directly**: NO, they will be sorted by `customer_id` within each `day(created_at)` partition file. r05 sort-order-within-partitions cite is appropriate.
+### Reclamation procedures — both verified
 
-**Soft Compl shave (-0.375): minor Hive-ism on "day-level directories".** The responder said partitioning "organizes files into day-level partitions" — Iceberg uses **hidden partitioning tracked in metadata** (partition spec ID + per-partition tuple recorded in manifests). Files DO land under `data/created_at_day=2026-06-28/...` style paths in object storage, but **query pruning is via manifest metadata, not directory scan** — the "directories" framing is a Hive-ism. Non-load-bearing for this question (engineer's worry was about physical sort, which is answered correctly), but flag for completeness.
+- **`ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold=>'7d')`**: correct 467 form per docs. Note responder pragmatically chose `7d` — happens to clear the documented `iceberg.expire-snapshots.min-retention` 7d default floor (verified at [trinodb/trino#19096](https://github.com/trinodb/trino/issues/19096) "Retention specified (1.00d) is shorter than the minimum retention configured in the system (7.00d)"). No floor-collision hazard.
+- **`ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold=>'7d')`**: correct 467 form per docs.
 
-**Production-stack fit**: MinIO + Iceberg + Hive Metastore + Trino 467 — CTAS works exactly as described. Engineer can run the DBA's DDL as-is.
+### Reader-safety claim — mostly correct, pragmatic nuance
 
-Cites r05.
+Responder said "files referenced by newer snapshots / currently-running queries stay safe". For long-running queries:
+- Iceberg + Trino reads pin a snapshot at query-start; physical files referenced by that pinned snapshot stay on MinIO until that snapshot is unreferenced.
+- If the long-running query started **within** `retention_threshold` (7d here), its pinned snapshot is **retained**, so files survive — safe.
+- **Edge case** (not flagged): if a query has been running **longer than 7d** (rare in practice, but possible for batch backfills), its pinned snapshot CAN be expired and Trino may surface `Cannot find snapshot` mid-scan. For a "long-running query" that's still within hours-to-a-day, the responder's framing is fine. The pragmatic answer is correct for the engineer's stated SaaS use.
+
+**Soft Compl shave (-0.375)**: `iceberg.expire-snapshots.min-retention` 7d floor not explicitly named as the "why-can't-I-set-1d" guard. Engineer using `7d` is fine; one trying `'1d'` would hit `Retention specified (1.00d) is shorter than the minimum retention...` and need to look up the catalog override. Non-load-bearing.
+
+**Production-stack fit**: on-prem MinIO + Iceberg + HMS + Trino 467 → procedures match prod stack exactly. Weekly cadence is conventional.
+
+Cites r17 (correct anchor).
 
 ---
 
-## Q2 — `touch_events` first-touch per user, 12 min correlated subquery → performant Trino — 4.75 STRONG PASS
+## Q2 — Three-step funnel: trial → payment-within-14d → activation-within-14d-of-TRIAL on 80M events — 4.625 STRONG PASS
 
-**Verified against [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)** (WebFetch this iter):
+**Verified against [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) + [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html)** + responder's pattern matches the canonical Trino 467 funnel form.
 
-> `ROW_NUMBER()` "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition."
-
-The canonical form is correct:
+### Pattern verification
 
 ```sql
-SELECT user_id, channel, touched_at
-FROM (
-  SELECT user_id, channel, touched_at,
-         ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY touched_at ASC NULLS LAST) AS rn
-  FROM touch_events
-)
-WHERE rn = 1
+WITH step1_trial AS (
+  SELECT user_id, MIN(occurred_at) AS trial_start
+  FROM events
+  WHERE event_type = 'trial_started'
+  GROUP BY user_id
+),
+step2_payment AS (
+  SELECT s1.user_id, s1.trial_start, MIN(e.occurred_at) AS payment_at
+  FROM step1_trial s1
+  JOIN events e ON e.user_id = s1.user_id
+                AND e.event_type = 'added_payment'
+                AND e.occurred_at BETWEEN s1.trial_start
+                                       AND s1.trial_start + INTERVAL '14' DAY
+  GROUP BY s1.user_id, s1.trial_start
+), ...
 ```
 
-1. **Correlated subquery diagnosis correct**: `WHERE touched_at = (SELECT MIN(touched_at) FROM ... WHERE u = outer.u)` is O(N×M) — Trino's correlated-subquery decorrelation produces a re-scan or a self-join; for 80M rows × 1–20 rows-per-user it explodes.
-2. **ROW_NUMBER form is THE canonical Trino 467 pattern** — single scan + per-partition sort under one `OVER()` window; Trino executes the window in a single exchange-sorted stage. 50–100x faster on 80M rows is realistic.
-3. **`ASC NULLS LAST`** — correct Trino 467 default (per `reference_trino_null_ordering_default` MEMORY card; Trino's default for `ORDER BY ASC` is `NULLS LAST`), explicit is fine and matches "first by time, NULLs treated as last".
-4. **Dialect-comparison defang correct**: `DISTINCT ON` is Postgres-only (not in Trino — verified above, no mention in window docs); `QUALIFY` is Snowflake/BQ-only (no Trino 467 support — verified). Responder gets both dialect notes right.
+All load-bearing facts correct:
+1. **Per-user MIN(trial_start) anchor** — collapses multi-trial users to a single per-user window anchor; same approach as iter1209 Q2's `approx_set` daily-sketch pattern but for exact funnel counts. ✓
+2. **`occurred_at BETWEEN s1.trial_start AND s1.trial_start + INTERVAL '14' DAY`** — valid Trino timestamp+INTERVAL arithmetic verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) "the date/time types include an operator for adding an INTERVAL to a TIMESTAMP" (`TIMESTAMP + INTERVAL '14' DAY` returns timestamp). ✓
+3. **Step 3 window from `step1.trial_start` not `step2.payment_at`** — explicitly matches the question's literal ask ("subscription_activated **within 14 days of TRIAL start**", NOT within 14d of payment). The original 3-subqueries-joined approach the engineer described was failing exactly because per-user windows weren't enforced; per-user CTE join with `trial_start` carried through both step 2 and step 3 fixes that. ✓
+4. **Diagnosed the original failure**: "JOINs without per-user time-window predicates can pair any user's trial_start with another user's payment" — correct root cause. ✓
+5. **80M-scale pre-aggregation hint**: pre-collapsing to per-user per-day sketches before the join is the right scaling lever; consistent with `feedback_synthesis_ceiling_stop_churning.md` family (multi-step funnel construction usually lands). ✓
 
-**Soft Compl shave (-0.25): didn't surface `min_by(channel, touched_at) GROUP BY user_id`** as the **even-more-efficient single-column alternative** when the engineer only needs `(user_id, channel)` — `min_by` avoids the full-row sort of `ROW_NUMBER` and uses streaming aggregation. The engineer's spec says "one row per user with channel from earliest touched_at" — `min_by` IS the cleanest fit. Minor and non-load-bearing (the `ROW_NUMBER` answer is correct and works), but a polished answer would mention both.
+### Minor Acc shave (-0.25): column-label slip
 
-Cites r23 §3.1G.
+Responder's final-SELECT alias `pct_step1_users` actually holds a `COUNT(*)` (the count of users who hit step 1), not a percentage. The ratio columns `pct_paid` / `pct_activated_of_paid` are correctly labeled. Reader-rename trivial; engineer gets the right numbers either way.
+
+### Minor Compl shave (-0.125): didn't surface `match_recognize` as a row-pattern-matching alternative
+
+Trino 467 supports `MATCH_RECOGNIZE` ([trino.io/docs/467/sql/match-recognize.html](https://trino.io/docs/467/sql/match-recognize.html)) which is the row-pattern-matching syntax for funnels with strict ordering + windows. For this 3-step funnel with 14d windows, CTE-join is the more readable + faster pattern; `match_recognize` is the polished mention. Non-load-bearing.
+
+Cites r07/r23.
 
 ---
 
-## Q3 — dbt seed `column_types` location: `dbt_project.yml` vs seed `schema.yml`? — 4.0 PASS (over-statement flag)
+## Q3 — dbt on-run-start vs pre_hook same-connection + per-model SET SESSION query_max_memory_per_node='8GB' — 3.25 PASS + LIGHT FIX-A
 
-**Verified against [docs.getdbt.com/reference/resource-configs/column_types](https://docs.getdbt.com/reference/resource-configs/column_types)** (WebFetch this iter):
+**Verified against [docs.getdbt.com/reference/project-configs/on-run-start-on-run-end](https://docs.getdbt.com/reference/project-configs/on-run-start-on-run-end) + [docs.getdbt.com/docs/local/connect-data-platform/trino-setup](https://docs.getdbt.com/docs/local/connect-data-platform/trino-setup) + [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)** (WebSearch this iter).
 
-> "Specify column types in your `dbt_project.yml` file: ... Or: ..." followed by the seed properties YAML form:
-> ```yaml
-> seeds:
->   - name: country_codes
->     config:
->       column_types:
->         country_code: varchar(2)
->         country_name: varchar(32)
-> ```
+### Correct load-bearing points
 
-**The docs explicitly support BOTH locations.** Responder gave the correct `dbt_project.yml` form:
+- **on-run-start hook DOES exist in dbt** — responder's strict phrasing "dbt does NOT have an on-run-start hook that fires once before all models **in a single SHARED Trino connection**" is technically defensible (the connection-sharing qualifier is the load-bearing nuance), but a casual reader could parse it as "no on-run-start at all". Phrasing dense.
+- **Option A diagnosis CORRECT**: `on-run-start: - "{{ run_query('SET SESSION query_max_memory_per_node = ...') }}"` issues the SET on a connection that closes when the hook completes — subsequent model builds open NEW connections where the session var is not set. Verified at dbt-trino docs: "If a pre-hook is run, that also is run outside of a transaction of course and does not effect the running queries" — same threading model applies to on-run-start. ✓
+- **Option B CORRECT**: per-model `pre_hook="SET SESSION query_max_memory_per_node='8GB'"` runs in the SAME connection as the model build because dbt-trino keeps the per-model connection open across the pre_hook + main SQL + post_hook sequence. Verified at dbt-trino docs: "To temporarily adjust these session properties for a specific dbt model or group of models, you can use a dbt hook to set session properties: `config(pre_hook=\"set session query_max_run_time='10m'\")`". ✓
+
+### DEFECTS
+
+**(a) Option C — FABRICATED catalog config form (load-bearing accuracy hit)**.
+
+Responder said: "set `iceberg.query_max_memory_per_node=8GB` in `etc/catalog/iceberg.properties` to apply globally."
+
+VERIFIED WRONG:
+- Trino query memory limits are **cluster-wide resource-management** properties in `etc/config.properties` (coordinator + workers), NOT per-catalog properties. r18 §155-167 + §279-282 already document this verbatim: `query.max-memory-per-node=8GB` in `etc/config.properties`.
+- The `iceberg.` prefix in `iceberg.properties` is reserved for connector-specific properties (`iceberg.catalog.type`, `iceberg.file-format`, `iceberg.expire-snapshots.min-retention`, etc.) per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html). There is NO `iceberg.query_max_memory_per_node` config property; an engineer pasting this into iceberg.properties hits "Configuration property 'iceberg.query_max_memory_per_node' was not used".
+- Even if responder meant the right file (`config.properties`), the property name `query_max_memory_per_node` (underscores) is the SESSION form, not the CONFIG form (dots/hyphens) per r18 §155-156 "**Config property** ... DOTS and HYPHENS" vs "**Session property** ... UNDERSCORES". The "global apply" framing for a session-only property compounds the error.
+- Per the `iter1141 query_max_memory_per_node` misconception family (responder previously claimed lowering it spills earlier — backwards), this is the THIRD instance of responder confusing the config-vs-session form / placement. r18 §155-167 IS the canonical disambiguation card but didn't reach this Q's "iceberg.properties" framing.
+
+**(b) Missed canonical: dbt-trino `session_properties:` block in `profiles.yml`** (load-bearing completeness hit).
+
+The CLEANEST dbt-native answer to "apply ONE setting before all models" is the dbt-trino profile-level `session_properties` map:
 
 ```yaml
-seeds:
-  <project_name>:
-    pricing:
-      +column_types:
-        plan_name: varchar
-        monthly_price_usd: decimal(10,2)
-        max_seats: integer
+my_profile:
+  outputs:
+    dev:
+      type: trino
+      host: ...
+      session_properties:
+        query_max_memory_per_node: "8GB"
 ```
 
-This DOES work and IS the most common form. **However**, the responder added: *"config goes in `dbt_project.yml` at root, NOT in a `schema.yml` next to the CSV."* — **this "NOT in a schema.yml" claim is incorrect / over-stated.** Modern dbt explicitly supports putting `config: column_types: ...` in a seed properties YAML file co-located with the CSV (e.g., `seeds/_seeds.yml` or `seeds/schema.yml`). The docs literally show both forms with "Or:" between them.
+Verified at [docs.getdbt.com/docs/local/connect-data-platform/trino-setup](https://docs.getdbt.com/docs/local/connect-data-platform/trino-setup) + [starburstdata/dbt-trino issue #4](https://github.com/starburstdata/dbt-trino/issues/4) verbatim "The standard way to define session properties is with the `session_properties` field of your `profiles.yml`, which ensures that all dbt connections use these settings by default."
 
-**Why this is a 4.0 not a lower score:**
-- The engineer **CAN act on the answer** — the `dbt_project.yml` form given is correct, `dbt seed --select pricing` is the right command, the example `decimal(10,2) / integer / varchar` types fit Trino dialect, and `monthly_price_usd + max_seats` math will work after the reload.
-- The over-statement narrows the engineer's options but does NOT lead them to a broken config — the form they're told to use IS valid.
-- Accuracy shave (-0.5) and Completeness shave (-0.5) for the wrong negative claim.
+**This IS the engineer's literal ask** ("put it once, applies to all models"). Every dbt-trino connection — including each per-model thread — receives the property at connection open. NO per-model pre_hook plumbing needed.
 
-**Production-stack fit**: dbt + dbt-trino + Iceberg seed materialization. `decimal(10,2)` and `integer` are valid Trino 467 column types (verified prior iter); engineer's `monthly_price_usd * max_seats` math will work after `dbt seed --full-refresh --select pricing`. The responder didn't mention `--full-refresh` is needed to drop+recreate the seed table with the new types (existing seed table created as VARCHAR won't auto-pick-up the type config without a rebuild) — minor.
+**Grep evidence — RESOURCE COVERAGE GAP confirmed**:
+- `grep -i 'session_properties' resources/` → **0 hits**
+- `grep -i 'on-run-start\|on_run_start' resources/` → **0 hits**
+- `grep -i 'iceberg.query_max_memory_per_node' resources/` → not in resources (responder fabrication)
 
-**Decision: NO FIX-A (recall-ceiling / minor over-statement).**
+### LIGHT FIX-A spec (target r28)
 
-Rationale:
-- The `dbt_project.yml` form given IS correct and unblocks the engineer immediately. The over-statement narrows but doesn't break.
-- Adding a "you can ALSO put it in the seed properties YAML" callout in r27/r28 risks over-attractor regression on adjacent seed config questions (per `feedback_new_card_over_attracts_adjacent`).
-- Margin remains healthy on "Improving complex SQL perf on Trino with dbt" row (~4.57 prior).
+Add a small dbt-trino session-properties + hook-mechanism card to r28 §profile-config cluster:
 
-**NEW SOFT WATCH** `iter1212 Q3 dbt seed column_types over-stated NOT-in-schema.yml`:
-- Re-probe in 4-8 iters under structurally-similar framing ("can I configure dbt seed X in a YAML next to the seed, or only in dbt_project.yml?" / "seed properties YAML config: block" / "schema.yml seed config").
-- If recurs (responder consistently asserts "only dbt_project.yml"), classify as a real resource gap and consider a light additive note in r27/r28; if doesn't recur, watch closes silently.
+1. **Three-tier mental model**:
+   - **Profile-tier (global)**: `session_properties:` in `profiles.yml` → applied at connection open, every dbt-issued query inherits → THE cleanest fit for "one global setting".
+   - **Project-tier (one-shot startup)**: `on-run-start` / `on-run-end` hooks in `dbt_project.yml` → run in their own connection that closes at hook end → session vars DON'T persist to model connections. Use for things that don't need session-state (auditing, vacuum, ANALYZE).
+   - **Model-tier (per-model)**: `pre_hook` / `post_hook` in `{{ config(...) }}` → run in the SAME connection as the model build → session vars DO persist for that model.
+2. **Worked example** with `query_max_memory_per_node='8GB'` showing the profile form first, the per-model pre_hook as the per-model override.
+3. **DO-NOT-WRITE inline-WRONG defangs** (per `feedback_defang_donotwrite_snippets.md`):
+   - WRONG: `iceberg.query_max_memory_per_node=8GB` in `etc/catalog/iceberg.properties` — query memory limits are CLUSTER properties, not catalog properties.
+   - WRONG: `query_max_memory_per_node=8GB` in `etc/config.properties` — config-property form is `query.max-memory-per-node` (dots/hyphens), not the session-form name.
+   - WRONG: `on-run-start: SET SESSION query_max_memory_per_node='8GB'` (the SET runs in a connection that closes; subsequent models open new connections without the var) — use `session_properties:` in profiles.yml instead.
 
-Cites r27 §6.7D.
+**Keyword anchors**: `session_properties profiles.yml dbt-trino, on-run-start session var doesn't persist, pre_hook same connection vs on-run-start separate connection, dbt apply session property to every model, dbt global session SET, query_max_memory_per_node dbt`.
 
----
+**Watch label**: `iter1213 r28 dbt-trino session_properties + hook-connection-scope card FIX-A`; re-probe with structurally similar framing in 3-6 iters ("dbt how do I set a Trino session property for every model, once").
 
-## Q4 — Oracle `DECODE(subscription_status, 'active', 'Paying', ..., 'Unknown')` → Trino — 4.875 STRONG PASS
-
-**Verified against [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html)** (WebFetch this iter): Trino 467 conditional expressions are **CASE (simple + searched), IF, COALESCE, NULLIF, TRY** — **no DECODE**.
-
-Responder's answer is correct on all five load-bearing points:
-
-1. **"No DECODE in Trino, parse error confirmed"** — YES, verified above (DECODE not in Trino 467 conditional functions list).
-2. **Searched CASE rewrite is THE canonical Trino 467 form**:
-   ```sql
-   CASE
-     WHEN subscription_status = 'active'  THEN 'Paying'
-     WHEN subscription_status = 'trial'   THEN 'Free Trial'
-     WHEN subscription_status = 'churned' THEN 'Lost'
-     ELSE 'Unknown'
-   END
-   ```
-   Correct. Simple CASE (`CASE subscription_status WHEN 'active' THEN ... END`) would also work for equality matches and would be slightly more compact, but searched CASE is the safer general-purpose form and is the right recommendation for the family.
-3. **Oracle DECODE NULL-equals-NULL semantics nuance is excellent**: Oracle `DECODE(col, NULL, 'X')` treats `NULL = NULL` as TRUE (Oracle DECODE has a special NULL-equality rule). Trino `CASE WHEN col = NULL` is **never TRUE** (SQL three-valued logic — `col = NULL` is UNKNOWN). The responder correctly tells the engineer to rewrite Oracle's NULL branch as `WHEN col IS NULL THEN ...` **as the first branch** (because branch order matters in searched CASE). This is a real Oracle→Trino migration trap and the responder caught it.
-4. **"For this example (no NULL branch in the original DECODE) simple CASE safe"** — correct scoping; the engineer's example doesn't have an explicit NULL branch, so the searched CASE given works as-is for non-NULL `subscription_status`. (If `subscription_status` IS NULL, both Oracle DECODE and Trino searched CASE fall through to ELSE 'Unknown' — same result.)
-5. **r27 §4.1A cite** appropriate (DECODE → CASE is a top-line Oracle migration row).
-
-**Soft Compl shave (-0.125)**: didn't surface that **`COALESCE` is the cleaner rewrite when Oracle DECODE is being used as a null-default** (e.g., Oracle `DECODE(col, NULL, 'default', col)` → Trino `COALESCE(col, 'default')`); minor since the engineer's example is a true multi-branch dispatch, not a null-default pattern.
-
-Cites r27 §4.1A.
+Cites r28 (target for FIX-A).
 
 ---
 
-## Carry-forward watches
+## Q4 — Oracle `(+)` outer-join rewrite to Trino LEFT/RIGHT JOIN — 3.625 PASS (INVERTED prose mnemonic, SOFT WATCH)
 
-**Open light-monitors (no action this iter):**
-- `iter1212 Q3 dbt seed column_types over-stated NOT-in-schema.yml` — **NEW** soft watch (this iter)
-- `iter1211 Q4 strpos-3-arg INSTR-Nth-occurrence assumed-absence` — open (4-8 iter re-probe)
-- `iter1210 Q2 r27 §663 :: cast-operator slip` (Postgres `::date` cast vs `CAST(x AS DATE)`) — open
-- `iter1209 Q3 CURRENT_TIMESTAMP()-empty-parens audit-column slip` — open
-- `iter1208 Q3 dbt selector direction +model vs model+ (exposures-selector)` — open
-- `iter1208 Q2 width_bucket boundary off-by-one labeling` — open
-- `iter1207 r13 §1293-1326 Spark-CALL inline-tag for GDPR delete recipe` — open
-- `iter1204 dbt --full-refresh on_table_exists atomicity framing` — open
-- `NVL-coercion` (latent SQL-best-practices secondary slip) — open
-- `$partitions metadata-table query semantics` — open
+**Verified against [trino.io/docs/467/sql/select.html#join-clause](https://trino.io/docs/467/sql/select.html#join-clause) + [Atlassian — Oracle Plus Sign for Left & Right Joins](https://www.atlassian.com/data/databases/left-and-right-joins-using-the-plus-sign-in-oracle)** + r27 §34 myth row + r27 §1745 translation row.
 
-**Closed this iter**: none.
+### Correct load-bearing points
 
-**Status**: steady-state extended-phase. All required topics PASSED healthy margins. Q3 over-statement is the first real (minor) inaccuracy this iter — added as a new soft watch, no resource churn.
+- **Trino does NOT support `(+)`** — Oracle-proprietary, parse error in Trino. ✓ (matches r27 §34 myth row + §1745 translation row).
+- **Rewrite to ANSI LEFT/RIGHT JOIN** — correct universal fix. ✓
+- **Mapping table examples correct** (verified against Atlassian source: "the + symbol is placed directly in the conditional statement and on the side of the optional table"):
+  - `orders.customer_id = customers.customer_id(+)` → `orders LEFT JOIN customers ON ...` ✓ (customers is OPTIONAL; preserve all orders)
+  - `orders.customer_id(+) = customers.customer_id` → `orders RIGHT JOIN customers ON ...` (or equivalently `customers LEFT JOIN orders ON ...`) ✓ (orders is OPTIONAL; preserve all customers)
+  - Multi-condition AND → all conditions in ON clause. ✓
+
+### DEFECT — INVERTED prose mnemonic
+
+Responder appended: **"the `(+)` always appears on the table you want to keep the unmatched rows from."**
+
+This is **BACKWARDS**. Oracle convention (verified at Atlassian source verbatim + [docs.oracle.com — Joins](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/Joins.html)):
+- `(+)` marks the **OPTIONAL / null-padded** side (the side that may produce NULLs when no match).
+- The rows you preserve (matched + unmatched) come from the side **WITHOUT** the `(+)`.
+- Example: `WHERE orders.customer_id = customers.customer_id(+)` — `(+)` on customers means customers is optional/null-padded; you keep ALL orders, including orders with NO matching customer. The "unmatched orders" (orphans) are preserved on the side **without** `(+)`.
+
+If a beginner applies the responder's prose to write NEW SQL:
+- Engineer wants "all orders, including orphan orders with no customer" → mnemonic says "put `(+)` on orders (the side you want to keep unmatched rows from)" → engineer writes `orders.customer_id(+) = customers.customer_id` → Oracle interprets this as "keep all customers (orphan customers preserved)" — the OPPOSITE of what the engineer wanted.
+
+The mapping-table rewrite path is fine BECAUSE the engineer has an existing query to translate (they read `customers.customer_id(+)` and look up the row → LEFT JOIN customers). The mnemonic is dangerous specifically for the **forward direction** (writing new Oracle-like queries or mentally validating an existing query's intent).
+
+### Source check — RESPONDER SLIP, NOT resource-sourced
+
+- `grep '(\+)' resources/27-oracle-plsql-to-dbt-trino.md` → r27 §34 myth row + §1745 translation row only; **no prose mnemonic line that matches "table you want to keep unmatched rows from"**.
+- `grep -i 'keep the unmatched\|unmatched rows\|optional side\|side without' resources/27-oracle-plsql-to-dbt-trino.md` → **0 hits**.
+- Mnemonic is a **responder synthesis slip** appended as a "for completeness" prose rule — matches `feedback_responder_broken_secondary_alternative.md` family (lead correct, appended aside broken).
+
+### Decision: SOFT WATCH, NO r27 reconcile
+
+- The r27 translation table is correct + load-bearing.
+- Adding a corrective prose mnemonic to r27 risks `feedback_new_card_over_attracts_adjacent` over-attractor on this thin secondary aside.
+- The responder slip is per-instance synthesis, not source-anchored.
+- **SOFT WATCH**: `iter1213 Q4 (+)-mnemonic-inverted "keep unmatched rows from"` — re-probe in 4-8 iters with structurally similar framing ("which side does `(+)` go on, easy way to remember"). If recurs, LIGHT FIX-A targets a single inline DO-NOT-WRITE row at r27 §1745: WRONG mnemonic vs CORRECT mnemonic ("`(+)` marks the side that may be NULL-padded; preserve all rows from the side **without** `(+)`").
+
+Cites r27 (mapping table correct; no fix this iter).
 
 ---
 
-## Rubric updates
+## Carry-forward watches (light-monitor list, no action this iter)
 
-| Topic | Prior | Q score | New | Delta | Margin vs 3.5 |
-|---|---|---|---|---|---|
-| Iceberg partition design for SaaS | 4.4480 / 57 | Q1=4.625 | 4.4511 / 58 | +0.0031 | +0.9511 |
-| Analytical query patterns on Iceberg+Trino | 4.5379 / 150 | Q2=4.75 | 4.5393 / 151 | +0.0014 | +1.0393 |
-| Improving complex SQL perf on Trino with dbt | 4.5779 / 43 | Q3=4.0 | 4.5648 / 44 | -0.0131 | +1.0648 |
-| Oracle PL/SQL → dbt + Trino SQL migration | 4.4680 / 174 | Q4=4.875 | 4.4703 / 175 | +0.0023 | +0.9703 |
+| Watch | Iter | Status |
+|---|---|---|
+| `iter1213 r28 dbt-trino session_properties + hook-connection-scope card FIX-A` | 1213 | **NEW — TEACHER TODO this iter** |
+| `iter1213 Q4 (+)-mnemonic-inverted "keep unmatched rows from"` | 1213 | NEW SOFT WATCH (re-probe 4-8) |
+| `iter1212 dbt-seed-column_types-NOT-in-schema.yml over-statement` | 1212 | open (re-probe 4-8) |
+| `iter1207 r13 §1293-1326 Spark-CALL-inline-tag` | 1207 | open (re-probe 4-8) |
+| `iter1206 Q1 LIKE-on-ROW + $partitions-omission` | 1206 | open (re-probe 4-8) |
+| `iter1204 dbt --full-refresh on_table_exists atomicity framing` | 1204 | open (re-probe 5-10) |
+| strpos-3-arg, ::cast-operator, NVL-coercion, $partitions, GDPR Spark-tag, width_bucket-boundary, exposures-selector, CURRENT_TIMESTAMP-parens, dbt-seed-column_types-location, `--full-refresh on_table_exists` | various | light-monitor, no fix |
 
-All required topics remain PASSED. No FIX-A. **Next iter1213: BREADTH**, with strpos-3-arg myth re-probe per `iter1211` open watch and dbt seed `column_types` location re-probe per `iter1212` new watch within 4-8 iters each.
+---
+
+## Topic score updates
+
+| Topic | Prior | New | Delta |
+|---|---|---|---|
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.4480/220 | (978.5600 + 4.625)/221 = **4.4488/221** | +0.0008 |
+| Analytical query patterns on Iceberg+Trino | 4.5393/151 | (685.4343 + 4.625)/152 = **4.5399/152** | +0.0006 |
+| Improving complex SQL performance on Trino with dbt | 4.5648/44 | (200.8512 + 3.25)/45 = **4.5356/45** | -0.0292 (margin still +1.0356) |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.4703/175 | (782.3025 + 3.625)/176 = **4.4655/176** | -0.0048 (margin still +0.9655) |
+
+All required topics remain PASSED with healthy margins. Q3 step-down absorbed by 44-question cushion (+1.03 margin).
