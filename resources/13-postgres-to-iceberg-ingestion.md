@@ -2991,9 +2991,13 @@ spark.sql("""
 >
 > Tombstones can also be disabled at the source via `tombstones.on.delete=false` in the Debezium connector config — but the default is `true`, and disabling them breaks Kafka log compaction's ability to garbage-collect deleted keys. **Default recommendation: keep tombstones on at the source and filter them in the consumer.**
 
-#### Iceberg delete write modes — choose one for your CDC table
+#### Iceberg delete write modes — Copy-on-Write (CoW) vs Merge-on-Read (MoR): which is faster for frequent small deletes
 
-When CDC replays Postgres `DELETE` (and `UPDATE`) events as `DELETE FROM` / `MERGE INTO` against Iceberg, the table's **delete write mode** determines what actually lands on MinIO. Iceberg supports two modes, controlled by the table property `write.delete.mode`:
+> **Findability anchor (read FIRST if your question contains any of these):** copy-on-write vs merge-on-read, CoW vs MoR, which delete mode is faster, my Spark/GDPR delete job rewrites the WHOLE table and takes 30-45+ min, deleting a small % of rows several times a day, frequent small deletes mode, write.delete.mode, right-to-be-forgotten delete is slow, which mode for high-delete-rate, MoR vs CoW for deletes, why is my delete rewriting everything.
+
+> **The one-line answer for "small % of rows deleted many times a day" (e.g. GDPR purges):** your slow whole-table-rewrite-per-delete is **Copy-on-Write** behavior — CoW rewrites every affected Parquet data file on each delete (slow write, fast read). **Switch to Merge-on-Read (`write.delete.mode = 'merge-on-read'`)** — MoR writes only small position-delete files marking the rows (fast write), so a 10-50K-row delete out of 500M no longer rewrites the table. MoR is the right mode for **frequent small deletes**; CoW is for **infrequent deletes on read-heavy tables**. **Load-bearing nuance on this stack:** set `write.delete.mode` **FROM SPARK** (`ALTER TABLE ... SET TBLPROPERTIES ('write.delete.mode'='merge-on-read')`) — it governs the **Spark** writer (your 45-min job is the Spark bottleneck). **Trino 467's Iceberg writer is MoR-only REGARDLESS of the property** ([trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272) — see r17 §"ENGINE CALLOUT" / r28 §380), so Trino-run deletes already produce position-delete files. MoR is faster for the DELETE, but the deleted bytes are NOT physically gone until you compact + expire — schedule periodic Trino `EXECUTE optimize` (applies position deletes by rewriting the data files it touches; raise `file_size_threshold` for already-large files) and `EXECUTE expire_snapshots` for actual GDPR byte removal (see r17 + the GDPR 3-step sequence in §"Layer 2" above).
+
+When CDC replays Postgres `DELETE` (and `UPDATE`) events as `DELETE FROM` / `MERGE INTO` against Iceberg — or when a GDPR / retention job issues row-level deletes — the table's **delete write mode** determines what actually lands on MinIO. Iceberg supports two modes, controlled by the table property `write.delete.mode`:
 
 | Mode | Property value | What `DELETE` does | Write speed | Read speed | When to choose |
 |---|---|---|---|---|---|

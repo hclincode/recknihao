@@ -1,167 +1,131 @@
-# Iteration 1218 — Judge Feedback
+# Iteration 1219 — Judge Feedback
 
-**Verdict: 4.20 PASS + LIGHT FIX-A on Q3.** Q1 closes the `iter1214 retention_days` param-fab watch CLEANLY (4.5625 — responder correctly flagged the wrong `retention_days => 7` form and substituted `retention_threshold => '7d'` + correctly framed expire-vs-planning + correctly routed `rewrite_manifests` to Spark per Trino 467 / Trino 470+ optimize_manifests cutoff). Q2 weighted-avg canonical pin-perfect (4.75). **Q3 dbt `accepted_values`-doesn't-catch-NULL DEFECT (2.75 FAIL)** — responder claimed "NULL and 'none' will BOTH be caught" but `accepted_values` compiles to `NOT IN (...)` and `NULL NOT IN (...)` evaluates UNKNOWN, so NULL rows pass silently. **Resource-sourced**: r28 §242 + r27 §3006 show the compiled SQL without making the NULL exclusion explicit. **LIGHT FIX-A**: add explicit NULL-trap caveat + pair-with-`not_null` guidance in both locations. Q4 Oracle DECODE → CASE WHEN with Oracle-NULL=NULL-TRUE vs Trino-IS-NULL nuance (4.75) — 5th consistent DECODE pass.
+**Verdict: 3.97 PASS (margin) + LIGHT FINDABILITY FIX-A on Q1.** Q2 WoW-pct-change FULL-OUTER-JOIN + COALESCE + dual-CASE-NULL pin-perfect (5.0). Q3 dbt tags-location + `--select tag:billing` vs `+tag:billing` upstream-deps + space-vs-comma OR-vs-AND all verified clean (4.875). **Q1 CoW-vs-MoR FAIL (2.75 — FINDABILITY HEDGE)** — responder partially answered (partition-aligned metadata-only delete, `rewrite_position_delete_files` is Spark-only, Trino 467 `EXECUTE optimize`) but **explicitly hedged "the resources don't contain a direct comparison of CoW vs MoR performance trade-offs for small frequent deletes"** when r13 §2996-§3001 contains EXACTLY that comparison table verbatim. Engineer with a 45-min Spark delete job leaves WITHOUT the load-bearing answer ("switch `write.delete.mode='merge-on-read'` from Spark; Trino 467's writer is already MoR-only"). **LIGHT FIX-A** — keyword-anchor r13 §2996 so "GDPR delete / small frequent deletes / which delete mode is faster / Spark rewriting whole table slow" routes to the comparison. **Q4 Oracle LPAD (3.25 — recall-ceiling, NO FIX-A)** — base form `LPAD(CAST(invoice_number AS VARCHAR),8,'0')` correct; missed the **truncation hazard** (lpad pads-OR-truncates to EXACTLY N — 9-digit invoice silently drops the trailing digit) + missed the **`format('%08d', invoice_number)` canonical** that r23 §716-758 explicitly recommends "whenever the value might exceed the pad width"; **the "no decimals for whole numbers" reassurance is wrong for a generic DECIMAL column** (`CAST(DECIMAL '12345.00' AS VARCHAR)='12345.00'` keeps the scale). All hits are recall-ceiling — r23 §716-758 keyword anchors ("zero-pad an id, truncation hazard, fixed-width truncation hazard") are dense; per `feedback_new_card_over_attracts_adjacent.md` no further defang. Watch.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Slow Iceberg planning (Spark streaming 200 commits/day × 8 months; coworker ran `expire_snapshots(retention_days => 7)`) — **WATCH RE-PROBE**
+### Q1 — GDPR delete: CoW vs MoR for ~10-50K rows × multiple/day; Spark whole-table rewrite is 45 min — **FAIL (FINDABILITY HEDGE) + LIGHT FIX-A**
 
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 4.75 |
-| Completeness | 4.0 |
-| **Average** | **4.5625 STRONG PASS** |
+| Dim | Score | Note |
+|---|---|---|
+| Technical accuracy | 3 | Partition-aligned delete = metadata-only is correct; `rewrite_position_delete_files` Spark-only correct; Trino 467 `EXECUTE optimize(file_size_threshold)` correct. **BUT the hedge "resources don't contain a CoW-vs-MoR comparison" is factually wrong** — r13 §2996-§3001 has the comparison table verbatim. |
+| Beginner clarity | 4 | What's there is clear. The hedge leaves the engineer without the load-bearing recommendation. |
+| Practical applicability | 2 | Engineer asked **explicitly** "which one makes delete jobs faster?" — answer dodges. Their 45-min Spark job stays at 45 min after reading this. Missed actionable: `ALTER TABLE ... SET TBLPROPERTIES('write.delete.mode'='merge-on-read')` from Spark + scheduled compaction (`EXECUTE optimize` Trino / `rewrite_position_delete_files` Spark) + `expire_snapshots` for actual GDPR byte removal. |
+| Completeness | 2 | Missed three load-bearing facts: (1) **CoW = rewrite whole affected Parquet file per delete** = literally what's causing the 45-min job; (2) **MoR = small position-delete files** = fast write, periodic compaction merges them; (3) **Trino 467's Iceberg writer is MoR-only regardless of the `write.delete.mode` property** per trinodb/trino#17272 (r13 §5589, r17 §583/§721) — so the property only governs **Spark**'s writer, which is exactly the engineer's situation. |
 
-**Verifications (this iter, all sources cited):**
+**Average: 2.75 — FAIL.**
 
-1. **`expire_snapshots(retention_days => 7)` is WRONG on Trino 467** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter): correct form is `expire_snapshots(retention_threshold => '7d')` (VARCHAR duration string), AND must meet `iceberg.expire-snapshots.min-retention` floor (default `7d`). Coworker would have hit `Unknown procedure argument: retention_days` parse error. Optional args `retain_last` (default 1) + `clean_expired_metadata` (default false) also documented. Responder correctly named the right param name.
-2. **Planning bloat causal model correct** — 200 commits/day × ~240 days = ~48,000 snapshots, each producing manifest commits. The CURRENT snapshot's manifest count grows even after `expire_snapshots` because expire reclaims STORAGE of historical snapshots but does NOT reduce the current snapshot's manifest list size; manifest-list + per-manifest scan at plan time is the actual 18s planning cost. Confirmed by Trino issue [trinodb/trino#14821](https://github.com/trinodb/trino/issues/14821) ("Add rewrite_manifests procedure to consolidate") still OPEN.
-3. **`rewrite_manifests` Spark-only on Trino 467, `optimize_manifests` is Trino 470+** — verified at trino.io/docs/467/connector/iceberg.html (procedures list only `register_table` / `unregister_table` / `migrate` / `add_files`) + [release-470.html](https://trino.io/docs/current/release/release-470.html) "Add the optimize_manifests table procedure" + matches r17 §24 / §211 / §235 / §685 / §810 verbatim "Trino 470, NOT 467" gating. Responder's "Spark or Trino 470+" precisely matches the resource pin.
-4. **`$manifests` metadata table diagnostic** — Iceberg `$manifests` is a valid Trino 467 metadata table (columns include `path`, `length`, `added_snapshot_id`, `partition_summaries`). `SELECT COUNT(*), SUM(length)/1024/1024 FROM "events$manifests"` is a correct diagnostic — >200 manifests is a sensible red-flag threshold for the planning-time bottleneck.
+**GREP — FINDABILITY ROOT CAUSE.** The CoW-vs-MoR comparison block at `resources/13-postgres-to-iceberg-ingestion.md` L2996-L3001:
 
-**Minor completeness shave (-0.5 Compl):** Did NOT mention `EXECUTE optimize(file_size_threshold => '256MB')` as a complementary lever — compacting small data files indirectly reduces manifest count over time (fewer entries per manifest, fewer total manifests). For Spark-streaming-200-commits/day this is structurally important: even after `rewrite_manifests` you have to address the small-file generator. Recall-ceiling, not a resource defect (r17 §61 step 1-3 teach optimize-then-rewrite_manifests as a sequence).
-
-**WATCH CLOSURE — `iter1214 retention_days` param-fab CLOSES on first re-probe (4 iters later).** Responder went from FABRICATING `retention_days => 7` (iter1214) to CORRECTLY CALLING OUT `retention_days => 7` as wrong and substituting `retention_threshold => '7d'` (this iter, iter1218). Findability + recall both reach the canonical. No FIX-A; clean watch close (12th consecutive closure in 1st-re-probe-CLOSE pattern across recent iters).
-
-**Topic**: `Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup` — was 4.4488/221, → (982.7848 + 4.5625)/222 = 987.3473/222 = **4.4475/222 PASSED** (-0.0013, margin +0.9475).
-
----
-
-### Q2 — Weighted average for `api_calls(customer_id, response_time_ms)` skewed by high-volume customers
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 5.0 |
-| Completeness | 4.5 |
-| **Average** | **4.75 STRONG PASS** |
-
-**Verifications:**
-
-1. **No `weighted_avg()` in Trino 467** — verified at [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html); aggregate function list has `avg(x)` + variants but no `weighted_avg`. (Approx-percentile takes an optional `weight` arg per [issue #12276](https://github.com/trinodb/trino/issues/12276), but that's percentile-specific.) Responder correctly bails "no built-in, write the formula."
-2. **`SUM(value*weight) / NULLIF(SUM(weight), 0)` canonical** — verified at [interviewquery.com SQL weighted average guide](https://www.interviewquery.com/p/weighted-average-sql-guide) + multiple Trino-tagged StackOverflow answers; NULLIF guard prevents DIVISION_BY_ZERO for empty/zero-weight groups (responder pinned `reference_trino_division_by_zero.md` family — INTEGER `/` 0 THROWS, NULLIF is the canonical guard).
-3. **Per-customer-aggregate reconstruction `SUM(avg*count)/SUM(count)`** — algebraically correct: `sum_over_customers(per_customer_avg × per_customer_count) / sum_over_customers(per_customer_count) = sum_over_all_rows(value) / count_of_all_rows`. Equivalent to grand-AVG over raw data; correctly recovers the call-weighted mean from already-aggregated per-customer stats.
-4. **Raw-data observation `SUM(response_time_ms) / COUNT(*)` = `AVG(response_time_ms)` = call-weighted** — correct: plain AVG over raw rows is mathematically a call-weighted average because each row counts once. Responder's framing that "AVG on raw data is inherently call-weighted" is the load-bearing insight that resolves the engineer's confusion ("why does my AVG-of-AVGs skew low-volume?" → AVG-of-AVGs is customer-weighted not call-weighted).
-
-**Minor compl shave (-0.5):** Could have spelled out the algebra ("AVG-of-AVGs gives each customer 1/N weight regardless of call count; SUM/COUNT gives each CALL 1/total_calls weight") to drive home WHY the original was skewed. Engineer arrives at the right code regardless.
-
-**Topic**: `SQL query best practices for OLAP` — was 4.5878/278, → (1275.4084 + 4.75)/279 = 1280.1584/279 = **4.5884/279 PASSED** (+0.0006, margin +1.0884).
-
----
-
-### Q3 — dbt test to fail build when `fct_subscriptions.plan_tier` has unexpected values (engineer scenario: NULL **and** literal 'none' both introduced)
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 2.0 |
-| Beginner clarity | 4.0 |
-| Practical applicability | 2.5 |
-| Completeness | 2.5 |
-| **Average** | **2.75 FAIL** |
-
-**DEFECT — `accepted_values` does NOT catch NULL; responder claim is FALSE.**
-
-Responder's exact quote: *"NULL and 'none' will BOTH be caught because they are NOT in the allowed list."*
-
-**This is factually wrong for NULL.** Verified via [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) + [dbt-core issue #8543](https://github.com/dbt-labs/dbt-core/issues/8543) ("[CT-3070] [Bug] accepted_values test passes despite NULL values") + [dbt-utils issue #287](https://github.com/dbt-labs/dbt-utils/issues/287) ("Schema Test - Accepted Values for null value"):
-
-- `accepted_values` compiles to roughly `SELECT col FROM model GROUP BY col HAVING col NOT IN ('v1', 'v2', ...)` (or equivalent `WHERE col NOT IN (...)`).
-- **SQL trap**: `NULL NOT IN ('free','starter','pro','enterprise')` evaluates to **UNKNOWN**, NOT TRUE. UNKNOWN rows are NOT returned by `WHERE`/`HAVING`.
-- Therefore the NULL row is **silently EXCLUDED** from the failing-rows result — the test passes despite NULL being a value the user didn't allow.
-- Verbatim from docs.getdbt.com: *"the `accepted_values` test validates that all of the **non-null** values in a column are present in a supplied list of values"* (non-null is documented but easy to miss).
-
-**Engineer's stated scenario explicitly had BOTH NULL and 'none' introduced.** If they follow the responder's advice verbatim, `dbt build` runs the `accepted_values` test, the 'none' rows fail (good — caught), but the NULL rows pass silently — and downstream is STILL silently wrong. The engineer thinks they're protected, but they're only half-protected. This is exactly the silent-bug failure mode the test was supposed to prevent.
-
-**Correct answer** (what should have been said): pair `accepted_values` WITH `not_null` on the same column:
-```yaml
-- name: plan_tier
-  data_tests:
-    - not_null                                                  # catches NULL
-    - accepted_values:
-        values: ['free', 'starter', 'pro', 'enterprise']         # catches 'none' and any other unexpected literal
 ```
-Both run as `severity: error` (default), both must pass for downstream to proceed.
+L2996: "When CDC replays Postgres DELETE (and UPDATE) events as DELETE FROM / MERGE INTO against Iceberg,
+        the table's delete write mode determines what actually lands on MinIO. Iceberg supports two
+        modes, controlled by the table property write.delete.mode:"
+L3000: | Merge-on-Read (MoR)  | write.delete.mode = 'merge-on-read'  | Writes small positional or
+        equality delete files ... Fast (only the small delete file is written) ... High-delete-rate
+        CDC streams; tables with frequent UPDATEs/DELETEs where you can run periodic compaction |
+L3001: | Copy-on-Write (CoW)  | write.delete.mode = 'copy-on-write'  | Rewrites every affected Parquet
+        data file without the deleted rows ... Slower (full file rewrite on every DELETE) ... Tables
+        with infrequent deletes where read performance matters most |
+```
 
-**Resource-sourced? YES — LIGHT FIX-A WARRANTED.**
+The section header at L2996 is framed around **"CDC replays Postgres DELETE events"** — a Postgres-CDC-narrow framing. The Q1 engineer's keywords are "GDPR delete / purge user_id rows / 45-min Spark job / small frequent deletes / which delete mode is faster" — NONE of which point at "CDC replays Postgres DELETE." Keyword anchors `Merge-on-Read`/`Copy-on-Write`/`write.delete.mode` exist deeper in the table cells but the section-level keyword magnet is wrong-shaped for a GDPR-purge question.
 
-Grep evidence:
-- **r28 §242** (`resources/28-complex-sql-performance-trino-dbt.md` line 242): teaches the compiled SQL `SELECT status FROM fct_users WHERE status NOT IN ('active','churned','trial')` but does **NOT** call out that NULL is excluded by NOT-IN semantics. The DO-NOT-WRITE row at §272 mentions `unique` is NULL-tolerant but says nothing about `accepted_values` NULL behavior.
-- **r27 §3006** (`resources/27-oracle-plsql-to-dbt-trino.md`): teaches `accepted_values` compiles to `WHERE <col> NOT IN ('v1', 'v2', ...) [AND <col> IS NOT NULL]` with the IS NOT NULL clause in BRACKETS (suggesting "optional"). This is technically wrong — dbt-core's `accepted_values.sql` macro does NOT emit an explicit IS NOT NULL filter; the NULL exclusion is purely NOT-IN UNKNOWN semantics. Either way, the engineer reading §3006 won't notice that NULL is excluded.
+The responder DID land on r17 §157 ("LEADING CANONICAL — bulk-purge OLD DAY-PARTITIONS for retention / GDPR: a partition-aligned DELETE is METADATA-ONLY") — which is why the partition-aligned-metadata fact came through correctly. But that section is **partition-aligned-only** and does NOT cover the non-partition delete-by-user_id case the engineer actually asked. So the responder gave the partition-aligned fact (correct but inapplicable here) + hedged on the by-user_id case it didn't find anchored content for.
 
-Neither location pairs `accepted_values` guidance with "also add `not_null`" guidance for catching NULLs. This is exactly the same shape as the iter948 r07 HAVING-trims-memory folklore (recurring slip traced to a wrong/incomplete resource claim) — `feedback_trace_recurring_folklore_to_resource_root_cause.md` applies.
+**LIGHT FIX-A RECOMMENDED.** Add a short LEADING CANONICAL block (or strong keyword preamble) at r13 §2996 (or as a cross-ref card in r17 immediately after §157) that:
 
-**LIGHT FIX-A spec:**
-- **r28 §242 (the compiled-SQL bullet for `accepted_values`)** — add explicit one-sentence caveat right after the compiled-SQL line: *"**NULL trap:** NULL rows are silently excluded because `NULL NOT IN (...)` evaluates to UNKNOWN (not TRUE), so NULL rows do NOT appear in the failing-rows set. To catch BOTH unexpected literal values AND NULL, pair `accepted_values` with `not_null` on the same column."*
-- **r28 §272 DO-NOT-WRITE table** — add a new row: *WRONG: `accepted_values` alone on a column that must reject NULL → RIGHT: pair with `not_null` (`accepted_values` catches `'none'` / typos / new values, `not_null` catches NULL — both run by default `severity: error`).*
-- **r27 §3006** — drop the misleading `[AND <col> IS NOT NULL]` bracket (dbt-core does NOT emit this), reconcile to: *"compiles to roughly `SELECT <col> FROM <model> WHERE <col> NOT IN ('v1', 'v2', ...)` — note NULL rows pass silently per `NULL NOT IN (...)` UNKNOWN semantics; pair with `not_null` to catch NULL."*
-- **Watch label**: `iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A`; re-probe with framing like *"my plan_tier has nulls and unexpected strings, single dbt test or two?"* or *"if a column allows NULL legitimately, can I still use accepted_values to catch typos?"* within 4-8 iters.
+1. **Keyword anchors:** "small frequent deletes, GDPR purge by user_id, delete by non-partition column, frequent row-level deletes, which delete mode is faster, write.delete.mode merge-on-read vs copy-on-write, Spark rewriting whole table slow, MoR vs CoW for frequent deletes, why is my delete job slow."
+2. **The two-sentence answer:** CoW rewrites the whole affected Parquet file per delete (= the slow 45-min Spark symptom); MoR writes small position-delete files (fast). For 10-50K rows × multiple times/day, **MoR is dramatically faster on writes**.
+3. **The Trino-467-MoR-only caveat (load-bearing on this stack since both Trino AND Spark write):** `write.delete.mode` only governs **Spark's writer** — Trino 467's writer is MoR-only regardless of the property (cross-ref r13 §5589 / r17 §583/§721 / trinodb/trino#17272). So setting the property has no effect on Trino-driven deletes (already MoR) but **does flip Spark-driven deletes** (the engineer's bottleneck).
+4. **Compaction-as-required-companion:** MoR shifts cost to readers, so schedule `EXECUTE optimize` (Trino) / `rewrite_position_delete_files` (Spark 469+ / Spark only currently) periodically.
+5. **GDPR-on-disk caveat:** delete files / file rewrites both leave bytes referenced by prior snapshots — `expire_snapshots` is required for actual MinIO byte removal (cross-ref r13 §1281-§1324).
 
-**Topic**: `dbt model contracts` (same routing as iter1216 Q3 relationships, per "structurally identical data-integrity declaration as model-contracts family") — was 4.5655/11, → (50.2205 + 2.75)/12 = 52.9705/12 = **4.4142/12 PASSED** (-0.1513, margin still +0.9142 — large hit on a thin 12-Q row, but row remains comfortably above threshold).
-
----
-
-### Q4 — Oracle `DECODE(plan_tier, 'free', 0, 'starter', 29, 'pro', 99, 999)` → Trino equivalent
-
-| Dimension | Score |
-|---|---|
-| Technical accuracy | 5.0 |
-| Beginner clarity | 4.5 |
-| Practical applicability | 5.0 |
-| Completeness | 4.5 |
-| **Average** | **4.75 STRONG PASS** |
-
-**Verifications:**
-
-1. **No `DECODE` in Trino 467** — verified at [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html); conditional functions are `CASE` / `IF` / `COALESCE` / `NULLIF` / `TRY`. No DECODE alias. Matches r27 §6.4 Oracle-function-translation table.
-2. **CASE WHEN rewrite is the correct translation** — responder gave the verbatim form:
-   ```sql
-   CASE WHEN plan_tier = 'free' THEN 0
-        WHEN plan_tier = 'starter' THEN 29
-        WHEN plan_tier = 'pro' THEN 99
-        WHEN plan_tier = 'enterprise' THEN 199
-        ELSE 999
-   END
-   ```
-   1:1 translation of Oracle DECODE position arguments to CASE WHEN branches with the trailing default mapped to ELSE.
-3. **Oracle NULL=NULL semantics caveat correctly named** — Oracle `DECODE(x, NULL, 'is_null', ...)` matches NULL inputs (DECODE treats NULL=NULL as TRUE, unique to DECODE among Oracle expressions); Trino's `CASE WHEN x = NULL` evaluates UNKNOWN (standard SQL three-valued logic), so the NULL branch never matches. Responder correctly routed to **searched CASE** with `WHEN plan_tier IS NULL THEN ...` as the FIRST branch — this is the canonical translation for DECODE rows that explicitly handle NULL.
-
-**5th consistent DECODE pass.** Past 4 DECODE re-probes (iter1067 / iter1133 / iter1170 / iter1213-ish) all landed cleanly with the same NULL-nuance disambiguation. This is a well-internalized canonical now.
-
-**Topic**: `Oracle PL/SQL procedure → dbt + Trino SQL migration` — was 4.4547/181, → (806.3007 + 4.75)/182 = 811.0507/182 = **4.4563/182 PASSED** (+0.0016, margin +0.9563).
+**Watch label:** `iter1219 Q1 CoW-vs-MoR small-frequent-delete findability`. Re-probe in 4-8 iters with fresh phrasing ("billing fact table getting hammered with row deletes for compliance — should I change my delete mode?" / "Spark MERGE INTO is rewriting too much — which write mode handles small deletes better?") to verify the FIX-A keyword anchors are reaching the responder.
 
 ---
 
-## Watch / monitor status
+### Q2 — WoW % change per customer with FULL OUTER JOIN, handling 0-prior-week + new-customer — **STRONG PASS (NO-OP)**
 
-**Watches CLOSED:**
-- **`iter1214 retention_days` param-fab + expire-vs-planning conflation** → **CLOSED on first re-probe** (4 iters later). Responder this iter correctly flagged the wrong `retention_days => 7` form, substituted `retention_threshold => '7d'`, AND framed expire-vs-planning distinction correctly (storage hygiene vs metadata-bloat fix). 12th consecutive watch-closure in 1st-re-probe-CLOSE pattern.
+| Dim | Score | Note |
+|---|---|---|
+| Technical accuracy | 5 | FULL OUTER JOIN of `this_week`/`last_week` weekly-grouped CTEs + `COALESCE(t.customer_id, l.customer_id)` for the union of customer ids + nested CASE handling all three branches (NULL→NULL for new customer, 0→NULL for div-zero, else `ROUND(100.0*(this-last)/last, 1)`) is the textbook canonical. |
+| Beginner clarity | 5 | Separating new-customer (`last_week_calls IS NULL`) from div-zero (`last_week_calls = 0`) as two distinct CASE branches both returning NULL is exactly the right teaching framing — the engineer asked about both edge cases and got them disambiguated explicitly. |
+| Practical applicability | 5 | Copy-paste ready Trino 467; INTEGER/DECIMAL div-by-zero throws caveat is correct per `reference_trino_division_by_zero` (verified RAW git-tag, r27 §4.4H locked); `100.0` literal correctly forces double arithmetic to avoid integer-division truncation; week-of-year window correctly framed. |
+| Completeness | 5 | Both edge cases handled cleanly; INT-div-by-zero-throws callout adds the "why guard explicitly" load-bearing reason. Minor non-load-bearing: cross-year week-of-year comparison fragility briefly mentioned but not fixed (use `date_trunc('week', ...)` or year+week composite key for production) — recall completeness only. |
 
-**Watches NEWLY OPENED:**
-- **`iter1218 r28+r27 accepted_values-doesnt-catch-NULL` LIGHT FIX-A** — resource-sourced (r28 §242 + r28 §272 + r27 §3006). Reconcile-in-place per `feedback_reconcile_dont_append.md`: drop r27 §3006 misleading `[AND <col> IS NOT NULL]` brackets, add explicit NULL-trap caveat at r28 §242 + new DO-NOT-WRITE row at §272. Re-probe within 4-8 iters under framing variants like *"if my column allows NULL legitimately, can I still use accepted_values?"* / *"is there ONE dbt test that catches both NULL and unexpected literals?"*
-
-**Watches STILL OPEN (no churn this iter):**
-- **`iter1215 strpos-3-arg`** CONFIRMED-CEILING — recall ceiling on responder, NO churn; re-probe in 6-10 iters.
-- **`iter1213 session_properties + (+)-mnemonic`** — re-probe 4-7 iters.
-- **`iter1206 LIKE-on-ROW + $partitions-omission`** — re-probe 4-8 iters.
+**Average: 5.0 — STRONG PASS, NO-OP.** No imported-prior, no broken-secondary, no over-warning. Cites r07 (WoW pattern) + r27 §4.4H (div-by-zero guard).
 
 ---
 
-## Pattern observations
+### Q3 — dbt tag placement + `--select tag:billing` upstream-deps behavior — **STRONG PASS (NO-OP)**
 
-- **Q3 family meta-pattern**: 3rd instance in recent ~20 iters where responder confidently asserts a built-in dbt test catches MORE cases than it actually does (similar to iter941+946 HAVING-trims-memory folklore traced to wrong resource claim). The two-sentence NULL-trap caveat in r28/r27 closes the recurring slip surface. Per `feedback_trace_recurring_folklore_to_resource_root_cause.md`, resource trace was successful (r28 §242 + r27 §3006 confirmed source-anchored, not pure responder slip).
-- **iter1214 watch closure timing**: 4-iter gap (1214 → 1218) is the median observed re-probe latency. Watch system functioning as designed; param-fab family (retention_days fab) now joins starts_with-fab / to_char-fab / array_sum-fab / format_number-fab / migrate-fab / LATERAL-absence-fab / register_table-arg-shape in the "imported-prior assumed-fact" family, all now closed.
-- **Recall ceilings (NO churn)**: Q1 omitted `EXECUTE optimize` as a complementary lever; Q2 didn't spell out the AVG-of-AVGs weighting algebra. Both are recall-ceiling completeness shaves on otherwise pin-perfect canonicals — no resource action.
+| Dim | Score | Note |
+|---|---|---|
+| Technical accuracy | 5 | Tags can go in `schema.yml` `config:` block OR inline `{{ config(tags=['billing']) }}` — both verified at [docs.getdbt.com/reference/resource-configs/tags](https://docs.getdbt.com/reference/resource-configs/tags). `dbt run --select tag:billing` selects ONLY tagged nodes (NOT upstream parents) — verified WebSearch above + [docs.getdbt.com/reference/node-selection/graph-operators](https://docs.getdbt.com/reference/node-selection/graph-operators). `+tag:billing` for ancestors (upstream parents). Space = UNION/OR, comma = INTERSECTION/AND — verified r27 §3722-§3734 + [docs.getdbt.com/reference/node-selection/set-operators](https://docs.getdbt.com/reference/node-selection/set-operators). |
+| Beginner clarity | 5 | Engineer with 180-model project + 50-min CI gets a precise unambiguous answer: where to add the tag (two locations), what command runs (just the tagged ones), how to expand selection (leading `+`). |
+| Practical applicability | 5 | Engineer pastes `tags: ['billing']` into `schema.yml` `config:`, runs `dbt run --select tag:billing`, and gets a billing-only hotfix run. If they need parent staging models too, `--select +tag:billing`. Direct CI cut from 50min → seconds. |
+| Completeness | 4.5 | Could mention tags can also be set in `dbt_project.yml` under the `models:` block (less common for ad-hoc hotfix tagging, but exists for project-wide subtree tagging). Minor recall-completeness only, non-load-bearing for the engineer's question. |
+
+**Average: 4.875 — STRONG PASS, NO-OP.** No imported-prior, no broken-secondary. Cites r27 §6.7F (set-operators).
 
 ---
 
-## Iteration summary
+### Q4 — Oracle `LPAD(invoice_number, 8, '0')` → Trino, CAST gotchas — **PASS (RECALL-CEILING, NO FIX-A)**
 
-- **Per-Q scores**: Q1 4.5625 / Q2 4.75 / Q3 2.75 / Q4 4.75
-- **Iteration avg**: (4.5625 + 4.75 + 2.75 + 4.75) / 4 = **4.2031 PASS + LIGHT FIX-A**
-- **FIX-A required**: r28 §242 + r28 §272 + r27 §3006 — `accepted_values`-doesn't-catch-NULL caveat + pair-with-`not_null` guidance.
-- **All required topics still PASSED** (Q3 hit r-dbt-model-contracts row to 4.4142/12, margin +0.9142 — comfortable; FIX-A protects against future regression).
+| Dim | Score | Note |
+|---|---|---|
+| Technical accuracy | 4 | `LPAD(CAST(invoice_number AS VARCHAR), 8, '0')` is correct and matches r23 §734 canonical verbatim. Trino does not implicitly coerce numbers to VARCHAR in function args — correct per r23 §714. "Don't double-cast via integer" is correct guard. **BUT** the reassurance **"if invoice_number is NUMERIC/DECIMAL the CAST to VARCHAR ... no decimals for whole numbers"** is incomplete/wrong for a DECIMAL column with non-zero scale: `CAST(CAST(12345 AS DECIMAL(10,2)) AS VARCHAR) = '12345.00'` (Trino preserves DECIMAL scale on the VARCHAR form). For Oracle NUMBER → Iceberg migration, NUMBER often becomes DECIMAL(p,s) with s≥0 — if s>0 the cast WILL include `.00` and break the 8-char pad. Safe form for a DECIMAL column: `LPAD(CAST(CAST(invoice_number AS BIGINT) AS VARCHAR), 8, '0')` (intermediate BIGINT strips the scale). |
+| Beginner clarity | 4 | Clear on the base form. Missing hazard callouts (see Completeness). |
+| Practical applicability | 3 | Engineer pastes the form, it works for **today's** data, then silently breaks when (a) `invoice_number` grows past 8 digits — `LPAD('123456789', 8, '0') = '12345678'` silently drops the trailing `9` — a real data-integrity hazard r23 §721-728 explicitly warns about — or (b) the column is DECIMAL(p,s) with s>0 and the `.00` shows up unexpectedly. |
+| Completeness | 2 | **Two key omissions on a documented topic:** (1) `format('%08d', invoice_number)` — r23 §739-742 explicitly says **"Prefer this over lpad(CAST(order_id AS VARCHAR), 8, '0') whenever the id may exceed the pad width"** because `%08d` is a MINIMUM field width (Java Formatter) so a 9-digit number prints in full and is NEVER truncated. Engineer with an invoice_number column that will eventually exceed 8 digits gets this canonical zero-pad-without-truncation-hazard. (2) The **truncation hazard** itself — `lpad(x, N, '0')` pads-OR-truncates to EXACTLY N; r23 §721-728 has a READ-FIRST callout on this. |
+
+**Average: 3.25 — PASS (borderline), RECALL-CEILING, NO FIX-A.**
+
+**GREP — RESOURCE IS ALREADY MAXIMALLY DEFENDED.** `resources/23-sql-best-practices-olap.md` §716-758 has the SUB-CANONICAL block:
+
+- L716 use-cases line lists keyword anchors: *"pad a string to a fixed width, build a fixed-width flat-file export, right-pad with spaces, left-pad, pad to N characters, **truncate if longer**, **zero-pad an id**, align text in a fixed field, ... **zero-pad order_id to 8 chars**"*
+- L720-728 **READ FIRST** callout: `lpad/rpad pad OR TRUNCATE to EXACTLY size characters` with worked example `lpad('123456789', 8, '0') -> '12345678' (drops the trailing '9')` + FIX directive "use `format('%08d', n)` (below) which zero-pads a number AND prints a wider number IN FULL (never truncates)."
+- L739-742 LEADING-CANONICAL block for `format('%08d', order_id)` with explicit "Prefer this over lpad(CAST(order_id AS VARCHAR), 8, '0') whenever the id may exceed the pad width."
+- L751 paragraph repeats the truncation-hazard message + ID-column-specific warning.
+- L758 cross-ref to r27 §7A.3.1 for Oracle LPAD migration angle.
+
+The keyword anchors at L716/L718 explicitly include "zero-pad an id, truncation hazard, fixed-width truncation hazard, lpad(CAST ...)" — these should magnetize an Oracle-LPAD-on-invoice_number question. The responder DID land on the section (correct base form `LPAD(CAST(... AS VARCHAR), 8, '0')`) but did NOT surface the `format('%08d', ...)` SUB-CANONICAL alternative or the truncation-hazard callout sitting 5-15 lines away. This is a **Haiku recall-ceiling on a SUB-CANONICAL** (LEADING canonical lifted; co-located SUB-CANONICAL alternative not lifted). Per pinned `feedback_synthesis_ceiling_stop_churning.md` and `feedback_new_card_over_attracts_adjacent.md` (risk of over-attracting adjacent neighbors with more defang on already-dense anchors) — **NO FIX-A**, accept the recall ceiling.
+
+The "no decimals for whole numbers" reassurance is the kind of casual over-confident reassurance the responder appends when it doesn't fully verify — non-resource-sourced, base-training filler. Common case (BIGINT/INTEGER `invoice_number`) is unaffected; DECIMAL(p, s>0) case silently breaks. Per `feedback_responder_broken_secondary_alternative.md` family (9th-ish instance — nails the LEAD, appends a slightly-wrong reassurance/secondary). No resource fix.
+
+**Watch label:** `iter1219 Q4 lpad-CAST format-%08d-missed + DECIMAL-scale-decimals-reassurance`. Re-probe in 5-9 iters under fresh phrasing ("padding part_number that could grow to 10 digits" / "Oracle NUMBER → Trino with non-zero scale gotcha") to verify ceiling.
+
+---
+
+## Topic average updates
+
+| Topic | Prior | Q | Δ | New | Status |
+|---|---|---|---|---|---|
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.4475/222 | Q1=2.75 | -0.0076 | **4.4399/223** | PASSED, margin +0.9399 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | 4.5465/156 | Q2=5.0 | +0.0029 | **4.5494/157** | PASSED, margin +1.0494 |
+| Improving complex SQL performance on Trino with dbt | 4.5407/47 | Q3=4.875 | +0.0069 | **4.5476/48** | PASSED, margin +1.0476 |
+| Oracle PL/SQL procedure → dbt + Trino SQL migration | 4.4563/182 | Q4=3.25 | -0.0066 | **4.4497/183** | PASSED, margin +0.9497 |
+
+All required topics REMAIN PASSED. Iter1219 overall average: (2.75 + 5.0 + 4.875 + 3.25) / 4 = **3.97 PASS**.
+
+---
+
+## Carry-forward watches
+
+| Iter | Watch | Status |
+|---|---|---|
+| 1219 (NEW) | **Q1 CoW-vs-MoR small-frequent-delete findability** — r13 §2996 keyword-anchor LIGHT FIX-A to magnetize "GDPR delete / small frequent deletes / which delete mode is faster" to the comparison table | OPEN — re-probe 4-8 iters with fresh phrasing |
+| 1219 (NEW) | **Q4 `lpad(CAST...)` SUB-CANONICAL recall + DECIMAL-decimals reassurance** — Haiku misses co-located `format('%08d', ...)` SUB-CANONICAL + truncation-hazard callout despite dense keyword anchors; recall-ceiling, NO FIX-A | OPEN soft-watch — re-probe 5-9 iters |
+| 1218 | `accepted_values` NULL-trap caveat — FIX-A added to r28 §242 + r27 §3006 | Re-probe 4-8 iters under "column-allows-NULL / one-test-for-both" framing |
+| 1215 | `strpos` 3-arg assumed-absence base-prior — accept-ceiling per iter1211 pre-commitment, no further defang | Re-probe 6-10 iters with fresh phrasing |
+| 1213 | session_properties + `(+)`-mnemonic | Re-probe 4-7 iters |
+| 1206 | LIKE-on-ROW + `$partitions` | Re-probe 3-7 iters |
+
+---
+
+## Status
+
+All required topics PASSED with healthy margins. The Q1 hedge is a clear findability defect on a load-bearing question; LIGHT FIX-A warranted to add keyword anchors at r13 §2996 (and/or a cross-ref card in r17 between §157 partition-aligned and §583 Trino-writer-MoR-only). Other three answers ranged from clean STRONG PASS (Q2/Q3) to borderline-PASS recall-ceiling (Q4). No new resource-defect family. Iter1220 next: BREADTH (probe other topics, re-probe Q1 CoW-vs-MoR after FIX-A under fresh phrasing).
