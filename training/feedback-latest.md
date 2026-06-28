@@ -1,144 +1,146 @@
-# Iteration 1224 — Judge Feedback
+# Iteration 1225 — Judge Feedback
 
-**Verdict: 4.578 PASS — iter1219 CoW-MoR FINDABILITY WATCH CLOSES (comparison REACHED).** Q1 reached the r13 §2994+ CoW/MoR comparison cleanly post-iter1219 findability-anchor add — facts on whole-file-rewrite (CoW, no delete files) vs position-delete files (MoR), `$files` content=1 diagnostic, and Trino-467-writer-MoR-only nuance are all VERIFIED correct. **BUT** the scenario-specific diagnosis was muddled: the user is SEEING delete files, which definitively means they are ALREADY on MoR; the teammate's "you're on CoW" is BACKWARDS, and the fix is COMPACTION (`EXECUTE optimize` / `rewrite_position_delete_files`) NOT a CoW→MoR mode switch. Responder's prose "CoW would rewrite your whole table — that's why your dashboard got slower" mis-attributes the slowness to a mode the engineer isn't on. Compaction is mentioned but not foregrounded as THE primary fix. Q2/Q3/Q4 all clean.
+**Verdict: 4.875 STRONG PASS — iter1219 format-%08d WATCH CLOSES on first re-probe (15th consecutive 1st-re-probe-close).** Q4 surfaces BOTH the `format('%08d', account_id)` minimum-width sub-canonical AND the `lpad` pads-OR-truncates hazard that iter1219 missed. Q2 (FILTER vs SUM CASE) and Q3 (dbt vars CLI override) are clean 5.0s. Q1 (Iceberg row-level diff) is a 4.5 — the time-travel + FULL OUTER JOIN + IS DISTINCT FROM pattern is CORRECT and is the right tool for the engineer's MoR-with-delete-files scenario, but the responder absolutely denies "Trino 467 has NO native changelog/diff table" when in fact Trino 467 HAS the `table_changes()` table function (see verification below). Practical impact bounded because `table_changes()` itself has documented limitations precisely in the engineer's scenario (no support for snapshots that include delete files), so routing to FULL OUTER JOIN is the right ACTION; but the existence-denial is a factual slip on a non-load-bearing axis.
 
 Per-question summary:
-- Q1 3.6875 — CoW/MoR comparison REACHED (watch CLOSES); facts correct + diagnostic + Trino-467 nuance + property syntax all clean; SCENARIO DIAGNOSIS muddled (didn't identify already-on-MoR / teammate-backwards / compaction-is-the-fix-not-mode-switch); new soft watch
-- Q2 5.0 — `CROSS JOIN UNNEST(tags) AS t(tag) GROUP BY tag` canonical + JSON-string variant + `LEFT JOIN UNNEST ... ON TRUE` empty-array handling + Oracle `TABLE()`→Trino mapping
-- Q3 4.6875 — `strategy='check'` correct for no-reliable-`updated_at`; `check_cols`+hash-diff semantics; 4 dbt_* columns; `hard_deletes='new_record'`
-- Q4 5.0 — Trino regexp_replace `$1/$2/$3` Java/Joni backreferences (NOT `\1`); `'($1) $2-$3'` example correct; `\1` defang correct
+- Q1 4.5 — Time-travel via `FOR VERSION AS OF` both snapshots + FULL OUTER JOIN on PK + `IS DISTINCT FROM` (NULL-safe) classify-INSERT/DELETE/UPDATE pattern correct; `$snapshots` discovery correct; `IS DISTINCT FROM` valid Trino 467; **SLIP: denies existence of `table_changes()` table function** (Trino 467 DOES have it — though it has limitations precisely in this scenario so the FULL OUTER JOIN routing is correct)
+- Q2 5.0 — `COUNT(*) FILTER (WHERE priority='low')` per priority correct + SUM(CASE) Oracle-form still valid + no native PIVOT
+- Q3 5.0 — Top-level `vars:` in `dbt_project.yml` + `{{ var('lookback_days', 90) }}` + `dbt run --vars '{lookback_days: 7}'` + precedence CLI > project > default + `--vars` plural
+- Q4 5.0 — **WATCH CLOSES**: `lpad(varchar, bigint, varchar)` signature + numeric-CAST-first + **PADS-OR-TRUNCATES** hazard + `format('%08d', account_id)` minimum-width Java Formatter alternative
 
-Iter average: (3.6875 + 5.0 + 4.6875 + 5.0) / 4 = **4.594** (rounded 4.58), margin +1.09.
+Iter average: (4.5 + 5.0 + 5.0 + 5.0) / 4 = **4.875** STRONG PASS, margin +1.375.
 
 ---
 
-## Q1 — Subscriptions Iceberg + Spark MERGE INTO + delete files accumulating; teammate says CoW→MoR
+## Q1 — Iceberg row-level diff between Monday-night snapshot and now (Spark MERGE INTO every 15min CDC)
 
-**Score: 3.6875** — Acc 3.5 / Clar 4.0 / App 3.75 / Compl 3.5
+**Score: 4.5** — Acc 4.0 / Clar 5.0 / App 5.0 / Compl 4.0
 
-**Scenario.** `subscriptions` Iceberg table being updated by Spark `MERGE INTO`; after ~2 weeks dashboards slower. `EXPLAIN ANALYZE` shows "lots of delete files scanned." Teammate claims "we're on Copy-on-Write, should switch to Merge-on-Read." Engineer asks what CoW vs MoR do, how to tell which mode they're on, which to prefer.
-
-**WATCH CLOSURE — iter1219 CoW-MoR findability.** iter1219 responder HEDGED "resources don't contain a direct comparison" (FALSE; r13 §2996 has the comparison table verbatim). iter1219 LIGHT FIX-A added a keyword-anchored leading canonical at r13 §2996. iter1224 (this iter) re-probe under structurally different framing (Spark MERGE INTO + delete-files-accumulating + teammate-said-X) REACHED the CoW vs MoR comparison cleanly — findability anchor works. **WATCH CLOSES on first re-probe** (~14th consecutive watch closure in 1st-re-probe-CLOSE pattern).
+**Scenario.** `accounts` Iceberg table on MoR; Spark `MERGE INTO` every 15min from CDC pipeline. Billing escalation wants row-level diff: inserted / deleted / field-value-changed between Monday-night snapshot and current state. Engineer asks whether Iceberg supports row-level diff or self-join of two snapshot states.
 
 **Load-bearing facts CORRECT (VERIFIED):**
 
-1. **CoW semantics** — "rewrites every affected Parquet file on DELETE/UPDATE; NO delete files; slow write, fast read." VERIFIED at [Dremio — Row-level Changes on the Lakehouse](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/) ("CoW rewrites the entire data file when even a single row is updated or deleted") + [iceberglakehouse.com/iceberg/iceberg-merge-on-read](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) ("Unlike COW, Merge-on-Read does not rewrite entire files when an update or delete occurs").
-2. **MoR semantics** — "small position-delete files reference invalidated rows by ordinal position; fast write, slower read." VERIFIED at iceberglakehouse.com ("delete files that reference the data file and the ordinal position of the invalidated row") + [trinodb/trino PR #12704](https://github.com/trinodb/trino/pull/12704).
-3. **Diagnostic** — `SELECT COUNT(*) FROM iceberg.analytics."subscriptions$files" WHERE content=1` (high count = MoR / many position deletes; zero = CoW). VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `$files.content` enum (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES).
-4. **Trino 467 writer is MoR-only regardless of property** — VERIFIED via r13 §5589 + r17 §583/§721 + [trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272). The `write.delete/update/merge.mode='merge-on-read'` property only governs SPARK's writer.
-5. **Property syntax** — `ALTER TABLE ... SET TBLPROPERTIES('write.delete.mode'='merge-on-read', 'write.update.mode'='merge-on-read', 'write.merge.mode'='merge-on-read')` from Spark. Correct.
-6. **Compaction mentioned** — `EXECUTE optimize` named as periodic compaction (correct fix for delete-file accumulation, verified via [Apache Iceberg knowledge base — Merge-on-Read](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) "compaction reads all delete files, applies them to the data, and writes new clean data files, resetting delete file count to zero").
+1. **Time-travel both snapshots** — `WITH old_state AS (SELECT ... FROM iceberg.<schema>.accounts FOR VERSION AS OF <old_snapshot_id>), new_state AS (... FOR VERSION AS OF <new_snapshot_id>)`. VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim: `SELECT * FROM example.testdb.customer_orders FOR VERSION AS OF 8954597067493422955`. `FOR TIMESTAMP AS OF TIMESTAMP '...'` alternative also valid for time-based pinning.
+2. **`$snapshots` discovery** — `SELECT snapshot_id, committed_at, operation, summary FROM iceberg.<schema>."accounts$snapshots" ORDER BY committed_at` to find IDs. Columns match docs verbatim.
+3. **FULL OUTER JOIN classify pattern** — `CASE WHEN o.account_id IS NULL THEN 'INSERTED' WHEN n.account_id IS NULL THEN 'DELETED' WHEN o.col IS DISTINCT FROM n.col OR ... THEN 'UPDATED' ELSE 'UNCHANGED' END` + `COALESCE(o.account_id, n.account_id)` for the key + filter `WHERE <any col> IS DISTINCT FROM <other col> OR <one side> IS NULL`. Standard analytical diff pattern.
+4. **`IS DISTINCT FROM` is NULL-safe** — VERIFIED at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) verbatim: "both operators guarantee either a true or false outcome even in the presence of `NULL` input." `NULL IS DISTINCT FROM NULL` evaluates to `FALSE` (they are not distinct).
+5. **Two full scans tradeoff** — correctly named as the cost; acceptable for small-medium accounts table; large/wide tables benefit from partition-pruning predicate (e.g., last-N-days `updated_at`) inside each CTE.
 
-**DEFECT — scenario-diagnosis muddle (NOT resource-sourced, recall-ceiling reasoning slip):**
+**SLIP — `table_changes()` denial** (Acc -1, Compl -1):
 
-The user's `EXPLAIN ANALYZE` shows "lots of delete files scanned." Per the responder's own correct fact #1, **CoW produces ZERO delete files** — so seeing delete files DEFINITIVELY means the table is **already on MoR**. The teammate's "we're on CoW" is BACKWARDS for this scenario. The slowness is caused by **accumulated MoR position-delete files** that every read must merge against the data files (read amplification), NOT by CoW whole-file rewrites.
+Responder said: "Trino 467 has NO native changelog/diff table for row-level comparison between snapshots." **FACTUALLY WRONG**. Trino 467 has an Iceberg `table_changes()` table function — see [trinodb/trino#21227](https://github.com/trinodb/trino/issues/21227) (documentation tracker) + Trino 467 release notes (the breaking change in 467 removed deprecated schema/table args and renamed to `schema_name`/`table_name`). Returns rows with special columns `_change_type` (e.g., `insert`), `_change_version_id`, `_change_timestamp`, `_change_ordinal`. Usage: `SELECT * FROM TABLE(iceberg.system.table_changes(schema_name => 'analytics', table_name => 'accounts', start_snapshot_id => <id>, end_snapshot_id => <id>))`.
 
-Responder's prose framing said: "With frequent updates, CoW would rewrite your whole table on each update — that's why your dashboard got slower." This mis-attributes the slowness to CoW when the engineer is on MoR. The CORRECT scenario diagnosis is:
+**HOWEVER** — `table_changes()` has KNOWN LIMITATIONS that hit the engineer's specific scenario:
+- Only reports per-snapshot insert/delete events; does NOT compute net effect across multiple snapshots (a row deleted then reinserted within the range returns BOTH events).
+- **Does NOT support snapshots that include delete files** — i.e., MoR position-delete snapshots produced by Spark `MERGE INTO` updates/deletes. The engineer's accounts table getting MERGE INTO every 15min IS exactly this case.
 
-> "The delete files you're seeing in EXPLAIN ANALYZE PROVE you're already on MoR — CoW doesn't produce delete files at all. Your teammate has it backwards. The dashboards slowed because MoR position-delete files have ACCUMULATED over 2 weeks of MERGE INTO writes — every read now merges many delete files against the data files. **The fix is COMPACTION, not a mode switch.** Run `ALTER TABLE iceberg.analytics.subscriptions EXECUTE optimize(file_size_threshold => '256MB')` (Trino-side) or `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.subscriptions')` (Spark-side) on a periodic schedule (nightly or every few hours). After compaction, `$files` content=1 count drops back to near-zero and read times recover."
+So routing the engineer to **FOR VERSION AS OF + FULL OUTER JOIN + IS DISTINCT FROM is the correct action** for this scenario (table_changes wouldn't help due to delete-file limitation). The slip is the absolute denial of table_changes() existence — a better framing is "Trino 467 HAS `table_changes()` but it doesn't support snapshots containing delete files, which is what your MoR + Spark MERGE pipeline produces — so the workhorse pattern for your case is two time-travel reads + FULL OUTER JOIN diff."
 
-Engineer following responder's prose would copy `SET TBLPROPERTIES write.X.mode='merge-on-read'` (a no-op — already MoR) and might also try `EXECUTE optimize` (the actual fix). They MIGHT recover via the secondary instruction but with the wrong mental model. Could file an unnecessary mode-switch ticket with the Spark team.
+**Resource-source check.** Grep `table_changes` in resources/ for findability gap test (recommended for teacher follow-up). If 0 hits, this is a knowledge gap; could warrant a 5-7 line additive card under r17 / r10 / r28 snapshot-comparison section: "Trino 467 has `iceberg.system.table_changes()` for snapshot-range CDC reading, BUT it does not work on snapshots containing delete files (MoR position-deletes) — for MoR tables use FOR VERSION AS OF + FULL OUTER JOIN + IS DISTINCT FROM diff pattern instead."
 
-**Resource-source check CLEAN.** r13 §2996 (CoW-vs-MoR table), r13 §1293-1326 (delete-then-purge MoR cleanup recipe), and r17 §157+ (`EXECUTE optimize` + delete-file accumulation) all teach the right facts. The bridge "delete files visible = ALREADY on MoR → teammate-backwards twist → compaction-is-the-fix" is a multi-hop synthesis that the responder didn't assemble for the specific scenario. NOT a resource gap — Haiku reasoning-ceiling slip.
+**NEW soft watch** `iter1225 Q1 table_changes() existence + delete-file limitation`: re-probe in 4-8 iters under framing like "Iceberg CDC diff between two versions / Iceberg snapshot-to-snapshot change feed" to test whether table_changes() existence + limitation surfaces. If recurs as denial, light additive card. If lands correctly with limitation, recall ceiling (no fix).
 
-**NO FIX-A.** Adding an explicit "teammate-backwards diagnosis" card at r13 §2996 risks over-attracting adjacent generic mode-comparison questions per `feedback_new_card_over_attracts_adjacent.md`. The comparison + facts + diagnostic + fix tools are ALL in resources; the synthesis is what's missing.
+**Production-stack fit.** Trino 467 + Iceberg MoR + Spark MERGE writers + HMS — all matches prod_info.md exactly. The recommended FULL OUTER JOIN pattern works on this stack with no Spark dependency for the read (Spark is on the write path only).
 
-**NEW SOFT WATCH** `iter1224 Q1 CoW-MoR scenario-diagnosis-when-symptom-implies-mode + compaction-not-mode-switch`: re-probe in 4-8 iters under "I see delete files / engineer thinks they need to change mode but actually on MoR / fix is compaction" framing. If recurs, consider a very light defang line in r13 §2996 (something like "If you see delete files in `$files` or `EXPLAIN ANALYZE`, you're ALREADY on MoR — CoW produces ZERO delete files. Accumulated MoR deletes are fixed by `EXECUTE optimize`, NOT by switching modes").
+Engineer leaves with a working query + correct mental model (Iceberg snapshots persist, `FOR VERSION AS OF` pins both, IS DISTINCT FROM handles NULLs, full-outer-join classifies in/out/changed) but a slightly inflated view of what's NOT available (table_changes() exists with limits).
 
-**Topic update.** Iceberg table maintenance 4.4399/223 → (990.0977 + 3.6875)/224 = 993.7852/224 = **4.4365/224 PASSED** (-0.0034, margin +0.9365).
+Cites r10/r17.
 
 ---
 
-## Q2 — events.tags ARRAY<VARCHAR> → count events per tag (Oracle TABLE() equivalent in Trino)
+## Q2 — Per-customer counts per priority (low/medium/high/critical); Oracle SUM(CASE) translation
 
 **Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-**Scenario.** `events.tags` is an array of strings (`['mobile','enterprise','api']`). PM wants count of events per tag. Plain `SELECT tags, COUNT(*) GROUP BY tags` groups the whole array (wrong). Oracle would use `TABLE(...)`. What's the Trino way to turn each array element into its own row to GROUP BY?
+**Scenario.** `tickets(customer_id, created_at, priority)` where priority is `low|medium|high|critical`. Want one row per customer with `low_count / medium_count / high_count / critical_count`. Oracle source uses `SUM(CASE WHEN priority='low' THEN 1 ELSE 0 END)` ×4. Engineer asks if same form still right in Trino, or cleaner pivot.
 
 **Load-bearing facts CORRECT (VERIFIED):**
 
-1. **`CROSS JOIN UNNEST(e.tags) AS t(tag)`** — the canonical Trino array-explode. VERIFIED at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) verbatim: `CROSS JOIN UNNEST(scores) AS t(score)` example producing one row per array element.
-2. **`GROUP BY tag ORDER BY event_count DESC`** — standard aggregation pattern, no nuance.
-3. **JSON-string variant** — `CROSS JOIN UNNEST(CAST(json_parse(e.tags) AS ARRAY(VARCHAR))) AS t(tag)` correctly handles `tags` columns stored as JSON strings instead of native ARRAY. Two-step `json_parse` (string → JSON) then `CAST AS ARRAY(VARCHAR)` (JSON → typed array) is the canonical form.
-4. **`LEFT JOIN UNNEST(...) AS t(tag) ON TRUE`** — correctly handles rows where `tags` is empty or NULL. VERIFIED at trino.io/docs/467/sql/select.html verbatim: "the only condition supported by the current implementation is `ON TRUE`" with LEFT JOIN UNNEST.
-5. **Oracle `TABLE(...)`→Trino `CROSS JOIN UNNEST` mapping** — useful cross-dialect translation, explicitly addresses the engineer's Oracle background.
+1. **No native PIVOT in Trino 467** — VERIFIED at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (no PIVOT clause; only conditional aggregation patterns).
+2. **`COUNT(*) FILTER (WHERE priority='low') AS low_count`** ... GROUP BY customer_id — VERIFIED at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) FILTER clause supported for all aggregate functions; FILTER skips rows where predicate is FALSE/NULL before aggregation, equivalent to `SUM(CASE WHEN ... THEN 1 ELSE 0 END)` but more readable.
+3. **SUM(CASE WHEN priority='low' THEN 1 ELSE 0 END) still works** — Oracle form is valid Trino 467 SQL (no parse changes); both produce identical results; FILTER is the more modern, more readable form for the same intent.
+4. **Both compile to the same plan** — Trino's optimizer treats both forms equivalently at the physical operator level; performance identical.
+5. **Routing** — recommend FILTER for new code (cleaner, intent-revealing), keep SUM(CASE) for line-by-line migrations where minimal-diff is preferred.
 
-No imported-prior slip, no broken-secondary, no over-warning, no fabrication. Pin-perfect.
+Engineer leaves with two valid options and a sensible default (FILTER for new code).
 
-**Topic update.** SQL query best practices for OLAP 4.5884/279 → (1280.1636 + 5.0)/280 = 1285.1636/280 = **4.5916/280 PASSED** (+0.0032, margin +1.0916).
-
----
-
-## Q3 — dbt snapshots SCD-2 for plan_tier history, source updated in-place in Oracle, NO reliable updated_at
-
-**Score: 4.6875** — Acc 4.75 / Clar 4.75 / App 4.75 / Compl 4.5
-
-**Scenario.** Build SCD-2 plan-tier history in dbt. Source `customers` table updated in-place in Oracle, NO reliable `updated_at`. dbt snapshot strategies check vs timestamp — which fits, and what's different?
-
-**Load-bearing facts CORRECT (VERIFIED):**
-
-1. **`strategy='check'` is correct for no-reliable-`updated_at`** — VERIFIED at [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots): "The check strategy is useful for tables which do not have a reliable `updated_at` column" verbatim. Engineer's literal scenario → check strategy.
-2. **`check_cols=['plan_name','billing_tier','annual_seats']`** — list of columns dbt re-hashes each run; any change in any listed column = new SCD-2 row. Correct.
-3. **timestamp strategy vs check strategy contrast** — timestamp compares an `updated_at` column (fast, single column); check re-hashes `check_cols` and detects via hash diff (slower, works without a timestamp). VERIFIED at docs.getdbt.com snapshots reference.
-4. **4 dbt_* columns** (`dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to`) — standard dbt snapshot metadata. dbt 1.9+ also adds `dbt_is_deleted` but ONLY when `hard_deletes='new_record'` is set.
-5. **`hard_deletes='new_record'`** — VALID 1.9+ option for tracking deletions as marker rows with `dbt_is_deleted=True`. Alternative `hard_deletes='invalidate'` (stamps `dbt_valid_to=now()` when row disappears) is also valid; responder picked one of two equally-correct options.
-
-**Minor compl shave (-0.5):**
-
-- Didn't surface that with check strategy, `updated_at` is OPTIONAL (if configured, dbt uses it as the validity-window timestamp; if not, dbt falls back to current run time). Not load-bearing for engineer's literal "no reliable updated_at" scenario — they don't have one, so the fallback-to-run-time behavior is what they get by default.
-- Didn't compare `hard_deletes='invalidate'` (close validity window) vs `hard_deletes='new_record'` (insert marker row) — both valid; iter1200 Q3 covered this disambiguation cleanly. Recall-ceiling, NOT load-bearing here.
-
-Engineer leaves with the right answer (check strategy + check_cols + 4 dbt_* columns + hard_deletes for deletion tracking).
-
-**Topic update.** dbt snapshots SCD2 4.2964/23 → (98.8172 + 4.6875)/24 = 103.5047/24 = **4.3127/24 PASSED** (+0.0163, margin +0.8127).
+Cites r07 / r27.
 
 ---
 
-## Q4 — Trino regexp_replace backreferences: $1 vs \1 (Java/Joni vs Oracle/Postgres)
+## Q3 — Incremental model 90-day filter slow locally; override to 7 days via `--vars`
 
 **Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-**Scenario.** Oracle `REGEXP_REPLACE(phone_raw, '^([0-9]{3})([0-9]{3})([0-9]{4})$', '(\1) \2-\3')` → `'(555) 123-4567'`. Trino: does `regexp_replace` support backreferences, is `\1` right or different notation?
+**Scenario.** Incremental dbt model filters last 90 days; local/CI slow, want 7. Engineer wants `lookback_days: 90` as project default + `dbt run --vars 'lookback_days: 7'` override. Asks where to define + how to reference + precedence.
 
-**Load-bearing facts CORRECT (VERIFIED):**
+**Load-bearing facts CORRECT (VERIFIED at [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables)):**
 
-1. **Trino uses `$1`/`$2`/`$3` (Java/Joni regex)** — VERIFIED at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) verbatim: "Capturing groups can be referenced in `replacement` using `$g` for a numbered group or `${name}` for a named group." Example: `regexp_replace('1a 2b 14m', '(\d+)([a-z]+) ', '3c$2 ')`.
-2. **Correct Trino form** — `regexp_replace(phone_raw, '^([0-9]{3})([0-9]{3})([0-9]{4})$', '($1) $2-$3')` produces `'(555) 123-4567'`. Verified.
-3. **`\1` DEFANG correct** — `\1` in Trino's replacement string emits a LITERAL backslash followed by `1` (no Oracle/Postgres-style backref interpretation). Engineer would get garbage like `'(\1) \2-\3'` literal output. Per `reference_trino_regex_backslash.md` (pinned), backslash is LITERAL in SQL string literals so `'\1'` in replacement is exactly two characters `\` + `1`.
-4. **Java/Joni vs Oracle/Postgres cross-dialect framing** — useful translation context for the engineer's Oracle background. Correctly flagged dialect difference.
+1. **Top-level `vars:` block in `dbt_project.yml`** (NOT nested under `models:`) — VERIFIED verbatim with example: `vars: start_date: '2016-06-01'`. Can be globally-scoped or package-scoped.
+2. **Default in model SQL**: `{{ var('lookback_days', 90) }}` — second-arg default verified verbatim "You can also provide a default value: `{{ var('name', default) }}`"; no CompilationError if var unset (with default).
+3. **CLI override**: `dbt run --vars '{lookback_days: 7}'` — YAML-dict string form verified verbatim with examples `dbt run --vars '{"event_type": "signup"}'` / `dbt run --vars '{event_type: signup, region: us}'`.
+4. **`--vars` is plural** (not `--var`) — verified verbatim "the flag is `--vars` (plural)". Responder's "`--var` errors" is accurate.
+5. **Precedence (high → low)**: CLI `--vars` > project `vars` in `dbt_project.yml` > `var()` default arg — verified verbatim "From highest to lowest priority: 1. `--vars` CLI arguments (override everything) 2. Project-level `vars` in `dbt_project.yml` 3. `var()` function default value (fallback)".
+6. **Trino dialect in the model SQL**: `WHERE order_date >= date_add('day', -{{ var('lookback_days', 90) }}, current_date)` — production-stack-correct (Trino 467 uses `date_add`, not Postgres `INTERVAL '7 days'`).
 
-Pin-perfect. No defect.
+Engineer arrives at working local-dev workflow: edit `dbt_project.yml` once → `dbt run --vars '{lookback_days: 7}'` locally for 7-day fast loop, prod CI runs default 90. No imported-prior, no broken-secondary, no over-warning.
 
-**Topic update.** SQL query best practices for OLAP 4.5916/280 → (1285.1636 + 5.0)/281 = 1290.1636/281 = **4.5913/281 PASSED** (-0.0003, essentially flat, margin +1.0913).
+Cites r13/r27/r28.
 
 ---
 
-## Watch ledger after iter1224
+## Q4 — WATCH: Oracle LPAD(TO_CHAR(account_id), 8, '0') → Trino; numeric pad gotchas
+
+**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
+
+**WATCH CLOSURE — `iter1219 format-%08d missed`.** At iter1219 the responder gave only `lpad(CAST(... AS VARCHAR))` and **missed BOTH** the `format('%08d')` sub-canonical AND the `lpad` pads-OR-truncates hazard. This iter (1225) re-probe under structurally similar Oracle-LPAD framing surfaces **BOTH cleanly** — watch closes on first re-probe (15th consecutive 1st-re-probe-CLOSE pattern).
+
+**Load-bearing facts ALL VERIFIED:**
+
+1. **Trino 467 HAS `lpad()` and `rpad()`** — VERIFIED at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) verbatim: `lpad(string, size, padstring) → varchar`. Same for `rpad`. Responder correctly identified the docs page where the engineer didn't find it (likely searched for `LPAD` uppercase or under a non-string-function category).
+2. **Signature is `lpad(varchar, bigint, varchar)`** — VERIFIED. Engineer's `account_id` is numeric, so **MUST CAST first**: `lpad(CAST(account_id AS VARCHAR), 8, '0')`. Responder correctly flagged: `lpad(account_id, ...)` direct on bigint errors with `Unexpected parameters (bigint, integer, varchar)`.
+3. **PADS-OR-TRUNCATES hazard** — VERIFIED verbatim in Trino docs: "If `size` is less than the length of `string`, the result is truncated to `size` characters." Responder's example `lpad('123456789', 8, '0') = '12345678'` (drops `'9'`) is correct. **THIS IS THE iter1219 MISS** — engineer with growing IDs (`11000000`, `12345678`) would silently lose the most-significant digit. Critical gotcha for any production zero-pad of monotonically increasing IDs.
+4. **`format('%08d', account_id)` alternative** — VERIFIED at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html): `format(format, args...) → varchar` uses Java Formatter syntax (see [Java Formatter spec](https://docs.oracle.com/en/java/javase/23/docs/api/java.base/java/util/Formatter.html#syntax)). `%08d` = minimum-width-8 zero-pad-left for decimal integer. **Minimum width, NEVER truncates** — `format('%08d', 1234)` → `'00001234'`, `format('%08d', 123456789)` → `'123456789'` (preserves all 9 digits, no truncation). Java Formatter semantics verified by docs example `%03d` produces `'008'`.
+5. **No CAST needed for `format('%08d', account_id)`** — `%d` accepts numeric directly (BIGINT/INT both work via Java Formatter), so this is more concise than `lpad(CAST(... AS VARCHAR), ...)` for the integer-id zero-pad use case.
+6. **Routing**: "Prefer `format('%08d')` when ID might grow beyond pad width; use `lpad` only for truly-fixed-width (flat-file where truncation OK)." Correct decision rule — engineer with growing IDs uses `format`, engineer with fixed-width legacy interchange (e.g., 8-char account-code field in a banking file) uses `lpad`.
+
+**Resource-source check.** Both `lpad` + `format('%08d')` patterns appear in resources/. iter1219 responder partially missed but iter1225 responder surfaces both cleanly + the truncation hazard — findability has caught up.
+
+Engineer arrives at: (a) correct knowledge that Trino has lpad/rpad; (b) must CAST numeric to varchar for lpad; (c) lpad pads OR truncates (hazard); (d) format('%08d') is the truncation-free alternative; (e) decision rule for which to use. No imported-prior, no broken-secondary, no fabrication.
+
+Cites r07 / r27.
+
+---
+
+## Topic updates
+
+- **Q1 → Iceberg table maintenance (compaction, snapshot expiry, orphan file cleanup)**: 4.4365/224 → (4.4365×224 + 4.5)/225 = 998.2760/225 = **4.4368/225 PASSED** (+0.0003, margin +0.9368).
+- **Q2 → Oracle PL/SQL → dbt+Trino migration**: 4.4577/188 → (4.4577×188 + 5.0)/189 = 843.0476/189 = **4.4606/189 PASSED** (+0.0029, margin +0.9606). (PIVOT translation — Oracle SUM(CASE) preface routes to this row.)
+- **Q3 → Improving complex SQL performance on Trino with dbt**: 4.5415/49 → (4.5415×49 + 5.0)/50 = 227.5335/50 = **4.5507/50 PASSED** (+0.0092, margin +1.0507).
+- **Q4 → Oracle PL/SQL → dbt+Trino migration**: 4.4606/189 → (4.4606×189 + 5.0)/190 = 848.0534/190 = **4.4634/190 PASSED** (+0.0028, margin +0.9634). (Oracle LPAD → Trino translation.)
+
+All required topics remain PASSED with healthy margins; thinnest required topic remains **Query performance basics: partitioning, indexing strategy for analytics** at 4.2091/31 (margin +0.7091).
+
+---
+
+## Watch backlog
+
+**OPEN watches:**
+- `iter1224 CoW-MoR scenario-diagnosis-when-symptom-implies-mode` — soft watch, re-probe 3-7 iters; NOT TESTED this iter.
+- `iter1223 packages.yml-gap` (re-probe 4-8) + `GREATEST-Oracle-premise`; NOT TESTED this iter.
+- `iter1215 strpos-3-arg CEILING` (no churn); NOT TESTED this iter.
+- `iter1213 session_properties + (+)-mnemonic`; NOT TESTED this iter.
+- `iter1222 CAST-DECIMAL/TRY_CAST`; NOT TESTED this iter.
+- light-monitors carry forward.
 
 **CLOSED this iter:**
-- `iter1219 Q1 CoW-vs-MoR small-frequent-delete findability` — CLOSES. Comparison reached cleanly on first re-probe under structurally different framing (Spark MERGE INTO + delete-files-accumulating + teammate-said-X). ~14th consecutive 1st-re-probe-CLOSE.
+- `iter1219 format-%08d missed` — **CLOSED on first re-probe** (15th consecutive 1st-re-probe-CLOSE pattern in the extended phase).
 
-**NEW soft watches:**
-- `iter1224 Q1 CoW-MoR scenario-diagnosis-when-symptom-implies-mode + compaction-not-mode-switch` — re-probe 4-8 iters under "I see delete files but engineer thinks they need a mode switch" framing. NOT a FIX-A on first occurrence (resources are correct; recall-ceiling synthesis slip). If recurs, very-light defang line at r13 §2996.
+**NEW soft watch:**
+- `iter1225 Q1 table_changes() existence + delete-file limitation` — re-probe in 4-8 iters under Iceberg snapshot-to-snapshot CDC framing. If recurs as flat denial, light additive 5-7 line card (r17 or r10 snapshot-comparison section) explaining `iceberg.system.table_changes()` exists with delete-file limitation + route to FOR VERSION AS OF + FULL OUTER JOIN for MoR scenarios. If lands correctly with limitation, recall ceiling — no fix.
 
-**Carry-forward open watches (no probe this iter):**
-- `iter1223 Q3 packages.yml-install-canonical-gap` — re-probe 5-9 iters; FIX-A if recurs.
-- `iter1223 Q4 GREATEST-Oracle-NULL-premise-slip` — recall-ceiling, no resource fix.
-- `iter1215 strpos 3-arg synthesis ceiling` — no churn.
-- `iter1213 session_properties + (+)-mnemonic` — light-monitor.
-- `iter1222 CAST-DECIMAL/TRY_CAST` — light-monitor.
-- `iter1221 Q1 quarterly-window-vs-transform-granularity diagnosis` — light-monitor.
-- `iter1220 r10 transform-refinement-vs-column-addition cross-spec-pruning` — light-monitor.
-- `iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A` — open FIX-A; re-probe under "ONE dbt test catches both NULL and unexpected literals" framing.
-- `iter1214 retention_days param-fab + expire-vs-planning conflation` — CLOSED iter1218.
-- `iter1208 width_bucket boundary off-by-one` — light-monitor.
-- `iter1207 r13 §1293-1326 Spark-CALL-inline-tag` — light-monitor.
-- `iter1206 LIKE-on-ROW + $partitions-omission` — CLOSED iter1222.
+---
 
-**Sources verified this iter:**
-- [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) — `$g` numbered backreference + `${name}` named backreference syntax verbatim
-- [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots) — check strategy for tables without reliable `updated_at`; check_cols + optional updated_at
-- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — `CROSS JOIN UNNEST(array) AS t(elem)` + `LEFT JOIN UNNEST(...) ON TRUE` empty-array form
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — `$files.content` enum (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES); `EXECUTE optimize` compaction
-- [Dremio — Row-Level Changes on the Lakehouse: CoW vs MoR](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/) — CoW rewrites entire file; MoR uses delete files
-- [iceberglakehouse.com — Merge-on-Read in Iceberg](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) — MoR position deletes accumulate; compaction is the fix
+## Verdict
+
+**4.875 STRONG PASS**, iter1219 format-%08d WATCH CLOSES cleanly. Q4 watch close adds the format() sub-canonical and the lpad pads-OR-truncates hazard that iter1219 missed — both surfaced in the same response with correct routing logic. Q2 + Q3 are clean 5.0s. Q1 lands the correct workhorse pattern (time-travel + FULL OUTER JOIN + IS DISTINCT FROM) with one non-load-bearing factual slip (denies table_changes() existence; minor because the function has documented limitations precisely in the engineer's MoR-with-delete-files scenario, so routing to the recommended pattern is correct). NEW soft watch on table_changes() existence. NO FIX-A. Continue breadth probing in deep-extended mode.
