@@ -1,139 +1,129 @@
-# Iter1210 Judge Feedback — PASS NO-OP (one real Q2 `::date` dialect slip, non-source-anchored)
+# Iter1211 Judge Feedback — PASS with Q4 `strpos`-3-arg responder slip against ALREADY-DEFENDED resource (NO FIX-A)
 
-**Overall verdict**: PASS, avg **4.59375**, NO FIX-A.
+**Overall verdict**: PASS, avg **4.344**, **NO FIX-A** (Q4 defect is a Haiku assumed-absence recall-ceiling slip against r27 §4.3 L990's exact `DO-NOT-WRITE` defang — not a resource gap).
 
 | Q | Topic | Score | Verdict |
 |---|---|---|---|
-| Q1 | Iceberg MoR position-delete + Trino-only optimize maintenance | **4.9375** | reconciled canonical reaches cleanly |
-| Q2 | Single-pass YoY revenue via FILTER + GROUP BY | **3.625** | core approach correct, **`::date` Postgres cast operator is a Trino 467 parse error** (real dialect slip on the month-column literal) |
-| Q3 | dbt `grants:` config + dbt-trino USER-vs-ROLE caveat + post_hook | **4.875** | clean, cites known bug + workaround |
-| Q4 | Oracle `''=NULL` vs Trino `''` distinct + `IS NULL OR =''` fix | **4.9375** | clean behavioral contrast + correct WHERE |
+| Q1 | Iceberg table maintenance (concurrent writers, optimistic concurrency, isolation) | 4.875 | STRONG PASS |
+| Q2 | SQL query best practices for OLAP (avg-of-avgs, per-account-then-AVG fairness) | 4.875 | STRONG PASS |
+| Q3 | Improving complex SQL perf on Trino with dbt (dbt vars + incremental interaction) | 5.0 | PIN-PERFECT |
+| Q4 | Oracle PL/SQL → dbt + Trino SQL migration (INSTR Nth occurrence → strpos 3-arg) | 2.625 | FAIL (responder recall-ceiling slip; resource is correct + maximally defended) |
 
 ---
 
-## Q1 — Iceberg MoR position-delete + Trino-only optimize: 4.9375
+## Q1 — Two writers on same Iceberg table, commit-conflict — 4.875 STRONG PASS
 
-**Heavily-reconciled optimize-position-delete topic (iter1194-1199) — the correct, fully Trino-only reconciled answer reaches.** No "you need Spark" misroute, no expire-only over-fix.
+**All five load-bearing facts verified.** Responder gave the canonical Iceberg optimistic-concurrency model:
 
-VERIFIED facts:
-1. **MoR write semantics**: "Iceberg never modifies files in place; UPDATE writes a **position-delete file** (marks rows to skip in existing data files) + new data files for the new row values." Confirmed at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — "Trino write operations on Iceberg tables follow the merge-on-read design, so they create positional delete files instead of rewriting entire data files that are impacted by updates or deletes."
-2. **Why reads slow over weeks**: every SELECT scans the data files PLUS replays the position-delete index to mask deleted rows; nightly 5k updates × 30 days = ~150k position-delete entries replayed per read. Row count stable (the engineer's observation) is consistent — net rows don't change, but delete-replay cost grows linearly with accumulated delete-file count. Correct mental model.
-3. **Trino-only fix — `ALTER TABLE ... EXECUTE optimize`**: rewrites data files into fewer larger files AND **applies the position deletes during the rewrite (rewritten files no longer reference position-delete files)**. Verified at Starburst's [Apache Iceberg DML & Maintenance in Trino](https://www.starburst.io/blog/apache-iceberg-dml-update-delete-merge-maintenance-in-trino/): "OPTIMIZE rewrites the content...merged into fewer but larger files." Trino-native, no Spark. Matches pinned reconciled answer.
-4. **`file_size_threshold` raise lever**: default is **100MB** (per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)). On a 200k-row table whose files are already > 100MB, no file qualifies for rewrite — raising `file_size_threshold => '512MB'` (above existing file size) forces those files to be selected and rewritten. Correct lever choice for the table size.
-5. **Weekly `expire_snapshots(retention_threshold=>'7d')` + `remove_orphan_files(retention_threshold=>'7d')`**: correct ops cadence; `7d` is the minimum allowed default per `iceberg.expire-snapshots.min-retention`.
-6. **Sizing guidance**: "200k rows / 5k UPDATEs/night, weekly optimize usually enough" — pragmatic, correct for the table size; nightly is overkill, weekly clears the delete-file accumulation before read slowdown becomes noticeable.
+1. **No upfront row/table locking** — Iceberg uses optimistic concurrency; writers race at commit time via atomic catalog pointer swap (compare-and-swap). NOT Postgres row-level locks. Verified at [iceberglakehouse.com/iceberg/iceberg-concurrent-writes](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/) verbatim: *"Rather than locking tables during writes, Iceberg allows concurrent writes to proceed in parallel."*
+2. **CommitFailedException on loser race** — correct mechanism (loser sees stale snapshot at CAS time, throws). Verified at [Apache Iceberg IsolationLevel javadoc](https://iceberg.apache.org/javadoc/1.7.1/org/apache/iceberg/IsolationLevel.html) and [lists.apache.org thread on serializable vs snapshot](https://lists.apache.org/thread/9gw4g4k59y1dm3ftcz61dnkgtq1godks).
+3. **No silent overwrite / no corruption** — atomic-pointer-swap semantics; either a write commits a new snapshot pointing to a consistent metadata.json or the commit fails. Phantom-row anomaly under `snapshot` isolation correctly named as the trade-off (don't use for billing/compliance).
+4. **`write.merge.isolation-level` `serializable` vs `snapshot`** — serializable rejects logical-overlap commits even on disjoint partitions (false-positive for table-level MERGEs); snapshot relaxes to physical-conflict-only. Correctly notes default is `serializable` (conservative). Verified at [aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg](https://aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg-on-the-aws-glue-data-catalog/).
+5. **`commit.retry.num-retries` for auto-retry** — correctly framed as the Iceberg library auto-retry knob (default 4); only metadata commit is retried, not the data write. Bumping to 8 + relaxed isolation is the standard mitigation.
 
-Minor completeness shave (-0.25): could mention that delete files only get **physically removed** after `expire_snapshots` runs past the retention threshold, not at the moment `optimize` finishes — but the read-side speedup happens immediately after optimize (rewritten files no longer reference deletes). Per [trinodb/trino#24086](https://github.com/trinodb/trino/issues/24086), removal of orphan delete files has nuances (sequence-number dependence). Not load-bearing for the engineer's "reads are getting slow" problem.
+**Production-stack fit**: correctly notes the isolation properties must be set via **Spark `ALTER TABLE SET TBLPROPERTIES`** since Trino 467 writer is MoR (Trino's `ALTER TABLE SET PROPERTIES` works for `format_version` but not all Iceberg table properties round-trip to the table-level isolation knob); verification via `SELECT * FROM iceberg.events$properties` is the correct introspection.
 
-The previously-reconciled iter1194-1199 watch (optimize-applies-position-deletes-during-rewrite framing) DURABLY HOLDS. No FIX-A.
+**Soft Compl shave (-0.125)**: didn't surface the **Trino 467 `iceberg.expire-snapshots.min-retention` 7d floor** as adjacent context (engineer might confuse retry config with expiry config); minor and non-load-bearing.
 
-## Q2 — Single-pass YoY revenue via FILTER + GROUP BY: 3.625
+Cites r17/r21/r26.
 
-**Core approach correct, one real dialect slip (`::date` cast operator) on the month column expression.**
+---
 
-VERIFIED facts:
-1. **Single-pass with conditional aggregation beats two-CTE-join**: `SUM(amount) FILTER (WHERE YEAR(order_date)=2025)` + `SUM(amount) FILTER (WHERE YEAR(order_date)=2026)` over a single `WHERE YEAR(order_date) IN (2025,2026) GROUP BY DATE_TRUNC('month', order_date)` is the correct/idiomatic Trino 467 pattern. One scan of the 500M-row orders table, one shuffle/aggregate, no self-join. The Oracle two-CTE-join shape scans+aggregates twice; the FILTER form is materially cheaper. **VERIFIED `FILTER (WHERE ...)`** at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "Aggregate functions support a FILTER clause that specifies which rows are processed."
-2. **NULLIF div-by-zero guard**: `ROUND(100.0*(rev2026-rev2025)/NULLIF(rev2025,0),2)` — correct (integer/decimal `/` by zero THROWS in Trino, per pinned `reference_trino_division_by_zero.md`). 100.0 forces decimal arithmetic.
-3. **`DATE_TRUNC('month', order_date)`**: valid, returns the same precision as input — fine.
+## Q2 — Avg CSAT fairness (per-account-then-average, not weighted by ticket count) — 4.875 STRONG PASS
 
-**REAL DIALECT SLIP (Acc -2.0)** — the responder writes the month column as:
+**Correct canonical form**: two-CTE `WITH per_account AS (... GROUP BY account_id, plan_tier) SELECT plan_tier, AVG(account_avg_csat) FROM per_account GROUP BY plan_tier`. This IS the only clean way (Trino does NOT allow nested aggregates like `AVG(AVG(csat_score))` — that's a parse error).
 
+- **Single Trino query**: YES — the CTE collapses what reads like a "two-step" approach into one query plan.
+- **Plain-language framing**: "each account one vote" nails the intuition for a SaaS engineer with no OLAP background.
+- **COUNT(DISTINCT account_id) per tier** included as the sample-size disclosure — production-quality touch.
+
+**Soft Compl shave (-0.125)**: didn't explicitly say "`AVG(AVG(...))` would be a parse error — Trino forbids nested aggregates" as a beginner-defense (the engineer literally asked "single query or two steps?" — flagging that the *naive* single query is impossible would close the loop).
+
+Cites r07/r23.
+
+---
+
+## Q3 — dbt vars (start_date / lookback_days) — 5.0 PIN-PERFECT
+
+**All four sub-questions answered correctly, verified verbatim against [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables):**
+
+1. **Where to declare**: `vars:` block at the TOP LEVEL of `dbt_project.yml` (not nested under `models:`); global scope vs project-scoped vs package-scoped distinction correctly handled by using top-level declarations.
+2. **Default value**: `{{ var('lookback_days', 30) }}` second-arg-default syntax is the canonical [docs.getdbt.com `var()` reference](https://docs.getdbt.com/reference/dbt-jinja-functions/var) form — does NOT raise `CompilationError` if the var is unset.
+3. **Reference in model SQL**: `WHERE occurred_at >= date_add('day', -{{ var('lookback_days', 30) }}, current_date)` is the canonical Trino 467 date-window form (uses `date_add` not Postgres `INTERVAL`).
+4. **CLI override**: `dbt run --vars '{lookback_days: 7}'` YAML form (JSON also accepted); precedence **CLI `--vars` > `dbt_project.yml` vars > `var()` default-arg** is correct per dbt docs verbatim *"Variables defined via `--vars` override values in `dbt_project.yml`."*
+5. **var-vs-`is_incremental()` independence**: correctly framed as orthogonal — first run `is_incremental()` returns FALSE so the `WHERE` predicate is SKIPPED (full table build), subsequent runs both apply. This is the correct mental model.
+
+No imported-prior slips, no broken-secondary alternatives, no over-warning. Engineer arrives at a working local-dev pattern with the right mental model.
+
+Cites r13/r27/r28.
+
+---
+
+## Q4 — Oracle INSTR(url, '/', 1, 3) → Trino — 2.625 FAIL (responder slip vs ALREADY-DEFENDED resource)
+
+**THE DEFECT.** Responder wrote: *"Trino does NOT have an INSTR equivalent accepting an occurrence parameter. strpos(string, substring) finds only the first match."* **BOTH CLAIMS ARE FALSE on Trino 467.**
+
+**Verified against [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html)** (WebFetch this iter):
+
+> `strpos(string, substring, instance) → bigint`
+> "Returns the position of the N-th `instance` of `substring` in `string`. When `instance` is a negative number the search will start from the end of `string`. Positions start with `1`. If not found, `0` is returned."
+
+So the **direct one-call answer to the engineer's question is**:
 ```sql
-DATE_TRUNC('month', order_date)::date AS month
+strpos(url, '/', 3)  -- position of the 3rd slash, exactly Oracle INSTR(url, '/', 1, 3)
 ```
 
-The `::` cast operator is **PostgreSQL/DuckDB/Snowflake syntax** and **NOT supported in Trino 467**. Verified at [trinodb/trino issue #23795 "Cast operator `::`"](https://github.com/trinodb/trino/issues/23795) — feature request still open; Trino requires `CAST(x AS type)`. The literal copy-paste of the responder's query into Trino 467 returns:
+**This is a RESPONDER recall-ceiling slip against ALREADY-DEFENDED resource content — NOT a resource gap:**
 
-```
-line N: mismatched input '::'. Expecting: ...
-```
+- **r27 §4.3 line 990** explicitly teaches the 3-arg form with the EXACT myth defang:
+  > `INSTR(s, sub, 1, n)` → `strpos(s, sub, n)` — the 3-arg form. **DO NOT WRITE** "Trino strpos is 2-arg only / has no n-th-occurrence form" — that is a **base-training myth**; the 3-arg form exists. Keyword anchors: position of the second occurrence, nth occurrence of a character Trino, find the 2nd/3rd instance, position of last occurrence, find n-th delimiter position.
+- **r23 §538-549** also teaches `strpos(s, sub, -1)` (negative-instance = from-end) for the last-occurrence case with extensive keyword anchors.
+- **r27 §4.3-STR-FAMILY line 1058** ("Trino has no `position` function — use `strpos` instead" — HALF-WRONG) sits adjacent in the same canonical block.
 
-Correct Trino 467 forms (any one):
-- `CAST(DATE_TRUNC('month', order_date) AS DATE) AS month`
-- Just drop the cast — `DATE_TRUNC('month', order_date)` already returns a timestamp scoped to the month boundary; the engineer's dashboard label only needs the truncated value, not strict `DATE` typing.
+The resource is **maximally defended already** — explicit `DO-NOT-WRITE` markup, exact-myth callout, keyword anchors targeting "nth occurrence" / "find the 2nd/3rd instance" / "position of last occurrence" / "find n-th delimiter position", and an adjacent `position()` myth-defang in the same string-family canonical. Despite this, the Haiku responder produced **the literal exact wording the resource defangs**.
 
-**Resource source check**: grep for `::date|::int|::varchar|postgres cast operator` in resources/ — **r27 §663 ALREADY DOCUMENTS `::` as invalid Trino dialect** ("Trino has no PostgreSQL `::` cast operator — use `CAST(x AS type)`"). The resource is correct. The responder's `::date` is a **recall-ceiling responder slip**, NOT a resource defect.
+**Partial credit**: the responder's fallback (`split(url, '/')` array index for path segments / `split_part(url, '/', n)` for the Nth segment) IS a valid Trino 467 idiom — r23 §504 leads with `split_part` for delimiter extraction — so an engineer who wants the *path segment* (not the *slash position*) does land on a working query. But the engineer literally asked for the **position of the Nth slash** (Oracle INSTR semantics fed to SUBSTR), and the responder said "Trino doesn't have that" instead of giving the one-line direct answer.
 
-Pattern: matches `feedback_responder_broken_secondary_alternative.md` family (the LEAD = single-pass FILTER + GROUP BY is the correct headline answer, but the responder appended a non-load-bearing decorative cast in Postgres syntax that's a real parse error). The engineer hits `mismatched input '::'` on first compile and fixes it in 60 seconds. The single-pass FILTER pattern + NULLIF + GROUP BY structure all carry over correctly.
+**NO FIX-A justified:**
+- The resource is correct, exact, and maximally defended at r27 §4.3 L990.
+- Per the imported-prior assumed-absence family (`starts_with` / `to_char` / `listagg` / `array_sum` / `format_number` / `migrate` / `LATERAL` — see MEMORY.md cards), this is a recurring Haiku base-training prior: foreign-looking funcs that DO exist in Trino get assumed absent. The resource already does what it can.
+- Adding more defang risks `feedback_new_card_over_attracts_adjacent` (over-attractor on adjacent strpos questions).
+- Per `feedback_synthesis_ceiling_stop_churning.md` — when a FIX-A has already shipped the maximum reasonable defang and the responder STILL recalls the myth, that residual is a Haiku synthesis ceiling, not a resource gap.
 
-**NO FIX-A.** Resource already teaches the correct rule at r27 §663; classify as one-instance responder slip per pinned `feedback_synthesis_ceiling_stop_churning.md` (don't churn the defang; treat as recall-ceiling variance). **NEW soft watch**: `r27 §663 :: cast operator responder slip iter1210` — re-probe in 4-8 iters under "Trino-version-of-Postgres-syntax" framing; if recurs across phrasings, add a top-of-r07 myth row.
+**NEW SOFT WATCH** `iter1211 Q4 strpos-3-arg INSTR-Nth-occurrence assumed-absence`:
+- Re-probe in 4-8 iters under structurally-similar framing ("Oracle INSTR with occurrence param → Trino equivalent" / "find the Nth occurrence of a character / 2nd dot / 3rd slash").
+- If recurs (despite r27 §4.3 L990 + r23 §538 + keyword anchors), classify as **CONFIRMED Haiku base-training prior — accept the occasional Q cost, do NOT add more defang** (would risk over-attractor regression on adjacent strpos questions).
+- If does NOT recur, watch closes silently.
 
-Score breakdown:
-- Acc: 3.0 (single-pass approach right; `::date` parse error real)
-- Clar: 4.5 (clear "why beats two-CTE" reasoning)
-- App: 3.0 (literal copy-paste parse-errors)
-- Compl: 4.0 (approach + NULLIF + GROUP BY all there)
-
-## Q3 — dbt `grants:` config + dbt-trino USER-vs-ROLE caveat: 4.875
-
-VERIFIED facts:
-1. **`grants: {select: ['bi_service_user']}` in model config**: dbt re-applies grants on every build/rebuild — verified at [docs.getdbt.com/reference/resource-configs/grants](https://docs.getdbt.com/reference/resource-configs/grants): "dbt will configure access to your resources whenever they are built." Direct, accurate answer to the literal "every rebuild drops the grant" problem.
-2. **dbt-trino bug #12862 — bare-name → USER not ROLE**: VERIFIED at [dbt-labs/dbt-core#12862 "Trino/Starburst Cannot use grants with roles"](https://github.com/dbt-labs/dbt-core/issues/12862) — the dbt-trino adapter emits `GRANT SELECT ON ... TO bi_service_user` without ROLE/USER prefix; Trino resolves bare names as USER. If `bi_service_user` is actually a ROLE (typical for service accounts in OPA-backed setups), the grant fails or grants to the wrong principal.
-3. **`post_hook="GRANT SELECT ON {{ this }} TO ROLE bi_service_user"`**: correct workaround pattern for ROLE grantees. `post_hook` runs after the table is created/replaced, so the GRANT statement always finds the target table. `{{ this }}` correctly resolves to the model's fully-qualified `catalog.schema.table`.
-4. **Production-stack relevance**: the production env uses OPA-backed authz with service accounts (typically modeled as ROLEs in Trino); the ROLE caveat is load-bearing for this stack — the responder routed correctly.
-
-Minor completeness shave (-0.25): could mention that the `post_hook` form means dbt's own grant-management is bypassed (`dbt run` won't re-issue a `REVOKE` if the YAML changes); ops-wise the grants:-config approach is preferred when the USER bug is irrelevant, post_hook only when the ROLE caveat applies. Not load-bearing for the engineer's specific "auto-grant on rebuild" question.
-
-No imported-prior slip, no fabrication. Direct, complete, production-stack-aware answer. Resources at r27 §6.7I doing their job.
-
-Score breakdown:
-- Acc: 5.0
-- Clar: 4.75 (clear primary + ROLE caveat)
-- App: 5.0 (literal YAML + post_hook strings)
-- Compl: 4.75 (covers both paths)
-
-## Q4 — Oracle `''=NULL` vs Trino `''` distinct: 4.9375
-
-VERIFIED facts:
-1. **Oracle VARCHAR2 `''` stored as NULL**: documented Oracle quirk — Oracle treats zero-length character values inserted into VARCHAR2 as NULL. Verified across multiple migration guides ([sqlpey.com Oracle empty strings as NULL](https://sqlpey.com/sql/oracle-empty-string-null-treatment/); [AWS database blog handling empty strings migrating from Oracle to PostgreSQL](https://aws.amazon.com/blogs/database/handle-empty-strings-when-migrating-from-oracle-to-postgresql/)). `'' IS NULL` returns TRUE in Oracle.
-2. **Trino `''` is a distinct zero-length string**: VERIFIED — Trino follows ANSI SQL where `''` is a valid zero-length VARCHAR value, NOT NULL. `'' IS NULL` returns FALSE in Trino 467; `'' = ''` returns TRUE; `length('')` returns 0. Per [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html): "IS NULL and IS NOT NULL operators test whether a value is null (undefined)" — empty string is defined (zero-length), not null.
-3. **The migration silent bug**: after Spark/Trino write, rows that were `''`-as-NULL in Oracle land as actual `''` (zero-length strings) in Iceberg; existing dashboard queries `WHERE notes IS NULL` now silently exclude what used to be NULL-matched rows (the migrated empty-string ones). Direct, accurate answer to the literal "rows missing" symptom.
-4. **Fix `WHERE notes IS NOT NULL AND notes <> ''`** (or equivalently `WHERE notes IS NULL OR notes = ''`): correct catch-both predicate. NULL-safe in Trino (the IS NOT NULL guard is necessary because `NULL <> ''` returns NULL, not TRUE, so a bare `notes <> ''` predicate would also silently drop NULL rows — the responder gets this right).
-5. **Audit guidance**: "Audit every migrated `IS NULL`/`IS NOT NULL`/`NVL` on text columns" — production-grade ops advice for an Oracle-to-Trino migration; many legacy queries make the `''=NULL` assumption silently.
-
-Minor completeness shave (-0.25): could mention `LENGTH(TRIM(notes)) = 0` for whitespace-only strings (another Oracle-era assumption is that `'   '`-style padded strings are "essentially empty"). Engineer's question only asks about `''` vs NULL, so not load-bearing — but worth a one-liner for completeness. Resources at r27 cover this area cleanly.
-
-No imported-prior slip, no fabrication. Direct, complete, behavioral-contrast answer with correct fix.
-
-Score breakdown:
-- Acc: 5.0
-- Clar: 5.0 (clear two-engine behavior contrast)
-- App: 5.0 (exact WHERE clause + audit advice)
-- Compl: 4.75 (one minor whitespace-only nuance omitted)
+Cites r27/r23 (resources are correct; responder slip).
 
 ---
 
-## Rubric updates (4 rows)
+## Carry-forward watches
 
-- **Iceberg table maintenance**: 4.4438/218 → (968.7484 + 4.9375)/219 = **4.4461/219 PASSED** (+0.0023, margin +0.9461)
-- **SQL query best practices for OLAP**: 4.5903/276 → (1266.9228 + 3.625)/277 = **4.5867/277 PASSED** (-0.0036, Q2 `::date` drag, margin +1.0867)
-- **Improving complex SQL performance on Trino with dbt**: 4.5603/41 → (186.9723 + 4.875)/42 = **4.5678/42 PASSED** (+0.0075, margin +1.0678)
-- **Oracle PL/SQL → dbt+Trino**: 4.4759/172 → (769.8548 + 4.9375)/173 = **4.4786/173 PASSED** (+0.0027, margin +0.9786)
+**Open light-monitors (no action this iter):**
+- `iter1210 Q2 r27 §663 :: cast-operator slip` (Postgres `::date` cast — Trino 467 requires `CAST(x AS DATE)`) — soft watch open
+- `iter1209 Q3 CURRENT_TIMESTAMP()-empty-parens audit-column slip` — soft watch open
+- `iter1208 Q3 dbt selector direction +model vs model+ for impact-analysis (exposures-selector)` — open
+- `iter1208 Q2 width_bucket boundary off-by-one labeling` — open
+- `iter1207 r13 §1293-1326 Spark-CALL inline-tag for GDPR delete recipe` — open
+- `iter1204 dbt --full-refresh on_table_exists atomicity framing` — open
+- `NVL-coercion` (latent SQL-best-practices secondary slip) — open
+- `$partitions metadata-table query semantics` — open
 
-ALL required topics REMAIN PASSED. Thinnest required topic stays Query-perf-basics at 4.2161 (untouched this iter). Iter average **(4.9375 + 3.625 + 4.875 + 4.9375)/4 = 4.59375 PASS NO-OP** (margin +1.09).
+**Closed this iter**: none (Q4 strpos-3-arg myth is a NEW watch, not a re-probe of an existing one).
 
----
-
-## Light-monitor watches (carry-forward, NO action this iter)
-
-- iter1199 r17 position-delete adjacent — **Q1 LOAD-BEARING RE-PROBE: CLOSES** (responder gave correct reconciled Trino-only optimize-applies-position-deletes-during-rewrite answer; no Spark misroute, no expire-only over-fix)
-- iter1204 dbt `--full-refresh` `on_table_exists` atomicity framing — no probe this iter
-- iter1206 NVL-coercion — no probe this iter
-- iter1206 `$partitions` omission under physical-layout framing — no probe this iter
-- iter1207 GDPR Spark-engine-tag — no probe this iter
-- iter1208 width_bucket boundary labels — no probe this iter
-- iter1208 dbt exposures `+model:` vs `model:+` selector direction — no probe this iter
-- iter1209 Q3 `CURRENT_TIMESTAMP()` empty-parens — no probe this iter (Q3 this iter is dbt-grants, not audit-column default)
-- **NEW** iter1210 Q2 `::date` Postgres cast operator responder slip — r27 §663 ALREADY teaches the correct CAST form; NO FIX-A; re-probe in 4-8 iters under "Trino-version-of-Postgres-syntax" or "dialect translation" framing; if recurs across phrasings → add top-of-r07 dialect-myth-row routing card. Low priority.
+**Status**: steady-state extended-phase. All required topics PASSED healthy margins. Q4 defect is a per-instance responder slip on already-defended content — accept and re-probe rather than over-fix.
 
 ---
 
-## Pattern observation
+## Rubric updates
 
-iter1210 4.59375 PASS NO-OP fits the sustainment band. The Q2 `::date` slip is a textbook recall-ceiling responder slip — the LEAD (single-pass FILTER + GROUP BY + NULLIF) is fully correct and copy-pasteable except for the one decorative cast operator on the month-column label, exactly the family pinned at `feedback_responder_broken_secondary_alternative.md`. Resource r27 §663 already teaches the correct rule; per `feedback_synthesis_ceiling_stop_churning.md` discipline, do NOT churn the defang — accept one-instance variance, soft-watch for re-probe.
+| Topic | Prior | Q score | New | Delta | Margin vs 3.5 |
+|---|---|---|---|---|---|
+| Iceberg table maintenance | 4.4461 / 219 | Q1=4.875 | 4.4480 / 220 | +0.0019 | +0.9480 |
+| SQL query best practices for OLAP | 4.5867 / 277 | Q2=4.875 | 4.5878 / 278 | +0.0011 | +1.0878 |
+| Improving complex SQL perf on Trino with dbt | 4.5678 / 42 | Q3=5.0 | 4.5779 / 43 | +0.0101 | +1.0779 |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.4786 / 173 | Q4=2.625 | 4.4680 / 174 | -0.0106 | +0.9680 |
 
-Q1 confirms the reconciled optimize-position-delete answer DURABLY HOLDS on a slightly different framing (the engineer's "delete files replayed on every read" + "Trino is primary engine" prompt is a high-precision re-probe). The iter1194-1199 reconciliation work is paying off: no "Spark required" misroute, no "just expire snapshots" over-fix, correct file_size_threshold raise lever for already-large files, correct weekly cadence sizing.
-
-Q3 + Q4 are clean canonical reaches with no slips.
-
-**Recommend NO-OP**. Continue breadth probing in next iter; Query-perf-basics remains thinnest required-topic at 4.2161 — when next sweep lands there, lift on technical-accuracy is the primary opportunity.
+All required topics remain PASSED. No FIX-A. Next iter1212: BREADTH (re-probe strpos-3-arg myth under structurally-similar framing within 4-8 iters per the watch).
