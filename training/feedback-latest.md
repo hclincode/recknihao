@@ -1,127 +1,107 @@
-# Iteration 1220 — Judge Feedback
+# Iteration 1221 — Judge Feedback
 
-**Verdict: 4.47 PASS + LIGHT FIX-A on Q1 (cross-spec pruning overstatement).** Q2 `min_by(channel, created_at)` value-at-min-timestamp pin-perfect (4.875). Q3 `on_schema_change='append_new_columns'` auto-ALTER + four-value matrix verified clean (4.75). Q4 Oracle `SYSDATE-7` → `current_timestamp - INTERVAL '7' DAY` + `date_diff('hour', t1, t2)` pin-perfect (5.0). **Q1 partition-evolution OVERSTATEMENT (3.25)** — responder correctly identifies spec_id mechanics, the `rewrite_data_files(rewrite-all=true)` fix, `$files` diagnostic, and `expire_snapshots` cleanup, **BUT misdiagnoses cross-spec pruning** as "Trino sees month-spec files and CANNOT apply day-level pruning to them — so it scans ALL 400M rows." The accurate framing per Iceberg/Trino semantics is: **old (month-spec) files DO still prune at the OLD spec's MONTH granularity** (the `event_date='2026-01-15'` predicate gets projected through the month transform, keeping ONLY the 2026-01 month-partition files and pruning all other months). Day-level pruning is what's lost on old files; pruning isn't lost entirely. The engineer is told their old queries can't prune at all when actually they prune to ~1 month of data; the FIX (Spark rewrite) is still the correct remediation for day-level pruning. **LIGHT FIX-A** — add a row to r10's PARTITION EVOLUTION canonical (§98-117 or the LEADING CANONICAL §126-228) explicitly distinguishing **transform-refinement evolution (month→day, day→hour)** = old files prune at the COARSER old granularity (NOT full scan) FROM **adding-a-new-column evolution (added tenant_id)** = old files cannot be pruned by the new column at all. Resource L1242 ("Cannot be pruned by the new column") is correct for the latter case but the responder generalized it to the transform-refinement case. NO over-warning / no imported-prior / no broken-secondary.
+**Verdict: 4.56 STRONG PASS. Two watches CLOSE; NO FIX-A.**
 
-Open watches carried forward: iter1219 CoW-vs-MoR findability (re-probe 4-8), iter1219 format-%08d co-located canonical (5-9), iter1218 `accepted_values` NULL behavior (4-8), iter1215 strpos-3-arg ceiling (6-10 no churn), iter1213 session_properties + (+)-mnemonic (4-7), iter1206 LIKE-on-ROW+$partitions (3-7), light-monitors.
-
----
-
-## Per-question scores
-
-### Q1 — month→day partition evolution; pre-migration date query "scans all 400M rows"; expected? what does Trino do pruning files? — **PARTIAL (OVERSTATED DIAGNOSIS) + LIGHT FIX-A**
-
-| Dim | Score | Note |
-|---|---|---|
-| Technical accuracy | 2.5 | **WRONG diagnosis**: "Trino sees month-spec files and CANNOT apply day-level pruning to them — so it scans ALL 400M rows." Accurate: old-spec files prune at the OLD spec's MONTH granularity (predicate `event_date='2026-01-15'` is projected through the month transform → keeps only the 2026-01 month partition's files; January's old data is read, not all months). Day-level pruning IS lost on old files; cross-spec pruning is NOT lost entirely. Verified at [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/) (Dremio engineering blog quotes: "evolving from month to day partitioning... old files at month granularity (coarser)"). Spec_id mechanics, `rewrite-all=true`, `expire_snapshots`, "Trino EXECUTE optimize cannot cross-spec re-layout" all CORRECT. |
-| Beginner clarity | 4 | Clear stepwise walkthrough with copy-pasteable Spark CALL form and Trino diagnostic query. Distinguishes the three engines/syntaxes well. |
-| Practical applicability | 3.5 | The remediation (rewrite_data_files with rewrite-all=true → restamp under new spec → expire_snapshots) IS correct and will solve the problem. **But** the diagnosis misleads — the engineer might wrongly conclude that **all** old-date queries are full table scans (rather than month-scoped scans), which affects their triage/prioritization decisions on OTHER queries hitting old dates. They might also overestimate the savings from rewriting (a 1-month scan → 1-day scan = ~30x, not 400M-row → 1-day = ~120000x). |
-| Completeness | 3 | Misses the key nuance that distinguishes **transform refinement** (same column, finer transform: month→day) from **column addition** (added partition column: e.g. + tenant_id). Both cases need rewrite to activate new pruning, but only the latter loses cross-spec pruning entirely. |
-
-**Average: (2.5 + 4 + 3.5 + 3)/4 = 3.25 — PARTIAL.**
-
-**VERIFICATION — Iceberg/Trino cross-spec pruning semantics.**
-
-[iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/) and Dremio engineering blog confirm:
-
-> "If you evolve from month to day partitioning and then run a query for 'yesterday,' Dremio prunes new files at day granularity (very precise) and **old files at month granularity (coarser)**."
-
-> "When a query runs: Iceberg reads all manifest files. For manifests written with the old spec, **it applies the old partition pruning logic**. For manifests written with the new spec, it applies the new partition pruning logic. Results are merged transparently."
-
-Iceberg's predicate-projection-through-partition-transform machinery (the same mechanism that makes `WHERE event_date='2026-01-15'` prune `month(event_date)='2026-01'` partitions on a freshly-month-partitioned table) ALSO applies to mixed-spec scenarios. The transform is `month(date)` for old files; the predicate `event_date='2026-01-15'` projects to `month(event_date)='2026-01'`, keeping ONLY the 2026-01 month and pruning all others. So:
-
-- **Old (month-spec) files**: 1 month of data scanned (~1/N of the historical data, where N = months in history)
-- **New (day-spec) files**: 1 day scanned
-- The query for `event_date='2026-01-15'` (a pre-migration date) hits ZERO new-spec files (since migration was 10 weeks ago, all pre-migration dates are in old-spec files); the actual scan is January's old data.
-
-**GREP — RESOURCE ROOT CAUSE.** Searching r10 for cross-spec pruning behavior:
-
-- `resources/10-lakehouse-partitioning.md` L98-117 (PARTITION EVOLUTION pin) — keyword-anchors month→day evolution and the in-place ALTER + Spark rewrite recipe, but says nothing explicit about old-spec PRUNING granularity.
-- L126-228 (LEADING CANONICAL "Migrating from date-only to (date, tenant_bucket)") — this is the **column-addition** case (added tenant_bucket); L143 correctly says "continue to **defeat tenant-bucket pruning**" — correct for THIS case (the new column wasn't in the old spec).
-- L1242 (table row): "Files written **before** the ALTER | Old spec (or unpartitioned) | **Cannot be pruned by the new column.** Trino has to open and read these files for any query, even one that filters on the new partition column." — correct for the column-addition case; not applicable to transform-refinement.
-- No section explicitly handles the **transform-refinement** subcase (same column, finer transform), so the responder generalized "Cannot be pruned" from the new-column case to the transform-refinement case.
-
-**Decision: LIGHT FIX-A on r10.** Add a 5-7 line disambiguation row to the PARTITION EVOLUTION pin and/or LEADING CANONICAL clarifying:
-
-```
-TRANSFORM REFINEMENT (month → day, day → hour, identity → bucket on same column):
-  Old-spec files prune at the OLD COARSER granularity (NOT full scan).
-  WHERE event_date = '2026-01-15' on a month→day evolved table → old files prune to month(event_date)='2026-01' (one month scanned); new files prune to day(event_date)='2026-01-15' (one day).
-  Rewrite to activate finer (day) pruning on old data.
-
-COLUMN ADDITION (added tenant_id to spec, was day(occurred_at) → (day, tenant_id)):
-  Old-spec files CANNOT be pruned by the NEW column at all (the column isn't in the old manifest partition struct).
-  WHERE tenant_id = 'acme' on a day-only → (day, tenant_id) table → old files: full scan (no tenant pruning); new files: prune by tenant_id.
-  Rewrite to activate tenant-column pruning on old data.
-```
-
-The "rewrite_data_files(rewrite-all=true)" fix is unchanged for both cases — only the DIAGNOSIS framing needs the disambiguation. Keyword anchors to add: "month to day pruning behavior", "old data prunes to month not day", "cross-spec pruning granularity", "do old queries full scan after partition evolution", "transform refinement vs new column".
+- **Q1 (iter1220 r10 transform-refinement-vs-column-addition WATCH) CLOSES** — responder correctly rejected teammate's "Trino can't prune old files AT ALL / full scan" overstatement and stated old-spec files prune at the OLD COARSER granularity via predicate projection through the old transform. Minor framing slips (see below) but the load-bearing diagnosis flipped from iter1220's "scans all 400M" to the correct "prunes at coarse old granularity."
+- **Q3 (iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A WATCH) CLOSES** — responder went from iter1218's "NULL and 'none' will BOTH be caught" (2.75 FAIL) to iter1221's pin-perfect "NULL NOT IN (...) = UNKNOWN in 3-valued logic, NULLs silently excluded, pair with not_null" (5.0). Clean 1st-re-probe close.
+- Q2 market-basket self-join + PARTITIONED join: 4.25 (load-bearing right; basket-skew caveat missing — not load-bearing for the engineer's immediate fix).
+- Q4 Oracle NVL2 → CASE/IF: 5.0 pin-perfect.
 
 ---
 
-### Q2 — user_events `MIN(channel)` returns alphabetical, want channel at earliest created_at — **STRONG PASS (4.875)**
+## Q1 — Iceberg partition spec evolution (day→hour) cross-spec pruning [WATCH RE-PROBE]
 
-| Dim | Score | Note |
-|---|---|---|
-| Technical accuracy | 5 | `min_by(channel, created_at)` returns the value of `channel` at the row with min `created_at` per group. Verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "`min_by(x, y)` — Returns the value of `x` associated with the minimum value of `y` over all input values." Distinct from `MIN(channel)` which is alphabetical (lexicographic min of the channel string). Also correctly mentions `min_by(x, y, n)` 3-arg form for top-N. `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at ASC, event_id ASC) <= 1` tiebreaker pattern correct (recommended when you need ALL columns of the earliest row, not just one). |
-| Beginner clarity | 5 | Crystal clear with the contrast against MIN(channel)'s alphabetical surprise, which is exactly the engineer's mental model. The "use min_by per column for multiple values, or ROW_NUMBER for all columns" routing is the right shape. |
-| Practical applicability | 5 | Engineer pastes `SELECT user_id, min_by(channel, created_at) AS first_channel, MIN(created_at) AS first_event_time FROM user_events GROUP BY user_id` and runs. Tiebreaker addressed correctly. |
-| Completeness | 4.5 | Minor: didn't note that `min_by` ignores rows where `created_at IS NULL` (more precisely: per Trino docs, `min_by` does NOT ignore null `x` values but the ordering column `y` follows standard MIN semantics on NULLs). Recall ceiling, not load-bearing for this question. |
+**Score: 4.0** | Tech 4.0 | Clar 4.5 | App 3.5 | Compl 4.0
+**Routing**: Iceberg partition design for SaaS (line 64)
+**Watch status: iter1220 r10 transform-refinement-vs-column-addition CLOSES on 1st re-probe**
 
-**Average: (5 + 5 + 5 + 4.5)/4 = 4.875 — STRONG PASS.**
+Load-bearing answer correct: teammate is WRONG, old (day-spec) files still prune at the OLD coarser day granularity via predicate transform projection — NOT full scan. Verified via [Dremio engineering](https://www.dremio.com/blog/apache-iceberg-partition-evolution-change-your-partitioning-strategy-without-rewriting-data/) (mixed-spec semantics: "Dremio prunes new files at day granularity (very precise) and old files at month granularity (coarser)") + [Streamkap operational guide](https://streamkap.com/resources-and-guides/iceberg-partition-evolution-operational-guide) ("Iceberg query planner reads all manifests, groups by spec ID, applies correct partition pruning logic for each group") + [Apache Iceberg Evolution docs](https://iceberg.apache.org/docs/latest/evolution/). The iter1220 FIX-A (r10 §98-117 PIN point 5 disambiguating transform-refinement vs column-addition) reached cleanly.
 
-Citations correct: r07/r23 §3.1D min_by/max_by leading canonical.
+**Two MINOR framing slips (Acc -1, App -1, Compl -1)** — flagged in directive as non-load-bearing:
 
----
+1. **"matching MONTH (or whatever the old spec was)" — old spec here was DAY**: the responder's lead example says "prune to the matching MONTH," then hedges with "or whatever the old spec was." For this specific question (day→hour), the correct phrasing is "prune to the matching DAY." Recall-ceiling phrasing slip, not a resource defect — r10 §98-117 PIN point 5 (iter1220 FIX-A) lists both `month()→day()` and `day()→hour()` as transform-refinement examples; responder generalized the first one.
 
-### Q3 — Spark added country_code column; dbt incremental merge fails; on_schema_change value? does dbt auto-ALTER or manual? — **STRONG PASS (4.75)**
+2. **"day-level pruning on old files (what you want) is what's missing" framing muddled for THIS use case**: the engineer's query is a QUARTERLY report `WHERE event_ts >= DATE '2026-01-01' AND < DATE '2026-04-01'` — a 90-day window. Day-level pruning on old files IS already available (old spec was day) and IS sufficient (the report scans 90 days; hour-level pruning wouldn't reduce that — there's still 90 days × 24 hours = 2160 hourly partitions inside the 90-day window). The "hundreds of GB" is the actual physical volume of a quarter of events at this ingest rate, NOT a pruning failure. The responder's "fix" — Spark `rewrite_data_files(rewrite-all=true)` to restamp old files under hour-spec — won't reduce the quarterly-report scan because the bottleneck isn't transform granularity, it's the 90-day window itself. The rewrite would help a 6-hour DASHBOARD on old data; it doesn't help a quarterly report. Practical Applicability shaved because the prescription is mismatched to the stated use case.
 
-| Dim | Score | Note |
-|---|---|---|
-| Technical accuracy | 5 | `on_schema_change='append_new_columns'` correct + **dbt auto-runs ALTER TABLE ADD COLUMN** before the MERGE (verified at [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) + community sources). Four values correctly enumerated: `ignore` (default, silent drop), `fail` (error/halt), `append_new_columns` (recommended), `sync_all_columns` (add + drop). Default = `ignore` (NOT `fail`) — correct per the dbt official page: "ignore - Default behavior (see below)." `sync_all_columns` correctly flagged as too aggressive for production (drops removed columns). |
-| Beginner clarity | 5 | Four-value matrix with consequences is exactly the right shape for an engineer who's never seen this config. Calling out `ignore` as the default (and the silent data-loss risk) is load-bearing. |
-| Practical applicability | 5 | Engineer adds `on_schema_change='append_new_columns'` to model config, runs `dbt run --select fct_events`, the ALTER fires automatically, the merge picks up country_code. No manual ALTER required. Exactly the actionable shape. |
-| Completeness | 4 | Minor gaps: (a) didn't mention that **historical rows get NULL for the new column** (no backfill — engineer might expect populated values for prior runs); (b) didn't note that `append_new_columns` only fires when new columns ARE detected (no-op when schemas match); (c) didn't mention `--full-refresh` as the alternative if backfill is needed. Recall ceiling. |
+Why this scores 4.0 not lower: load-bearing point (teammate WRONG, prunes at coarse old granularity) is correct, the iter1220 FIX-A reached, and `rewrite_data_files(rewrite-all=true)` IS the right rewrite path for general "old data pruning at NEW spec granularity" needs (just not for THIS quarterly report). No imported-prior, no fabrication. NO FIX-A — both slips are recall-ceiling, the resource correctly teaches the disambiguation as of iter1220.
 
-**Average: (5 + 5 + 5 + 4)/4 = 4.75 — STRONG PASS.**
-
-Citations correct: r13/r27 + dbt official docs.
+**NEW SOFT WATCH** `iter1221 Q1 quarterly-window-vs-transform-granularity diagnosis` — re-probe in 5-9 iters under "quarterly/annual report scans a lot, did partition evolution break pruning" framing; if recurs, light additive line in r10 noting "for date-range queries spanning many old-spec partitions, the volume IS the window — rewriting to finer granularity won't reduce scan; that's only a win for short-window queries inside old data."
 
 ---
 
-### Q4 — Oracle `SYSDATE-7` and `event_time-SYSDATE` port to Trino errors; correct N-days-ago WHERE filter? correct hour-diff between two timestamps? — **STRONG PASS (5.0)**
+## Q2 — Market basket self-join OOM, partitioned-join lever
 
-| Dim | Score | Note |
-|---|---|---|
-| Technical accuracy | 5 | (a) `current_timestamp - INTERVAL '7' DAY` valid per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — unit OUTSIDE single-quotes, singular, uppercase. `INTERVAL '7 days'` (plural unit INSIDE quotes) is a parse error — verified. `date_add('day', -7, current_timestamp)` valid alt (Trino docs: "Subtraction can be performed by using a negative value"). (b) `date_diff('hour', t1, t2)` correct duration form returning integer hours (`timestamp2 - timestamp1` in units). Direct `timestamp - timestamp` subtraction is NOT a documented operator (returns parse error / type error). `(to_unixtime(t2) - to_unixtime(t1)) / 3600.0` valid epoch-seconds fallback returning fractional hours. All forms compatible with the `from_unixtime` returns timestamp-with-tz pin per memory. |
-| Beginner clarity | 5 | The "unit OUTSIDE quotes" callout is the SINGLE most-confused syntax point for Oracle/Postgres migrants. Showing both INTERVAL and date_add forms covers two ergonomic preferences. The "timestamp - timestamp throws" defang prevents the engineer from retrying that exact wrong form. |
-| Practical applicability | 5 | Engineer pastes `WHERE event_time >= current_timestamp - INTERVAL '7' DAY` and `SELECT date_diff('hour', start_ts, end_ts) AS duration_hours` and ships. |
-| Completeness | 5 | Covers (a) and (b) cleanly. Could optionally mention `current_date - INTERVAL '7' DAY` for date-only (no time-of-day) windows but the current_timestamp form is the more general/Oracle-equivalent translation. No imported-prior, no over-warning. |
+**Score: 4.25** | Tech 4.5 | Clar 4.5 | App 4.5 | Compl 3.5
+**Routing**: Improving complex SQL performance on Trino with dbt (line 419)
 
-**Average: 5.0 — STRONG PASS.**
+Load-bearing answer correct:
 
-Citations: r27 Oracle→Trino port + r23 date/time canonicals.
+1. **Self-join shape `a.product_id < b.product_id` is canonical co-occurrence pair construction** — drops self-pairs (`a.product_id = b.product_id` filtered) AND drops mirror duplicates (only one orientation per pair). Standard market-basket / association-rule pair-mining shape per [GeeksforGeeks Market Basket SQL](https://www.geeksforgeeks.org/market-basket-analysis-with-sql/) + Lumi-AI walkthrough.
+
+2. **`SET SESSION join_distribution_type='PARTITIONED'` is a valid Trino 467 session property** — verified at [trino.io/docs/467/admin/properties-general.html](https://trino.io/docs/467/admin/properties-general.html) verbatim "valid values are AUTOMATIC (default), PARTITIONED, BROADCAST" + "PARTITIONED employs hash distributed joins where both tables are redistributed using a hash of the join key" — matches pinned iter1203 canonical (broadcast vs partitioned distribution). `SET SESSION join_max_broadcast_table_size='1MB'` is also valid (default `100MB` per [PR #2527](https://github.com/trinodb/trino/pull/2527)) — lowering to `1MB` effectively forces partitioned for any non-trivial build side. Either lever alone forces partitioned; both is belt-and-suspenders.
+
+3. **Diagnosis correct that broadcast on a 100M-row self-join is the OOM cause** — broadcast replicates the build side to every worker; if Trino's CBO picks broadcast for `order_items` (because ANALYZE is stale or absent, no NDV stats), every worker tries to hold 100M rows → OOM. Partitioned hash-distribution shuffles both sides on `order_id` (the join key), so each worker holds only its slice → bounded memory.
+
+4. **`ANALYZE order_items` as the durable fix** — populating Iceberg Puffin NDV stats so CBO picks partitioned automatically without session overrides. Matches pinned iter1203 canonical.
+
+**COMPLETENESS SHAVE (-1)**: The deeper market-basket OOM driver — **basket-cardinality skew** — is not surfaced. An order with N items produces N(N-1)/2 pairs at join time; a basket with 1000 items produces ~500K pairs from a single `order_id`. Partitioned join solves the per-worker memory distribution; it does NOT solve the **join cardinality blow-up** itself. For 100M rows skewed toward a few mega-baskets, the partitioned join still produces a massive intermediate cardinality before the GROUP BY collapses it. The other lever (which the responder did not mention) is:
+- **Cap basket cardinality** — pre-filter `WHERE order_id NOT IN (SELECT order_id FROM order_items GROUP BY order_id HAVING COUNT(*) > 50)` or top-N-items-per-basket
+- **Pre-aggregate to distinct (order_id, product_id) pairs FIRST** if duplicates exist within an order
+- **Two-phase**: filter pairs to "frequent items only" via a first-pass `HAVING SUM(...) >= min_support` before the self-join
+
+Non-load-bearing for the engineer's stated immediate fix (partitioned join WILL likely resolve the OOM for typical retail baskets where p99 basket size is small). But on truly skewed data (B2B wholesale, supplier orders), partitioned alone may not be enough. Watch label `iter1221 Q2 market-basket basket-skew completeness` — re-probe if a high-basket-cardinality framing surfaces. NO FIX-A — single re-probe data point, not source-anchored.
+
+No imported-prior. No broken-secondary. No fabrication. Cites r24/r27/r28 family pinned canonicals.
 
 ---
 
-## Iteration aggregate
+## Q3 — dbt accepted_values + NULL trap [WATCH RE-PROBE]
 
-| Q | Topic | Score | Status |
-|---|---|---|---|
-| Q1 | Iceberg partition design — partition evolution cross-spec pruning | 3.25 | PARTIAL — LIGHT FIX-A r10 |
-| Q2 | Analytical query patterns — `min_by` value-at-min-timestamp | 4.875 | STRONG PASS |
-| Q3 | Oracle PL/SQL → dbt+Trino — `on_schema_change` auto-ALTER | 4.75 | STRONG PASS |
-| Q4 | Oracle PL/SQL → dbt+Trino — INTERVAL/date_diff temporal port | 5.0 | STRONG PASS |
-| **Avg** | | **4.47** | **PASS + LIGHT FIX-A** |
+**Score: 5.0** | Tech 5.0 | Clar 5.0 | App 5.0 | Compl 5.0
+**Routing**: dbt model contracts (line 455)
+**Watch status: iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A WATCH CLOSES on 1st re-probe**
 
-All required topics remain PASSED. Margins safe. Q1 dent is FINDABILITY/FRAMING (a coarser-vs-no-pruning disambiguation row missing from r10's partition-evolution canonical), NOT a deep accuracy collapse — the responder got 6/7 of the technical mechanics right and the FIX recommendation is correct.
+Pin-perfect canonical: "accepted_values compiles to `WHERE col NOT IN (...)`; `NULL NOT IN (...) = UNKNOWN` (not TRUE) in 3-valued logic, NULL rows silently excluded from failing set → NULLs PASS unnoticed. accepted_values validates non-NULL values only. FIX: add `- not_null` test alongside accepted_values."
 
-**Recurring pattern note**: this is the FIRST cross-spec PRUNING-granularity question on a transform-refinement (month→day) evolution scenario. Prior partition-evolution questions in the rubric (155+ iterations) were almost all column-addition cases (added tenant_id, added bucket(tenant_id, 64), etc.) where "cannot prune by the new column" IS the correct answer. The teacher should ADD the transform-refinement disambiguation row but NOT remove the column-addition framing — both cases are real.
+Verified verbatim at [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests): "the `accepted_values` data test validates that all of the **non-null** values in a column are present in a supplied list of `values`" + "This test automatically excludes `NULL` values from validation, consistent with how database foreign key constraints work. Use the `not_null` test separately if `NULL` values should cause failures." Confirmed by [dbt-core #8543](https://github.com/dbt-labs/dbt-core/issues/8543) "[CT-3070] accepted_values test passes despite NULL values" — the underlying mechanism is exactly the 3-valued-logic UNKNOWN-not-TRUE semantics the responder named.
 
-**Carry-forward watches**:
-- iter1219 CoW-vs-MoR findability (re-probe 4-8): keyword anchors added at r13 §2994; needs re-probe under varied phrasings (GDPR/right-to-be-forgotten/slow Spark delete job/which delete mode/45-minute rewrite). NO churn unless re-FAIL.
-- iter1219 format-%08d co-located canonical (5-9): r23 §716-758 has the canonical with truncation-hazard callout; responder LPAD form passed but missed format(). Soft watch.
-- iter1218 `accepted_values` NULL behavior (4-8): re-probe varied phrasings.
-- iter1215 strpos-3-arg recall ceiling (6-10): no resource fix possible (Haiku recall ceiling); accept occasional Q cost.
-- iter1213 session_properties + (+)-mnemonic (4-7).
-- iter1206 LIKE-on-ROW+$partitions (3-7).
-- NEW iter1220 cross-spec pruning granularity disambiguation (re-probe 4-8 after FIX-A lands).
+**Direct iter1218 → iter1221 transition**: iter1218 responder said "NULL and 'none' will BOTH be caught because they are NOT in the allowed list" (factually wrong, FAIL 2.75). iter1221 responder says "CRITICAL NULL TRAP. accepted_values compiles to NOT IN; NULL NOT IN = UNKNOWN; NULLs PASS unnoticed; pair with not_null" — exactly the FIX-A spec landing point. Engineer in iter1221 scenario (NULL writes from migration that bypassed accepted_values) gets the right diagnosis + the right combined-test fix.
+
+**iter1218 r28 §242 NULL-trap caveat + r28 §272 DO-NOT-WRITE pair-with-not_null + r27 §3006 reconcile** all reaching cleanly. 12th-or-so consecutive watch closing in 1st-re-probe-CLOSE pattern. No imported-prior, no broken-secondary, no over-warning. Cites r27/r28 + dbt docs.
+
+---
+
+## Q4 — Oracle NVL2 → Trino CASE/IF
+
+**Score: 5.0** | Tech 5.0 | Clar 5.0 | App 5.0 | Compl 5.0
+**Routing**: Oracle PL/SQL → dbt+Trino (line 335)
+
+Pin-perfect Oracle→Trino conditional-function migration. Verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html): no NVL2 function listed (conditional family is CASE / IF / COALESCE / NULLIF / TRY). Two valid Trino 467 rewrites both shown:
+1. `CASE WHEN referral_code IS NOT NULL THEN 'referred' ELSE 'organic' END` — searched-CASE, portable across all SQL dialects
+2. `IF(referral_code IS NOT NULL, 'referred', 'organic')` — Trino-native conditional, more concise
+
+Both equivalent. Migration mapping table also correct: `NVL → COALESCE`, `NVL2 → CASE/IF`, `NULLIF → NULLIF` (same in both dialects). Matches r27 §6.4 Oracle conditional-function translation canonical. Consistent with iter1218 Q4 DECODE landing pattern (5th-or-so consistent DECODE/NVL/NVL2 family pass).
+
+No imported-prior. No broken-secondary. No over-warning. No fabrication. Cites r27.
+
+---
+
+## Watches summary
+
+**Watches CLOSED this iteration:**
+- `iter1220 r10 transform-refinement-vs-column-addition cross-spec-pruning FIX-A` — CLOSED (Q1 load-bearing flipped to correct; minor framing slips non-load-bearing)
+- `iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A` — CLOSED (Q3 pin-perfect 1st re-probe)
+
+**Open watches carried forward:**
+- `iter1219 CoW-vs-MoR findability` (re-probe 3-7)
+- `iter1219 format-%08d co-located canonical` (re-probe 4-8)
+- `iter1215 strpos-3-arg ceiling` (re-probe 6-10, accept-ceiling per pre-commitment, no churn)
+- `iter1213 session_properties + (+)-mnemonic` (re-probe 3-6)
+- `iter1206 LIKE-on-ROW + $partitions-omission` (re-probe 1-5)
+- light-monitors: iter1214 Q1 retention_days param-fab + expire-vs-planning conflation; iter1214 Q3 config(severity:) Jinja-colon-vs-equals; iter1208 Q3 dbt selector direction +model vs model+; iter1209 Q3 CURRENT_TIMESTAMP() empty-parens; iter1191 dbt-contract-two-phase phrasing; iter1215 seed column_types-location.
+
+**NEW soft watch this iter:**
+- `iter1221 Q1 quarterly-window-vs-transform-granularity diagnosis` (re-probe 5-9 iters) — non-FIX
+- `iter1221 Q2 market-basket basket-cardinality skew completeness` (re-probe if high-basket-cardinality framing surfaces) — non-FIX
+
+**No FIX-A this iter.** All four answers passed; two watches closed cleanly on 1st re-probe.
