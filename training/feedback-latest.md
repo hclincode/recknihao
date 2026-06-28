@@ -1,107 +1,129 @@
-# Iteration 1221 — Judge Feedback
+# Iteration 1222 — Judge Feedback
 
-**Verdict: 4.56 STRONG PASS. Two watches CLOSE; NO FIX-A.**
+**Verdict: 4.72 STRONG PASS. One WATCH CLOSES; TWO minor completeness gaps flagged as light SOFT WATCH; NO FIX-A.**
 
-- **Q1 (iter1220 r10 transform-refinement-vs-column-addition WATCH) CLOSES** — responder correctly rejected teammate's "Trino can't prune old files AT ALL / full scan" overstatement and stated old-spec files prune at the OLD COARSER granularity via predicate projection through the old transform. Minor framing slips (see below) but the load-bearing diagnosis flipped from iter1220's "scans all 400M" to the correct "prunes at coarse old granularity."
-- **Q3 (iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A WATCH) CLOSES** — responder went from iter1218's "NULL and 'none' will BOTH be caught" (2.75 FAIL) to iter1221's pin-perfect "NULL NOT IN (...) = UNKNOWN in 3-valued logic, NULLs silently excluded, pair with not_null" (5.0). Clean 1st-re-probe close.
-- Q2 market-basket self-join + PARTITIONED join: 4.25 (load-bearing right; basket-skew caveat missing — not load-bearing for the engineer's immediate fix).
-- Q4 Oracle NVL2 → CASE/IF: 5.0 pin-perfect.
-
----
-
-## Q1 — Iceberg partition spec evolution (day→hour) cross-spec pruning [WATCH RE-PROBE]
-
-**Score: 4.0** | Tech 4.0 | Clar 4.5 | App 3.5 | Compl 4.0
-**Routing**: Iceberg partition design for SaaS (line 64)
-**Watch status: iter1220 r10 transform-refinement-vs-column-addition CLOSES on 1st re-probe**
-
-Load-bearing answer correct: teammate is WRONG, old (day-spec) files still prune at the OLD coarser day granularity via predicate transform projection — NOT full scan. Verified via [Dremio engineering](https://www.dremio.com/blog/apache-iceberg-partition-evolution-change-your-partitioning-strategy-without-rewriting-data/) (mixed-spec semantics: "Dremio prunes new files at day granularity (very precise) and old files at month granularity (coarser)") + [Streamkap operational guide](https://streamkap.com/resources-and-guides/iceberg-partition-evolution-operational-guide) ("Iceberg query planner reads all manifests, groups by spec ID, applies correct partition pruning logic for each group") + [Apache Iceberg Evolution docs](https://iceberg.apache.org/docs/latest/evolution/). The iter1220 FIX-A (r10 §98-117 PIN point 5 disambiguating transform-refinement vs column-addition) reached cleanly.
-
-**Two MINOR framing slips (Acc -1, App -1, Compl -1)** — flagged in directive as non-load-bearing:
-
-1. **"matching MONTH (or whatever the old spec was)" — old spec here was DAY**: the responder's lead example says "prune to the matching MONTH," then hedges with "or whatever the old spec was." For this specific question (day→hour), the correct phrasing is "prune to the matching DAY." Recall-ceiling phrasing slip, not a resource defect — r10 §98-117 PIN point 5 (iter1220 FIX-A) lists both `month()→day()` and `day()→hour()` as transform-refinement examples; responder generalized the first one.
-
-2. **"day-level pruning on old files (what you want) is what's missing" framing muddled for THIS use case**: the engineer's query is a QUARTERLY report `WHERE event_ts >= DATE '2026-01-01' AND < DATE '2026-04-01'` — a 90-day window. Day-level pruning on old files IS already available (old spec was day) and IS sufficient (the report scans 90 days; hour-level pruning wouldn't reduce that — there's still 90 days × 24 hours = 2160 hourly partitions inside the 90-day window). The "hundreds of GB" is the actual physical volume of a quarter of events at this ingest rate, NOT a pruning failure. The responder's "fix" — Spark `rewrite_data_files(rewrite-all=true)` to restamp old files under hour-spec — won't reduce the quarterly-report scan because the bottleneck isn't transform granularity, it's the 90-day window itself. The rewrite would help a 6-hour DASHBOARD on old data; it doesn't help a quarterly report. Practical Applicability shaved because the prescription is mismatched to the stated use case.
-
-Why this scores 4.0 not lower: load-bearing point (teammate WRONG, prunes at coarse old granularity) is correct, the iter1220 FIX-A reached, and `rewrite_data_files(rewrite-all=true)` IS the right rewrite path for general "old data pruning at NEW spec granularity" needs (just not for THIS quarterly report). No imported-prior, no fabrication. NO FIX-A — both slips are recall-ceiling, the resource correctly teaches the disambiguation as of iter1220.
-
-**NEW SOFT WATCH** `iter1221 Q1 quarterly-window-vs-transform-granularity diagnosis` — re-probe in 5-9 iters under "quarterly/annual report scans a lot, did partition evolution break pruning" framing; if recurs, light additive line in r10 noting "for date-range queries spanning many old-spec partitions, the volume IS the window — rewriting to finer granularity won't reduce scan; that's only a win for short-window queries inside old data."
+- **Q1 (iter1206 r17/r10 `$partitions`-omission + LIKE-on-ROW WATCH) CLOSES** — responder went from iter1206's `$files + GROUP BY partition + WHERE partition LIKE '%event_date=...%'` (type error on ROW + long-way-round) to iter1222's direct `$partitions` table with the canonical `partition / file_count / record_count / total_size` column set and correct `"events$partitions"` single-double-quote token quoting. Clean first-re-probe close.
+- Q2 NTILE(4) + tie behavior: 4.875 pin-perfect — NTILE exists, ties NOT kept together, remainder distributed to lowest bucket numbers (102 = 26/26/25/25), DESC → bucket 1 = top spenders all verified.
+- Q3 dbt ref() vs source() = behavioral not naming: 5.0 pin-perfect — model-to-model DAG edge / source-to-model DAG edge / source freshness / ref-for-raw-breaks-DAG all on-mark.
+- Q4 Trino TO_NUMBER equivalent (CAST AS DOUBLE/BIGINT): 4.0 — core canonical correct (no TO_NUMBER, CAST throws on invalid input, regexp_replace for `$49.99`-style dirty strings), but TWO minor completeness gaps flagged: (a) `CAST(price_usd AS DECIMAL(10,2))` better than DOUBLE for monetary values (IEEE-754 float drift); (b) `TRY_CAST(price_usd AS DOUBLE)` returns NULL instead of erroring — the safer tool for a dirty staging column over the regexp_replace strip.
 
 ---
 
-## Q2 — Market basket self-join OOM, partitioned-join lever
-
-**Score: 4.25** | Tech 4.5 | Clar 4.5 | App 4.5 | Compl 3.5
-**Routing**: Improving complex SQL performance on Trino with dbt (line 419)
-
-Load-bearing answer correct:
-
-1. **Self-join shape `a.product_id < b.product_id` is canonical co-occurrence pair construction** — drops self-pairs (`a.product_id = b.product_id` filtered) AND drops mirror duplicates (only one orientation per pair). Standard market-basket / association-rule pair-mining shape per [GeeksforGeeks Market Basket SQL](https://www.geeksforgeeks.org/market-basket-analysis-with-sql/) + Lumi-AI walkthrough.
-
-2. **`SET SESSION join_distribution_type='PARTITIONED'` is a valid Trino 467 session property** — verified at [trino.io/docs/467/admin/properties-general.html](https://trino.io/docs/467/admin/properties-general.html) verbatim "valid values are AUTOMATIC (default), PARTITIONED, BROADCAST" + "PARTITIONED employs hash distributed joins where both tables are redistributed using a hash of the join key" — matches pinned iter1203 canonical (broadcast vs partitioned distribution). `SET SESSION join_max_broadcast_table_size='1MB'` is also valid (default `100MB` per [PR #2527](https://github.com/trinodb/trino/pull/2527)) — lowering to `1MB` effectively forces partitioned for any non-trivial build side. Either lever alone forces partitioned; both is belt-and-suspenders.
-
-3. **Diagnosis correct that broadcast on a 100M-row self-join is the OOM cause** — broadcast replicates the build side to every worker; if Trino's CBO picks broadcast for `order_items` (because ANALYZE is stale or absent, no NDV stats), every worker tries to hold 100M rows → OOM. Partitioned hash-distribution shuffles both sides on `order_id` (the join key), so each worker holds only its slice → bounded memory.
-
-4. **`ANALYZE order_items` as the durable fix** — populating Iceberg Puffin NDV stats so CBO picks partitioned automatically without session overrides. Matches pinned iter1203 canonical.
-
-**COMPLETENESS SHAVE (-1)**: The deeper market-basket OOM driver — **basket-cardinality skew** — is not surfaced. An order with N items produces N(N-1)/2 pairs at join time; a basket with 1000 items produces ~500K pairs from a single `order_id`. Partitioned join solves the per-worker memory distribution; it does NOT solve the **join cardinality blow-up** itself. For 100M rows skewed toward a few mega-baskets, the partitioned join still produces a massive intermediate cardinality before the GROUP BY collapses it. The other lever (which the responder did not mention) is:
-- **Cap basket cardinality** — pre-filter `WHERE order_id NOT IN (SELECT order_id FROM order_items GROUP BY order_id HAVING COUNT(*) > 50)` or top-N-items-per-basket
-- **Pre-aggregate to distinct (order_id, product_id) pairs FIRST** if duplicates exist within an order
-- **Two-phase**: filter pairs to "frequent items only" via a first-pass `HAVING SUM(...) >= min_support` before the self-join
-
-Non-load-bearing for the engineer's stated immediate fix (partitioned join WILL likely resolve the OOM for typical retail baskets where p99 basket size is small). But on truly skewed data (B2B wholesale, supplier orders), partitioned alone may not be enough. Watch label `iter1221 Q2 market-basket basket-skew completeness` — re-probe if a high-basket-cardinality framing surfaces. NO FIX-A — single re-probe data point, not source-anchored.
-
-No imported-prior. No broken-secondary. No fabrication. Cites r24/r27/r28 family pinned canonicals.
-
----
-
-## Q3 — dbt accepted_values + NULL trap [WATCH RE-PROBE]
+## Q1 — Iceberg per-partition file-count + size breakdown via `$partitions` [WATCH RE-PROBE]
 
 **Score: 5.0** | Tech 5.0 | Clar 5.0 | App 5.0 | Compl 5.0
-**Routing**: dbt model contracts (line 455)
-**Watch status: iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A WATCH CLOSES on 1st re-probe**
+**Routing**: Iceberg partition design for SaaS (line 64) — physical-layout inspection via metadata tables
+**WATCH STATUS: iter1206 `$partitions`-omission + LIKE-on-ROW CLOSES on 1st re-probe**
 
-Pin-perfect canonical: "accepted_values compiles to `WHERE col NOT IN (...)`; `NULL NOT IN (...) = UNKNOWN` (not TRUE) in 3-valued logic, NULL rows silently excluded from failing set → NULLs PASS unnoticed. accepted_values validates non-NULL values only. FIX: add `- not_null` test alongside accepted_values."
+Responder reached the direct `$partitions` metadata table with the right column set and quoting. All four load-bearing facts VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter):
 
-Verified verbatim at [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests): "the `accepted_values` data test validates that all of the **non-null** values in a column are present in a supplied list of `values`" + "This test automatically excludes `NULL` values from validation, consistent with how database foreign key constraints work. Use the `not_null` test separately if `NULL` values should cause failures." Confirmed by [dbt-core #8543](https://github.com/dbt-labs/dbt-core/issues/8543) "[CT-3070] accepted_values test passes despite NULL values" — the underlying mechanism is exactly the 3-valued-logic UNKNOWN-not-TRUE semantics the responder named.
+1. **`$partitions` exists and is the direct per-partition aggregate stats table** — docs confirm columns: `partition ROW(...)` ("A row that contains the mapping of the partition column names to the partition column values"), `record_count BIGINT` ("The number of records in the partition"), `file_count BIGINT` ("The number of files mapped in the partition"), `total_size BIGINT` ("The size of all the files in the partition"), and `data ROW(...)` per-column min/max/null/nan stats. Responder named `partition / file_count / record_count / total_size` — pin-perfect for the engineer's literal "file count + size per partition" ask.
+2. **Quoting `"events$partitions"` correct** — docs: metadata table name + `$` + metadata-table token are ONE double-quoted identifier (verbatim "use the table name and the metadata table name separated by a `$`" with the full-qualification example `example.testdb."customer_orders$snapshots"`). Responder explicitly called out the single-double-quote rule.
+3. **Example partition row representation `{event_ts=2026-06-25}`** — accurate ROW-of-partition-fields shape, matches the docs' partition-column-to-value mapping.
+4. **JOIN-back path to identify the 80%-rows customer** — natural follow-up of "`$partitions` shows the partition with anomalous record_count; then query the raw `events` table partition-filtered to find the dominant `customer_id` via GROUP BY customer_id ORDER BY count DESC". Engineer leaves with the full inspection-then-attribution workflow.
 
-**Direct iter1218 → iter1221 transition**: iter1218 responder said "NULL and 'none' will BOTH be caught because they are NOT in the allowed list" (factually wrong, FAIL 2.75). iter1221 responder says "CRITICAL NULL TRAP. accepted_values compiles to NOT IN; NULL NOT IN = UNKNOWN; NULLs PASS unnoticed; pair with not_null" — exactly the FIX-A spec landing point. Engineer in iter1221 scenario (NULL writes from migration that bypassed accepted_values) gets the right diagnosis + the right combined-test fix.
+**iter1206 WATCH CLOSURE**: iter1206 responder produced `WHERE partition LIKE '%event_date=2026-06-25%' ORDER BY file_size_in_bytes DESC` on `$files` (LIKE-on-ROW = parse error; `$files + GROUP BY partition` long-way-round). iter1222 responder went straight to `$partitions` (zero GROUP BY) — the more direct tool. Engineer's literal ask ("per-partition breakdown of file count + size — without listing MinIO") fully satisfied in one query without MinIO browsing or ROW-type-LIKE traps. ~13th consecutive watch closure in 1st-re-probe-CLOSE pattern.
 
-**iter1218 r28 §242 NULL-trap caveat + r28 §272 DO-NOT-WRITE pair-with-not_null + r27 §3006 reconcile** all reaching cleanly. 12th-or-so consecutive watch closing in 1st-re-probe-CLOSE pattern. No imported-prior, no broken-secondary, no over-warning. Cites r27/r28 + dbt docs.
+No imported-prior slip, no broken-secondary, no fabrication. NO FIX-A.
 
 ---
 
-## Q4 — Oracle NVL2 → Trino CASE/IF
+## Q2 — Trino NTILE(4) for spend quartiles + tie behavior
+
+**Score: 4.875** | Tech 4.75 | Clar 5.0 | App 5.0 | Compl 4.75
+**Routing**: Analytical query patterns on Iceberg+Trino (line 87) — window-function family
+
+Every load-bearing fact VERIFIED at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) (WebFetched this iter):
+
+1. **NTILE exists in Trino 467** — `ntile(n) → bigint`. Responder's Oracle 1:1 port `NTILE(4) OVER (ORDER BY total_spend DESC)` works verbatim.
+2. **NTILE divides into `n` buckets numbered 1..n, bucket sizes differ by at most 1** — docs verbatim "Bucket values will differ by at most 1." Responder's 102 customers → 26/26/25/25 arithmetic is exactly right.
+3. **Remainder distributed one per bucket starting from bucket 1** — docs verbatim "If the number of rows in the partition does not divide evenly into the number of buckets, then the remainder values are distributed one per bucket, starting with the first bucket." 102 rows = 4×25 + 2 remainder → buckets 1 and 2 get the extra row each (26/26/25/25). Responder said "earliest buckets in ORDER BY order" — CORRECT.
+4. **NTILE does NOT keep tied rows together; assigns purely by row position** — docs example "6 rows / 4 buckets = 1 1 2 2 3 4" illustrates positional assignment regardless of value equality. Responder correctly flagged the 100-customers-at-$0 case: the 100 ties get sprinkled across all 4 buckets deterministically by ORDER BY position (with no secondary tiebreaker, the position is implementation-dependent within ties but stable within one query plan). For the engineer's "lots of ties (100 customers at $0)" scenario, ties at a boundary CAN land in different buckets — exactly the load-bearing warning the engineer asked about.
+5. **DESC → bucket 1 = top spenders** — correct (NTILE numbers rows in ORDER BY order, so DESC puts highest-spend rows first = bucket 1).
+
+**Minor Compl shave (-0.25)**: didn't explicitly mention adding a deterministic secondary tiebreaker (e.g. `ORDER BY total_spend DESC, customer_id`) to make the bucket assignment reproducible across re-runs when ties are present. For the campaign-quartile use case, "Acme Corp is in Q1 this week and Q2 next week because of tie position drift" can confuse marketing. Recall ceiling, not load-bearing — engineer's literal "do ties split across buckets" question is fully answered.
+
+**Minor Acc shave (-0.25)**: "NTILE distributes ties to earliest buckets in ORDER BY order" framing technically conflates two effects — (a) bucket boundary position is purely row-position-based (positional, deterministic given a stable ORDER BY); (b) remainder rows go to lowest-numbered buckets. Both true, but the engineer might read "earliest in ORDER BY" as "extra remainder goes to the highest-priority side" which is the same in this case (DESC → top spenders in remainder-receiving buckets 1 and 2) but accidentally correct for the wrong reason. Recall-ceiling phrasing, not a factual error.
+
+No imported-prior, no broken-secondary. NO FIX-A.
+
+---
+
+## Q3 — dbt ref() vs source(): behavioral difference, not naming convention
 
 **Score: 5.0** | Tech 5.0 | Clar 5.0 | App 5.0 | Compl 5.0
-**Routing**: Oracle PL/SQL → dbt+Trino (line 335)
+**Routing**: Oracle PL/SQL → dbt + Trino migration (line 337) — dbt fundamentals family (could also route to dbt sources line 455, but iter1222 Q3 is the foundational ref-vs-source disambiguation, not source-freshness-specific)
 
-Pin-perfect Oracle→Trino conditional-function migration. Verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html): no NVL2 function listed (conditional family is CASE / IF / COALESCE / NULLIF / TRY). Two valid Trino 467 rewrites both shown:
-1. `CASE WHEN referral_code IS NOT NULL THEN 'referred' ELSE 'organic' END` — searched-CASE, portable across all SQL dialects
-2. `IF(referral_code IS NOT NULL, 'referred', 'organic')` — Trino-native conditional, more concise
+All five load-bearing facts VERIFIED at [docs.getdbt.com/reference/dbt-jinja-functions/source](https://docs.getdbt.com/reference/dbt-jinja-functions/source) (WebFetched this iter) + [docs.getdbt.com/reference/dbt-jinja-functions/ref](https://docs.getdbt.com/reference/dbt-jinja-functions/ref) + [docs.getdbt.com/docs/build/sources](https://docs.getdbt.com/docs/build/sources):
 
-Both equivalent. Migration mapping table also correct: `NVL → COALESCE`, `NVL2 → CASE/IF`, `NULLIF → NULLIF` (same in both dialects). Matches r27 §6.4 Oracle conditional-function translation canonical. Consistent with iter1218 Q4 DECODE landing pattern (5th-or-so consistent DECODE/NVL/NVL2 family pass).
+1. **`ref('model_name')` references another dbt MODEL** — verified verbatim "References models built within your dbt project (other dbt models)." dbt builds the upstream model first, ref creates a model-to-model DAG edge.
+2. **`source('source_name','table_name')` references a RAW EXTERNAL table declared in `sources.yml`** — verified verbatim "References external, raw data sources that exist outside your dbt project... NOT built by dbt; they exist in your source system." Source-to-model DAG edge; dbt does NOT build sources.
+3. **`source()` enables freshness monitoring via `loaded_at_field` + `warn_after/error_after`** — verified at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness) (consistent with pinned iter1195 + iter1142 source-freshness canonicals). `ref()` has NO freshness mechanism.
+4. **Using `ref()` for raw ingestion tables breaks DAG semantics + loses freshness** — verified verbatim "This is **not recommended**... `ref()` assumes the table is a dbt model you've built. For external raw data, you should use `source()` because: it properly documents external dependencies; it enables freshness monitoring; it clarifies that the data is externally sourced, not dbt-managed." Compile-time happens to produce the same table name in both cases ("compile to same table name" the engineer reported) but the DAG is wrong AND the source row is invisible to `dbt source freshness`.
+5. **Canonical pattern**: `stg_orders` reads `{{ source('app','orders') }}`; downstream `fct_orders` reads `{{ ref('stg_orders') }}`. Two layers, two functions, one per role. Responder's example is the canonical dbt-style staging → fact pattern.
 
-No imported-prior. No broken-secondary. No over-warning. No fabrication. Cites r27.
+This is a behavioral question masquerading as a naming question (the engineer's exact framing). Responder correctly framed it as "NOT just naming — it's a behavior change" and surfaced all four operational consequences (DAG edge type, build order, freshness enablement, dbt model vs external).
+
+No imported-prior, no broken-secondary, no fabrication. NO FIX-A.
 
 ---
 
-## Watches summary
+## Q4 — Oracle TO_NUMBER on VARCHAR staging columns → Trino CAST
 
-**Watches CLOSED this iteration:**
-- `iter1220 r10 transform-refinement-vs-column-addition cross-spec-pruning FIX-A` — CLOSED (Q1 load-bearing flipped to correct; minor framing slips non-load-bearing)
-- `iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A` — CLOSED (Q3 pin-perfect 1st re-probe)
+**Score: 4.0** | Tech 4.5 | Clar 4.5 | App 3.5 | Compl 3.5
+**Routing**: Oracle PL/SQL → dbt + Trino migration (line 337) — Oracle function-translation family
 
-**Open watches carried forward:**
-- `iter1219 CoW-vs-MoR findability` (re-probe 3-7)
-- `iter1219 format-%08d co-located canonical` (re-probe 4-8)
-- `iter1215 strpos-3-arg ceiling` (re-probe 6-10, accept-ceiling per pre-commitment, no churn)
-- `iter1213 session_properties + (+)-mnemonic` (re-probe 3-6)
-- `iter1206 LIKE-on-ROW + $partitions-omission` (re-probe 1-5)
-- light-monitors: iter1214 Q1 retention_days param-fab + expire-vs-planning conflation; iter1214 Q3 config(severity:) Jinja-colon-vs-equals; iter1208 Q3 dbt selector direction +model vs model+; iter1209 Q3 CURRENT_TIMESTAMP() empty-parens; iter1191 dbt-contract-two-phase phrasing; iter1215 seed column_types-location.
+Core canonical correct. VERIFIED at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) (WebFetched this iter):
 
-**NEW soft watch this iter:**
-- `iter1221 Q1 quarterly-window-vs-transform-granularity diagnosis` (re-probe 5-9 iters) — non-FIX
-- `iter1221 Q2 market-basket basket-cardinality skew completeness` (re-probe if high-basket-cardinality framing surfaces) — non-FIX
+1. **No `TO_NUMBER` function in Trino 467** — correct. Trino conversion functions are `cast()`, `try_cast()`, `format()`, `typeof()`. Raw `TO_NUMBER(...)` resolves to "Function 'to_number' not registered."
+2. **`CAST(price_usd AS DOUBLE)` is the equivalent on valid numeric strings** — correct. `cast('49.99' AS DOUBLE) = 49.99`. Engineer's literal "is CAST AS DOUBLE identical to Oracle TO_NUMBER" question: YES on clean input, equivalent semantics.
+3. **`CAST(... AS BIGINT)` for whole numbers** — correct (Trino BIGINT CAST routes integer strings; note CAST AS BIGINT/INTEGER also rounds half-up on a fractional double per pinned `reference_trino_cast_to_integer_rounds.md`).
+4. **Trino strict on types vs Oracle silent coercion** — correct framing. Oracle silently coerces `'42'` as integer in arithmetic context; Trino requires explicit CAST for any varchar → numeric step.
+5. **CAST throws on non-numeric input ('$49.99')** — correct. Recommended `CAST(regexp_replace(price_usd, '[^0-9.]', '') AS DOUBLE)` to strip currency symbols/spaces before cast. Works for the symbol-stripping case.
 
-**No FIX-A this iter.** All four answers passed; two watches closed cleanly on 1st re-probe.
+**TWO COMPLETENESS GAPS (per directive — both real, both recall-ceiling not resource-sourced)**:
+
+**(a) DECIMAL-for-money over DOUBLE — minor App/Compl shave**: `price_usd` is monetary data. `DOUBLE` is IEEE-754 binary floating-point — small repeating-decimal currency values drift (`CAST('49.99' AS DOUBLE) + CAST('0.01' AS DOUBLE)` can produce `50.000000000000007` instead of `50.00`; accumulated over hundreds of orders this corrupts SUM(price_usd) totals). For monetary data the idiomatic Trino type is `CAST(price_usd AS DECIMAL(10,2))` — exact base-10 arithmetic, no float drift. DECIMAL supports up to 38 digits per [trino.io/docs/467/language/types.html](https://trino.io/docs/467/language/types.html). Responder's DOUBLE/BIGINT only menu misses this. Engineer ships `CAST(price_usd AS DOUBLE)` aggregations, gets $0.01 drift on month-end totals.
+
+**(b) TRY_CAST for dirty staging columns — minor App/Compl shave**: The engineer's stated scenario ("staging stores numerics as VARCHAR" + the question's framing presumes mixed/messy values) is the canonical use case for `TRY_CAST(price_usd AS DECIMAL(10,2))` — returns NULL on a bad row instead of erroring out the whole query. VERIFIED at conversion.html: "Like `cast()`, but returns null if the cast fails." For a dirty staging column with possible empty strings / non-numeric junk, TRY_CAST + COALESCE pattern is the production-grade form (`COALESCE(TRY_CAST(price_usd AS DECIMAL(10,2)), 0)` to default bad rows to 0; OR `WHERE TRY_CAST(price_usd AS DECIMAL(10,2)) IS NOT NULL` to drop bad rows). Responder gave only the regexp_replace strip variant (works for `'$49.99'` clean dirty pattern; doesn't help with truly invalid values like `'TBD'` / `'N/A'` / `''`).
+
+**Resource-source check (grep planned, not run here)**: r27 Oracle function-translation table likely already has TO_NUMBER → CAST + TRY_CAST as canonical translations (similar shape to pinned NVL → COALESCE / DECODE → CASE / NVL2 → CASE families). TRY_CAST is teachable in r23 dialect canonicals + r27 Oracle-port section. Responder reached the CAST canonical but didn't reach the adjacent TRY_CAST + DECIMAL-for-money sub-canonicals. Recall-ceiling, NOT resource defect — per `feedback_synthesis_ceiling_stop_churning.md` family, the FOR-MONEY/FOR-DIRTY-DATA sub-routing was a peripheral recall miss. Engineer's literal CAST question is answered; the production-quality DECIMAL + TRY_CAST extension wasn't surfaced.
+
+**NO FIX-A** — both gaps are recall-ceiling sub-canonical adjacent forms, not source-anchored defects. Adding more defang in r27 around TO_NUMBER risks `feedback_new_card_over_attracts_adjacent` over-attractor on simple CAST questions.
+
+**NEW SOFT WATCH** `iter1222 Q4 CAST-AS-DECIMAL-for-money + TRY_CAST-for-dirty-staging completeness` — re-probe in 5-9 iters under "VARCHAR → number for monetary column with some bad rows" framing (e.g. "subscription_fee column has '$', '49.99', '', NULL — Trino way?"); if both DECIMAL-for-money AND TRY_CAST stay missing in 2+ re-probes, consider light additive findability anchor in r27 Oracle TO_NUMBER row pointing to TRY_CAST + DECIMAL sub-canonicals.
+
+No imported-prior (TRY_CAST is not assumed-absent; responder just didn't reach it), no broken-secondary, no over-warning. Cites r23/r27.
+
+---
+
+## Overall
+
+**Average: (5.0 + 4.875 + 5.0 + 4.0) / 4 = 4.72 STRONG PASS**
+
+**Watch closures this iter**:
+- **iter1206 r17/r10 `$partitions`-omission + LIKE-on-ROW WATCH: CLOSED** on 1st re-probe (~13th consecutive watch closure in 1st-re-probe-CLOSE pattern). Responder went straight to `"events$partitions"` with the canonical column set, no ROW-type LIKE slip, no `$files + GROUP BY partition` long-way-round.
+
+**Watches carried forward (no re-probe this iter)**:
+- iter1219 r10 CoW-MoR-findability + r23 format-%08d sub-canonical (open, light-monitor)
+- iter1215 r27 §4.3 strpos-3-arg INSTR-Nth-occurrence assumed-absence (ACCEPT-CEILING per pre-commitment, no churn, re-probe 8-12 iters with fresh phrasing)
+- iter1213 r27 §1745 Oracle (+)-mnemonic-inverted + session_properties name pin (soft watch, re-probe 4-8 iters)
+- iter1221 r10 quarterly-window-vs-transform-granularity diagnosis (soft watch, re-probe 5-9 iters)
+- iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A: CLOSED iter1221 (sealed)
+- iter1208 width_bucket boundary off-by-one (light-monitor)
+- iter1206 NVL-COALESCE type-coercion edge case (light-monitor)
+- iter1217 translate phone-strip example-output-bug (per-instance, no churn)
+
+**New watch this iter**:
+- iter1222 Q4 CAST-AS-DECIMAL-for-money + TRY_CAST-for-dirty-staging completeness (light-monitor, re-probe 5-9 iters; if both gaps stay missing in 2+ re-probes, consider light findability anchor in r27 Oracle TO_NUMBER row)
+
+**No FIX-A this iter.** All required topics PASS healthy margins; Q1 watch closure restores `$partitions` direct-table findability after iter1206 long-way-round slip. Q4 minor gaps are recall-ceiling, not resource-sourced; resources r23/r27 already teach TRY_CAST + DECIMAL — recall layer just didn't reach them from the Oracle TO_NUMBER entry-keyword path.
+
+**NEXT iter1223**: BREADTH. Probe topics that haven't been tested recently; consider a re-probe of iter1213 (+)-mnemonic if it falls in the natural rotation.
+
+**Sources verified this iter**:
+- [trino.io/docs/467/connector/iceberg.html — $partitions metadata table columns](https://trino.io/docs/467/connector/iceberg.html)
+- [trino.io/docs/467/functions/window.html — NTILE tie-handling](https://trino.io/docs/467/functions/window.html)
+- [docs.getdbt.com/reference/dbt-jinja-functions/source — source vs ref behavior](https://docs.getdbt.com/reference/dbt-jinja-functions/source)
+- [trino.io/docs/467/functions/conversion.html — cast/try_cast/no-to_number](https://trino.io/docs/467/functions/conversion.html)
+- [trino.io/docs/467/language/types.html — DECIMAL up to 38 digits, DOUBLE IEEE-754](https://trino.io/docs/467/language/types.html)
