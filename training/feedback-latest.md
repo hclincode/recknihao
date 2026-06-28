@@ -1,134 +1,172 @@
-# Iter1199 Judge Feedback
+# Iter1200 Judge Feedback
 
-**Overall: 4.969 / 5.0 — STRONG PASS NO-OP. Q1 PRIORITY WATCH CLOSES.** All four answers verified against trino.io/docs/467 + docs.getdbt.com + trinodb/trino GitHub issues; zero defects. **Q1 (PRIORITY WATCH for `iter1197 r17 position-delete-optimize findable-summary reconcile`) lands the canonical Trino-only-can-clear-position-deletes answer on 3rd attempt (FAILED iter1195 + iter1197, REACHES iter1199). The 10-location r17 reconcile is now landing.** Q2 map_agg per-account collect-key-value-pairs pin-perfect with a minor duplicate-key caveat shave; Q3 dbt ephemeral inlined-CTE-per-downstream pin-perfect with sound 3+ downstream materialization rule; Q4 Oracle TRUNC → Trino `truncate(n, d)` pin-perfect with correct CAST/ROUND defang (both round half-up, NOT truncate). No imported-prior slips, no broken-secondary-alternative slips, no over-warning. Carry-forward watches NOT exercised this iter: iter1196 r21 format_version SET PROPERTIES Trino dialect; soft iter1197 localtimestamp SYSDATE direct mapping; soft iter1197 generate_schema_name macro surface.
+**Overall: 4.625 / 5.0 — PASS. Q1 PRIORITY WATCH CLOSES. Q4 soft WATCH CLOSES on the lead BUT with a broken-secondary slip (timestamp-minus-timestamp).** Two clean 5.0s (Q1 format_version dialect canonical, Q3 dbt hard_deletes), one 4.5 (Q2 two-level-aggregation pattern correct but inner CTE column reference sloppy), one 4.0 (Q4 lead correct but age example uses `timestamp - timestamp` which Trino does NOT support per `-` operator). Q4 slip is a per-instance responder lapse, NOT resource-sourced — r27 §4.2 L771 explicitly bans `dt - SYSDATE`-style timestamp subtraction and routes to `date_diff`. No FIX-A. Carry-forward watches NOT exercised this iter: soft iter1197 generate_schema_name macro; light-monitor iter1199 r17 position-delete adjacent.
 
 ---
 
-## Q1 (PRIORITY WATCH) — Trino-only EXECUTE optimize for MoR position deletes on already-large data files
+## Q1 (PRIORITY WATCH) — Trino 467 `format_version` upgrade after Hive→Iceberg migrate
 
 **Score: 5 / 5 / 5 / 5 = 5.0**
 
-### What the responder said:
-- Trino EXECUTE optimize default `file_size_threshold = 100MB` — files **below** the threshold are merged; **at/above is SKIPPED**. That is why the 200–300 MB delete-bearing files were left untouched.
-- FIX: `ALTER TABLE iceberg.analytics.orders EXECUTE optimize(file_size_threshold => '512MB')` — raises the threshold above the existing file sizes so they become candidates, forcing the rewrite.
-- During the rewrite Trino **APPLIES** the position-delete records that point at those data files and **DROPS** the now-unreferenced delete files. Reads no longer have to reconcile them.
-- Follow-up: `EXECUTE expire_snapshots(retention_threshold => '7d')` to actually delete the orphaned delete-file artifacts after the snapshot retention window.
-- **Explicit YES: Trino-only shop CAN clean this up, NO Spark required.**
-- Tradeoff named: rewriting clears deletes by rewriting data → write amplification proportional to data volume rewritten.
-- Optional cheaper path: Spark `CALL iceberg.system.rewrite_position_delete_files(...)` rewrites delete files only — OPTIONAL, NOT required, lighter when available.
+### What the responder said
+- Trino form: `ALTER TABLE iceberg.analytics.accounts SET PROPERTIES format_version = 2;`
+- Three load-bearing dialect distinctions correctly named:
+  1. **`SET PROPERTIES`** (Trino), NOT `SET TBLPROPERTIES` (Spark/Hive).
+  2. **Underscored `format_version`** (Trino), NOT hyphenated `'format-version'` (Spark/Iceberg-native).
+  3. **Unquoted integer `2`** (Trino), NOT quoted string `'2'` (Spark).
+- Routing: migrated tables default to v1 (no row-level deletes → MERGE / dbt incremental MERGE fails); new Trino-created tables already default to v2; v1→v2 bump enables MERGE.
 
-### Verification (primary sources):
-- [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) (verified): `optimize` "merges all files with a size below the optional `file_size_threshold` parameter (default value … `100MB`)" — confirms files **above** 100 MB are skipped unless threshold raised. The example output exposes `removed_delete_files_count`, and the file-selection rule includes "at least one data file, with delete files attached, is present" → optimize DOES handle delete-file cleanup during data-file consolidation.
-- [trinodb/trino PR #12704](https://github.com/trinodb/trino/pull/12704) (verified): "Cleanup delete files during optimize" — position-delete files are removed during optimize regardless of `maxScannedFileSizeInBytes` once the relevant data files are rewritten. PR introduces `DataFileWithDeleteFiles` helper to track which delete files correspond to which data files for intelligent cleanup.
-- [trinodb/trino issue #12617](https://github.com/trinodb/trino/issues/12617) (closed by PR #12704): original gap was "optimize leaves behind delete files which do not reference any data files still in the table manifest" — PR #12704 fixed this; modern Trino 467 (well after merge) **does** clean up.
-- [trinodb/trino issue #16574](https://github.com/trinodb/trino/issues/16574) (verified): "Support data and delete file thresholds for Iceberg OPTIMIZE" — confirms the `file_size_threshold` parameter and that it gates whether a data file is eligible for rewrite.
-- [trinodb/trino issue #24086](https://github.com/trinodb/trino/issues/24086) (verified): "Delete files are not removed after running Iceberg maintenance ops" — this is the noisy issue that produced the "Spark required" folklore. The actual fix is the user-known pattern of raising `file_size_threshold` to force the rewrite of already-large data files so their position deletes get applied + dropped.
+### Verification (primary sources)
+- [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — verbatim ALTER form: `ALTER TABLE table_name SET PROPERTIES format_version = 2;` (unquoted name, unquoted integer; CONFIRMED via WebFetch this iter).
+- The Spark/Iceberg-native form `ALTER TABLE ... SET TBLPROPERTIES ('format-version'='2')` is the recognized Iceberg PROCEDURE / Spark Iceberg connector form and is documented by Iceberg, not Trino. Pasting Spark's hyphenated quoted form into Trino yields a parse / unknown-property error — the responder's framing is correct.
+- r21 §137 / §159 already carries this canonical with the exact same dialect contrast — responder cleanly reached the right card.
 
-### PRIORITY WATCH STATUS: **CLOSES** (3rd attempt)
+### PRIORITY WATCH STATUS: **CLOSES** (1st re-probe)
 
-History: This claim FAILED twice — iter1195 ("Spark-only / Trino-only stuck") and iter1197 (despite r17 reconcile attempt). iter1197 reconciled 10 r17 locations + r13/r16/r28 earlier passes. **Iter1199 responder lands all five load-bearing facts correctly:**
-1. Default `file_size_threshold = 100MB` skip-above mechanism — correctly named as the proximate cause of "optimize seemed to do nothing".
-2. Raise-threshold workaround with concrete `file_size_threshold => '512MB'` syntax — exactly the verified fix.
-3. Apply-deletes-then-drop-delete-files mechanism — correctly attributed to data-file rewrite path (PR #12704).
-4. Explicit "Trino-only NOT stuck; Spark NOT required" — directly refutes the prior folklore.
-5. `rewrite_position_delete_files` correctly framed as OPTIONAL (not required) Spark-side alternative.
+Watch label: `iter1196 r21 format_version SET PROPERTIES` — the iter1196 r21 §137-159 reconcile (Trino-form FIRST, Spark-form clearly defanged as wrong-engine) lands on first re-probe. All three dialect axes (statement, property name, value type) verbalized by the responder.
 
-Plus follow-up `expire_snapshots` to actually reclaim storage — correct operational sequencing.
-
-**WATCH CLOSES.** The 10-location r17 reconcile finally reaches the responder's keyword path. Continue light-monitoring on adjacent angles (e.g. "Spark-only delete-file rewrite vs Trino optimize tradeoff" framing) for 3–6 iters but no further FIX-A needed.
-
-### Verdict:
-Pin-perfect canonical for the longest-running Iceberg-maintenance folklore in the rubric. No defect.
+### Verdict
+Pin-perfect canonical for the v1→v2 post-migrate upgrade. No defect, no FIX-A.
 
 ---
 
-## Q2 — One-row-per-account MAP via map_agg
+## Q2 — Two-level aggregation (busy-hour heatmap: average per day, NOT total)
 
-**Score: 5 / 5 / 5 / 4.5 = 4.875**
+**Score: 4.5 / 5 / 4 / 4.5 = 4.5**
 
-### What the responder said:
-- `SELECT account_id, map_agg(config_key, config_value) AS config_map FROM account_config GROUP BY account_id`.
-- Extraction: `element_at(config_map, 'max_users')` returns the value or NULL.
-- One pass, no re-joins.
-- Aside: "for huge key cardinality a map gets unwieldy."
+### What the responder said
+```sql
+WITH tickets_per_cell AS (
+  SELECT event_date,
+         day_of_week(event_date) AS dow,
+         hour(created_at)         AS hour_of_day,
+         COUNT(*)                 AS ticket_count
+  FROM tickets
+  WHERE created_at >= current_timestamp - INTERVAL '90' DAY
+  GROUP BY event_date, day_of_week(event_date), hour(created_at)
+)
+SELECT dow, hour_of_day, CAST(AVG(ticket_count) AS BIGINT) AS avg_tickets_per_day
+FROM tickets_per_cell
+GROUP BY dow, hour_of_day
+ORDER BY ...
+```
 
-### Verification (primary source):
-- [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) (verified): `map_agg(key, value)` — "returns a map created from the input key/value pairs."
-- [trino.io/docs/current/functions/map.html](https://trino.io/docs/current/functions/map.html): `element_at(map<K,V>, key) → V` returns the value for the given key, NULL if missing.
-- GROUP BY drives one map per account in a single pass — correct.
+The **PATTERN** is correct: inner GROUP BY produces one row per (date, dow, hour) tuple with that day's count; outer GROUP BY averages across the ~13 occurrences of each (dow, hour) cell over the 90-day window. This is the canonical two-level fix for "AVG per day" vs "raw COUNT" heatmaps.
 
-### Minor completeness shave (-0.5 Compl):
-The duplicate-key behavior was not called out. In Trino 467, `map_agg` over a group containing two rows with the same `key` collapses to **arbitrary-pick** (similar to `map_union`'s documented "arbitrary input" rule — confirmed via WebFetch on functions/aggregate.html); the `map()` *constructor* throws on duplicate keys, but `map_agg` does not throw — it just yields an undefined which-wins map. For this specific schema `(account_id, config_key, config_value)` with 5–30 rows/account, the use case implies `(account_id, config_key)` is effectively unique, so duplicate-key is rarely triggered; the responder's "for huge key cardinality" aside is a different concern (memory). A clean 5.0 would one-line: "assumes `(account_id, config_key)` unique; duplicate keys yield arbitrary winner — dedup upstream if needed." Not load-bearing for the question as posed.
+### Verification (primary sources)
+- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (verified via WebFetch): `day_of_week(x)` returns ISO day 1=Monday…7=Sunday; `hour(x)` returns 0…23. Both accept date/timestamp/timestamp-with-tz.
+- Two-level aggregation pattern is standard Trino: inner pre-aggregate → outer aggregate over inner results. Single-pass `AVG(COUNT(*) OVER (...))` does NOT exist (nested aggregates illegal); CTE form is the canonical fix.
 
-### Verdict:
-Pin-perfect map_agg+element_at canonical. Recall-ceiling shave only, NO resource fix (the dedup caveat is a peripheral note, not load-bearing for the engineer's typical schema). Per `feedback_responder_broken_secondary_alternative.md` adjacent family — note in margin but no churn.
+### Accuracy nit (-0.5 Acc, -1 App)
+**`event_date` is ungrounded.** The inner SELECT references `event_date` and groups by `event_date`, but the source table (per the engineer's framing) has only `created_at` TIMESTAMP. As written the query throws `Column 'event_date' cannot be resolved`. The intended form is one of:
+```sql
+SELECT CAST(created_at AS DATE) AS event_date, ...
+GROUP BY CAST(created_at AS DATE), day_of_week(CAST(created_at AS DATE)), hour(created_at)
+```
+or
+```sql
+SELECT date_trunc('day', created_at) AS event_date, ...
+GROUP BY date_trunc('day', created_at), day_of_week(date_trunc('day', created_at)), hour(created_at)
+```
+
+Per the eval directive, the load-bearing thing is the **PATTERN** (this two-level-average heatmap was historically a synthesis-ceiling FAIL — see `feedback_synthesis_ceiling_stop_churning.md` family). The responder reaches the pattern cleanly, which is the recall win. Engineer copy-pastes, hits the missing-column error, infers `event_date` is meant to be derived, and adds the CAST in ~10 seconds. Not catastrophic, but the SQL as printed is not directly runnable.
+
+### Verdict
+Pattern-level recall is the historically-hard part and the responder lands it. The `event_date` derivation slip is a per-instance copy-trap, NOT a resource defect — r07 two-level-aggregate canonicals consistently show explicit `CAST(... AS DATE)` derivations. Recall ceiling, NO FIX-A. Per `feedback_responder_broken_secondary_alternative.md` adjacent family (broken-secondary in-line in a otherwise-correct primary block).
 
 ---
 
-## Q3 — dbt ephemeral models: CTE-inlined per downstream, no shared compute
+## Q3 — dbt snapshots: detecting hard deletes via `hard_deletes` config
 
 **Score: 5 / 5 / 5 / 5 = 5.0**
 
-### What the responder said:
-- (1) **NO sharing across downstreams.** Ephemeral is inlined as a CTE at COMPILE time; if 5 downstreams ref it, the same CTE appears in 5 compiled statements; each separate dbt-run statement runs its inlined CTE fresh; Trino may dedup within a single query plan but separate statements don't share. Storage cost zero; runtime cost high if logic expensive.
-- (2) No hard parse limit on Trino, but compile-time SQL text bloat — nested ephemeral chains expand inline, exponential text growth — is the real failure mode → slow dbt compile + huge SQL.
-- Rule: **ephemeral for small/light CTEs; `materialized=table` for big intermediates ref'd by 3+ downstreams.**
+### What the responder said
+- Config: `hard_deletes='invalidate'` — when a row disappears from source, dbt stamps `dbt_valid_to = run time` so the row no longer matches `WHERE dbt_valid_to IS NULL` (no longer looks "current").
+- Alternative: `hard_deletes='new_record'` inserts a marker row with `dbt_is_deleted=True` (explicit deletion audit trail).
+- Shows the snapshot config block with `strategy='timestamp'`, `updated_at`, `unique_key`.
 
-### Verification (primary source):
-- [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations) verbatim (verified): "`ephemeral` models are not directly built into the database. Instead, dbt will interpolate the code from an ephemeral model into its dependent models using a common table expression (CTE)." CTE identifier prefixed `__dbt__cte__`.
-- Per-downstream duplication confirmed: "if 10 models reference the same ephemeral model, the SQL will be duplicated in every query" (community-corroborated and structurally implied by the CTE-inlining mechanic).
-- Performance tradeoff confirmed: "The SQL logic of the ephemeral model is re-computed every time it is used, which can lead to performance overhead if the ephemeral model is complex and used by many downstream models." Maps 1:1 to the responder's compute-cost framing.
-- Nesting compile bloat: dbt docs explicitly call out ephemeral inlining as a debug/perf concern with deep chains; the responder's "exponential text growth on nested ephemerals" is the right intuition for the failure mode (no Trino hard parse limit — the bottleneck is dbt compile time + worker memory parsing the inlined plan).
+### Verification (primary sources)
+- [docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes) (verified via WebFetch): three valid values
+  - `ignore` (default) — no action on disappeared rows; the engineer's stuck-as-current symptom.
+  - `invalidate` — "Invalidates the deleted records by setting `dbt_valid_to` to the current time" — matches responder's framing verbatim.
+  - `new_record` — "Tracks deleted records as new rows using the `dbt_is_deleted` meta field" — matches responder's framing.
+- Introduced in **dbt 1.9** (or "Latest" track). The legacy field name is `invalidate_hard_deletes=true` for pre-1.9; responder doesn't mention the legacy name but didn't have to — engineer is on a current dbt + dbt-trino setup (production stack).
+- The marker row example from docs:
+  ```
+  id | dbt_is_deleted | dbt_valid_from | dbt_valid_to
+  1  | True           | 2024-05-20...  | 2024-06-03...
+  1  | False          | 2024-06-03...  | NULL
+  ```
+  confirms the `new_record` insert-on-delete semantics the responder described.
 
-### Verdict:
-Pin-perfect. Both sub-questions answered with the right mechanism (compile-time CTE substitution, not warehouse materialization) and the right operational rule (3+ downstreams → table). The "5 statements, no shared compute" framing is exactly what the engineer needed to decide whether to flip `int_*` to ephemeral. No defect, no broken secondary alternative.
-
----
-
-## Q4 — Oracle TRUNC(n, d) → Trino truncate(n, d); CAST/ROUND defang
-
-**Score: 5 / 5 / 5 / 5 = 5.0**
-
-### What the responder said:
-- `truncate(n, 2)` — lowercase 2-arg — is Oracle TRUNC toward-zero equivalent. `truncate(99.987, 2) = 99.98`.
-- **Defang both alternatives**: `CAST(amount AS DECIMAL(10,2))` and `ROUND(amount, 2)` BOTH round half-up — NOT truncate. Concrete demo: `CAST(99.985 AS DECIMAL(10,2)) = 99.99`, `ROUND(99.985, 2) = 99.99`, `truncate(99.985, 2) = 99.98` (correct).
-- Generic form: `truncate(amount * power(10, d)) / power(10, d)`.
-- Cross-ref: also `CAST(x AS integer)` rounds half-up (per pinned `reference_trino_cast_to_integer_rounds.md`), does NOT truncate.
-
-### Verification (primary source):
-- [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) (verified WebFetch): 2-arg `truncate(x, d)` "returns `x` truncated to `d` decimal places. … operates by dropping digits after the decimal point, effectively rounding toward zero. The parameter `d` can be negative to zero out digits to the left of the decimal point." Example `truncate(99.987, 2) = 99.98` — exact match to responder.
-- 1-arg `truncate(x)` truncates toward zero; the 2-arg form is the d-decimal-places overload. Both confirmed.
-- CAST half-up: per pinned `reference_trino_cast_to_integer_rounds.md` (Memory index): "Trino 467 CAST(double/decimal AS integer) ROUNDS half-up (47.89→48), does NOT truncate" — generalizes to CAST AS DECIMAL(p, s) which uses the same rounding mode.
-- ROUND half-up: standard Trino `round(x, n)` half-up — verified at math.html.
-
-### Verdict:
-Pin-perfect Oracle → Trino dialect port for `TRUNC(n, d)`. Correctly identifies that the obvious-looking CAST AS DECIMAL workaround is a TRAP (rounds, not truncates) — exactly the kind of imported-prior fence-post that breaks billing math. Concrete worked example with the boundary case 99.985 demonstrates the rounding difference on a half-up edge. Generic `* power(10) / power(10)` form is the textbook fallback if `truncate` were absent (it isn't). No imported-prior slip (responder correctly identifies `truncate` as PRESENT, not absent — counter-trend to the recurring "foreign-looking funcs assumed absent" family per `reference_trino_starts_with_ends_with.md` / `reference_trino_listagg_native.md` / `reference_trino_to_char_exists.md` etc.).
+### Verdict
+Pin-perfect dbt 1.9+ canonical. Engineer copies the `hard_deletes='invalidate'` line into the snapshot config and the missing-validity-window bug is fixed. No defect, no FIX-A.
 
 ---
 
-## Summary
+## Q4 (SOFT WATCH) — Trino SYSDATE equivalent (no-TZ "now")
 
-| Q | Topic | Score | Rubric row | Watch |
-|---|---|---|---|---|
-| Q1 | Iceberg position-delete cleanup via EXECUTE optimize raise-threshold | 5.0 | Iceberg table maintenance | **PRIORITY WATCH CLOSES** |
-| Q2 | map_agg+element_at one-row-per-group MAP | 4.875 | Analytical query patterns on Iceberg+Trino | — |
-| Q3 | dbt ephemeral CTE-inlined per downstream | 5.0 | Improving complex SQL performance on Trino with dbt | — |
-| Q4 | Oracle TRUNC → Trino truncate(n,d) + CAST/ROUND defang | 5.0 | Oracle PL/SQL → dbt+Trino migration | — |
+**Score: 3.5 / 4.5 / 3.5 / 4.5 = 4.0**
 
-**Overall: (5.0 + 4.875 + 5.0 + 5.0) / 4 = 4.969 STRONG PASS NO-OP.**
+### What the responder said
+- **Lead (correct):** "The Trino function is `localtimestamp`" — returns `TIMESTAMP` (no TZ) = session local wall clock, matches Oracle SYSDATE.
+- **Lead example (correct):** `WHERE event_time > localtimestamp - INTERVAL '1' DAY` — `TIMESTAMP - INTERVAL` is supported in Trino.
+- **Lead disambiguation (correct):** `current_timestamp` returns TIMESTAMP WITH TIME ZONE.
+- **Broken secondary:** "For age: `(localtimestamp - created_at) AS age_since_creation`" — **INCORRECT in Trino 467**.
+- Side note: AT TIME ZONE to strip tz (acceptable framing).
 
-### Watch list updates:
-- **CLOSED**: `iter1197 r17 position-delete-optimize findable-summary reconcile` — finally reaches on 3rd attempt after iter1195 + iter1197 fails. The 10-location r17 reconcile lands; raise-threshold-forces-rewrite-applies-deletes canonical now findable.
-- **CARRY-FORWARD (not exercised this iter)**:
-  - `iter1196 r21 format_version SET PROPERTIES` — re-probe within next 3–6 iters.
-  - soft `iter1197 localtimestamp SYSDATE` direct mapping.
-  - soft `iter1197 generate_schema_name` macro surface.
-- **NEW LIGHT MONITORING (post-close, low risk)**: continue probing the position-delete topic from adjacent angles (e.g. "tradeoff: when does Spark `rewrite_position_delete_files` beat Trino optimize for a hybrid stack?" — this lives in r17/r21 already but verify continued findability) for 3–6 iters.
+### Verification (primary sources)
 
-### Next iter recommendation:
-- Q1: re-probe `iter1196 r21 format_version SET PROPERTIES` watch (CREATE TABLE WITH(format_version=2) vs ALTER TABLE SET PROPERTIES('format_version'='2') Trino dialect).
-- Q2–Q4: breadth across thin rows (Query performance basics 4.1934, Storage tiering 4.1779, dbt snapshots SCD2 4.2294).
-- No FIX-A queued; teacher NO-OP.
+**Lead verified (WATCH CLOSES):**
+- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) (WebFetch this iter): "`localtimestamp` — Returns the current timestamp as of the start of the query, with 3 digits of subsecond precision." Returns `TIMESTAMP` without time zone (vs. `current_timestamp` → `TIMESTAMP WITH TIME ZONE`). Matches Oracle SYSDATE no-TZ semantics.
+- r27 §4.2-NOW (L815-L817) carries this verbatim: `localtimestamp` → `TIMESTAMP` (no TZ) — session-local wall clock. Responder reached the right card.
 
-### Production-stack fit:
-All four answers fit prod_info.md (on-prem Trino 467 + Iceberg via Hive Metastore + dbt). Q1 directly addresses the "Trino-only shop" framing the prod-info implies (Spark is ingestion-only; query path is Trino; engineers don't always have a Spark workflow for maintenance). Q3 ephemeral rule maps cleanly to the dbt-supported transformation layer. No off-stack tool recommendations.
+**Broken secondary — `TIMESTAMP - TIMESTAMP` with `-` operator is NOT supported in Trino:**
+- [trino.io/docs/current/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) operators table (WebFetch verified): only `timestamp - interval` is listed; `timestamp - timestamp` is NOT a supported binary operator. The example `timestamp '2012-08-08 01:00' - interval '29' hour` is the only subtraction form documented.
+- **`(localtimestamp - created_at)` throws** in Trino — the engine has no rewrite for raw timestamp-minus-timestamp into INTERVAL DAY TO SECOND (that's a Postgres/Oracle interval-arithmetic semantic; Postgres does it natively, Trino does not).
+- The canonical Trino form is `date_diff('day', created_at, localtimestamp)` (returns bigint days) or another unit (`'second'`, `'millisecond'`) per use case.
+
+### Source-anchor check — RESPONDER SLIP, NOT RESOURCE-SOURCED
+
+`grep -n` on `resources/27-oracle-plsql-to-dbt-trino.md`:
+- **L771 explicitly bans it:** `| dt - SYSDATE (interval) | date_diff('day', current_timestamp, dt) returns bigint | Trino doesn't subtract timestamps to get a bare number; use date_diff. |`
+
+The resource carries the exact translation row that would have prevented this slip. The responder reached the `localtimestamp` card for the lead but produced the broken `timestamp - timestamp` example independently. Per `feedback_responder_broken_secondary_alternative.md` family — recurring pattern of a correct lead followed by an in-line broken "for completeness" example. **Per-instance one-off, NO resource fix.**
+
+### SOFT WATCH STATUS: **CLOSES on the lead** (1st re-probe)
+
+Watch label: `soft iter1197 localtimestamp SYSDATE`. The primary question was "Trino function for current date+time WITHOUT tz (like SYSDATE)?" — responder named `localtimestamp` directly with correct return type, contrasts with `current_timestamp`. Watch closes on the lead. The age-example slip is a separate broken-secondary that does NOT reopen the watch but earns a -1 on Acc and -1.5 on App because the engineer copies the broken form and hits a runtime / type error.
+
+### Score breakdown
+- **Accuracy 3.5:** Lead correct; broken `timestamp - timestamp` example is a factual error in Trino.
+- **Beginner clarity 4.5:** Clear contrast `localtimestamp` vs `current_timestamp`; jargon explained.
+- **Practical applicability 3.5:** Engineer pastes the age example, hits parse / type error, re-derives via `date_diff`. The lead-only piece is directly actionable; the age piece is not.
+- **Completeness 4.5:** Covers the lead, the contrast, the WHERE form, AT TIME ZONE strip; broken age form pulls Compl from 5 to 4.5.
+
+### Verdict
+Lead is the answer to the question as asked and it lands. The age example is the recurring `feedback_responder_broken_secondary_alternative.md` pattern — secondary form unsolicited, broken, ignored by skilled engineers but a copy-trap for new ones. **NO resource fix** (r27 §4.2 L771 already carries the exact ban); responder slip only. Re-probe in 3-6 iters under a structurally similar framing ("age in days from created_at vs SYSDATE") to confirm the slip is per-instance and not recurring.
+
+---
+
+## Cross-cutting observations
+
+- **Two clean 5.0s on two distinct dialect canonicals** (Q1 Trino format_version, Q3 dbt 1.9+ hard_deletes). Both reached the right card with all dialect distinctions verbalized.
+- **Q2 synthesis-ceiling stays closed** — the two-level-aggregation pattern (historically a FAIL family per `feedback_synthesis_ceiling_stop_churning.md`) was reached cleanly. Only the column-derivation in the inner CTE was sloppy; the load-bearing pattern is correct.
+- **Q4 broken-secondary recurs** — `feedback_responder_broken_secondary_alternative.md` family active again. 9th-or-10th instance in this rolling pattern: correct lead + uninvited broken alternative. Continue per-instance scoring, do NOT churn resources (no single resource fix addresses responder padding).
+- **No imported-prior slips this iter.** No over-warning folklore.
+- **No FIX-A this iter.** All four answers either pin-perfect (Q1, Q3) or recoverable recall-ceiling/copy-trap (Q2 event_date, Q4 timestamp-minus-timestamp).
+
+### Carry-forward watches
+- **CLOSED THIS ITER:** `iter1196 r21 format_version SET PROPERTIES` (Q1, 1st re-probe). `soft iter1197 localtimestamp SYSDATE` (Q4 lead, 1st re-probe).
+- **NEW LIGHT-MONITOR:** Q4 broken-secondary `localtimestamp - created_at` — responder slip, NOT resource defect; r27 §4.2 L771 already bans it. Re-probe in 3-6 iters under similar framing to confirm per-instance.
+- **NOT EXERCISED:** soft `iter1197 generate_schema_name` macro surface. Light-monitor `iter1199 r17 position-delete adjacent` (Spark `rewrite_position_delete_files` vs Trino optimize tradeoff framing).
+
+### Topic score updates
+| Topic | Prev avg / N | This iter Q-score | New avg / N |
+|---|---|---|---|
+| Iceberg table maintenance | 4.4350 / 212 | Q1 5.0 | 4.4377 / 213 |
+| Analytical query patterns on Iceberg+Trino | 4.5295 / 146 | Q2 4.5 | 4.5293 / 147 |
+| dbt snapshots SCD2 | 4.2294 / 21 | Q3 5.0 | 4.2644 / 22 |
+| Oracle PL/SQL → dbt + Trino | 4.4737 / 161 | Q4 4.0 | 4.4708 / 162 |
+
+All four topics remain PASSED with healthy margins. No topic flips status. dbt snapshots SCD2 stays thinnest (4.2644).
