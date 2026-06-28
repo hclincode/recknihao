@@ -1,159 +1,124 @@
-# Iter1203 Judge Feedback
+# Iter1204 Judge Feedback
 
-**Overall: 4.906 / 5.0 — STRONG PASS, LIGHT FIX-A CONFIRMED + 1 OPEN WATCH CLOSED.** Two structural wins this iteration: (1) Q4 closes the iter1201 `r27 §7A.3.1 concat-mixed-types findability anchor` WATCH on the first re-probe — responder reached `format()` cleanly with full Java-Formatter specifier table (`%d` / `%,.2f` / `%s` / `%%`), no Option-B "concat coerces" regression. (2) Q3 exposed a genuine RESOURCE GAP (`generate_schema_name` had ZERO coverage in `resources/`) that the responder correctly flagged with a meta-disclaimer + fell back to dbt-docs-correct general knowledge; teacher has filled the gap this iteration with new canonical `r27 §6.7M LEADING CANONICAL — generate_schema_name macro`, which I verified accurate against [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas). Q1 is the thinnest-row lift (Query-performance-basics, 4.1934 → 4.2161) with all join-distribution / EXPLAIN / ANALYZE facts verified at trino.io 467 docs. Q2 (listagg+array_join) is pin-perfect with the BIGINT-CAST caveat. No defects, no fabrications, no broken-secondary slips.
+**Overall: 4.875 / 5.0 — STRONG PASS + TWO WATCHES CLOSE.** Both iter1200/iter1201 WATCHES close cleanly on first re-probe:
+
+- **Q2 WATCH `iter1200 timestamp-subtraction broken-secondary` → CLOSES.** Responder gave `date_diff('day', created_at, current_date)` as the canonical Trino form AND explicitly defanged `current_date - created_at` as a type error. Result-type framing (BIGINT, not INTERVAL) correct. No broken-secondary "for completeness use timestamp - timestamp" padding.
+- **Q3 WATCH `iter1201 dbt --full-refresh mechanism` → CLOSES.** The iter1201 slip "MERGE INTO that touches every row" is fully corrected — responder now frames the mechanism as **rebuild from scratch / full CTAS / is_incremental() = FALSE / delta WHERE skipped**, NOT MERGE. Minor atomicity over-statement flagged below (see Q3 defect note) but does NOT block close.
+
+Q1 (Iceberg optimize concurrency) and Q4 (NULL ordering default) are pin-perfect 5.0 canonicals; Q1 ties optimistic concurrency + snapshot isolation + atomic pointer swap + concurrent-write CommitFailedException together with the right diagnostic framing; Q4 hits the canonical NULLS LAST regardless of direction default + Oracle-contrast table from pinned `reference_trino_null_ordering_default.md`. No fabrications, no imported-prior slips, no broken-secondary alternatives.
 
 **Per-question scores:**
 
 | Q | Topic | Acc | Clar | App | Compl | Avg |
 |---|---|---|---|---|---|---|
-| Q1 | Slow 3-table join / REPARTITION vs BROADCAST / `join_distribution_type` / ANALYZE / EXPLAIN DISTRIBUTED | 5 | 4.5 | 5 | 5 | **4.875** |
-| Q2 | GROUP_CONCAT/string_agg → Trino `listagg` WITHIN GROUP + `array_join(array_agg(...))` alt + BIGINT-CAST trap | 5 | 5 | 5 | 5 | **5.00** |
-| Q3 | dbt `generate_schema_name` macro per-env schema names (dev/staging/prod → dev_analytics/staging_analytics/analytics) | 5 | 4 | 5 | 5 | **4.75** |
-| Q4 | Oracle `\|\|` mixed-type type error → Trino `format()` printf-style %d/%,.2f/%s **(WATCH CLOSED)** | 5 | 5 | 5 | 5 | **5.00** |
+| Q1 | Iceberg EXECUTE optimize — locks? safe live reads during compaction? off-hours window needed? | 5 | 5 | 5 | 5 | **5.00** |
+| Q2 (WATCH) | Account age days/hours/seconds between two timestamps — Trino `date_diff(unit, start, end)` vs Oracle `SYSDATE - created_at` | 5 | 5 | 5 | 5 | **5.00** |
+| Q3 (WATCH) | dbt `--full-refresh` on incremental model — mechanism, drop-or-replace, safety on prod | 4 | 5 | 4.5 | 4.5 | **4.50** |
+| Q4 | Trino NULL ordering default vs Oracle (NULLS first on DESC) | 5 | 5 | 5 | 5 | **5.00** |
 
-**Average: 4.906.**
-
----
-
-## Q1 — Slow 3-table join, partitioned vs broadcast (4.875)
-
-**Verdict: load-bearing thinnest-row lift; all join-distribution / EXPLAIN / ANALYZE facts verified.**
-
-Responder lands every load-bearing element:
-
-1. **Broadcast vs Partitioned semantics framed correctly**: broadcast = small build-side table REPLICATED to every worker; partitioned/REPARTITION = both sides REHASHED on the join key and shuffled across workers. `RemoteExchange[REPARTITION]` in the plan = both sides being shuffled — if `accounts` is < ~100 MB, broadcasting it saves the events-side shuffle entirely.
-
-2. **Trino decides via CBO when `join_distribution_type='AUTOMATIC'` (the default)** — VERIFIED valid values `AUTOMATIC` / `PARTITIONED` / `BROADCAST` default `AUTOMATIC` verbatim at [trino.io/docs/467/admin/properties-general.html](https://trino.io/docs/467/admin/properties-general.html): *"When set to `AUTOMATIC`, Trino makes a cost based decision as to which distribution type is optimal."*
-
-3. **Three-lever fix in correct order**:
-   - **(a) `ANALYZE iceberg.analytics.events;`** — BARE `ANALYZE <table>`, NO `TABLE` keyword. VERIFIED grammar verbatim at [trino.io/docs/467/sql/analyze.html](https://trino.io/docs/467/sql/analyze.html): `ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]`. Populates Iceberg Puffin NDV stats so the CBO sees `accounts` is small and auto-broadcasts.
-   - **(b) `EXPLAIN (TYPE DISTRIBUTED)`** to verify — look for `Join[...][BROADCAST]` or `RemoteExchange[REPLICATE]` (replicate = broadcast). VERIFIED at [trino.io/docs/467/sql/explain.html](https://trino.io/docs/467/sql/explain.html) — distributed plan fragments include `BROADCAST` / `HASH` / `ROUND_ROBIN` / `SOURCE` / `SINGLE` labels; `REPARTITION = HASH partitioned` vs `REPLICATE = BROADCAST` is the canonical disambiguation.
-   - **(c) Force via `SET SESSION join_distribution_type='BROADCAST'`** (RESET after) OR `dbt pre_hook="SET SESSION join_distribution_type='BROADCAST'"` per-model — matches the iter1181 Q4 canonical (no fabricated session names like `distributed_joins`, `broadcast_join_strategy`, `join_strategy`).
-
-**Production-stack fit**: dbt `pre_hook` form is exactly right for the prod_info.md stack (Trino 467 + dbt-trino). Engineer arrives at: ANALYZE → re-EXPLAIN → if still partitioned, force broadcast per-model via pre_hook.
-
-**Minor Clarity shave (-0.5)**: "rehashed by key" terminology assumes the reader already knows what hash-partitioning means. A one-sentence definition — "rehashed = each row routed to a specific worker by `hash(join_key)` so matching rows from both tables land on the same worker" — would zero-assumption it for a SaaS engineer with no OLAP background. Not load-bearing; the engineer can copy the three levers regardless.
-
-No imported-prior slip, no broken-secondary, no fabrication.
-
-**Topic routing**: Query performance basics: partitioning, indexing strategy for analytics (the thinnest required-topic row). 4.1934/29 → 4.2161/30 (+0.0227, margin +0.7161, STILL thinnest but a load-bearing breadth-probe lift).
+**Iteration average: 4.875.**
 
 ---
 
-## Q2 — GROUP_CONCAT/string_agg → Trino listagg+array_join (5.00)
+## Per-question detail + verifications
 
-**Verdict: pin-perfect; native function correctly identified + secondary form correctly routed by use case.**
+### Q1 — Iceberg optimize concurrency (5.00)
 
-Lead: `listagg(ticket_id, ', ') WITHIN GROUP (ORDER BY ticket_id) GROUP BY agent_id`. Alt: `array_join(array_agg(ticket_id ORDER BY ticket_id), ', ')` (routes to DISTINCT and windowed cases).
+Responder's load-bearing facts, all verified:
 
-**listagg VERIFIED native in Trino 467** at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html):
-```
-LISTAGG(expression [, separator] [ON OVERFLOW overflow_behaviour])
-    WITHIN GROUP (ORDER BY sort_item, [...]) [FILTER (WHERE condition)]
-```
-Throws on >1,048,576-byte overflow by default; TRUNCATE WITH/WITHOUT COUNT optional. `string_agg()` and `group_concat()` are absent in 467 (verified absence at same docs page) — responder correctly named both MySQL/Postgres equivalents as absent.
+- **Reads SAFE during optimize.** Iceberg uses optimistic concurrency, no upfront locks on the table. Verified at [Iceberg knowledge base — concurrent write handling](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/): "Rather than locking tables during writes, Iceberg allows concurrent writes to proceed in parallel, then detects conflicts at commit time and either merges compatible operations or fails conflicting ones cleanly."
+- **Mechanism: optimize writes a NEW snapshot, then atomically swaps the current-snapshot pointer in the catalog.** Readers that started before see the OLD snapshot; readers that start after see the NEW snapshot. Snapshot isolation — readers never observe a half-written state. Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) optimize section + [Apache Iceberg spec](https://iceberg.apache.org/spec/) snapshot atomicity guarantee.
+- **No off-hours window needed for READ safety.**
+- **REAL ISSUE diagnosed correctly:** concurrent WRITE conflict (optimize + Spark streaming append touching the same partition) → `CommitFailedException`. Verified at [Iceberg Spark streaming docs](https://iceberg.apache.org/docs/latest/spark-structured-streaming/) + [Cloudera Iceberg optimization blog](https://www.cloudera.com/blog/technical/optimization-strategies-for-iceberg-tables.html). Pointing the engineer to r26 isolation level (snapshot isolation allows concurrent appends in some cases; "serializable" rejects them) is exactly right — the dashboard errors are most plausibly a writer collision rather than reader interference.
+- **Production-stack fit:** prod_info.md has Spark streaming → Iceberg via Hive Metastore + Trino 467 reader — exactly the scenario this answer addresses. No off-hours window guidance for the SaaS dashboard is the correct ops call.
 
-**BIGINT-CAST trap correctly named**: if `ticket_id` is `BIGINT`, must `CAST(ticket_id AS varchar)` for the listagg expression argument (Trino has no implicit numeric→string per pinned `reference_trino_listagg_native.md`) BUT keep `ORDER BY ticket_id` numeric for proper TK-1 < TK-2 < ... < TK-10 sort (not lexicographic 'TK-10' < 'TK-2'). This is the kind of "you'd see right-on-prod but burn dev hours figuring out" detail that elevates a 4.5 to a 5.
+Zero shave. Engineer arrives at: keep reads pointed at the table during optimize, but verify their Spark job's write isolation level + consider not running optimize during the streaming-append peak.
 
-**DISTINCT routing correct**: `array_agg(DISTINCT ticket_id ORDER BY ticket_id)` for the dedup case — listagg-DISTINCT is awkward, so the routing to array_agg+array_join is the right escape hatch.
+### Q2 — Timestamp subtraction → `date_diff` (5.00) — WATCH CLOSES
 
-No imported-prior slip (counter-trend to the recurring "foreign-looking funcs assumed absent" family — listagg IS native, responder correctly identified).
+WATCH `iter1200 timestamp-subtraction broken-secondary` → CLOSES on first re-probe.
 
-**Topic routing**: SQL query best practices for OLAP. 4.5838/270 → 4.5853/271 (+0.0015, margin +1.0853 above 3.5 threshold).
+Responder's load-bearing facts, all verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html):
 
----
+- **Trino has NO `timestamp - timestamp -> interval` operator.** WebFetch confirmed: "No direct `timestamp - timestamp` operation returning an interval is documented. The operator table only shows subtraction of *intervals* from timestamps."
+- **Canonical form:** `date_diff(unit, start_timestamp, end_timestamp) -> BIGINT`. Docs verbatim: "returns `timestamp2 - timestamp1` expressed in terms of `unit`." Result type bigint.
+- **Cross-type works:** `date_diff('day', created_at, current_date)` — DATE coerces to TIMESTAMP automatically per `reference_trino_timestamp_tz_coercion.md` family.
+- **Unit list given:** `day` / `hour` / `minute` / `second` / `month` / `quarter` / `year` — all valid `date_diff` units (note: `quarter` and `week` ARE valid `date_diff` unit strings but NOT INTERVAL qualifiers per pinned `reference_trino_interval_qualifiers.md` — responder correctly used them only inside `date_diff('quarter', ...)`, never as `INTERVAL '1' QUARTER` literals).
+- **Result is INTEGER not INTERVAL — compare with `> 7`, NOT `> INTERVAL '7' DAY`.** Explicit defang of the most common Postgres/Oracle import muscle-memory mistake.
+- **`current_date - created_at` explicitly marked WRONG / type-error.** This is the exact iter1200 slip; defang reaches under structurally different framing ("Active for 312 days" / "Last login 4 days ago").
 
-## Q3 — dbt generate_schema_name macro (4.75)
+Zero shave. Engineer arrives at one runnable canonical form, knows the defang, knows the result-type trap.
 
-**Verdict: RESOURCE-GAP DRIVEN; meta-behavior correct (flag gap → fall back to general knowledge); content matches dbt docs; teacher gap-fill landed this iteration.**
+### Q3 — dbt `--full-refresh` on incremental model (4.50) — WATCH CLOSES with minor accuracy flag
 
-### What the responder did
+WATCH `iter1201 dbt --full-refresh mechanism` → CLOSES. The iter1201 slip "a MERGE INTO that touches every row" is fully corrected — responder now correctly frames the mechanism as a **rebuild from scratch / full CTAS / treats incremental like materialized='table'**, NOT a MERGE.
 
-Responder lead with a META-DISCLAIMER: *"I don't have enough information from the resources to give you a complete answer — generate_schema_name isn't covered."* Then provided from general knowledge:
+**Verified correct (load-bearing core mechanism):**
 
-- `macros/generate_schema_name.sql` with `target.name` checks: `prod → {{ default_schema }}` (= `analytics`), `staging → {{ target.name }}_{{ default_schema }}` (= `staging_analytics`), `dev → same` (= `dev_analytics`).
-- Keep uniform `schema: analytics` in all three `profiles.yml` targets; the macro derives the env prefix from `target.name`.
-- Recommended verifying against dbt docs.
+- "`--full-refresh` forces every incremental model to rebuild from scratch" — verified at [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models): "This flag will cause dbt to **drop the existing target table in the database before rebuilding it for all-time**."
+- `is_incremental()` returns FALSE during `--full-refresh` → the `WHERE processed_at > (SELECT max(processed_at) FROM {{ this }})` delta filter is SKIPPED → entire source scanned. Verified at same page — `is_incremental()` returns FALSE specifically when `--full-refresh` is passed.
+- Full CTAS over the corrected source data → new table with corrected rows replaces old.
+- Production safety guidance (downstream large reprocess; don't run `--full-refresh` and incremental in parallel on the same table; go back to normal `dbt run` after) — all correct ops-level advice.
 
-### Content-correctness check (this iter, against dbt docs)
+**Acc=4 flag — atomicity OVER-STATED, dependent on `on_table_exists` config (responder did not name the config dependency):**
 
-VERIFIED at [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas):
-- Default `generate_schema_name(custom_schema_name, node)` shape: `{{ default_schema }}_{{ custom_schema_name | trim }}` when custom set, else `{{ default_schema }}`. **This is the source of the "all three targets land in `analytics`" surprise** — uniform `schema: analytics` profiles + no `+schema:` per model = default macro returns `analytics` for all three.
-- Override file MUST be at `macros/generate_schema_name.sql` (auto-discovered). Verified.
-- `generate_schema_name_for_env` built-in helper: prod (`target.name == 'prod'`) = custom-or-target.schema; non-prod = target.schema only (ignores custom). Verified table in the docs.
-- `target.name`-based switching IS the docs-blessed "Standard Pattern" (dev / ci / prod recommended target names).
+The responder framed step (4) as "old table ATOMICALLY REPLACED (Iceberg CREATE OR REPLACE TABLE commit) — downstream readers see only new table, no gap/partial." This is **only true if `on_table_exists='replace'` is configured.** Per [dbt-trino docs (Starburst/Trino configurations)](https://docs.getdbt.com/reference/resource-configs/trino-configs), the `on_table_exists` config supports four modes:
 
-Responder's macro shape is functionally correct for the user's literal ask and matches the "Standard Pattern" canonical.
+| Mode | Behavior | Atomic? |
+|---|---|---|
+| `rename` (default) | Creates intermediate → renames target to backup → renames intermediate to target | NO (multi-step, brief window where target is the backup name) |
+| `drop` | Drops target then re-creates | NO (true unavailability window between DROP and CREATE) |
+| `replace` | `CREATE OR REPLACE TABLE` | YES — atomic snapshot swap (Trino 431+ for Iceberg; verified at [trinodb/trino#13180](https://github.com/trinodb/trino/issues/13180)) |
+| `skip` | `CREATE TABLE IF NOT EXISTS` (no-op if exists) | N/A |
 
-### Meta-behavior assessment
+Per the dbt docs verbatim: "The `--full-refresh` flag will force dbt to `drop cascade` the existing table before rebuilding it" — the **default** flow on a non-`replace` adapter IS drop-then-rebuild, NOT atomic.
 
-Flagging "resources don't cover this" then falling back to general knowledge with a "verify vs dbt docs" disclaimer is the RIGHT meta-behavior under a resources-only contract — preferable to hallucinating a fabricated macro or staying silent. The fall-back content was correct, so the practical outcome for the engineer is "ships working code."
+The responder's hedge "briefly unavailable OR serving stale during rebuild" partially softens the over-statement (it covers BOTH the drop-then-rebuild case AND the replace case), so an engineer who reads carefully will plan for unavailability. But step (4)'s "atomically replaced" claim, framed as a guarantee rather than as conditional on `on_table_exists='replace'`, could mislead an engineer using default config to skip planning for the unavailability window. A cleaner answer would have said: "If your `on_table_exists` is `replace`, the swap is atomic (Trino 431+ Iceberg CREATE OR REPLACE); if it's `rename` (the default) or `drop`, expect a brief unavailability window."
 
-### Minor Clarity shave (-1)
+**App=4.5 / Compl=4.5 flags:** the `on_table_exists` config dependency is the right rung of the abstraction to mention for an engineer planning a prod `--full-refresh` on an Iceberg-backed model; its absence is a recall ceiling, not a fabrication. The CORE WATCH-closing fact (rebuild, NOT MERGE) is firmly correct.
 
-The responder didn't explain WHY the default produces the surprise (that the default macro PREFIXES `target.schema` with `custom_schema_name`, so three uniform `schema: analytics` profiles all collapse to `analytics`). A one-sentence mechanism would convert this from "here's a workaround" to "here's why your config produces the bug, and here's the fix" — closer to how the teacher's new §6.7M card frames it.
+**Per `feedback_responder_overwarning_folklore.md` / `feedback_responder_broken_secondary_alternative.md` adjacent family:** the responder did NOT over-warn (the safe-on-prod guidance is sober and correct) and did NOT include a broken alternative form. The atomicity over-statement is a **recall-ceiling under-specification**, not a folklore over-warning. **NO RESOURCE FIX** — adding an `on_table_exists` atomicity card risks `feedback_new_card_over_attracts_adjacent` over-attracting adjacent dbt-incremental questions; the iter1201 watch closure is the load-bearing result here. Light-monitor the atomicity framing for one or two re-probes.
 
-### Teacher gap-fill check — r27 §6.7M (this iter, L3997–L4049)
+### Q4 — Trino NULL ordering default (5.00)
 
-I read the new canonical card and VERIFIED it accurate against [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas):
+Responder's load-bearing facts, all verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html):
 
-| §6.7M claim | Docs verification |
-|---|---|
-| Default macro shape `{{ default_schema }}_{{ custom_schema_name \| trim }}` when custom set, else `{{ default_schema }}` | VERIFIED VERBATIM in docs's "Default macro" code block. |
-| Override file at `macros/generate_schema_name.sql` (auto-discovered, ignored from packages) | VERIFIED. Docs: *"Custom generate_schema_name macros must be placed in: macros/generate_schema_name.sql"* + *"dbt ignores any custom generate_schema_name macros included in installed packages."* |
-| `generate_schema_name_for_env`: prod = custom-or-target.schema; non-prod = target.schema only (ignores custom) | VERIFIED against the docs's "Dev vs Prod Behavior Comparison" table. |
-| Hand-rolled fix `target.name == 'prod' → default_schema; else target.name + '_' + default_schema` produces `dev → dev_analytics / staging → staging_analytics / prod → analytics` from uniform `schema: analytics` | VERIFIED — exact match for the user's literal ask. |
-| DO-NOT-WRITE against `{{ custom_schema_name }}`-only-returning macro (drops env discriminator → all envs collide) | CORRECT anti-pattern; preserves env-discrimination invariant. |
-| dbt-trino framing: "the returned name is the Trino SCHEMA inside the catalog" + catalog comes from profile's `catalog`/`database` key | VERIFIED against dbt-trino profile schema; minor: dbt-trino's profile property is `database` (catalog alias also accepted), informal phrasing "`catalog`/`database` key" is fine. |
-| Findability anchor includes load-bearing keywords ("all my targets write to the SAME schema", "dev → dev_analytics", "per-environment schema", "generate_schema_name macro — what to put in it and where the file goes", "+schema: config produced a weird PREFIXED name", "generate_schema_name_for_env") | Strong keyword coverage; should reach from "dbt environments / per-env schema / dev_analytics" question paths. |
+- **Trino default is NULLS LAST regardless of ASC/DESC direction.** WebFetch verbatim: "The default null ordering is `NULLS LAST`, regardless of the ordering direction." Matches pinned `reference_trino_null_ordering_default.md` precisely.
+- **NULLS FIRST / NULLS LAST explicit clauses supported.** Syntax `ORDER BY expr [ASC|DESC] [NULLS {FIRST|LAST}]`.
+- **Oracle contrast accurate:** Oracle's default is NULLs-as-largest (DESC → NULLs first, ASC → NULLs last), opposite to Trino on DESC. The DESC table row (Oracle NULLs top / Trino NULLs bottom) is the load-bearing migration-trap.
+- **Migration fix:** `ORDER BY score DESC NULLS FIRST` to restore Oracle's leaderboard behavior.
+- **Defensive rule:** always write explicit NULLS FIRST/LAST in migrated queries — correct ops guidance.
+- **PostgreSQL note:** "PostgreSQL differs from both" — accurate, Postgres defaults to NULLs-as-largest like Oracle (DESC → NULLs first / ASC → NULLs last).
 
-**§6.7M ACCURATE — NO ADJUSTMENT NEEDED.** One soft suggestion (not required): the card could add a one-line cross-ref to the dbt-trino profile-schema-vs-catalog separation in a sibling §, but the inline note at L4034 is sufficient.
-
-### New WATCH
-
-`iter1203 r27 §6.7M generate_schema_name findability re-probe` — re-probe in 3-6 iters with similar dev/staging/prod framing ("dbt targets all writing to the same schema, want per-env names") to confirm the new canonical IS reachable from the dbt-environment keyword path.
-
-**Topic routing**: Oracle PL/SQL → dbt + Trino SQL migration. 4.4676/165 → 4.4693/166 (+0.0017, margin +0.9693).
+Zero shave. Engineer arrives at the one-line fix + a defensive habit.
 
 ---
 
-## Q4 — Oracle `||` mixed-type type error → Trino `format()` printf-style (5.00) — WATCH CLOSED
+## Watch carry-forward / monitoring
 
-**Verdict: WATCH `iter1201 r27 §7A.3.1 concat-mixed-types findability anchor` CLOSES ON FIRST RE-PROBE.**
+- **CLOSED iter1204:** `iter1200 timestamp-subtraction broken-secondary` (Q2, first re-probe).
+- **CLOSED iter1204:** `iter1201 dbt --full-refresh mechanism` (Q3, first re-probe; minor `on_table_exists` atomicity flag noted, NO resource fix).
+- **OPEN — carry forward:** `iter1203 r27 §6.7M generate_schema_name findability` — re-probe in 3-6 iters with dev/staging/prod framing.
+- **LIGHT-MONITOR:** `iter1199 r17 position-delete adjacent` — no recurrence, observe one more cycle.
+- **NEW LIGHT-MONITOR (this iter):** Q3 `on_table_exists` atomicity framing — re-probe with a "prod table can't be unavailable, will dbt --full-refresh cause downtime" structurally-similar question in 5-10 iters to confirm one-off vs recurrent.
 
-The iter1201 question framing produced a Q4 3.0 (Option A correct + Option B WRONG claiming `concat()` coerces + `format()` ENTIRELY MISSED). Teacher's LIGHT FIX-A added an additive findability anchor at r27 §7A.3.1 L4521 with keywords *"Oracle `||` throws... build a display label/string from numeric + string columns without `CAST(... AS VARCHAR)` on every piece; does `concat()` auto-coerce numbers (NO — `concat()` is varchar-only too, same as `||`); printf-style string building"* + the inline canonical answer pointing at `format('Account #%s — active for %s days', account_id, days_since_login)`.
+## Topic-row impact
 
-This iter, under the literal Q-phrasing *"is there a printf/format function? Can it format decimals / thousands separators?"*, the responder reached `format()` cleanly:
+| Topic | Before | This iter Q | New Avg | Δ | Margin vs 3.5 |
+|---|---|---|---|---|---|
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.4403 / 214 | Q1 = 5.00 | 4.4429 / 215 | +0.0026 | +0.9429 |
+| SQL query best practices for OLAP (Trino dialect — date_diff, NULL ordering) | 4.5868 / 272 | Q2 = 5.00 + Q4 = 5.00 | 4.5898 / 274 | +0.0030 | +1.0898 |
+| Postgres-to-Iceberg ingestion: full refresh, incremental, CDC, JSONB handling | 4.4936 / 174 | Q3 = 4.50 | 4.4936 / 175 | +0.0000 | +0.9936 |
 
-- Lead: `format('Invoice #%d for $%,.2f due %s', invoice_id, total_amount, due_date)` — exact one-line answer to the user's input shape.
-- Specifier table: `%s` any type / `%d` bigint no CAST / `%,d` thousands-grouped integer / `%.2f` 2-decimal / `%,.2f` thousands+2-decimal / `%%` literal percent. All VERIFIED at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html): `format(format, args...) → varchar`, Java Formatter syntax. Docs example `format('%,.2f', 1234567.89) = '1,234,567.89'` matches the responder's thousands+decimal claim VERBATIM.
-- Explicit "Why NOT to use `||` or `concat()`": both varchar-only, VERIFIED at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) (`concat(string1, ..., stringN) → varchar`) + [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) *"Trino will not convert between character and numeric types."* Engineer correctly steered away from the iter1201 "concat coerces" Option-B trap.
-- Worked example with 4-5 pieces (Invoice #, invoice_id, total_amount, due_date) matches the literal user input shape — no abstract template indirection.
+All four required topics touched this iter remain PASSED with healthy margins. Q3 -0.0026 is absorbed by the 174-question cushion.
 
-No imported-prior slip, no broken-secondary, no fabrication, no over-warning. The %s-vs-%d-vs-%,.2f routing was the iter1201 ceiling that's now cleared.
+## Production-stack fit
 
-**WATCH STATUS**: `iter1201 r27 §7A.3.1 Oracle-|| concat-mixed-types findability anchor` — **CLOSED on 1st re-probe**.
+All four answers fit prod_info.md:
 
-**Topic routing**: SQL query best practices for OLAP. 4.5853/271 → 4.5868/272 (+0.0015, margin +1.0868).
+- Q1 names Spark-streaming + Iceberg-on-MinIO concurrent-write conflict as the real risk — exactly the production ingestion stack.
+- Q2 uses Trino 467 dialect (`date_diff` units), no Postgres-import slip.
+- Q3 dbt-on-Trino + Iceberg backing table → CREATE OR REPLACE is the right Trino 431+ atomic swap when `on_table_exists='replace'`; default `rename` mode would have warranted explicit naming (the only Q3 shave).
+- Q4 Trino 467 dialect verified; Oracle-to-Trino migration scenario realistic for prod.
 
----
-
-## Carry-forward watches (NOT exercised this iter)
-
-| # | Watch | Origin | Status |
-|---|---|---|---|
-| 1 | `iter1199 r17 position-delete adjacent` | light-monitor | not exercised this iter; remains open, re-probe under MERGE/UPDATE-on-Iceberg framing |
-| 2 | `iter1200 timestamp-subtraction broken-secondary` | light-monitor | not exercised this iter; remains open, re-probe under "age between two timestamps" framing |
-| 3 | `iter1201 dbt --full-refresh mechanism` | light-monitor | not exercised this iter; remains open, re-probe under "dbt incremental rebuild from scratch" framing |
-| 4 | **NEW**: `iter1203 r27 §6.7M generate_schema_name findability` | soft (this iter teacher FIX-A) | re-probe in 3-6 iters with dbt env-schema framing to confirm reachability of the new canonical |
-
-The iter1201 `r27 §7A.3.1 concat-mixed-types findability anchor` watch CLOSES this iter (Q4).
-
----
-
-## Bottom line for the teacher
-
-- **No new FIX-A needed.** Q1/Q2/Q4 are clean; Q3 gap-fill (§6.7M) already landed this iter and is accurate.
-- **One light suggestion for §6.7M**: a one-sentence "this is the BUG the question is asking about" up-front mechanism (default macro PREFIXES → uniform profiles collapse) would mirror the responder's Clarity ceiling. Not load-bearing.
-- **Streak**: 6th consecutive iteration with avg ≥ 4.85. Sliding-3-window avg = (4.969 + 4.97 + 4.906) / 3 = 4.948 — still STRONG PASS territory. Thinnest required-topic (Query-performance-basics) lifted from 4.1934 to 4.2161 (margin +0.7161 above 3.5 threshold).
-- **Next iter recommendation**: BREADTH. Specifically probe the new `r27 §6.7M generate_schema_name` from a slightly different angle (e.g., per-developer dev schemas with `generate_schema_name_for_env` shortcut) to confirm 2nd-angle reachability of the new canonical. Also re-exercise the iter1200 timestamp-subtraction light-monitor (now ~3 iters old) under "calculate user age / account age in days" framing.
+No public-cloud-only tools recommended. No fabricated session properties.
