@@ -1,195 +1,142 @@
-# Iter1215 Judge Feedback — BORDERLINE PASS (3.50 avg) | **FIX-A REQUIRED** on Q1 (compression_codec resource-sourced 477+ gate miss across r11/r03/r17/r27/r25) | Q4 strpos 3-arg myth CONFIRMED RECURRENCE → ACCEPT-CEILING NO FIX-A | Q3 iter1212 over-statement watch CLOSES
+# Iteration 1216 — Judge Feedback
 
-**Overall verdict:** **BORDERLINE PASS at threshold (3.50)** with TWO confirmed hard problems:
-
-1. **Q1 = HARD FAIL on mechanism (2.875)** — multiple LEADING CANONICAL blocks teach `compression_codec` as a Trino 467 Iceberg TABLE property (CREATE TABLE WITH + ALTER TABLE SET PROPERTIES). **Verified FALSE for Trino 467**: in 467, `compression_codec` is a SESSION property (`SET SESSION iceberg.compression_codec = 'ZSTD'`), NOT a table property. PR #25755 (merged Aug 2025, milestone **Trino 477**) added the table-property form AND dropped the session property simultaneously. Resources teach the 477+ form against the 467 stack. **FIX-A REQUIRED — resource-sourced defect.**
-2. **Q4 = HARD FAIL (2.0) — CONFIRMED RECURRENCE (2nd consecutive, iter1211+1215)** of the `strpos` 3-arg assumed-absence myth despite maximally-defanged + responder-CITED resource at r27 §4.3 L990. **Confirmed Haiku base-prior ceiling — ACCEPT-CEILING, NO FIX-A** per iter1211 pre-commitment + feedback_synthesis_ceiling_stop_churning + feedback_new_card_over_attracts_adjacent.
-
-**Q3 (iter1212 over-statement watch): CLOSES.** No "must NOT be in schema.yml" or equivalent over-claim. Safe to retire from active watch.
-
-| Q | Topic | Score | Verdict |
-|---|---|---|---|
-| Q1 | Storage tiering / compression_codec on Trino 467 Iceberg | **2.875** | **FAIL — resource-sourced; FIX-A REQUIRED** |
-| Q2 | Analytical patterns — median/percentile via approx_percentile + GROUP BY | 4.75 | STRONG PASS (no PERCENTILE_CONT, approx_percentile array form, qdigest_agg tunable accuracy all clean) |
-| Q3 (WATCH) | dbt seed column_types in dbt_project.yml | 4.375 | PASS — watch CLOSES, no over-statement recurrence; minor completeness gap on the "or schema.yml" choice question |
-| Q4 (WATCH) | Oracle INSTR Nth occurrence → Trino strpos 3-arg | **2.0** | **FAIL — CONFIRMED RECURRENCE / Haiku ceiling — NO FIX-A** |
-
-**Iter avg: (2.875 + 4.75 + 4.375 + 2.0) / 4 = 3.50** — borderline PASS at threshold. Strong Q2+Q3 mask two hard fails.
+**Verdict: 4.78 STRONG PASS / NO-OP** (all four answers score 4.75–4.875; no FIX-A; resources already canonical on all four axes).
 
 ---
 
-## Q1 — Iceberg compression CHECK + ZSTD vs Snappy + Trino impact — FAIL on mechanism
+## Per-question scores
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 1.5 | `SHOW CREATE TABLE` showing `WITH(...compression_codec='...')` — FALSE for 467 (compression_codec not in 467 table-property list). `ALTER TABLE ... SET PROPERTIES compression_codec='ZSTD'` — FALSE for 467 (would parse-error: `Catalog 'iceberg' table property 'compression_codec' does not exist`). Both lifted directly from resources. ZSTD-vs-Snappy I/O-bound reasoning IS correct. `"events$properties"` metadata table IS valid in 467. |
-| Beginner clarity | 4.0 | Clear narrative; explains the trade-off well; gives action verbs. |
-| Practical applicability | 2.0 | Engineer pastes the ALTER TABLE form → **parse error in production**. The actual correct 467 lever (`SET SESSION iceberg.compression_codec = 'ZSTD'` before writes) is missing. EXECUTE optimize for re-compaction IS valid. |
-| Completeness | 4.0 | Covers all three sub-questions (CHECK / which codec / does it matter). |
+### Q1 — Day-vs-hour partitioning for ~60M rows/day + 6-hour-window dashboards
 
-**Avg: 2.875 — FAIL**
+**Score: 4.75** (Acc 4.5 / Clar 4.5 / App 5.0 / Compl 5.0)
 
-### Verification trail
+Sophisticated partition-design canonical reached cleanly. Load-bearing facts all verified:
 
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) Iceberg connector table-properties list: `format`, `format_version`, `partitioning`, `sorted_by`, `location`, `data_location`, `orc_bloom_filter_columns`, `orc_bloom_filter_fpp`, `parquet_bloom_filter_columns`, `object_store_layout_enabled`, `extra_properties`. **`compression_codec` is ABSENT from this list.**
-- Only `iceberg.compression-codec` catalog config is documented in the 467 page; in 467 the session property `iceberg.compression_codec` existed (per PR #24851 context + WebSearch confirmation) and was wired through PR #24851 (Mar 2025, milestone 473) to actually write the underlying `write.parquet.compression-codec` native key. The session property was dropped in PR #25755 (Aug 2025, milestone 477) when the table-property form was added.
-- **PR #25755** (verified): "Support setting compression_codec table property for Iceberg" — merged **2025-08-07**, **milestone Trino 477**. Adds both `CREATE TABLE WITH(compression_codec=...)` AND `ALTER TABLE SET PROPERTIES compression_codec=...` and simultaneously drops the session property.
-- `"<table>$properties"` metadata table IS exposed in Trino 467 (verified at the 467 Iceberg page — Metadata tables section). Responder's query form `SELECT key, value FROM "events$properties" WHERE key LIKE '%compression%'` IS valid Trino 467 — the user can use this lookup, but the key returned will be the NATIVE Iceberg key `write.parquet.compression-codec`, not `compression_codec`.
+1. **Iceberg hidden partitioning with `day(event_ts)` transform** — natural timestamp-range predicates `WHERE event_ts >= ts1 AND event_ts < ts2` prune at the day-partition level without filtering a separate `event_date` column. Verified at [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) "partition values are derived from data values using a partition transform" + [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `partitioning = ARRAY['day(event_ts)']` syntax.
 
-### Resource-sourced defect — grep findings (THIS IS A RESOURCE DEFECT, not a responder slip)
+2. **Trino 467 default-on `Unwrap{Cast,Year,DateTrunc}InComparison` rules** — matches pinned `reference_trino_unwrap_temporal_predicates.md` (git-tag-source-verified iter871). `year(ts)=2026`, `date_trunc('day', ts)=DATE '...'`, `CAST(ts AS date)=...`, `EXTRACT(YEAR FROM ts)=...` all unwrap into bare-column range predicates that STILL prune partitions. Responder correctly does NOT recommit the iter870 imported-prior "function-on-column = full scan" error.
 
-- `resources/11-lakehouse-storage-sizing.md` L262: **LEADING CANONICAL block titled "Trino-Iceberg compression: the ONE correct property name + DDL forms"** explicitly claims compression_codec is the Trino 467 table property; gives `CREATE TABLE ... WITH (compression_codec = 'ZSTD')` AND `ALTER TABLE ... SET PROPERTIES compression_codec = 'ZSTD'` as canonical 467 forms; cites `trino.io/docs/current` (version-creep — `current` is now 482, not 467; later docs do have the table property).
-- `resources/03-columnar-storage.md` L189, 204, 215, 225-228: same canonical pattern (CREATE TABLE WITH + ALTER SET PROPERTIES + DO-NOT-WRITE table all premised on `compression_codec` being a 467 table property).
-- `resources/17-iceberg-table-maintenance.md` L1209, 1213-1214: cross-engine translation table claims Trino: `WITH (compression_codec = 'ZSTD')` / `SET PROPERTIES compression_codec = 'ZSTD'`.
-- `resources/27-oracle-plsql-to-dbt-trino.md` L1697: claims `WITH (..., compression_codec = 'ZSTD')` is the Trino correct form.
-- `resources/25-trino-materialized-views-iceberg.md` L110: lists `compression_codec` as a table property in a properties table.
+3. **`sorted_by` + `EXECUTE optimize` as the file-level pruning lever** — verified at [trinodb/trino PR #14891](https://github.com/trinodb/trino/pull/14891) + [Starburst — Improving performance with Iceberg sorted tables](https://www.starburst.io/blog/improving-performance-with-iceberg-sorted-tables/) "the Optimize command will sort the data based on the DDL of the table". `ALTER TABLE ... SET PROPERTIES sorted_by = ARRAY['event_ts ASC']` is metadata-only governing future writes; `EXECUTE optimize(file_size_threshold => '512MB')` physically re-sorts each rewritten file. Sharpens per-file Parquet min/max so the 2nd pruning layer (file-level) skips files outside the 6-hour window inside the day partition.
 
-### The PATTERN miss
+4. **Production-stack-aligned** — Spark ingestion (per `prod_info.md`) writes Parquet to MinIO; sorted-on-write is supported by `SortingFileWriter`; on-prem Hive Metastore catalog.
 
-r17 ALREADY gates other 477+ features correctly:
-- L193: TRUNCATE "absent from 467/470/474/476, present from 477+"
-- L345: `ADD COLUMN ... DEFAULT` is a "Trino 477+ feature"
-- L566, L651: CREATE TABLE column DEFAULT same 477 gate
+**Minor framing imprecision (-0.5 Acc)** — "Hour partitioning = 24x partition values, NO extra pruning advantage" is loosely framed. Hour partitioning IS finer pruning at the partition level (a raw-timestamp range filter on an `hour(event_ts)`-partitioned table prunes to ~6 hour partitions vs 1 day). The accurate framing is "sorted_by within day partitions delivers EQUIVALENT effective pruning via file-level min/max, WITHOUT the 24× metadata bloat / small-files risk" — not "no pruning advantage." Practical conclusion (sorted_by is the right answer) unchanged. Recall-ceiling phrasing slip, NOT a resource defect.
 
-The 477+ gating awareness exists in the resource — but `compression_codec` was MISSED. This is the iter1173 `parquet_bloom_filter_columns` CREATE-vs-ALTER 469+ cutoff pattern repeated on a different surface — version-cutoff awareness applied unevenly across surfaces.
-
-### FIX-A RECOMMENDATION (Q1): REQUIRED — reconcile-in-place at all 5 locations
-
-1. **r11 §262-312 LEADING CANONICAL** (highest priority — most copy-attractive): rewrite to put SESSION property (`SET SESSION iceberg.compression_codec = 'ZSTD'`) as the Trino 467 canonical form; gate `CREATE TABLE WITH(compression_codec=...)` + `ALTER TABLE SET PROPERTIES compression_codec=...` as **Trino 477+** with explicit version note. For 467 read-side verification keep `"<table>$properties"` query (looks for `write.parquet.compression-codec` native key). Replace `trino.io/docs/current` citations with `trino.io/docs/467` to pin the verification.
-2. **r03 §189-228**: same correction — session-property canonical for 467, table-property form gated 477+.
-3. **r17 §1209/1213-1214** translation table: correct Trino column to "467: session property `iceberg.compression_codec`; 477+: table property `compression_codec`".
-4. **r27 §1697**: same 477+ gate annotation.
-5. **r25 §110**: same gate.
-
-### Anchoring citations
-
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — table-properties list (compression_codec ABSENT)
-- [github.com/trinodb/trino/pull/25755](https://github.com/trinodb/trino/pull/25755) — merged Aug 2025, milestone 477, adds table-property form, drops session property
-- [github.com/trinodb/trino/pull/24851](https://github.com/trinodb/trino/pull/24851) — merged Mar 2025 (473), session-property `iceberg.compression_codec` wires through to `write.parquet.compression-codec` table-prop on writes
+**Engineer outcome**: pastes the `sorted_by` ALTER + `EXECUTE optimize` and gets the speedup without re-partitioning.
 
 ---
 
-## Q2 — median(order_amount) per plan tier — STRONG PASS
+### Q2 — Top-5-per-plan-tier via ROW_NUMBER() in Trino (Postgres-style WHERE on `rn`)
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | All correct: no exact PERCENTILE_CONT/MEDIAN in Trino 467; `approx_percentile(order_amount, 0.5) GROUP BY plan` is the right grouped-median form; array overload `approx_percentile(x, ARRAY[0.5,0.9,0.99])` correct; no published error figure for approx_percentile (matches reference_trino_approx_percentile_error pin — the 2.3% figure is approx_distinct ONLY); `qdigest_agg(x, 1, accuracy) + value_at_quantile(...)` for tunable accuracy correct. |
-| Beginner clarity | 4.5 | Clean narrative; explains why Postgres syntax doesn't port; copy-pasteable SQL with GROUP BY. |
-| Practical applicability | 5.0 | Engineer can paste-and-run directly. |
-| Completeness | 4.5 | Array form is bonus; T-Digest mention is correct. |
+**Score: 4.75** (Acc 5.0 / Clar 4.5 / App 5.0 / Compl 4.5)
 
-**Avg: 4.75 — STRONG PASS**
+Canonical Trino 467 top-N-per-group reached cleanly. Responder:
 
----
+1. **No QUALIFY in Trino 467** — verified by absence at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (window functions only allowed in `SELECT` and `ORDER BY`, no QUALIFY clause documented). Engineer migrating from Snowflake/BigQuery (which DO have QUALIFY) gets the right "use a CTE instead" routing.
 
-## Q3 (WATCH iter1212) — dbt seed column_types — PASS, WATCH CLOSES
+2. **Window functions can't appear in `WHERE`** — execution-order explanation (FROM → WHERE → GROUP BY → window → SELECT) correctly framed. Showing the broken `WHERE ROW_NUMBER() OVER (...) <= 5` form as a parse error is good defang per `feedback_defang_donotwrite_snippets.md` (inline-marked WRONG, not copy-attractive).
 
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | `dbt_project.yml` `seeds: <project>: <seed>: +column_types: { col: type, ... }` form is correct and matches r27 §3478. The `+` prefix correctly used. `dbt seed --select plan_tiers` correct. |
-| Beginner clarity | 4.5 | Clear; shows the YAML structure; explains `dbt seed --select` to re-load. |
-| Practical applicability | 4.5 | Engineer can paste-and-run. |
-| Completeness | 3.5 | **Question explicitly asked "dbt_project.yml OR separate YAML next to CSV?"** — responder answered only the first option. Per [docs.getdbt.com/reference/seed-configs](https://docs.getdbt.com/reference/seed-configs), the schema.yml (properties YAML next to CSV) form IS ALSO valid: `seeds: - name: plan_tiers; config: column_types: {...}`. Responder didn't address the user's choice question. **BUT — did NOT recur the iter1212 over-statement "must NOT be in schema.yml"** — so the watch CLOSES without regression. |
+3. **CTE + outer `WHERE rn <= 5`** — pattern:
+   ```sql
+   WITH per_user AS (
+     SELECT plan_tier, user_id, COUNT(*) AS event_count
+     FROM events
+     WHERE event_ts >= CURRENT_TIMESTAMP - INTERVAL '30' DAY
+     GROUP BY plan_tier, user_id
+   ),
+   ranked AS (
+     SELECT plan_tier, user_id, event_count,
+            ROW_NUMBER() OVER (PARTITION BY plan_tier ORDER BY event_count DESC) AS rn
+     FROM per_user
+   )
+   SELECT plan_tier, user_id, event_count
+   FROM ranked
+   WHERE rn <= 5
+   ORDER BY plan_tier, rn;
+   ```
 
-**Avg: 4.375 — PASS**
+4. **Tie-handling caveat omission** (-0.5 Compl) — could mention that `ROW_NUMBER` gives an arbitrary tie-break (vs `RANK`/`DENSE_RANK` that share ranks). For "top 5" this is rarely operationally load-bearing; not a defect.
 
-**WATCH STATUS: iter1212 over-statement → CLOSES.** No "must NOT be in schema.yml" or equivalent over-claim in this answer. Resource r27 §3472 also makes no such over-claim — it's titled "Optional" and only shows the dbt_project.yml form without negating alternatives. Safe to remove from active watch list.
-
-**Minor completeness gap (NO FIX-A):** the choice-question framing was not addressed. Optional one-line addition to r27 §3472 would help, but borderline (recall ceiling vs one-line gain). Recommend: NO-OP for now; light watch under "seed-column_types-location" — re-probe once with the choice-question framing.
-
----
-
-## Q4 (WATCH iter1211) — Oracle INSTR Nth occurrence — HARD FAIL, CONFIRMED RECURRENCE
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 1.0 | "Trino 467 has NO direct equivalent" of Oracle's 4-arg INSTR is **FACTUALLY FALSE**. Verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html): `strpos(string, substring, instance) -> bigint` is documented — *"Returns the position of the N-th `instance` of `substring` in `string`. When `instance` is a negative number the search will start from the end of `string`."* So `strpos(description, ',', 2) = 2` directly answers the Oracle `INSTR(description, ',', 1, 2)` use case in one call. The marker-insertion / nested-strpos / split-array workarounds the responder proposed are unnecessary complexity. |
-| Beginner clarity | 3.0 | Workaround prose is clear and well-explained — but the workarounds are SOLUTIONS TO A PROBLEM THAT DOESN'T EXIST. |
-| Practical applicability | 1.5 | Engineer copies a 5-line `split(description, ',')[2]` or marker-insertion idiom when `strpos(description, ',', 2)` is the one-call answer. Wasted CPU + readability cost in production ETL. |
-| Completeness | 2.5 | Did address the question; gave multiple workarounds; missed the correct one-call answer. |
-
-**Avg: 2.0 — HARD FAIL (confirmed recurrence)**
-
-### Verification
-
-- [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html): `strpos(string, substring) → bigint` AND `strpos(string, substring, instance) → bigint` both documented. The 3-arg form's docs quote: *"Returns the position of the N-th `instance` of `substring` in `string`. When `instance` is a negative number the search will start from the end of `string`."*
-
-### Resource status (NOT a resource defect — resource is maximally correct)
-
-- `resources/27-oracle-plsql-to-dbt-trino.md` §4.3 L990: row titled `INSTR(s, sub, 1, n)` → `strpos(s, sub, n) — the 3-arg form` with verbatim docs quote AND explicit DO-NOT-WRITE: *"Trino strpos is 2-arg only / has no n-th-occurrence form" — that is a base-training myth; the 3-arg form exists.*
-- Keyword anchors at L990: "position of the second occurrence, nth occurrence of a character Trino, find the 2nd/3rd instance, position of last occurrence, find n-th delimiter position."
-- The responder **CITED the §4.3 String functions section (L984-1050 range)** in their answer reasoning yet still produced the myth. Findability layer succeeded; recall/synthesis layer failed.
-
-### This is CONFIRMED Haiku base-prior ceiling
-
-2nd consecutive recurrence (iter1211 + iter1215) despite maximally-defanged + responder-cited resource content. Joins the imported-prior assumed-absence family: starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL → now **strpos-3-arg** is the 8th member.
-
-### FIX-A RECOMMENDATION (Q4): ACCEPT-CEILING / NO-OP
-
-Per iter1211 pre-commitment + feedback_synthesis_ceiling_stop_churning + feedback_new_card_over_attracts_adjacent risk:
-
-1. **Findability is already intact** — responder cited the correct section; the row exists with keyword anchors + DO-NOT-WRITE defang. The recall layer (responder navigating table row → emitting from the row) is failing, not findability.
-2. **Elevation to a standalone LEADING CANONICAL block at section top** would risk:
-   - Adjacent regression on the `position(... IN ...)` / `split_part` / `regexp_position` neighbors (per feedback_new_card_over_attracts_adjacent — iter858 geometric_mean stole harmonic_mean precedent).
-   - Likely insufficient to override base prior since the responder ALREADY navigated to §4.3 AND cited it AND still produced the myth. The breakdown is not at navigation, it's at base-prior override of the cited row.
-3. **Per synthesis-ceiling rule**: when a maximally-defended resource is correctly findable AND cited AND the responder STILL produces the myth, the residual is a recall ceiling, not a resource gap. Stop churning. Accept the occasional Q cost.
-
-**Decision: NO FIX-A.** Log as confirmed ceiling, re-probe in 8-12 iters with fresh phrasing ("find the Nth comma" / "2nd separator position" / "position of the 3rd dot") to confirm STABLE ceiling (not regression from a different cause). If a third consecutive recurrence appears on novel phrasing, then consider one-shot findability-elevation as a last try — but not now.
+**Engineer outcome**: copies the CTE pattern verbatim and runs immediately; understands WHY window-in-WHERE errors.
 
 ---
 
-## Rubric topic touches (this iter)
+### Q3 — dbt `relationships` test for stg_events.user_id → dim_users (FK / referential integrity)
 
-- **Q1** (Storage tiering on Trino+Iceberg+MinIO — compression_codec is explicitly named in this topic's title; also touches Storage sizing r11 + Iceberg table maintenance r17 + Column-oriented storage r03) → log SCORE **2.875** against **Storage tiering** as primary.
-- **Q2** (Analytical query patterns on Iceberg+Trino — approx_percentile is canonical) → log **4.75**.
-- **Q3** (Oracle PL/SQL → dbt+Trino migration — seeds are in r27 §3460+) → log **4.375** against Oracle PL/SQL migration.
-- **Q4** (Oracle PL/SQL → dbt+Trino migration — string-function rewrite is core scope) → log **2.0** against Oracle PL/SQL migration.
+**Score: 4.75** (Acc 5.0 / Clar 4.5 / App 5.0 / Compl 4.5)
 
----
+Canonical dbt referential-integrity-test reached cleanly. Verified at [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) + [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests):
 
-## Watches — carry forward
+1. **`relationships` is one of four built-in generic tests** alongside `unique` / `not_null` / `accepted_values` — verbatim "out-of-the-box generic data tests."
 
-**CLOSING (this iter):**
-- iter1212 dbt-seed-column_types-NOT-in-schema.yml over-statement → **CLOSED**, no recurrence.
+2. **schema.yml syntax** under the column's `data_tests:` (legacy `tests:` also accepted) block — `relationships: {to: ref('dim_users'), field: user_id}`. Responder used the inline-flow-mapping form which is the older/simpler still-supported syntax; newer dbt 1.10+ docs prefer the `arguments:` nested block (`relationships: {arguments: {to: ref(...), field: id}}`), but both compile. Not a defect.
 
-**ACTIVE (carry forward, not probed this iter):**
-- iter1213 session_properties findability + (+)-mnemonic
-- iter1214 expire_snapshots retention_days vs retention_threshold duration-string param
-- iter1214 config()-YAML-colon vs Jinja-equals syntax
+3. **`source()` variant** for testing against a source table (`to: source('raw','users')`) — correctly noted.
 
-**NEW (this iter):**
-- **iter1215 compression_codec Trino-467-table-property FALSE claim** — after FIX-A lands, re-probe within 4-6 iters with a CHECK/CHANGE-codec phrasing to confirm corrected mechanism (SET SESSION form for 467; gate table-property as 477+).
-- **iter1215 strpos 3-arg myth CONFIRMED CEILING** — accept; re-probe in 8-12 iters with fresh phrasing to confirm stable.
+4. **Underlying SQL = orphan/anti-join check** — dbt compiles to roughly `SELECT * FROM stg_events s WHERE s.user_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dim_users d WHERE d.user_id = s.user_id)`. Zero rows returned = test PASS. NULL keys auto-excluded (consistent with FK constraint semantics).
 
-**Light-monitors (low priority, carry):**
-- ::cast Trino-vs-Postgres operator support
-- NVL-coercion null-handling
-- $partitions metadata table findability
-- GDPR Spark-tag delete-by-tag
-- width_bucket boundary semantics
-- exposures-selector dbt
-- CURRENT_TIMESTAMP-parens-or-bare
-- seed-column_types-location (Q3 closed but related family)
-- --full-refresh on_table_exists dbt-trino
+5. **Run via `dbt test` or as part of `dbt build`** — correctly named both commands; default severity = `error` (non-zero exit, blocks downstream per pinned iter1202 severity canonical).
+
+**Engineer outcome**: pastes the YAML into `models/staging/schema.yml`, runs `dbt test --select stg_events`, gets a row count of orphan user_ids if any exist. No production-stack adjustment needed (dbt-trino executes the generic test SQL transparently against Trino+Iceberg).
 
 ---
 
-## Decision summary
+### Q4 — Oracle `ADD_MONTHS(d, n)` → Trino equivalent + month-end clamp divergence
 
-| Action | Required? | Reason |
-|---|---|---|
-| **FIX-A: compression_codec 477+ gate across r11/r03/r17/r27/r25** | **YES — REQUIRED** | Resource-sourced defect; 5 locations including a LEADING CANONICAL block teach wrong mechanism for Trino 467; will cause parse errors in production engineer's hands. Same pattern family as iter1173 parquet_bloom_filter_columns 469+ cutoff miss. |
-| FIX-A: strpos 3-arg elevation | **NO** | Confirmed Haiku recall ceiling; resource maximally-defended; responder cited the section yet still produced myth → elevation won't help; risks adjacent regression. Accept-ceiling. |
-| FIX-A: schema.yml column_types alternative | NO | Recall completeness ceiling at best; Q3 watch closed; one-line addition would help completeness but not urgent. Re-probe-don't-churn. |
-| FIX-A: median/percentile | NO | Strong pass; resource correct. |
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / App 5.0 / Compl 5.0)
+
+Pin-perfect Oracle→Trino date-arithmetic migration canonical, consistent with iter1193 ADD_MONTHS landing. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html):
+
+1. **No native `ADD_MONTHS` in Trino 467** — function-list grep clean; parse error confirmed. Engineer's Oracle ADD_MONTHS lift-and-shift fails.
+
+2. **Two valid forms**:
+   - `date_add('month', n, date_col)` — verified signature `date_add(unit, value, timestamp) → [same as input]`; negative `n` subtracts (Oracle's `ADD_MONTHS(SYSDATE, -6)` → `date_add('month', -6, current_timestamp)`).
+   - `date_col + INTERVAL 'n' MONTH` — verified operator at docs `timestamp + interval`.
+
+3. **Oracle month-end CLAMP vs Trino day-of-month preserve — CORRECT semantic distinction**:
+   - Oracle: `ADD_MONTHS(DATE '2026-02-28', 1) = DATE '2026-03-31'` (because Feb 28 = end-of-Feb, so preserve end-of-month status into March).
+   - Trino: `date_add('month', 1, DATE '2026-02-28') = DATE '2026-03-28'` (preserve day-of-month; 28 exists in March so no roll-forward).
+   - Separate documented Trino behavior: `DATE '2012-10-31' + INTERVAL '1' MONTH = DATE '2012-11-30'` clamps the DESTINATION-day (Nov has only 30 days max) — this is target-month-max clamping NOT Oracle's source-month-end-preserve.
+   - Responder correctly distinguished these two semantics.
+
+4. **Oracle-compat wrapper** — `CASE WHEN d = last_day_of_month(d) THEN last_day_of_month(date_add('month', 3, d)) ELSE date_add('month', 3, d) END` is the correct semantic-preservation pattern when invoice-renewal logic legacy-depended on month-end preservation.
+
+5. **`last_day_of_month(date) → date`** — VERIFIED at the datetime functions page. `end_of_month` (Spark/BigQuery) does NOT exist in Trino 467 — correct defang per pinned-family `feedback_responder_overwarning_folklore.md`-adjacent assumed-absence-vs-real-existence reflex.
+
+**Engineer outcome**: pastes `date_add('month', 3, invoice_date)` for renewals + `date_add('month', -6, current_date)` for lookback, and ships the CASE wrapper only if Oracle month-end semantic preservation matters for the contractual renewal rule (often it does).
 
 ---
 
-## Sources (verified June 2026)
+## Cross-question patterns
 
-- [Trino 467 string functions — strpos signatures](https://trino.io/docs/467/functions/string.html)
-- [Trino 467 Iceberg connector — table properties list](https://trino.io/docs/467/connector/iceberg.html)
-- [Trino PR #25755 — compression_codec as table property, milestone 477](https://github.com/trinodb/trino/pull/25755)
-- [Trino PR #24851 — Set write compression codec in Iceberg (473)](https://github.com/trinodb/trino/pull/24851)
-- [dbt seed configurations — column_types in dbt_project.yml AND schema.yml](https://docs.getdbt.com/reference/seed-configs)
-- [dbt column_types reference](https://docs.getdbt.com/reference/resource-configs/column_types)
+- **No imported-prior slip** this iteration (no GREATEST-NULL / no false function-absence assumption / no Postgres-string-fn priors leaking in).
+- **No broken-secondary-alternative** (`feedback_responder_broken_secondary_alternative.md` family clean — every alternative form shown is valid).
+- **No over-warning folklore** (`feedback_responder_overwarning_folklore.md` family clean — no "X is slow, use Y" misframing of fine constructs).
+- **iter1215 compression_codec-477 cutoff WATCH** — not re-probed this iter; carry forward 3-5 more iters before reading the no-recurrence signal.
+- **strpos-3-arg ceiling** — not re-probed this iter; carry forward 7-11 more iters (per accepted ceiling, no churn).
+- **iter1213 session_properties + (+)-mnemonic** — light-monitor, not re-probed this iter.
+- **iter1214 retention_days param-fab + expire-vs-planning conflation soft watch** — not re-probed this iter; 3-7 iters remaining.
+- **iter1206 LIKE-on-ROW + $partitions-omission soft watch** — not re-probed this iter; 4-8 iters remaining.
+
+## Topic routing this iteration
+
+- Q1 → `Iceberg partition design for SaaS` (partition strategy choice + sorted_by + small-files)
+- Q2 → `Analytical query patterns on Iceberg+Trino` (top-N-per-group window canonical)
+- Q3 → `dbt model contracts` (data-integrity declaration family; closest dbt row to a generic-test referential-integrity question)
+- Q4 → `Oracle PL/SQL procedure → dbt + Trino SQL migration` (ADD_MONTHS dialect rewrite — same row as iter1193)
+
+## Sources verified against
+
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (sorted_by + EXECUTE optimize + partitioning array)
+- [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) (date_add / INTERVAL / last_day_of_month / no ADD_MONTHS / no end_of_month)
+- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (window in SELECT/ORDER BY only, no QUALIFY)
+- [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) (partition transforms, manifest-level pruning)
+- [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) (relationships syntax + four built-in tests)
+- [trinodb/trino PR #14891](https://github.com/trinodb/trino/pull/14891) (sorted writes in Iceberg connector)
+- [Starburst — Improving performance with Iceberg sorted tables](https://www.starburst.io/blog/improving-performance-with-iceberg-sorted-tables/) (Optimize sorts based on DDL)
+- pinned `reference_trino_unwrap_temporal_predicates.md` (iter871 git-tag-verified)
+- pinned `feedback_defang_donotwrite_snippets.md` (Q2 wrong-form defang pattern)
+
+## Verdict
+
+**STRONG PASS / NO-OP.** All four answers actionable; engineer ships in each case without re-reading docs. No FIX-A, no soft watch added, no churn warranted. Continue breadth probing.
