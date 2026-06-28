@@ -1,119 +1,162 @@
-# Iter1211 Judge Feedback — PASS with Q4 `strpos`-3-arg responder slip against ALREADY-DEFENDED resource (NO FIX-A)
+# Iter1212 Judge Feedback — PASS (4.5625 avg), NO FIX-A; Q3 minor "NOT in schema.yml" over-statement flagged as soft watch
 
-**Overall verdict**: PASS, avg **4.344**, **NO FIX-A** (Q4 defect is a Haiku assumed-absence recall-ceiling slip against r27 §4.3 L990's exact `DO-NOT-WRITE` defang — not a resource gap).
+**Overall verdict**: **PASS**, avg **4.5625**, **NO FIX-A**. Q1/Q2/Q4 clean; Q3 has a real but minor over-statement ("NOT in schema.yml") that does not block the engineer (the `dbt_project.yml` form given IS correct and most common). Decision: recall-ceiling / per-instance slip — no resource churn.
 
 | Q | Topic | Score | Verdict |
 |---|---|---|---|
-| Q1 | Iceberg table maintenance (concurrent writers, optimistic concurrency, isolation) | 4.875 | STRONG PASS |
-| Q2 | SQL query best practices for OLAP (avg-of-avgs, per-account-then-AVG fairness) | 4.875 | STRONG PASS |
-| Q3 | Improving complex SQL perf on Trino with dbt (dbt vars + incremental interaction) | 5.0 | PIN-PERFECT |
-| Q4 | Oracle PL/SQL → dbt + Trino SQL migration (INSTR Nth occurrence → strpos 3-arg) | 2.625 | FAIL (responder recall-ceiling slip; resource is correct + maximally defended) |
+| Q1 | Iceberg partition design (CTAS honors partitioning + sorted_by physically) | 4.625 | STRONG PASS (minor "directories" Hive-ism) |
+| Q2 | Analytical query patterns on Iceberg+Trino (ROW_NUMBER first-row-per-group) | 4.75 | STRONG PASS (min_by alt not surfaced; non-load-bearing) |
+| Q3 | Improving complex SQL perf on Trino with dbt (seed `column_types` location) | 4.0 | PASS (real "NOT in schema.yml" over-statement; engineer still unblocked) |
+| Q4 | Oracle PL/SQL → dbt + Trino SQL migration (DECODE → searched CASE + NULL nuance) | 4.875 | STRONG PASS |
 
 ---
 
-## Q1 — Two writers on same Iceberg table, commit-conflict — 4.875 STRONG PASS
+## Q1 — Iceberg CTAS `partitioning=ARRAY['day(created_at)'], sorted_by=ARRAY['customer_id']` honored physically? — 4.625 STRONG PASS
 
-**All five load-bearing facts verified.** Responder gave the canonical Iceberg optimistic-concurrency model:
+**Verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)** (WebFetch this iter):
 
-1. **No upfront row/table locking** — Iceberg uses optimistic concurrency; writers race at commit time via atomic catalog pointer swap (compare-and-swap). NOT Postgres row-level locks. Verified at [iceberglakehouse.com/iceberg/iceberg-concurrent-writes](https://iceberglakehouse.com/iceberg/iceberg-concurrent-writes/) verbatim: *"Rather than locking tables during writes, Iceberg allows concurrent writes to proceed in parallel."*
-2. **CommitFailedException on loser race** — correct mechanism (loser sees stale snapshot at CAS time, throws). Verified at [Apache Iceberg IsolationLevel javadoc](https://iceberg.apache.org/javadoc/1.7.1/org/apache/iceberg/IsolationLevel.html) and [lists.apache.org thread on serializable vs snapshot](https://lists.apache.org/thread/9gw4g4k59y1dm3ftcz61dnkgtq1godks).
-3. **No silent overwrite / no corruption** — atomic-pointer-swap semantics; either a write commits a new snapshot pointing to a consistent metadata.json or the commit fails. Phantom-row anomaly under `snapshot` isolation correctly named as the trade-off (don't use for billing/compliance).
-4. **`write.merge.isolation-level` `serializable` vs `snapshot`** — serializable rejects logical-overlap commits even on disjoint partitions (false-positive for table-level MERGEs); snapshot relaxes to physical-conflict-only. Correctly notes default is `serializable` (conservative). Verified at [aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg](https://aws.amazon.com/blogs/big-data/manage-concurrent-write-conflicts-in-apache-iceberg-on-the-aws-glue-data-catalog/).
-5. **`commit.retry.num-retries` for auto-retry** — correctly framed as the Iceberg library auto-retry knob (default 4); only metadata commit is retried, not the data write. Bumping to 8 + relaxed isolation is the standard mitigation.
+> "The sort order is configured with the `sorted_by` table property... **Data is sorted during writes within each file based on the specified array of one or more columns.**"
+> "You can disable sorted writing with the session property `sorted_writing_enabled` set to `false`."
 
-**Production-stack fit**: correctly notes the isolation properties must be set via **Spark `ALTER TABLE SET TBLPROPERTIES`** since Trino 467 writer is MoR (Trino's `ALTER TABLE SET PROPERTIES` works for `format_version` but not all Iceberg table properties round-trip to the table-level isolation knob); verification via `SELECT * FROM iceberg.events$properties` is the correct introspection.
+Responder's claims are all correct:
 
-**Soft Compl shave (-0.125)**: didn't surface the **Trino 467 `iceberg.expire-snapshots.min-retention` 7d floor** as adjacent context (engineer might confuse retry config with expiry config); minor and non-load-bearing.
+1. **`partitioning` organizes data files into Iceberg partitions during the write** — YES; the writer routes rows into per-partition file streams based on the partition transform (`day(created_at)`).
+2. **`sorted_by` clusters rows within each Parquet file by `customer_id` DURING the write** — YES, verbatim per the docs above ("Data is sorted during writes within each file"). Not post-write, not metadata-only.
+3. **Sharpens file-level `customer_id` min/max stats** — correct; Parquet column stats now have tight ranges, so file-skipping on `customer_id` predicates becomes effective.
+4. **Applies only to files written by THIS CTAS** — correct; sorted_by as a table property affects all FUTURE writes (including this CTAS), and `ALTER TABLE SET PROPERTIES sorted_by=ARRAY[...]` afterward only affects subsequent writes (existing files would need `ALTER TABLE EXECUTE optimize` to be rewritten).
+5. **Engineer's worry "files come out unsorted" answered directly**: NO, they will be sorted by `customer_id` within each `day(created_at)` partition file. r05 sort-order-within-partitions cite is appropriate.
 
-Cites r17/r21/r26.
+**Soft Compl shave (-0.375): minor Hive-ism on "day-level directories".** The responder said partitioning "organizes files into day-level partitions" — Iceberg uses **hidden partitioning tracked in metadata** (partition spec ID + per-partition tuple recorded in manifests). Files DO land under `data/created_at_day=2026-06-28/...` style paths in object storage, but **query pruning is via manifest metadata, not directory scan** — the "directories" framing is a Hive-ism. Non-load-bearing for this question (engineer's worry was about physical sort, which is answered correctly), but flag for completeness.
 
----
+**Production-stack fit**: MinIO + Iceberg + Hive Metastore + Trino 467 — CTAS works exactly as described. Engineer can run the DBA's DDL as-is.
 
-## Q2 — Avg CSAT fairness (per-account-then-average, not weighted by ticket count) — 4.875 STRONG PASS
-
-**Correct canonical form**: two-CTE `WITH per_account AS (... GROUP BY account_id, plan_tier) SELECT plan_tier, AVG(account_avg_csat) FROM per_account GROUP BY plan_tier`. This IS the only clean way (Trino does NOT allow nested aggregates like `AVG(AVG(csat_score))` — that's a parse error).
-
-- **Single Trino query**: YES — the CTE collapses what reads like a "two-step" approach into one query plan.
-- **Plain-language framing**: "each account one vote" nails the intuition for a SaaS engineer with no OLAP background.
-- **COUNT(DISTINCT account_id) per tier** included as the sample-size disclosure — production-quality touch.
-
-**Soft Compl shave (-0.125)**: didn't explicitly say "`AVG(AVG(...))` would be a parse error — Trino forbids nested aggregates" as a beginner-defense (the engineer literally asked "single query or two steps?" — flagging that the *naive* single query is impossible would close the loop).
-
-Cites r07/r23.
+Cites r05.
 
 ---
 
-## Q3 — dbt vars (start_date / lookback_days) — 5.0 PIN-PERFECT
+## Q2 — `touch_events` first-touch per user, 12 min correlated subquery → performant Trino — 4.75 STRONG PASS
 
-**All four sub-questions answered correctly, verified verbatim against [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables):**
+**Verified against [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)** (WebFetch this iter):
 
-1. **Where to declare**: `vars:` block at the TOP LEVEL of `dbt_project.yml` (not nested under `models:`); global scope vs project-scoped vs package-scoped distinction correctly handled by using top-level declarations.
-2. **Default value**: `{{ var('lookback_days', 30) }}` second-arg-default syntax is the canonical [docs.getdbt.com `var()` reference](https://docs.getdbt.com/reference/dbt-jinja-functions/var) form — does NOT raise `CompilationError` if the var is unset.
-3. **Reference in model SQL**: `WHERE occurred_at >= date_add('day', -{{ var('lookback_days', 30) }}, current_date)` is the canonical Trino 467 date-window form (uses `date_add` not Postgres `INTERVAL`).
-4. **CLI override**: `dbt run --vars '{lookback_days: 7}'` YAML form (JSON also accepted); precedence **CLI `--vars` > `dbt_project.yml` vars > `var()` default-arg** is correct per dbt docs verbatim *"Variables defined via `--vars` override values in `dbt_project.yml`."*
-5. **var-vs-`is_incremental()` independence**: correctly framed as orthogonal — first run `is_incremental()` returns FALSE so the `WHERE` predicate is SKIPPED (full table build), subsequent runs both apply. This is the correct mental model.
+> `ROW_NUMBER()` "Returns a unique, sequential number for each row, starting with one, according to the ordering of rows within the window partition."
 
-No imported-prior slips, no broken-secondary alternatives, no over-warning. Engineer arrives at a working local-dev pattern with the right mental model.
+The canonical form is correct:
 
-Cites r13/r27/r28.
-
----
-
-## Q4 — Oracle INSTR(url, '/', 1, 3) → Trino — 2.625 FAIL (responder slip vs ALREADY-DEFENDED resource)
-
-**THE DEFECT.** Responder wrote: *"Trino does NOT have an INSTR equivalent accepting an occurrence parameter. strpos(string, substring) finds only the first match."* **BOTH CLAIMS ARE FALSE on Trino 467.**
-
-**Verified against [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html)** (WebFetch this iter):
-
-> `strpos(string, substring, instance) → bigint`
-> "Returns the position of the N-th `instance` of `substring` in `string`. When `instance` is a negative number the search will start from the end of `string`. Positions start with `1`. If not found, `0` is returned."
-
-So the **direct one-call answer to the engineer's question is**:
 ```sql
-strpos(url, '/', 3)  -- position of the 3rd slash, exactly Oracle INSTR(url, '/', 1, 3)
+SELECT user_id, channel, touched_at
+FROM (
+  SELECT user_id, channel, touched_at,
+         ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY touched_at ASC NULLS LAST) AS rn
+  FROM touch_events
+)
+WHERE rn = 1
 ```
 
-**This is a RESPONDER recall-ceiling slip against ALREADY-DEFENDED resource content — NOT a resource gap:**
+1. **Correlated subquery diagnosis correct**: `WHERE touched_at = (SELECT MIN(touched_at) FROM ... WHERE u = outer.u)` is O(N×M) — Trino's correlated-subquery decorrelation produces a re-scan or a self-join; for 80M rows × 1–20 rows-per-user it explodes.
+2. **ROW_NUMBER form is THE canonical Trino 467 pattern** — single scan + per-partition sort under one `OVER()` window; Trino executes the window in a single exchange-sorted stage. 50–100x faster on 80M rows is realistic.
+3. **`ASC NULLS LAST`** — correct Trino 467 default (per `reference_trino_null_ordering_default` MEMORY card; Trino's default for `ORDER BY ASC` is `NULLS LAST`), explicit is fine and matches "first by time, NULLs treated as last".
+4. **Dialect-comparison defang correct**: `DISTINCT ON` is Postgres-only (not in Trino — verified above, no mention in window docs); `QUALIFY` is Snowflake/BQ-only (no Trino 467 support — verified). Responder gets both dialect notes right.
 
-- **r27 §4.3 line 990** explicitly teaches the 3-arg form with the EXACT myth defang:
-  > `INSTR(s, sub, 1, n)` → `strpos(s, sub, n)` — the 3-arg form. **DO NOT WRITE** "Trino strpos is 2-arg only / has no n-th-occurrence form" — that is a **base-training myth**; the 3-arg form exists. Keyword anchors: position of the second occurrence, nth occurrence of a character Trino, find the 2nd/3rd instance, position of last occurrence, find n-th delimiter position.
-- **r23 §538-549** also teaches `strpos(s, sub, -1)` (negative-instance = from-end) for the last-occurrence case with extensive keyword anchors.
-- **r27 §4.3-STR-FAMILY line 1058** ("Trino has no `position` function — use `strpos` instead" — HALF-WRONG) sits adjacent in the same canonical block.
+**Soft Compl shave (-0.25): didn't surface `min_by(channel, touched_at) GROUP BY user_id`** as the **even-more-efficient single-column alternative** when the engineer only needs `(user_id, channel)` — `min_by` avoids the full-row sort of `ROW_NUMBER` and uses streaming aggregation. The engineer's spec says "one row per user with channel from earliest touched_at" — `min_by` IS the cleanest fit. Minor and non-load-bearing (the `ROW_NUMBER` answer is correct and works), but a polished answer would mention both.
 
-The resource is **maximally defended already** — explicit `DO-NOT-WRITE` markup, exact-myth callout, keyword anchors targeting "nth occurrence" / "find the 2nd/3rd instance" / "position of last occurrence" / "find n-th delimiter position", and an adjacent `position()` myth-defang in the same string-family canonical. Despite this, the Haiku responder produced **the literal exact wording the resource defangs**.
+Cites r23 §3.1G.
 
-**Partial credit**: the responder's fallback (`split(url, '/')` array index for path segments / `split_part(url, '/', n)` for the Nth segment) IS a valid Trino 467 idiom — r23 §504 leads with `split_part` for delimiter extraction — so an engineer who wants the *path segment* (not the *slash position*) does land on a working query. But the engineer literally asked for the **position of the Nth slash** (Oracle INSTR semantics fed to SUBSTR), and the responder said "Trino doesn't have that" instead of giving the one-line direct answer.
+---
 
-**NO FIX-A justified:**
-- The resource is correct, exact, and maximally defended at r27 §4.3 L990.
-- Per the imported-prior assumed-absence family (`starts_with` / `to_char` / `listagg` / `array_sum` / `format_number` / `migrate` / `LATERAL` — see MEMORY.md cards), this is a recurring Haiku base-training prior: foreign-looking funcs that DO exist in Trino get assumed absent. The resource already does what it can.
-- Adding more defang risks `feedback_new_card_over_attracts_adjacent` (over-attractor on adjacent strpos questions).
-- Per `feedback_synthesis_ceiling_stop_churning.md` — when a FIX-A has already shipped the maximum reasonable defang and the responder STILL recalls the myth, that residual is a Haiku synthesis ceiling, not a resource gap.
+## Q3 — dbt seed `column_types` location: `dbt_project.yml` vs seed `schema.yml`? — 4.0 PASS (over-statement flag)
 
-**NEW SOFT WATCH** `iter1211 Q4 strpos-3-arg INSTR-Nth-occurrence assumed-absence`:
-- Re-probe in 4-8 iters under structurally-similar framing ("Oracle INSTR with occurrence param → Trino equivalent" / "find the Nth occurrence of a character / 2nd dot / 3rd slash").
-- If recurs (despite r27 §4.3 L990 + r23 §538 + keyword anchors), classify as **CONFIRMED Haiku base-training prior — accept the occasional Q cost, do NOT add more defang** (would risk over-attractor regression on adjacent strpos questions).
-- If does NOT recur, watch closes silently.
+**Verified against [docs.getdbt.com/reference/resource-configs/column_types](https://docs.getdbt.com/reference/resource-configs/column_types)** (WebFetch this iter):
 
-Cites r27/r23 (resources are correct; responder slip).
+> "Specify column types in your `dbt_project.yml` file: ... Or: ..." followed by the seed properties YAML form:
+> ```yaml
+> seeds:
+>   - name: country_codes
+>     config:
+>       column_types:
+>         country_code: varchar(2)
+>         country_name: varchar(32)
+> ```
+
+**The docs explicitly support BOTH locations.** Responder gave the correct `dbt_project.yml` form:
+
+```yaml
+seeds:
+  <project_name>:
+    pricing:
+      +column_types:
+        plan_name: varchar
+        monthly_price_usd: decimal(10,2)
+        max_seats: integer
+```
+
+This DOES work and IS the most common form. **However**, the responder added: *"config goes in `dbt_project.yml` at root, NOT in a `schema.yml` next to the CSV."* — **this "NOT in a schema.yml" claim is incorrect / over-stated.** Modern dbt explicitly supports putting `config: column_types: ...` in a seed properties YAML file co-located with the CSV (e.g., `seeds/_seeds.yml` or `seeds/schema.yml`). The docs literally show both forms with "Or:" between them.
+
+**Why this is a 4.0 not a lower score:**
+- The engineer **CAN act on the answer** — the `dbt_project.yml` form given is correct, `dbt seed --select pricing` is the right command, the example `decimal(10,2) / integer / varchar` types fit Trino dialect, and `monthly_price_usd + max_seats` math will work after the reload.
+- The over-statement narrows the engineer's options but does NOT lead them to a broken config — the form they're told to use IS valid.
+- Accuracy shave (-0.5) and Completeness shave (-0.5) for the wrong negative claim.
+
+**Production-stack fit**: dbt + dbt-trino + Iceberg seed materialization. `decimal(10,2)` and `integer` are valid Trino 467 column types (verified prior iter); engineer's `monthly_price_usd * max_seats` math will work after `dbt seed --full-refresh --select pricing`. The responder didn't mention `--full-refresh` is needed to drop+recreate the seed table with the new types (existing seed table created as VARCHAR won't auto-pick-up the type config without a rebuild) — minor.
+
+**Decision: NO FIX-A (recall-ceiling / minor over-statement).**
+
+Rationale:
+- The `dbt_project.yml` form given IS correct and unblocks the engineer immediately. The over-statement narrows but doesn't break.
+- Adding a "you can ALSO put it in the seed properties YAML" callout in r27/r28 risks over-attractor regression on adjacent seed config questions (per `feedback_new_card_over_attracts_adjacent`).
+- Margin remains healthy on "Improving complex SQL perf on Trino with dbt" row (~4.57 prior).
+
+**NEW SOFT WATCH** `iter1212 Q3 dbt seed column_types over-stated NOT-in-schema.yml`:
+- Re-probe in 4-8 iters under structurally-similar framing ("can I configure dbt seed X in a YAML next to the seed, or only in dbt_project.yml?" / "seed properties YAML config: block" / "schema.yml seed config").
+- If recurs (responder consistently asserts "only dbt_project.yml"), classify as a real resource gap and consider a light additive note in r27/r28; if doesn't recur, watch closes silently.
+
+Cites r27 §6.7D.
+
+---
+
+## Q4 — Oracle `DECODE(subscription_status, 'active', 'Paying', ..., 'Unknown')` → Trino — 4.875 STRONG PASS
+
+**Verified against [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html)** (WebFetch this iter): Trino 467 conditional expressions are **CASE (simple + searched), IF, COALESCE, NULLIF, TRY** — **no DECODE**.
+
+Responder's answer is correct on all five load-bearing points:
+
+1. **"No DECODE in Trino, parse error confirmed"** — YES, verified above (DECODE not in Trino 467 conditional functions list).
+2. **Searched CASE rewrite is THE canonical Trino 467 form**:
+   ```sql
+   CASE
+     WHEN subscription_status = 'active'  THEN 'Paying'
+     WHEN subscription_status = 'trial'   THEN 'Free Trial'
+     WHEN subscription_status = 'churned' THEN 'Lost'
+     ELSE 'Unknown'
+   END
+   ```
+   Correct. Simple CASE (`CASE subscription_status WHEN 'active' THEN ... END`) would also work for equality matches and would be slightly more compact, but searched CASE is the safer general-purpose form and is the right recommendation for the family.
+3. **Oracle DECODE NULL-equals-NULL semantics nuance is excellent**: Oracle `DECODE(col, NULL, 'X')` treats `NULL = NULL` as TRUE (Oracle DECODE has a special NULL-equality rule). Trino `CASE WHEN col = NULL` is **never TRUE** (SQL three-valued logic — `col = NULL` is UNKNOWN). The responder correctly tells the engineer to rewrite Oracle's NULL branch as `WHEN col IS NULL THEN ...` **as the first branch** (because branch order matters in searched CASE). This is a real Oracle→Trino migration trap and the responder caught it.
+4. **"For this example (no NULL branch in the original DECODE) simple CASE safe"** — correct scoping; the engineer's example doesn't have an explicit NULL branch, so the searched CASE given works as-is for non-NULL `subscription_status`. (If `subscription_status` IS NULL, both Oracle DECODE and Trino searched CASE fall through to ELSE 'Unknown' — same result.)
+5. **r27 §4.1A cite** appropriate (DECODE → CASE is a top-line Oracle migration row).
+
+**Soft Compl shave (-0.125)**: didn't surface that **`COALESCE` is the cleaner rewrite when Oracle DECODE is being used as a null-default** (e.g., Oracle `DECODE(col, NULL, 'default', col)` → Trino `COALESCE(col, 'default')`); minor since the engineer's example is a true multi-branch dispatch, not a null-default pattern.
+
+Cites r27 §4.1A.
 
 ---
 
 ## Carry-forward watches
 
 **Open light-monitors (no action this iter):**
-- `iter1210 Q2 r27 §663 :: cast-operator slip` (Postgres `::date` cast — Trino 467 requires `CAST(x AS DATE)`) — soft watch open
-- `iter1209 Q3 CURRENT_TIMESTAMP()-empty-parens audit-column slip` — soft watch open
-- `iter1208 Q3 dbt selector direction +model vs model+ for impact-analysis (exposures-selector)` — open
+- `iter1212 Q3 dbt seed column_types over-stated NOT-in-schema.yml` — **NEW** soft watch (this iter)
+- `iter1211 Q4 strpos-3-arg INSTR-Nth-occurrence assumed-absence` — open (4-8 iter re-probe)
+- `iter1210 Q2 r27 §663 :: cast-operator slip` (Postgres `::date` cast vs `CAST(x AS DATE)`) — open
+- `iter1209 Q3 CURRENT_TIMESTAMP()-empty-parens audit-column slip` — open
+- `iter1208 Q3 dbt selector direction +model vs model+ (exposures-selector)` — open
 - `iter1208 Q2 width_bucket boundary off-by-one labeling` — open
 - `iter1207 r13 §1293-1326 Spark-CALL inline-tag for GDPR delete recipe` — open
 - `iter1204 dbt --full-refresh on_table_exists atomicity framing` — open
 - `NVL-coercion` (latent SQL-best-practices secondary slip) — open
 - `$partitions metadata-table query semantics` — open
 
-**Closed this iter**: none (Q4 strpos-3-arg myth is a NEW watch, not a re-probe of an existing one).
+**Closed this iter**: none.
 
-**Status**: steady-state extended-phase. All required topics PASSED healthy margins. Q4 defect is a per-instance responder slip on already-defended content — accept and re-probe rather than over-fix.
+**Status**: steady-state extended-phase. All required topics PASSED healthy margins. Q3 over-statement is the first real (minor) inaccuracy this iter — added as a new soft watch, no resource churn.
 
 ---
 
@@ -121,9 +164,9 @@ Cites r27/r23 (resources are correct; responder slip).
 
 | Topic | Prior | Q score | New | Delta | Margin vs 3.5 |
 |---|---|---|---|---|---|
-| Iceberg table maintenance | 4.4461 / 219 | Q1=4.875 | 4.4480 / 220 | +0.0019 | +0.9480 |
-| SQL query best practices for OLAP | 4.5867 / 277 | Q2=4.875 | 4.5878 / 278 | +0.0011 | +1.0878 |
-| Improving complex SQL perf on Trino with dbt | 4.5678 / 42 | Q3=5.0 | 4.5779 / 43 | +0.0101 | +1.0779 |
-| Oracle PL/SQL → dbt + Trino SQL migration | 4.4786 / 173 | Q4=2.625 | 4.4680 / 174 | -0.0106 | +0.9680 |
+| Iceberg partition design for SaaS | 4.4480 / 57 | Q1=4.625 | 4.4511 / 58 | +0.0031 | +0.9511 |
+| Analytical query patterns on Iceberg+Trino | 4.5379 / 150 | Q2=4.75 | 4.5393 / 151 | +0.0014 | +1.0393 |
+| Improving complex SQL perf on Trino with dbt | 4.5779 / 43 | Q3=4.0 | 4.5648 / 44 | -0.0131 | +1.0648 |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.4680 / 174 | Q4=4.875 | 4.4703 / 175 | +0.0023 | +0.9703 |
 
-All required topics remain PASSED. No FIX-A. Next iter1212: BREADTH (re-probe strpos-3-arg myth under structurally-similar framing within 4-8 iters per the watch).
+All required topics remain PASSED. No FIX-A. **Next iter1213: BREADTH**, with strpos-3-arg myth re-probe per `iter1211` open watch and dbt seed `column_types` location re-probe per `iter1212` new watch within 4-8 iters each.
