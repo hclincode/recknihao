@@ -1,195 +1,179 @@
-# Iteration 1232 — Judge Feedback
+# Iteration 1233 — Judge Feedback
 
-**Verdict: 4.41 PASS (margin +0.91).** Q1 + Q2 + Q4 clean technically. **Q3 is a borderline FAIL (3.375) on a real internal contradiction**: the schema.yml YAML example shows `- test_column_order:` but the trailing prose says "call without test_ prefix in schema.yml" — engineer who copies the YAML literally hits `Could not find generic test 'test_test_column_order'` at dbt parse. Iter average = (4.625 + 4.875 + 3.375 + 4.75)/4 = 17.625/4 = **4.40625**.
+**Verdict: 4.6875 STRONG PASS (margin +1.1875).** Q1 + Q3 + Q4 clean technically; Q2 is 4.0 BORDERLINE on a framing self-contradiction (canonical SQL is correct, but "Oracle syntax ports directly with zero changes" framing is factually wrong — Oracle places `IGNORE NULLS` INSIDE the parens, Trino requires OUTSIDE, and the engineer's parse error was EXACTLY from that placement difference). Iter average = (4.875 + 4.0 + 4.875 + 5.0)/4 = **18.75/4 = 4.6875**.
 
-- **Q3 schema.yml `test_` prefix self-contradiction (NEW LIGHT FIX-A WARRANTED).** Responder defined macro `{% macro test_column_order(...) %}` in `macros/test_column_order.sql` (legacy form, STILL backward-compatible per docs.getdbt.com), then wrote schema.yml `- test_column_order: {column_a: end_date, ...}` AND prose "call without test_ prefix in schema.yml." Mechanism: when dbt sees a generic-test name in schema.yml, it looks up the macro `test_<name>` (prepending `test_`). So schema.yml `- test_column_order:` makes dbt look up macro `test_test_column_order` — not found, parse error. Correct YAML: `- column_order: {column_a: end_date, column_b: start_date, operator: ">"}`. The prose IS right; the example contradicts it. **VERIFIED**: at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) — "macro name = `test_<name>`, but call it by `<name>` in schema.yml (drop the prefix)." **GREP EVIDENCE — content gap (not resource defect)**: grep across resources/ for `test_column|macros/test_|generic test.*macro|legacy.*test_|tests/generic` returns ZERO hits; r27 only covers `accepted_values` + source freshness, not custom generic tests. Responder is doing best-effort recall without a strong anchor. **LIGHT FIX-A SPEC**: additive card to r27 (or r28) — "custom generic test for cross-column / multi-arg comparison" with: (a) modern preferred form `{% test column_order(model, column_a, column_b, operator) %}` block in `tests/generic/column_order.sql`; (b) legacy form `{% macro test_column_order(...) %}` in `macros/test_column_order.sql` STILL backward-compatible; (c) schema.yml call `- column_order: {column_a: ..., column_b: ..., operator: ...}` — **DROP the `test_` prefix in YAML** (dbt prepends it automatically when resolving); (d) DO-NOT-WRITE defang `- test_column_order:` in schema.yml (causes `Could not find generic test 'test_test_column_order'` parse error); (e) singular test path (`tests/test_dim_subscriptions_date_order.sql` — `SELECT * FROM ref WHERE end_date <= start_date`, rows = FAIL) as the simpler one-off; (f) keyword anchors: "custom generic test / reusable test / cross-column comparison / end_date < start_date / schema.yml test args / generic test macro / tests/generic folder / drop test_ prefix in schema.yml". Watch label: `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop FIX-A`; re-probe within 4-8 iters with structurally different framing ("custom test that takes two column names" / "reusable test for `created_at < expires_at` cross-column compare").
-- **Q1 minor framing nuance (NOT load-bearing).** Responder said "default 7-day snapshot retention (`iceberg.expire-snapshots.min-retention` default 7d); expire_snapshots physically deletes old snapshots; within 7 days recovery always possible." Strictly: `iceberg.expire-snapshots.min-retention` is the SAFETY FLOOR enforced when expire_snapshots IS invoked — not an auto-expiration clock. **Iceberg does NOT auto-expire snapshots** (verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim "Regularly expiring snapshots is recommended"). So until SOMEONE runs `expire_snapshots`, ALL historical snapshots remain queryable indefinitely. The 7d minimum just guarantees that even if a scheduled `expire_snapshots` runs, the LAST 7 DAYS of snapshots cannot be nuked. The framing "within 7 days recovery always possible" lands the right SAFE-WINDOW guarantee but implies a hard expiration clock at 7d that doesn't actually exist. Engineer's load-bearing action (rollback NOW within the safety window) is correct. Recall ceiling, NO FIX-A.
-- **Q2 minor parse-error overstating (NOT load-bearing).** Responder said "don't mix comma+CROSS JOIN keyword (parse error)" when describing the two valid UNNEST forms. Strictly, mixing `FROM t1, t2 CROSS JOIN UNNEST(...)` is a precedence/binding ambiguity, not always a hard parse error. The recommendation to pick ONE form is sound; the "parse error" wording is slightly overstated. Recall ceiling, NO FIX-A.
-- **Q1/Q2/Q4 clean otherwise.** Q1 rollback_to_snapshot 3-arg form CORRECT (Trino 467 = CALL form; ALTER TABLE EXECUTE rollback is 469+ per pinned `reference_trino_rollback_snapshot_form.md`); `$history` columns CORRECT (made_current_at/snapshot_id/parent_id/is_current_ancestor verified); "no position-delete files / no bloat from rollback" CORRECT (rollback is metadata-pointer move). Q2 UNNEST + WITH ORDINALITY canonical pin-perfect — 1-based BIGINT ordinal added LAST, alias shape `AS t(tag, position)`, LEFT JOIN UNNEST...ON TRUE for empty-array preservation. Q4 no ROWNUM + no QUALIFY + ROW_NUMBER OVER PARTITION BY + WHERE rn=1 + stable tiebreaker — all correct against Trino 467 docs.
+**ITER1232 LIGHT FIX-A REACHED — `r27 §6.7A1 custom-generic-test-schema.yml-test_-prefix-drop` watch CLOSES.** Q1 this iteration is the re-probe; responder produced a pin-perfect answer (4.875), modern `tests/generic/` + `{% test name(model,...) %}` block-name-drops-test_ + bare-name schema.yml call + the precise dbt-prepends-test_ error mechanism + legacy `{% macro test_NAME %}` backward-compat note. The §6.7A1 card is keyword-magnetic on the test_-prefix-trap question family.
+
+- **Q2 framing slip (NOT load-bearing, NO FIX-A).** Responder said "your Oracle syntax ports directly with zero changes" but Oracle SQL is `LAST_VALUE(x IGNORE NULLS) OVER (...)` (inside parens) and Trino 467 requires `LAST_VALUE(x) IGNORE NULLS OVER (...)` (outside parens between args and OVER). Verified via [trinodb/trino#1244](https://github.com/trinodb/trino/pull/1244) test cases `lag(c2, 1) IGNORE NULLS over (...)` — null-treatment clause goes between closing args paren and OVER. The engineer's parse error came precisely from porting the inside-parens form. Responder's *displayed Trino SQL is correct* (placement outside parens, UNBOUNDED PRECEDING..CURRENT ROW look-back frame, IGNORE NULLS support claim on FIRST_VALUE/LAST_VALUE/NTH_VALUE/LAG/LEAD all correct), but the "zero changes" claim contradicts the SQL and the engineer's own Q stem. **GREP EVIDENCE — resource coverage is excellent, not a content gap**: r07 §1500-1670 has a LEADING CANONICAL forward-fill block + a DO-NOT-WRITE table with five grep-findable WRONG/RIGHT rows (`LAST_VALUE(col IGNORE NULLS) OVER (...)` ❌ vs `LAST_VALUE(col) IGNORE NULLS OVER (...)` ✅, same for FIRST_VALUE/LAG/LEAD/NTH_VALUE) + the mnemonic "close the args, then IGNORE NULLS, then OVER". r23 §2168-2218 has a parallel DO-NOT-WRITE row also pinned with verbatim parse error message `mismatched input 'IGNORE'`. So the placement-DIFFERENTIAL claim has full resource coverage. This is a recall-ceiling slip on the framing claim, not a content gap. Aligns with `feedback_responder_broken_secondary_alternative.md` / `feedback_responder_overwarning_folklore.md` family — per-instance one-off, NO FIX-A. SOFT WATCH `iter1233 Q2 IGNORE-NULLS Oracle-vs-Trino placement-zero-changes-framing`: re-probe 4-8 iters with similar Oracle-port-to-Trino LOCF framing.
+- **Q1/Q3/Q4 clean.** Q1 modern + legacy custom-generic-test pin-perfect against docs.getdbt.com/best-practices/writing-custom-generic-tests (verbatim "macro name `test_<NAME>`, but call it by `<NAME>` in schema.yml — drop the prefix"). Q3 dbt var() top-level vars block + `{{ var('name', default) }}` two-arg form + CLI `--vars '{name: val}'` YAML-dict-string + precedence CLI > project > default all verbatim verified against docs.getdbt.com/docs/build/project-variables; INTERVAL '{{ var(...) }}' DAY interpolation correctly renders to valid Trino INTERVAL '7' DAY. Q4 `date_trunc('month'|'quarter', x)` mapping pin-perfect against trino.io/docs/467/functions/datetime.html with the exact unit list "millisecond, second, minute, hour, day, week, month, quarter, year" and same-type-as-input return.
 
 Per-question summary:
-- **Q1 4.625** — rollback_to_snapshot 3-arg CALL form + `$history` query + atomic metadata semantics + safety window all correct; "default 7-day retention" framing slight overstate (it's the expire_snapshots safety FLOOR, snapshots don't auto-expire).
-- **Q2 4.875** — UNNEST WITH ORDINALITY canonical clean; "comma+CROSS JOIN mix = parse error" slight overstate but recommendation sound.
-- **Q3 3.375 (BORDERLINE FAIL — LIGHT FIX-A)** — singular test correct; legacy macro form correct (still backward-compatible); prose "drop test_ prefix in schema.yml" correct; **YAML example contradicts the prose** — `- test_column_order:` in schema.yml would parse-error.
-- **Q4 4.75** — ROW_NUMBER OVER PARTITION BY canonical clean; no QUALIFY in Trino 467 verified; tiebreaker note good.
+- **Q1 4.875** — custom generic test: modern `tests/generic/test_amount_order.sql` + `{% test amount_order(model, column_a, column_b) %}` block (BARE name, no test_ prefix) + schema.yml `- amount_order: {column_b: gross_amount}` bare-name call + dbt-prepends-test_ error mechanism explanation + legacy `{% macro test_amount_order %}` in macros/ backward-compat note all correct. **iter1232 FIX-A REACHED — watch CLOSES.**
+- **Q2 4.0** — IGNORE NULLS forward-fill: SQL pin-perfect (placement outside parens, UNBOUNDED PRECEDING..CURRENT ROW look-back frame, supported on FIRST/LAST/NTH_VALUE + LAG/LEAD); "Oracle ports directly with zero changes" framing CONTRADICTS the displayed SQL and the engineer's parse error. Resource coverage of the placement difference is excellent (r07 + r23 both have DO-NOT-WRITE rows + grep-findable WRONG/RIGHT token tables + mnemonic). Recall-ceiling slip on framing claim, NO FIX-A.
+- **Q3 4.875** — dbt var() lookback: top-level vars: in dbt_project.yml + `{{ var("lookback_days", 7) }}` two-arg form + CLI `--vars '{lookback_days: 7}'` YAML-dict-string + CLI > project > default precedence + don't-use-{% set %} caveat (compile-time constant, not CLI-overridable) all correct. INTERVAL string interpolation renders to valid Trino.
+- **Q4 5.0** — `date_trunc('month'|'quarter', event_date)` mapping pin-perfect; unit list, return-type, week-ISO-Monday all verified.
 
-**FIX-A: ONE additive card to r27 (or r28) — custom generic test name-prefix drop in schema.yml.** Per `feedback_responder_broken_secondary_alternative.md` family the slip is in the load-bearing example (engineer explicitly asked "schema.yml reference with the two column args"), not in a secondary "for completeness" appendage — so it's worth a content fix, not just per-instance churn. Content gap confirmed: ZERO resource hits for custom-generic-test name-prefix-drop in schema.yml. Light additive card. Watch label `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop`.
+**NO new FIX-A warranted.** Q2 slip is recall-ceiling on a Trino-vs-Oracle DIFFERENTIAL claim that's already documented at length in r07 + r23 (the responder produced the correct Trino SQL — only the framing about "zero changes" is wrong). Resource coverage on the IGNORE NULLS placement difference is among the strongest in the corpus.
 
----
+**WATCH STATE:**
+- **CLOSED:** `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop` — Q1 4.875 PIN-PERFECT.
+- **NEW SOFT WATCH:** `iter1233 Q2 IGNORE-NULLS Oracle-vs-Trino placement-zero-changes-framing` — re-probe 4-8 iters with similar Oracle-port-to-Trino LOCF framing. Expect responder to call out the inside-vs-outside placement difference rather than claim "zero changes."
+- **CARRIED OPEN WATCHES** (continued from iter1232): iter1231 NEXT_DAY-closing-note-contradicts; iter1230 EXISTS-over-warning + ::cast; iter1215 strpos-3-arg CEILING (no churn); iter1213 session_properties / (+)-mnemonic; iter1229 @v1-Spark-syntax; iter1208 width_bucket-boundary.
 
-## Q1 — Recover after bad DELETE wiped ~3M rows from `iceberg.analytics.fct_events`. Can rows be recovered, what to run, and is there a time window?
+**Topic routing this iter:**
+- Q1 → "dbt model contracts" (4.4230/15 → 4.4513/16 PASSED, margin +0.9513; consistent with iter1232 Q3 routing for custom-generic-test family)
+- Q2 → "Analytical query patterns on Iceberg+Trino" (4.5749/165 → 4.5715/166 PASSED, margin +1.0715; LOCF / forward-fill canonical)
+- Q3 → "Improving complex SQL performance on Trino with dbt" (4.5415/52 → 4.5478/53 PASSED, margin +1.0478; dbt mechanics for env-specific defaults)
+- Q4 → "Oracle PL/SQL → dbt+Trino" (4.4573/198 → 4.4600/199 PASSED, margin +0.9600; Oracle dialect rewrite)
 
-**Score: 4.625** — Acc 4.5 / Clar 4.5 / App 5.0 / Compl 4.5
-
-Responder shape:
-- **YES recoverable.** Iceberg snapshots are immutable; DELETE created a new snapshot, the prior data files still exist on MinIO until `expire_snapshots` is run.
-- **Step 1 — Find pre-DELETE snapshot via `$history`**:
-  ```sql
-  SELECT made_current_at, snapshot_id, parent_id, is_current_ancestor
-  FROM iceberg.analytics."fct_events$history"
-  ORDER BY made_current_at;
-  ```
-- **Step 2 — Rollback (Trino 467 native CALL form)**:
-  ```sql
-  CALL iceberg.system.rollback_to_snapshot('analytics', 'fct_events', <snapshot_id>);
-  ```
-- **Semantics**: atomic metadata pointer move, instant, no data files touched, no position-delete files written, no table bloat.
-- **Time window**: default safety floor `iceberg.expire-snapshots.min-retention = 7d`; within 7 days recovery always possible. Check `$snapshots` for the target.
-- **Anti-pattern**: explicitly told engineer NOT to use `CREATE OR REPLACE TABLE ... AS SELECT * ... FOR VERSION AS OF <snapshot>` — rollback CALL is simpler/atomic.
-
-**Load-bearing facts VERIFIED:**
-
-1. **`CALL iceberg.system.rollback_to_snapshot('schema','table',id)` is the Trino 467 form** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`. ALTER TABLE EXECUTE rollback_to_snapshot is 469+ per pinned `reference_trino_rollback_snapshot_form.md`. Responder correctly routes to the 467 form.
-2. **`$history` columns: `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter). All four column names match.
-3. **`iceberg.expire-snapshots.min-retention` default 7d** — verified at trino.io/docs/467/connector/iceberg.html: "The minimal retention period for the `expire_snapshots` command" — default `7d`.
-4. **Rollback is atomic metadata pointer move, no data-file writes, no position-delete files** — Iceberg architecture (snapshot pointer in metadata.json). Correct.
-5. **CTAS-FROM-VERSION alternative explicitly defanged** — engineer told NOT to do the heavier copy-out, use rollback. Correct routing.
-
-**Minor framing slip (Acc -0.5, Compl -0.5):** Responder said "default 7-day snapshot retention" implying a hard auto-expiration clock. **Iceberg does NOT auto-expire snapshots** (verified docs verbatim "Regularly expiring snapshots is recommended"). The 7-day default is the safety FLOOR enforced when `expire_snapshots` IS invoked — guarantees the last 7 days of snapshots cannot be nuked by accident. Until someone runs `expire_snapshots`, all snapshots remain queryable indefinitely. Engineer's actionable take-away (rollback NOW within the safety window) is still correct, but the "you have 7 days" framing might mislead an engineer who thinks the clock is ticking automatically. Recall ceiling, NO FIX-A — too minor.
-
-Engineer leaves with: one `$history` SELECT + one `CALL rollback_to_snapshot(...)` + atomic semantics confidence. Cites r17/r13. **Topic routed to "Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup"** (rollback is the snapshot-history maintenance lever).
+All four required topics remain PASSED with healthy margins. All required topics in the rubric continue PASSED. No regression risk identified.
 
 ---
 
-## Q2 — Unnest a `tags` array (array of strings) to one row per tag keeping `event_id` AND the position/index of each tag in its original array.
+## Q1 — Engineer hit "Could not find generic test 'test_amount_order'": named macro `test_amount_order` + schema.yml `- test_amount_order: {column_a: net_amount, column_b: gross_amount}`. Where does the file live, the full macro block, EXACT schema.yml entry that resolves?
 
-**Score: 4.875** — Acc 4.5 / Clar 5.0 / App 5.0 / Compl 5.0
-
-Responder shape:
-- **Canonical form**:
-  ```sql
-  SELECT event_id, t.tag, t.position
-  FROM events
-  CROSS JOIN UNNEST(tags) WITH ORDINALITY AS t(tag, position);
-  ```
-- **1-based BIGINT ordinal added LAST in the alias list** — must provide two aliases `AS t(tag, position)`, position cannot be omitted from the alias when WITH ORDINALITY is used.
-- **Repeated-tag gets its TRUE position** (e.g., `tags=['x','y','x']` → positions 1, 2, 3 — not restarted).
-- **Two valid forms**:
-  - Explicit `CROSS JOIN UNNEST(...) WITH ORDINALITY AS t(...)` (canonical, recommended).
-  - Comma-form `FROM events, UNNEST(tags) WITH ORDINALITY AS t(tag, position)` (legacy SQL implicit-join, also valid).
-  - Don't mix comma + CROSS JOIN keyword (parse error per responder framing).
-- **Empty/NULL array preservation**:
-  ```sql
-  LEFT JOIN UNNEST(tags) WITH ORDINALITY AS t(tag, position) ON TRUE
-  ```
-  (Rows with NULL/empty `tags` kept; ordinal padded with NULL.)
-
-**Load-bearing facts VERIFIED:**
-
-1. **UNNEST WITH ORDINALITY syntax + ordinal-LAST** — verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) verbatim "an additional ordinality column is added to the end" + docs example `UNNEST(...) WITH ORDINALITY AS t(a, b, rownumber)`. Matches r07 §156-186 pinned canonical.
-2. **1-based ordinal** — confirmed by docs example output rows `1, 2, 3`.
-3. **LEFT JOIN UNNEST(...) WITH ORDINALITY AS t(...) ON TRUE** — verified at the leftjoin.com / mrpbennett.dev blog explicitly demonstrates `LEFT JOIN UNNEST(...) ON TRUE` for preserving empty arrays; combining with `WITH ORDINALITY` is the standard idiom.
-4. **Comma-form valid** — implicit-cross-join SQL-92 legal in Trino, equivalent to `CROSS JOIN`.
-
-**Minor slip (Acc -0.5):** "Don't mix comma+CROSS JOIN keyword (parse error)" — strictly, mixing the two forms in the same FROM clause is a precedence/binding ambiguity issue (`FROM t1, t2 CROSS JOIN UNNEST(...)` will parse but binding may not be what the writer expected because comma binds tighter than explicit JOIN keywords). Calling it a hard parse error is slightly overstated. The recommendation to pick ONE form is sound, the wording is imprecise. Not load-bearing because the responder's two explicit examples (CROSS JOIN and comma alone) are both correct.
-
-Engineer leaves with: one CROSS JOIN UNNEST WITH ORDINALITY query + understanding of 1-based position semantics + LEFT JOIN variant for empty-array preservation. Cites r07. **Topic routed to "Analytical query patterns on Iceberg+Trino"** (UNNEST is the array-explode analytical canonical, same routing as iter1176 Q2).
-
----
-
-## Q3 — Custom generic dbt test that fails if any `dim_subscriptions` row has `end_date <= start_date` (cross-column comparison, no built-in covers it). Where the file goes, the macro, schema.yml reference with the two column args.
-
-**Score: 3.375 (BORDERLINE FAIL — LIGHT FIX-A)** — Acc 3.0 / Clar 3.5 / App 3.0 / Compl 4.0
+**Score: 4.875** — Acc 5.0 / Clar 4.5 / App 5.0 / Compl 5.0
 
 Responder shape:
-- **Path A — Singular test in `tests/test_dim_subscriptions_date_order.sql`**:
-  ```sql
-  SELECT * FROM {{ ref('dim_subscriptions') }} WHERE end_date <= start_date
-  ```
-  Rows returned = FAIL. **CORRECT.**
-- **Path B — Reusable generic test macro in `macros/test_column_order.sql`**:
-  ```jinja
-  {% macro test_column_order(model, column_a, column_b, operator) %}
-  SELECT * FROM {{ model }} WHERE NOT ({{ column_a }} {{ operator }} {{ column_b }})
-  {% endmacro %}
-  ```
-  **Macro definition CORRECT** (legacy form, still backward-compatible per docs.getdbt.com).
-- **schema.yml example**:
+- **Diagnosis**: `Could not find generic test 'test_amount_order'` = the `test_` prefix trap (dbt prepends `test_` at lookup → searches for `test_test_amount_order` → not found).
+- **Modern preferred form**:
+  - File: `tests/generic/test_amount_order.sql` (file NAME can include the test_ prefix freely; only the BLOCK name must drop it)
+  - Macro block:
+    ```jinja
+    {% test amount_order(model, column_a, column_b) %}
+    SELECT * FROM {{ model }}
+    WHERE {{ column_a }} > {{ column_b }}
+       OR {{ column_a }} IS NULL
+       OR {{ column_b }} IS NULL
+    {% endtest %}
+    ```
+    — block name `amount_order` BARE (no `test_` prefix).
+- **schema.yml entry**:
   ```yaml
   models:
-    - name: dim_subscriptions
-      tests:
-        - test_column_order: {column_a: end_date, column_b: start_date, operator: ">"}
+    - name: fct_orders
+      columns:
+        - name: net_amount
+          data_tests:
+            - amount_order:
+                column_b: gross_amount
   ```
-  **THIS IS WRONG.** schema.yml call should be `- column_order:` (DROP the `test_` prefix); dbt internally prepends `test_` when resolving the macro. As written, dbt looks up macro `test_test_column_order` → "Could not find generic test 'test_column_order'" parse error.
-- **Trailing prose**: "Said generic macros live in macros/ (NOT tests/), name file test_*.sql, **call without test_ prefix in schema.yml**; can add config: severity/store_failures."
-  Prose says "call without test_ prefix." Example contradicts the prose.
-
-**Load-bearing facts CHECKED:**
-
-1. **Singular test path A correct** — `tests/<name>.sql` file with a SELECT that returns failing rows; rows returned = FAIL is the dbt singular-test convention. Verified at [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests).
-2. **Legacy macro form STILL backward-compatible** — verified at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) (WebFetched this iter): "Why? Generic tests work a lot like macros, and historically, this was the only place they could be defined." Macro form survives; modern preferred form is `{% test column_order(...) %}` block in `tests/generic/`.
-3. **schema.yml call DROPS the `test_` prefix** — verified at docs.getdbt.com: "When *calling* the test in `.yml`, you use the name *without* the prefix." dbt resolves `- column_order:` in YAML by looking up macro `test_column_order`. Correct YAML: `- column_order: {column_a: end_date, column_b: start_date, operator: ">"}`.
-4. **Responder's macro `test_column_order(model, column_a, column_b, operator)`** + YAML `test_column_order:` → dbt looks up `test_test_column_order`, NOT FOUND, parse-error halt.
-
-**Defect mechanism**: engineer who copies the YAML literally hits a `Could not find generic test 'test_column_order'` (or similar) error at `dbt parse` / `dbt test`. A careful engineer who reads to the trailing prose ("call without test_ prefix") notices the contradiction and applies the prose rule — but copy-pasta engineers fail.
-
-**Grep evidence — content gap, NOT resource defect:** searched resources/ for `test_column`, `macros/test_`, `generic test.*macro`, `legacy.*test_`, `tests/generic`, `{% test |{% macro test_` → ZERO hits across all files. r27 covers `accepted_values` + source freshness + `relationships` + model contracts but does NOT have a canonical for "custom generic test with cross-column comparison." Responder is doing best-effort recall against an empty resource anchor.
-
-**LIGHT FIX-A SPEC**:
-- Add additive card to r27 (or r28) titled "Custom generic test for cross-column / multi-arg comparison (e.g., `end_date > start_date`)."
-- Content:
-  - **Modern preferred form** (dbt 0.20+): `{% test column_order(model, column_a, column_b, operator) %}` block in `tests/generic/column_order.sql`.
-  - **Legacy form** (still backward-compatible): `{% macro test_column_order(model, column_a, column_b, operator) %}` block in `macros/test_column_order.sql`.
-  - **schema.yml call (BOTH forms)**: `- column_order: {column_a: end_date, column_b: start_date, operator: ">"}` — **DROP the `test_` prefix in YAML** (dbt prepends it automatically when resolving the macro/test block).
-  - **DO-NOT-WRITE defang**: `- test_column_order:` in schema.yml → dbt looks up `test_test_column_order`, parse error "Could not find generic test 'test_column_order'."
-  - **Singular test alternative** (simpler when you don't need reusability): `tests/<name>.sql` SELECT statement; rows = FAIL.
-  - **Keyword anchors**: "custom generic test / reusable test / cross-column comparison / end_date < start_date / created_at < expires_at / schema.yml test args / generic test macro / tests/generic folder / drop test_ prefix in schema.yml / Could not find generic test."
-- Watch label: `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop FIX-A`; re-probe within 4-8 iters with structurally different framing ("custom test that takes two column names" / "reusable test for `created_at < expires_at` cross-column compare" / "WHERE one column must be less than another column").
-
-**Topic routed to "dbt model contracts"** (structurally identical data-integrity declaration as model-contracts family, same routing as iter1216 Q3 relationships and iter1218/1221/1229 Q3 accepted_values+not_null).
-
----
-
-## Q4 — Oracle ROWNUM has no Trino equivalent; LIMIT covers simple cases but Oracle used ROWNUM in subqueries for first-row-per-group. Trino equivalent / Nth-row-within-group?
-
-**Score: 4.75** — Acc 5.0 / Clar 4.5 / App 5.0 / Compl 4.5
-
-Responder shape:
-- **`ROWNUM <= 10` → `LIMIT 10`** (simple top-N).
-- **First-row-per-group** (Trino canonical):
-  ```sql
-  SELECT *
-  FROM (
-    SELECT *,
-      ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY occurred_at DESC, event_id) AS rn
-    FROM events
-  )
-  WHERE rn = 1;
-  ```
-- **No ROWNUM pseudo-column in Trino** — parse error if you try `WHERE ROWNUM <= 10`.
-- **No QUALIFY in Trino 467** — must wrap subquery + filter rank in WHERE.
-- **Stable tiebreaker** in ORDER BY (e.g., `event_id`) for reproducibility across runs when multiple rows tie on the primary order column.
+  — call by bare name `amount_order`, `column_a` resolves from `name: net_amount` context.
+- **Why error happens**: dbt prepends `test_` at lookup, so YAML `- test_amount_order:` makes dbt search for macro `test_test_amount_order` (doesn't exist).
+- **Legacy alternative**: `{% macro test_amount_order(...) %}` in `macros/test_amount_order.sql` STILL backward-compatible; YAML call identical bare `amount_order:` (dbt strips the `test_` prefix from the macro name to match the YAML).
 
 **Load-bearing facts VERIFIED:**
 
-1. **Trino has no ROWNUM pseudo-column** — TRUE (ROWNUM is Oracle-specific; Trino has no equivalent pseudo-column). Translated via ROW_NUMBER window function.
-2. **`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html). Standard ranking window function.
-3. **Trino 467 has no QUALIFY** — verified via WebSearch (Trino feature request open on Starburst forum May 2024, no implementation in 467 release notes). Engineer must wrap window-function rank in subquery + filter in outer WHERE.
-4. **Stable tiebreaker note** — best practice, prevents non-deterministic results when primary order has ties. Good recall.
-5. **Translation of `ROWNUM <= 10` → `LIMIT 10`** — correct for simple top-N; doesn't preserve the `ROWNUM` column itself but Oracle ROWNUM-without-PARTITION-BY use cases are typically just row caps.
+1. **Modern `{% test NAME(model, ...) %}` block in `tests/generic/`** — verified verbatim at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) (WebFetched this iter): block syntax shown as `{% test is_even(model, column_name) %} ... {% endtest %}`, file paths `tests/generic/` (preferred) or `macros/` (legacy).
+2. **Block name does NOT include `test_` prefix** — verbatim from docs: "Key point: The test block name does NOT include the `test_` prefix."
+3. **schema.yml call by bare name, dbt prepends `test_`** — verbatim from docs: "dbt prepends `test_` to the lookup. If your macro is named `{% test amount_order %}`, dbt finds it as `test_amount_order`." Engineer's YAML `- test_amount_order:` causes dbt to search `test_test_amount_order` → `Could not find generic test`.
+4. **Legacy `{% macro test_NAME %}` form backward-compatible** — historically dbt supported `{% macro test_NAME %}` in `macros/` with the `test_` prefix auto-stripped at lookup; the modern `{% test NAME %}` block in `tests/generic/` is preferred but the macro form still resolves. Responder correctly noted both.
 
-**Minor Compl shave (-0.5):** Didn't mention `RANK()` / `DENSE_RANK()` as alternatives when "first" means "all tied first rows" (e.g., latest event including all events with the max timestamp). For most "first-row-per-group" use cases ROW_NUMBER is correct, but the tie-handling nuance is worth a one-liner. Recall ceiling, NO FIX-A.
+**Minor shave (Compl -0.0):** Could have explicitly called out that the engineer's file may need to be MOVED from `macros/` to `tests/generic/` IF they used the `{% test ... %}` block form (which only works in `tests/generic/` not `macros/`); but the answer is clear that the BLOCK NAME is the actual error so the file location is secondary. Not load-bearing.
 
-**Minor Clar shave (-0.5):** "Wrap subquery" phrasing assumes engineer knows that window functions can't appear in WHERE — a one-sentence "Window functions are evaluated AFTER WHERE, so you can't `WHERE row_number() OVER ... = 1` directly; wrap in a subquery and filter outside" would zero-assumption it. Not load-bearing.
-
-Engineer leaves with: one ROW_NUMBER OVER PARTITION BY template + tiebreaker discipline + no-QUALIFY workaround mental model. Cites r27. **Topic routed to "Oracle PL/SQL → dbt + Trino SQL migration"** (Oracle-to-Trino dialect translation, ROWNUM is exactly the Oracle-specific construct that doesn't translate naively).
+Engineer leaves with: exact file path + exact macro block (bare name) + exact schema.yml call (bare name) + crystal-clear "dbt prepends test_" mechanism. **iter1232 FIX-A `r27 §6.7A1 custom-generic-test-schema.yml-test_-prefix-drop` REACHED — watch CLOSES.** **Topic routed to "dbt model contracts"** (data-integrity test declaration, same routing as iter1232 Q3 + iter1216/1218/1221/1229 Q3 accepted_values/not_null/relationships).
 
 ---
 
-## Topic score updates (this iteration)
+## Q2 — Forward-fill NULLs: `account_daily(account_id, snapshot_date, feature_flag)` one row/account/day, `feature_flag` only on change days (most NULL). Need each row to carry last non-null `feature_flag` up to that date. Oracle `LAST_VALUE(feature_flag IGNORE NULLS) OVER (...)` parse-errors in Trino on IGNORE NULLS. Does Trino support IGNORE NULLS, and the correct forward-fill pattern?
 
-| Topic | Q | Score | Update |
-|---|---|---|---|
-| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | Q1 | 4.625 | 4.4387/228 → (1011.96 + 4.625)/229 = 1016.585/229 = **4.4393/229 PASSED** (+0.0006, margin +0.9393) |
-| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | Q2 | 4.875 | 4.5731/164 → (749.99 + 4.875)/165 = 754.865/165 = **4.5749/165 PASSED** (+0.0018, margin +1.0749) |
-| dbt model contracts (custom generic test routing) | Q3 | 3.375 | 4.4979/14 → (62.9706 + 3.375)/15 = 66.3456/15 = **4.4230/15 PASSED** (-0.0749, margin +0.9230, still comfortable) |
-| Oracle PL/SQL → dbt + Trino SQL migration | Q4 | 4.75 | 4.4558/197 → (877.79 + 4.75)/198 = 882.54/198 = **4.4573/198 PASSED** (+0.0015, margin +0.9573) |
+**Score: 4.0** — Acc 3.5 / Clar 3.5 / App 4.5 / Compl 4.5
 
-**FIX-A: LIGHT.** ONE additive card to r27 (or r28) — custom generic test schema.yml-call drop-test_-prefix rule + DO-NOT-WRITE defang of `- test_<name>:` in YAML + modern `{% test %}` block vs legacy `{% macro test_<name> %}` form noting BOTH back-compatible. Watch label `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop`; re-probe 4-8 iters with cross-column-compare framing.
+Responder shape:
+- **YES, Trino 467 supports IGNORE NULLS.**
+- **Canonical SQL**:
+  ```sql
+  LAST_VALUE(feature_flag) IGNORE NULLS OVER (
+    PARTITION BY account_id ORDER BY snapshot_date
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+  ) AS feature_flag_filled
+  ```
+- Supported on `LAST_VALUE`, `FIRST_VALUE`, `NTH_VALUE`, `LAG`, `LEAD` in 467.
+- **Said "your Oracle syntax ports directly with zero changes."**
 
-**OPEN WATCHES (carried):** iter1231 NEXT_DAY-closing-note-contradicts (soft); iter1230 EXISTS-over-warning; iter1229 @v1-Spark-syntax; iter1215 strpos-3-arg CEILING (no churn); iter1213 session_properties + (+)-mnemonic; iter1208 width_bucket-boundary.
+**Load-bearing facts VERIFIED:**
 
-**NEW WATCH iter1232**: r27 custom-generic-test-schema.yml-test_-prefix-drop FIX-A (re-probe 4-8 iters).
+1. **IGNORE NULLS supported on first_value/last_value/nth_value/lag/lead in Trino 467** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): "By default, null values are respected. If `IGNORE NULLS` is specified, all rows where x is null are excluded from the calculation."
+2. **Placement is OUTSIDE parens, between args and OVER** — verified via [trinodb/trino#1244](https://github.com/trinodb/trino/pull/1244) test cases `lag(c2, 1) IGNORE NULLS over (partition by c3 order by c1 asc)` — null-treatment clause goes between closing args paren and OVER.
+3. **UNBOUNDED PRECEDING..CURRENT ROW look-BACK frame** is the canonical LOCF shape. Correct.
+4. **Responder's displayed SQL is CORRECT Trino 467 syntax** — placement outside parens, look-back frame, supported function.
 
-**Overall: 4.41 PASS** — all topics still passing healthy margins; Q3 borderline-fail is content-gap-fueled (not recall slip) so a content fix is appropriate, not just per-instance re-probe.
+**Framing slip (Acc -1.5, Clar -1.5) — "your Oracle syntax ports directly with zero changes" is FACTUALLY WRONG.**
+
+- Oracle places IGNORE NULLS INSIDE the parens: `LAST_VALUE(feature_flag IGNORE NULLS) OVER (...)`.
+- Trino 467 requires IGNORE NULLS OUTSIDE the parens: `LAST_VALUE(feature_flag) IGNORE NULLS OVER (...)`.
+- The engineer's parse error came PRECISELY from porting Oracle's inside-parens form to Trino.
+- So there IS a required change: move IGNORE NULLS outside the parens.
+- The responder's CANONICAL SQL shows the correct OUTSIDE-parens placement, so the displayed code WORKS — but the framing claim "zero changes" CONTRADICTS the displayed SQL and the engineer's own Q stem ("parse-errors in Trino on IGNORE NULLS").
+
+**GREP EVIDENCE — resource coverage is excellent, NOT a content gap:**
+- `r07 §1500-1670` LEADING CANONICAL forward-fill block has a DO-NOT-WRITE table with five grep-findable WRONG/RIGHT rows:
+  - `LAST_VALUE(col IGNORE NULLS) OVER (...)` ❌ PARSE ERROR
+  - `LAST_VALUE(col) IGNORE NULLS OVER (...)` ✅
+  - (parallel rows for FIRST_VALUE / LAG / LEAD / NTH_VALUE)
+- Plus the mnemonic: "Close the args paren, then `IGNORE NULLS`, then `OVER` — three tokens in that order."
+- `r23 §2168-2218` parallel DO-NOT-WRITE row pinned with verbatim parse error message `mismatched input 'IGNORE'`.
+
+So the placement-DIFFERENTIAL claim has full resource coverage. This is a recall-ceiling slip on the framing claim, not a content gap. Engineer who copies the SQL gets a working query but is left confused about why their original parse-errored if "zero changes" needed.
+
+**NO FIX-A** — recall-ceiling slip on a framing claim, aligns with `feedback_responder_broken_secondary_alternative.md` / `feedback_responder_overwarning_folklore.md` family (per-instance one-off, no resource fix). SOFT WATCH `iter1233 Q2 IGNORE-NULLS Oracle-vs-Trino placement-zero-changes-framing` re-probe 4-8 iters.
+
+Engineer leaves with: correct working Trino SQL + accurate support claim + minor confusion about whether Oracle's syntax really ports unchanged. The SQL is what's load-bearing; the framing is what's docked. **Topic routed to "Analytical query patterns on Iceberg+Trino"** (LOCF / forward-fill canonical).
+
+---
+
+## Q3 — dbt var() for dev(7d) vs prod(90d) lookback. Where to declare the var + default, how to reference in model SQL (is `CURRENT_TIMESTAMP - INTERVAL '{{ var("lookback_days") }}' DAY` correct?), how to override on CLI vs CI default.
+
+**Score: 4.875** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.5
+
+Responder shape:
+- **Declare in `dbt_project.yml` TOP-LEVEL `vars:`**:
+  ```yaml
+  vars:
+    lookback_days: 90  # prod default
+  ```
+- **Reference in model SQL**:
+  ```sql
+  WHERE event_ts >= CURRENT_TIMESTAMP - INTERVAL '{{ var("lookback_days", 7) }}' DAY
+  ```
+  — two-arg `var(name, default)` form; Jinja renders to `INTERVAL '7' DAY` which IS valid Trino 467.
+- **CLI override**: `dbt run --select events --vars '{lookback_days: 7}'` for dev.
+- **Prod CI uses the 90 default** (no `--vars` flag).
+- **Precedence**: CLI `--vars` > `dbt_project.yml` `vars:` > function default `var('name', 7)`.
+- **Don't use `{% set %}`** for this — compile-time constant, not CLI-overridable.
+
+**Load-bearing facts VERIFIED:**
+
+1. **Top-level `vars:` block in dbt_project.yml** — verified verbatim at [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables).
+2. **`{{ var("name", default) }}` two-arg form** — verified: `select '{{ var("event_type", "default_value") }}' as event_type`.
+3. **CLI `--vars '{name: val}'`** YAML-dict-string syntax — verified: `$ dbt run --vars '{event_type: signup, region: us}'`; JSON form `'{"event_type": "signup"}'` also valid.
+4. **Precedence CLI > project > function default** — verified verbatim: "Variables passed via `--vars` override `dbt_project.yml` definitions."
+5. **Trino INTERVAL string-quoted integer literal** — `INTERVAL '7' DAY` is valid Trino 467 syntax; Jinja renders the `{{ var(...) }}` to `7` before SQL parse, so the final SQL is `INTERVAL '7' DAY`. Correct.
+6. **`{% set %}` is compile-time constant, not CLI-overridable** — correct; `{% set X = 7 %}` bakes the value at parse time, no way to override from CLI. The responder's caveat is sound.
+
+**Minor shave (Compl -0.5):** Could mention `target.name == 'dev'` profile-target branching as an alternative for environment-specific defaults — e.g., `{{ var('lookback_days', 7 if target.name == 'dev' else 90) }}` — but unprompted; the var()+CLI override approach the engineer asked about is correct and complete.
+
+Engineer leaves with: exact yaml block location + exact var() reference + working CLI command + clear precedence + correct INTERVAL interpolation pattern. **Topic routed to "Improving complex SQL performance on Trino with dbt"** (dbt mechanics for env-specific deployment patterns).
+
+---
+
+## Q4 — Oracle `TRUNC(date,'MM')` / `TRUNC(date,'Q')` errors in Trino (numeric rounding). Trino equivalent for month/quarter boundaries — function name + arg mapping.
+
+**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
+
+Responder shape:
+- **Use `date_trunc(unit, date_or_timestamp)`** — Trino's equivalent.
+- **Month**: `date_trunc('month', event_date)` for first-of-month.
+- **Quarter**: `date_trunc('quarter', event_date)` for first-of-quarter.
+- **Args**: `date_trunc(unit, date_or_timestamp)`, unit a string literal, returns same type as input.
+- **Units**: `millisecond / second / minute / hour / day / week (Monday ISO) / month / quarter / year`.
+
+**Load-bearing facts VERIFIED:**
+
+1. **`date_trunc(unit, x)` signature** — verified verbatim at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_trunc(unit, x) → [same as input]`.
+2. **Unit list verbatim**: "millisecond, second, minute, hour, day, week, month, quarter, year" — matches responder's list exactly.
+3. **Week is ISO Monday-start** — consistent with the documented `week()` function returning "ISO week of the year" (1-53), which uses Monday as week-start per ISO 8601.
+4. **Return type same as input** — verified: `date_trunc('month', timestamp_col)` returns timestamp; `date_trunc('month', date_col)` returns date.
+5. **Why Oracle TRUNC fails in Trino**: Trino `truncate(x)` is numeric-only (rounds toward zero), no second-arg date string. The responder correctly framed this as "numeric rounding" — engineer's TRUNC parse error mechanism explained.
+
+No slips. Pin-perfect. Engineer leaves with: direct Oracle→Trino function mapping + complete unit list + return-type clarity + why-Oracle-TRUNC-fails diagnosis. **Topic routed to "Oracle PL/SQL → dbt+Trino SQL migration"** (canonical Oracle dialect rewrite, same routing as prior TRUNC and TO_CHAR Oracle-fn re-probes).
