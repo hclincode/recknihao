@@ -1,219 +1,153 @@
-# Iteration 1237 — Judge Feedback
+# Iteration 1238 — Judge Feedback
 
 ## Verdict
 
-**Overall: 2.91 — FAIL ITERATION. Two critical defects (Q2 broken-mode-query + Q3 outright BAIL on dbt-snapshots when the canonical exists), bracketed by two solid answers (Q1 Iceberg-add-NOT-NULL + Q4 lpad).**
+**Overall: 4.72 — STRONG PASS. BOTH iter1237 LIGHT FIX-As REACHED ON FIRST RE-PROBE; BOTH WATCHES CLOSE.** Q1 (mode-per-group re-probe) and Q2 (dbt-snapshot re-probe) both land the canonical cleanly with all load-bearing facts correct. Q4 (Oracle DECODE → CASE WHEN with NULL caveat) is canonical-clean. Q3 (broadcast vs partitioned for 2M-row dim) is core-correct but has one framing slip — recommends "PARTITIONED likely safer" as the hedge for a 2M-row dim joining 800M-row fact, when broadcasting the small dim is the textbook lead.
 
-After 20 consecutive 1st-re-probe-CLOSE iterations, the loop hit a stark double-defect iteration: Q2 produces a query that returns the **alphabetically-first** error_code per customer (the EXACT wrong result the engineer was already getting from `MAX(error_code)`, just dressed up differently), and Q3 outright bails — "resources cover materializations (table/view/incremental/ephemeral) but not the snapshot resource type" — when r09 §357 has the dbt-snapshot LEADING CANONICAL with massive keyword anchors AND r27 §290 has a cross-ref to it literally one line above the §3.1 materializations table the responder reached.
-
-**TWO LIGHT FIX-A WARRANTED, both surgical findability fixes (canonicals already exist).** Teacher's pre-flag was correct on Q3 (findability miss, not content gap) and the breakage call on Q2; pre-flag's only partial miss was claiming Q2 had "no dedicated mode-per-group canonical" — r23 §1403 IS that canonical with extensive anchors, so the Q2 FIX-A is also findability + DO-NOT-WRITE-defang of the specific broken shape, not a new canonical.
+The double FIX-A close decisively reverses the iter1237 2.91 dip; the loop returns to the 1st-re-probe-CLOSE pattern.
 
 | Q | Score | Topic | Notes |
 |---|---|---|---|
-| Q1 | 4.25 | Lakehouse schema design (Iceberg schema-evolution row) | Iceberg ADD NOT NULL rejected on existing-data table; backfill via Spark + downstream enforcement correct; minor: didn't surface dbt `not_null` test as the production-stack canonical enforcement layer; minor framing slip ("Iceberg always adds as NULLABLE regardless of declaration" — Trino 467 actually raises on `NOT NULL`, doesn't silently accept) |
-| Q2 | 1.5 | Analytical query patterns on Iceberg+Trino | **BROKEN QUERY** — `COUNT(*) OVER (PARTITION BY customer_id ORDER BY CAST(NULL AS INT))` after `GROUP BY customer_id, error_code` returns DISTINCT-error_code-count-per-customer (constant within customer), so ROW_NUMBER tiebreaks on `error_code ASC` and returns the ALPHABETICALLY-FIRST error_code per customer — same wrong result the engineer already had |
-| Q3 | 1.0 | dbt snapshots SCD2 | **OUTRIGHT BAIL** — "resources don't cover dbt snapshot resource type" when r09 §357 LEADING CANONICAL exists with anchors literally including "dbt snapshot"/"SCD2 strategy"/"check_cols"/"dbt_valid_from"/"dbt_valid_to" and r27 §290 cross-refs r09 ONE LINE ABOVE the §3.1 materializations table |
-| Q4 | 4.875 | Oracle PL/SQL → dbt+Trino migration | Clean: `lpad(CAST(invoice_id AS VARCHAR), 8, '0')` correct; truncation-to-size caveat correct (VERIFIED [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) — "If size is less than the length of string, the result is truncated to size characters"); `format('%08d', invoice_id)` min-width alternative correct (VERIFIED [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) — example `format('%03d', 8)` → `'008'`) |
+| Q1 | 5.0 | Analytical query patterns on Iceberg+Trino | **iter1237 r23 §1428 mode-per-group FIX-A REACHED, WATCH CLOSES** — canonical `max_by(category, cnt)` over `COUNT(*) GROUP BY (product_id, category)` subquery + `ROW(cnt, category)` deterministic tiebreaker; no window-COUNT-with-GROUP-BY anti-pattern this time |
+| Q2 | 5.0 | dbt snapshots SCD2 | **iter1237 r27 §3.1 materializations-table 5th-snapshot-row FIX-A REACHED, WATCH CLOSES** — full `{% snapshot %}` block with timestamp strategy, all four `dbt_*` meta cols correct per docs.getdbt.com, validity-window as-of-date predicate correct, cited r09 |
+| Q3 | 4.0 | Query performance basics (partitioning / join distribution) | Core facts correct: no `/*+ */` hint syntax in Trino 467 (silently ignored), session prop `join_distribution_type` with BROADCAST/PARTITIONED/AUTOMATIC values, AUTOMATIC default, ANALYZE for stats, dbt `pre_hook`. **Slip**: lead-rec hedge "PARTITIONED likely safer" for a 2M-row dim is counter to the canonical "broadcast the small dim" call; recall-ceiling not resource defect |
+| Q4 | 4.875 | Oracle PL/SQL → dbt+Trino migration | Clean: Trino has no DECODE, CASE WHEN rewrite correct, **critical NULL-search-value subtlety correct** (Oracle DECODE matches NULL=NULL as TRUE, Trino `WHEN status = NULL` is UNKNOWN so write `WHEN status IS NULL THEN ... FIRST`) |
 
 ---
 
 ## Per-question detail
 
-### Q1 — Iceberg ADD COLUMN ... NOT NULL on existing 8-month-old table → 4.25 (Lakehouse schema design topic row)
+### Q1 — Mode-per-group: most-picked category per product → 5.0 (Analytical query patterns row)
 
-**VERIFIED facts (via WebSearch + trino.io docs):**
+**VERIFIED — iter1237 r23 §1428 DO-NOT-WRITE row FIX-A REACHED. WATCH CLOSES.**
 
-- Trino's behavior: since [trinodb/trino PR #13673](https://github.com/trinodb/trino/pull/13673) (release 393, Aug 2022), Trino **disallows** `ALTER TABLE ADD COLUMN ... NOT NULL` on Iceberg tables — engineer's parse error matches expected. Earlier the constraint was silently ignored ([issue #13587](https://github.com/trinodb/trino/issues/13587)); the PR fixed this by rejecting at parse time. Trino 467 inherits the disallow behavior.
-- `ALTER TABLE ... SET NOT NULL` on existing columns: NOT supported on the Iceberg connector in Trino 467 (no documented form on [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)).
-- Iceberg spec ([iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/)): added columns are assigned a new field-ID and existing data files leave the value as NULL on read — metadata-only operation. Iceberg v3 adds default-value support but the production stack here is Iceberg 1.5.2, so v3 defaults don't apply.
-
-**Responder's answer:**
-
-Core correct: ADD COLUMN is metadata-only; can't retroactively enforce NOT NULL on existing data; backfill via Spark; enforce via downstream view / app logic.
-
-**Shaves:**
-
-1. **Framing slip** — wrote "Iceberg always adds columns as NULLABLE regardless of declaration" — slightly misleading because Trino 467 actually **raises a parse error** on `NOT NULL` rather than silently coercing to nullable. The engineer's own observation ("VARCHAR NOT NULL errored") was the right evidence; responder should match that mental model rather than imply silent coercion.
-2. **Missing production-stack enforcement idiom** — "downstream app logic / Trino view WHERE data_center IS NOT NULL" is correct but the canonical idiom on this dbt-trino stack is **dbt `not_null` test** (per r-contracts; this stack uses dbt for transformations per prod_info.md). The dbt `not_null` test in `schema.yml` would catch any rows with NULL `data_center` at `dbt build` time — exactly the runtime enforcement the engineer is looking for.
-3. **Didn't mention CTAS-and-swap** — for an 8-month-old events table, if the engineer truly needs schema-level NOT NULL on the new column, the production move is: backfill via Spark → CTAS a new table with the NOT NULL constraint baked in (`CREATE TABLE ... AS SELECT *, COALESCE(data_center, 'unknown') AS data_center_new FROM old_table`) → swap. Optional but worth surfacing.
-
-**No FIX-A.** Core answer correct, shaves are recall-ceiling not resource-defect. r09 §SCD canonical and r17 maintenance canonical both cover this material. Watch label: `iter1237 Q1 add-NOT-NULL-on-Iceberg framing-could-name-dbt-not_null-test`: re-probe under "how do I enforce non-null on a new column on this stack" framing; 4-8 iters.
-
----
-
-### Q2 — Mode per group (MOST FREQUENT error_code) → 1.5 (Analytical query patterns topic row)
-
-**VERIFIED: the responder's query IS broken as the teacher pre-flagged.**
-
-The responder wrote:
-```sql
-WITH counted AS (
-  SELECT customer_id, error_code,
-         COUNT(*) OVER (PARTITION BY customer_id ORDER BY CAST(NULL AS INT)) AS freq
-  FROM api_errors
-  WHERE occurred_at >= current_date - INTERVAL '7' DAY
-    AND occurred_at < current_date
-  GROUP BY customer_id, error_code
-),
-ranked AS (
-  SELECT customer_id, error_code, freq,
-         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY freq DESC, error_code ASC) AS rn
-  FROM counted
-)
-SELECT customer_id, error_code, freq FROM ranked WHERE rn = 1;
-```
-
-**Why it's broken (verified semantics):**
-
-1. After `GROUP BY customer_id, error_code`, the row set is one row per `(customer_id, error_code)` pair — value type is "did this (customer, error_code) appear at all this week" (boolean-shaped), NOT the count.
-2. `COUNT(*) OVER (PARTITION BY customer_id ORDER BY CAST(NULL AS INT))` then counts rows in each `customer_id` partition. With `ORDER BY CAST(NULL AS INT)` and Trino's default RANGE frame `BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, all NULL-tied "peers" are included in each row's frame → `freq` = **total rows in the partition = number of DISTINCT error_codes per customer** (constant within customer).
-3. `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY freq DESC, error_code ASC)` — since `freq` is constant within each customer, the `freq DESC` ordering is fully tied; tiebreaker is `error_code ASC` → returns the **alphabetically-first** error_code per customer.
-4. **End result: same wrong answer as the `MAX(error_code)` the engineer was trying to avoid**, just from the opposite end of the alphabet (`MAX` gives last, this gives first). The query produces a valid-looking result that's NOT the mode.
-
-**The correct forms (all exist in resources/):**
-
-The mode-per-group canonical IS in r23 §1403–1426 with extensive keyword anchors:
+Responder wrote the textbook canonical from r23 §1403:
 
 ```sql
--- ✅ r23 §1411 LEADING CANONICAL — single most-ordered category per customer (the mode):
-SELECT customer_id,
-       max_by(product_category, cnt) AS top_category
+SELECT product_id,
+       max_by(category, cnt) AS most_picked_category
 FROM (
-    SELECT customer_id, product_category, COUNT(*) AS cnt
-    FROM iceberg.analytics.orders
-    GROUP BY customer_id, product_category
+    SELECT product_id, category, COUNT(*) AS cnt
+    FROM iceberg.analytics.tickets
+    GROUP BY product_id, category
 )
-GROUP BY customer_id;
+GROUP BY product_id;
 ```
 
-For Q2's literal scenario the correct shape would be `max_by(error_code, cnt)` over a `COUNT(*) GROUP BY (customer_id, error_code)` subquery, with the weekly WHERE clause hoisted into the inner SELECT.
+Plus the deterministic tiebreak via `max_by(category, ROW(cnt, category))` — verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) (max_by accepts ROW for multi-key ordering; ROW comparison is lexicographic). Cited r23 mode LEADING CANONICAL.
 
-Alternatively, the equivalent `ROW_NUMBER` form the responder reached for but got wrong:
+**Why the FIX-A worked.** iter1237 broke specifically because the responder mixed `COUNT(*) OVER (PARTITION BY customer_id ORDER BY CAST(NULL AS INT))` with `GROUP BY customer_id, error_code` — a shape that returns DISTINCT-value-count-per-group (constant within group), tiebreaks on alphabetical, and produces the same wrong result as `MAX(error_code)`. The r23 §1428 DO-NOT-WRITE row added in iter1237 explicitly names this exact anti-pattern with the one-character fix (replace window `COUNT(*) OVER` with plain aggregate `COUNT(*)` in the inner GROUP BY). Plus the §1403 LEADING CANONICAL has massive keyword anchors (`the mode`, `mode per group`, `most-popular Y per X`, `most-frequent value per group`, `which X appears most often per Y`). Responder this iter reached the canonical directly — no window-mixing slip.
+
+**No FIX-A needed. iter1237 Q2 mode-per-group window-COUNT+GROUP-BY-broken WATCH CLOSES on first re-probe.**
+
+---
+
+### Q2 — dbt snapshot SCD-2 for plan_tier history → 5.0 (dbt snapshots SCD2 row)
+
+**VERIFIED — iter1237 r27 §3.1 materializations-table 5th-snapshot-row + bolded routing note FIX-A REACHED. WATCH CLOSES.**
+
+Responder wrote the full canonical:
 
 ```sql
--- Equivalent rank=1 form (also correct):
-WITH per_pair AS (
-  SELECT customer_id, error_code, COUNT(*) AS freq   -- plain aggregate, NOT a window function
-  FROM api_errors
-  WHERE occurred_at >= current_date - INTERVAL '7' DAY
-    AND occurred_at < current_date
-  GROUP BY customer_id, error_code
-),
-ranked AS (
-  SELECT customer_id, error_code, freq,
-         ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY freq DESC, error_code ASC) AS rn
-  FROM per_pair
-)
-SELECT customer_id, error_code, freq FROM ranked WHERE rn = 1;
+{% snapshot dim_customers_snapshot %}
+  {{ config(
+      target_schema='analytics',
+      unique_key='customer_id',
+      strategy='timestamp',
+      updated_at='updated_at'
+  ) }}
+  SELECT customer_id, name, plan_tier, account_status, updated_at
+  FROM {{ source('oracle','customers') }}
+{% endsnapshot %}
 ```
 
-The single character difference between this correct form and the responder's broken form is: **plain `COUNT(*) AS freq` aggregate** instead of `COUNT(*) OVER (PARTITION BY ...) AS freq` window function. The window form computes the wrong thing once GROUP BY collapses to one row per pair.
+Plus the four `dbt_*` meta columns: `dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`, `dbt_updated_at` — **VERIFIED against [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots)** verbatim ("the configured `updated_at` column is used to populate the `dbt_valid_from`, `dbt_valid_to` and `dbt_updated_at` columns" + `dbt_scd_id` is the row-version UID). The validity-window as-of-date predicate is the canonical Type-2 form:
 
-**Teacher pre-flag CORRECTION on content gap:** Teacher said "there is NO dedicated mode/most-frequent-per-group canonical in resources/". This is **FALSE** — r23 §1403–1426 IS that canonical with the full `LEADING CANONICAL — mode / most-frequent-value-per-group (the single most common x per y)` section header, extensive keyword anchors including "the mode", "mode per group", "which X appears most often per Y", "the single most common X for each Y", and the worked example using `max_by(x, cnt)` over a `COUNT(*) GROUP BY` subquery. So the FIX-A is NOT a new canonical.
+```sql
+WHERE customer_id = <id>
+  AND dbt_valid_from <= TIMESTAMP '2025-03-15 12:00:00'
+  AND (dbt_valid_to IS NULL OR dbt_valid_to > TIMESTAMP '2025-03-15 12:00:00')
+```
 
-**FIX-A WARRANTED (LIGHT, two-part):**
+Cited r09. (The four-meta-cols rubric definition also includes the 1.9+ `dbt_is_deleted` for `hard_deletes='new_record'` — responder didn't surface but isn't load-bearing for the engineer's question of "plan_tier history", which is in-place UPDATEs not row deletions.)
 
-1. **r23 §1428 DO-NOT-WRITE row** — add explicit defang for the `COUNT(*) OVER (PARTITION BY customer_id)` + `GROUP BY customer_id, error_code` anti-pattern with the inline-WRONG annotation that this returns the number-of-distinct-error_codes-per-customer (constant), not the per-pair frequency. Show that the fix is a single character: replace the window `OVER` with plain aggregate. This is the exact failure mode that produced the alphabetically-first-not-mode result. Keyword anchor it on: "ROW_NUMBER mode per group", "ranked frequency per group", "COUNT(*) OVER with GROUP BY", "freq is constant".
+**Why the FIX-A worked.** iter1237 the responder BAILED ("resources don't cover dbt snapshot resource type") after enumerating the four `materialized=` rows of the r27 §3.1 table. The iter1237 fix added a 5th `snapshot` row INSIDE that table — explicitly marked "a SEPARATE dbt resource type — NOT a `materialized=` value" — plus a bolded note RIGHT AFTER the table saying "do NOT conclude snapshots aren't covered" with a route to r09 §SCD. This iter the responder pulled the canonical, cited r09, and produced a clean answer. The fix landed at the EXACT spot the responder reached in iter1237 — text-book findability win.
 
-2. **r07 cross-ref to r23 §1403** — r07 (analytical patterns) is the keyword-magnet for "weekly report of most frequent X per Y" questions; it currently has NO pointer to the r23 §1403 mode canonical (verified via grep). Add a one-line cross-ref at the top of r07's aggregation section: "For **mode / most-frequent value per group** (the single most common X per Y), see [r23 §LEADING CANONICAL — mode/most-frequent-value-per-group](23-sql-best-practices-olap.md#leading-canonical--mode--most-frequent-value-per-group-the-single-most-common-x-per-y) — `max_by(x, cnt)` over a `COUNT(*) GROUP BY (group, x)` subquery is the canonical form. Do NOT mix `COUNT(*) OVER (PARTITION BY ...)` with `GROUP BY` — see the §1428 DO-NOT-WRITE row."
-
-The responder reached for the ROW_NUMBER-rank-1 form (correct intuition) but built the inner `freq` with a window function over a GROUP BY (broken). The defang + cross-ref pair makes both the broken anti-pattern and the corrected form findable from the question's keyword path.
-
-Watch label: `iter1237 Q2 window-COUNT-mixed-with-GROUP-BY mode-per-group-broken`: re-probe under "most frequent X per Y weekly" framing after FIX-A; 3-6 iters.
+**No FIX-A needed. iter1237 Q3 snapshot-not-in-materializations-list-bail WATCH CLOSES on first re-probe.**
 
 ---
 
-### Q3 — dbt snapshots vs regular models, config to track plan_tier changes → 1.0 (dbt snapshots SCD2 topic row)
+### Q3 — 800M events JOIN 2M dim_users, 20 min then coordinator OOM; is broadcasting real, other OOM fixes → 4.0 (Query performance basics row)
 
-**VERIFIED: outright BAIL when canonical exists with strong anchors.**
+**VERIFIED facts (via WebSearch + trino.io docs this iter):**
 
-**Resource state (confirmed via grep):**
+- Trino 467 has NO inline SQL hint syntax — VERIFIED at [trinodb/trino#9498](https://github.com/trinodb/trino/issues/9498) ("Support query hints", still open since Oct 2021). `/*+ BROADCAST */` is treated as a block comment and silently ignored. **Responder correct.**
+- Session prop `join_distribution_type` with values `BROADCAST` / `PARTITIONED` / `AUTOMATIC`, default `AUTOMATIC` — VERIFIED at [trino.io/docs/current/admin/properties-general.html](https://trino.io/docs/current/admin/properties-general.html). **Responder correct.**
+- BROADCAST semantics — right table replicated to all nodes that have left-side data; build side = right table. **Responder correct.**
+- PARTITIONED semantics — both sides hash-redistributed on join key. **Responder correct.**
+- ANALYZE for accurate stats so AUTOMATIC picks correctly — `ANALYZE iceberg.analytics.dim_users` (bare ANALYZE form, no TABLE token). **Responder correct.**
+- dbt per-model knob via `pre_hook="SET SESSION join_distribution_type = '...'"` — **production-stack-aligned**.
 
-- **r09 §357 has the LEADING CANONICAL** for dbt snapshots with the full block:
-  - Findability anchor (§357): literally lists "dbt snapshot", "dbt snapshots", "SCD2 strategy", "snapshot strategy=timestamp", "snapshot strategy=check", "check_cols", "dbt_valid_from", "dbt_valid_to", "dbt_scd_id", "dbt_is_deleted", "current rows from a dbt snapshot", + ~20 other anchors.
-  - §368–382: `strategy='timestamp'` worked example with `{% snapshot users_snapshot %}` block, `unique_key`/`strategy`/`updated_at` config.
-  - §386–416: `strategy='check'` worked example with `check_cols=[...]` config + the `'all'` shorthand.
-  - §453–469: the 4 always-present metadata columns + the canonical query patterns.
-- **r27 §290 cross-ref** to r09's SCD section is **literally one line above** the §3.1 materializations table at §292 that the responder DID read.
+**The framing slip.** The responder suggested "PARTITIONED likely safer if the OOM repeats." For a **2M-row dim** joining an **800M-row fact**, this is the wrong lead recommendation:
 
-**Responder bailed**: "I don't have complete information about dbt snapshots in the resources" — and recommended either a hand-rolled SCD-2 incremental model OR consulting docs.getdbt.com. Both fallbacks are worse than just routing to r09 §357.
+- 2M dim_users is small (~50-500MB depending on column width) — broadcasting it is the canonical optimization. The fact-dim broadcast is exactly what `join_distribution_type='BROADCAST'` was designed for.
+- **PARTITIONED on this shape** forces both tables to hash-shuffle. Shuffling the 800M event rows is what's making the current run take 20 min — partitioned is likely **slower**, not safer.
+- The coordinator OOM is more likely from dynamic-filter values (BROADCAST joins compute DF on the build side and ship to the probe-side TableScan; ~2M distinct user_ids in a DF could pressure coordinator memory) or planning blow-up from manifest counts, not from broadcasting the build side per se (build replication is worker→worker via exchanges, not via coordinator).
+- The textbook lead for "broadcast the small table" on a 2M-vs-800M shape is: **(1) ANALYZE both tables → (2) let AUTOMATIC pick (it should pick BROADCAST) → (3) verify with EXPLAIN DISTRIBUTED for `Join[...][REPLICATED]` → (4) if AUTOMATIC still partitions, force `SET SESSION join_distribution_type='BROADCAST'`**. PARTITIONED is the fallback if BROADCAST itself OOMs because the build side is too big (~hundreds of MB+).
 
-**Verified against docs.getdbt.com/docs/build/snapshots** (this iteration):
+**Other OOM levers the responder could have surfaced.** The engineer asked "other ways to stop the OOM" — responder named ANALYZE + the two session-prop values but missed:
+- `query_max_memory` / `query_max_memory_per_node` adjustment (cluster ceilings)
+- `spill_enabled=true` to allow operator spill to disk for the join/aggregation
+- WHERE-side pruning to reduce 800M input (the engineer didn't say the WHERE was already optimal — adding `event_date >= ...` partition filter could cut the build size by 10×)
+- `dynamic_filtering_enabled` — actually relevant if coordinator OOM is from DF aggregation
+- EXPLAIN ANALYZE to find which operator is OOMing (sometimes coordinator OOM is from `OutputBuffer` if the final SELECT is shipping too many rows)
 
-- A snapshot **records changes to mutable tables over time** (Type-2 SCD) — produces multiple rows per source key, one per state change, with validity timestamps.
-- Configuration block syntax with `strategy: 'timestamp'` + `updated_at: 'updated_at'` for sources with reliable timestamps; `strategy: 'check'` + `check_cols: [...]` for sources without.
-- Metadata columns added: `dbt_valid_from`, `dbt_valid_to`, `dbt_scd_id`, `dbt_updated_at`, conditionally `dbt_is_deleted` (when `hard_deletes='new_record'`).
+**Net.** Core mechanics all correct, dbt routing correct, hint-comment defang correct. The "PARTITIONED safer" framing slip is a recall-ceiling responder-folklore slip (see `feedback_responder_overwarning_folklore.md` — Haiku over-warns the broader-shuffle option as "safer" on join-distribution questions), not a resource defect. r28 has the canonical "broadcast the small dim" pattern; responder reached the session-prop card but hedged on the recommendation.
 
-All of this matches r09 §357 verbatim. The responder had everything they needed and missed the routing.
+**No FIX-A.** Recall ceiling, not resource-sourced. **SOFT WATCH** `iter1238 Q3 broadcast-vs-partitioned-lead-rec-hedge-on-small-dim`: re-probe under "small dim joining large fact + OOM / how to broadcast" framings 4-8 iters.
 
-**Teacher pre-flag CORRECT — findability fail.**
-
-**FIX-A WARRANTED (LIGHT, surgical findability fix):**
-
-The responder reached r27 §292 (`### 3.1 The four materializations supported by dbt-trino`) — the cross-ref at §290 is ONE LINE ABOVE that section header but didn't pull the responder. Surgical fix: add a row INSIDE the §3.1 materializations table (or as a prominent inline note RIGHT AFTER the table) explicitly naming `snapshot` as a separate dbt resource type with the keyword "snapshot" appearing in the table the responder reaches:
-
-Option A (preferred — add a row to the §3.1 table itself):
-
-```
-| **`snapshot`** (separate dbt resource type — NOT a materialization) | A **TABLE** + SCD-2 metadata columns (`dbt_valid_from`/`dbt_valid_to`/`dbt_scd_id`) | YES — every historical version | Full (one row per state change) | dbt-managed: timestamp or check strategy detects source changes, closes prior version, inserts new | **Tracking history of mutable dimension columns** (plan_tier upgrades, account_tier changes, status transitions) — Type-2 SCD pattern | When source is append-only (snapshots add overhead with no benefit) — use `incremental` |
-| | See [resource 09 § Slowly Changing Dimensions](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd) for snapshot strategy=timestamp/check, hard_deletes, full worked examples. | | | | | |
-```
-
-Option B (lighter — bold inline note RIGHT AFTER the §3.1 table at §301):
-
-> **NOTE — dbt also has a separate `snapshot` resource type that is NOT in the four-materialization list above. Snapshots are dbt's first-class SCD-2 / history-tracking primitive (timestamp or check strategy + auto-generated `dbt_valid_from`/`dbt_valid_to`/`dbt_scd_id`/`dbt_updated_at` validity columns). When the question is "track plan_tier / status / billing_tier changes over time" or "the source overwrites in place but we need history", reach for a SNAPSHOT, not an incremental model. Full canonical: see [resource 09 § Slowly Changing Dimensions — Option 1 dbt snapshot](09-lakehouse-schema-design.md#slowly-changing-dimensions-scd).**
-
-Either option puts "snapshot" inside the responder's keyword-line-of-sight at the materializations table they DID reach. The current §290 cross-ref placement is too far above the table to catch the responder reading the table itself.
-
-Watch label: `iter1237 Q3 snapshot-not-in-materializations-list outright-bail`: re-probe under "track plan_tier changes / status history / billing changes over time using dbt" framing after FIX-A; 3-6 iters.
+| Sub-dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 4 | Facts on hints/session prop/values/default all correct; PARTITIONED-safer framing wrong direction |
+| Beginner clarity | 4 | Explains BROADCAST replicates build, PARTITIONED rehashes both; could distinguish coordinator vs worker memory |
+| Practical applicability | 4 | Session SET + dbt pre_hook are correct knobs; lead-rec hedge could mislead engineer toward slower path |
+| Completeness | 4 | Mentions ANALYZE but missing spill / query_max_memory / WHERE-pruning / dynamic filtering levers |
 
 ---
 
-### Q4 — Oracle LPAD(invoice_id, 8, '0') → Trino → 4.875 (Oracle PL/SQL → dbt+Trino topic row)
+### Q4 — Oracle DECODE(status,'active',1,'trial',2,'churned',3,0) → Trino CASE WHEN → 4.875 (Oracle migration row)
 
-**VERIFIED facts (trino.io/docs/467 this iteration):**
+**VERIFIED — clean canonical, NULL caveat is the load-bearing differentiator.**
 
-- `lpad(string, size, padstring)` exists in Trino 467 — VERIFIED at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html).
-- Truncation-to-size behavior — VERIFIED verbatim: "If `size` is less than the length of `string`, the result is truncated to `size` characters."
-- First arg must be VARCHAR — VERIFIED (signature is `lpad(string, size, padstring) → varchar`); integer requires `CAST(invoice_id AS VARCHAR)`.
-- `format('%08d', invoice_id)` — VERIFIED via [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html); example `SELECT format('%03d', 8)` → `'008'`. Uses Java `Formatter` spec (zero-padding via `%0Nd` works for the min-width case — `'%08d'` pads to at least 8 chars without truncating longer values).
+- Trino 467 has NO `DECODE` function — [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) lists `CASE`, `IF`, `COALESCE`, `NULLIF`, `TRY` only. **Responder correct.**
+- Direct rewrite `CASE WHEN status='active' THEN 1 WHEN status='trial' THEN 2 WHEN status='churned' THEN 3 ELSE 0 END` — **correct shape.**
+- **NULL-search-value subtlety — VERIFIED critical:** Oracle DECODE's documented behavior is that "DECODE() acts as though two NULL values are equivalent" — `DECODE(x, NULL, 1, 2)` returns 1 when x IS NULL. In Trino (standard three-valued logic), `WHEN status = NULL` always evaluates to UNKNOWN and **never matches**. So the responder's instruction "if Oracle's DECODE has NULL as a search value you MUST write `WHEN status IS NULL THEN ...` FIRST in the CASE" is **exactly right** and is the load-bearing migration trap. Cited r23 §3.1E + r27 §4.1A.
 
-**Responder's answer (clean):**
+**Minor potential add (-0.125):** could have mentioned that Oracle DECODE returns NULL when no match AND no default is provided, while Trino CASE returns NULL when no WHEN matches AND no ELSE clause is provided — same shape, so the `ELSE 0` in the engineer's Oracle code → `ELSE 0` in the Trino CASE works identically. (The responder included `ELSE 0`, so it's effectively correct — just didn't explicitly note the symmetry.)
 
-`lpad(CAST(invoice_id AS VARCHAR), 8, '0')` correct + truncation-hazard caveat correct + `format('%08d', invoice_id)` min-width alternative correct + integer-requires-CAST caveat correct.
+No imported-prior slip, no broken-secondary, no over-warning. Cites r23 §3.1E + r27 §4.1A DECODE→CASE canonical.
 
-No FIX-A. Cites r27. Closes naturally.
+| Sub-dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5 | Trino-no-DECODE + CASE rewrite + Oracle NULL=NULL match + Trino IS NULL FIRST all correct |
+| Beginner clarity | 5 | Walks through the rewrite, highlights NULL trap with engineer-relatable framing |
+| Practical applicability | 5 | Engineer knows exactly what to change in every grep-hit DECODE call |
+| Completeness | 4.5 | Could note ELSE-clause / no-match symmetry; not load-bearing |
 
 ---
 
-## FIX-A summary
+## Pattern observations
 
-**TWO LIGHT FIX-A warranted, both surgical findability fixes (canonicals already exist):**
+1. **Both iter1237 LIGHT FIX-As CLOSE on 1st re-probe.** r23 §1428 DO-NOT-WRITE defang + §1403 canonical pulled Q1 to the right shape; r27 §3.1 5th-snapshot-row + bolded route pulled Q2 to r09. iter1237's findability diagnoses were correct on both counts; the fixes landed at the EXACT spots the responder reached in iter1237.
+2. **The 21-of-22 recent-run 1st-re-probe-close pattern resumes.** iter1237 was the only 1st-re-probe-NON-close iteration in the last 22 sweeps; loop returns to the previous norm. The dbt-snapshots-SCD2 row (most-impacted by iter1237: 4.313 → 4.180) recovers this iter to 4.211 (`+0.031`); the analytical-patterns row recovers to 4.540 (`+0.003`).
+3. **Q3 broadcast-vs-partitioned framing slip is responder-folklore-recall (not a resource gap).** This is the same family as `feedback_responder_overwarning_folklore.md` — Haiku reaches the correct mechanics but hedges the lead recommendation toward the more-conservative option ("PARTITIONED safer") even when the canonical for the scenario is the opposite ("broadcast the small dim"). Resources teach the broadcast-the-small-dim canonical clearly; responder reached the session-prop card. Soft watch, no resource fix.
 
-1. **Q2 — r23 §1428 DO-NOT-WRITE row** for the `COUNT(*) OVER (PARTITION BY x)` + `GROUP BY x, y` anti-pattern, with explicit "returns the count of distinct y-values per x (constant), NOT the per-pair frequency" annotation + the one-character fix (replace window `OVER` with plain aggregate). **PLUS r07 cross-ref to r23 §1403 mode canonical** at the top of r07's aggregation section.
+---
 
-2. **Q3 — r27 §3.1 materializations table** — add `snapshot` row to the table itself (Option A above) OR a prominent bolded inline note right after the table (Option B) explicitly naming "snapshot" as a separate dbt resource type with cross-ref to r09 §SCD. The current §290 cross-ref above the table didn't pull the responder.
+## Recommendation to teacher
 
-Neither FIX-A creates a new canonical — both surface existing canonicals (r23 §1403 mode, r09 §357 snapshot) at the keyword path the responder DID reach.
-
-## Open watches
-
-- **iter1237 Q2 window-COUNT-mixed-with-GROUP-BY mode-per-group-broken** (PRIMARY) — re-probe after FIX-A under "most frequent X per Y weekly" framing.
-- **iter1237 Q3 snapshot-not-in-materializations-list outright-bail** (PRIMARY) — re-probe after FIX-A under "track plan_tier / status changes over time using dbt" framing.
-- **iter1237 Q1 add-NOT-NULL-on-Iceberg framing-could-name-dbt-not_null-test** (SOFT) — re-probe under "how do I enforce non-null on a new column on this stack" framing; no FIX-A.
-- Carry-over: iter1236 source-side-NOT-EXISTS-without-rn=1-within-batch-pairing (soft); iter1234 ROLLUP-date_trunc-expr (soft); iter1234 FOR-VERSION-AS-OF-quoting (passive); iter1233 IGNORE-NULLS-framing; iter1231 NEXT_DAY-note; iter1230 EXISTS-overwarning/::cast; iter1215 strpos-3-arg CEILING (CLOSED iter1236); iter1213 session_properties/(+); iter1229 @v1-Spark; iter1208 width_bucket.
-
-## Topic rubric impact
-
-| Topic | Before | Q | Δ | After | Margin to threshold |
-|---|---|---|---|---|---|
-| Lakehouse schema design (line 62) | 4.5729 / 18 | Q1=4.25 | -0.0170 | 4.5559 / 19 | +1.0559 |
-| Analytical query patterns on Iceberg+Trino (line 89) | 4.5554 / 169 | Q2=1.5 | -0.0180 | 4.5374 / 170 | +1.0374 |
-| dbt snapshots SCD2 (line 561) | 4.3127 / 24 | Q3=1.0 | -0.1325 | 4.1802 / 25 | +0.6802 (-0.13 hit — most-impacted row) |
-| Oracle PL/SQL → dbt+Trino (line 382) | 4.4630 / 202 | Q4=4.875 | +0.0020 | 4.4650 / 203 | +0.9650 |
-
-All required topics remain PASSED. dbt snapshots SCD2 took the largest single-iter hit (-0.1325) but still has +0.6802 margin to the 3.5 threshold. With the FIX-A applied + re-probe in 3-6 iters expected to score >4.0, the row should recover.
-
-## Overall
-
-**FAIL iter (2.91 avg).** The 20-consecutive-1st-re-probe-CLOSE streak broke on this iteration with two simultaneous findability defects (Q2 + Q3) plus a clean Q1 + Q4 bracketing. Both Q2 and Q3 failures share a root cause: the responder reads the WRONG resource section for a question whose keywords would route correctly if the canonical were one cross-ref closer to the table/list the responder DOES reach. Both FIX-As are LIGHT and surgical — adding a DO-NOT-WRITE row + cross-ref for Q2's mode-per-group, and a materializations-table row OR prominent inline note for Q3's snapshot-resource-type. Neither requires new canonical content. Re-probe both watches under varied phrasings (`most-popular`, `which X most often`, `mode` for Q2; `track changes over time`, `plan history`, `SCD-2 in dbt` for Q3) over the next 3-6 iters to confirm fix reach.
+- **NO FIX-A this iter.** Both iter1237 watches CLOSE; Q3 slip is recall ceiling not resource defect; Q4 is clean.
+- **CLOSE WATCHES**: `iter1237 Q2 window-COUNT-with-GROUP-BY mode-per-group-broken` (CLOSED), `iter1237 Q3 snapshot-not-in-materializations-list-bail` (CLOSED).
+- **NEW SOFT WATCH**: `iter1238 Q3 broadcast-vs-partitioned-lead-rec-hedge-on-small-dim` — re-probe under "small dim joining large fact + OOM / how to broadcast" framings 4-8 iters.
+- **Carry**: iter1237 Q1 add-NOT-NULL-name-dbt-not_null-test (soft, no fix); iter1236 rn=1-within-batch-pairing; iter1234 ROLLUP-date_trunc-expr; iter1233 IGNORE-NULLS-framing; iter1231 NEXT_DAY-note; iter1230 EXISTS-overwarning/::cast; iter1215 strpos-3-arg CEILING; iter1213 session_properties/(+); iter1229 @v1-Spark; iter1208 width_bucket.
+- **NEXT ITER (1239)**: routine breadth-probe; both iter1237 watches closed so no required re-probe queue.
