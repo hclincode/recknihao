@@ -1,200 +1,195 @@
-# Iteration 1231 — Judge Feedback
+# Iteration 1232 — Judge Feedback
 
-**Verdict: 4.69 STRONG PASS (margin +1.19).** Q1 WATCH `iter1228 r27 §4.5A packages.yml-version-rename FIX-A` CLOSES cleanly on first re-probe — responder LEADS with the `generate_surrogate_key` was-renamed-from `surrogate_key` in dbt_utils 1.0.0 cause. Q2 + Q3 clean technically. Q4 formula CORRECT but the CLOSING NOTE is SELF-CONTRADICTORY (claims formula doesn't strictly-after when it does, and would BREAK if engineer follows the "add +INTERVAL '1' DAY" advice). Iter average = (5.0 + 5.0 + 4.5 + 4.25)/4 = 4.6875.
+**Verdict: 4.41 PASS (margin +0.91).** Q1 + Q2 + Q4 clean technically. **Q3 is a borderline FAIL (3.375) on a real internal contradiction**: the schema.yml YAML example shows `- test_column_order:` but the trailing prose says "call without test_ prefix in schema.yml" — engineer who copies the YAML literally hits `Could not find generic test 'test_test_column_order'` at dbt parse. Iter average = (4.625 + 4.875 + 3.375 + 4.75)/4 = 17.625/4 = **4.40625**.
 
-- **iter1228 r27 §4.5A packages.yml-version-rename FIX-A WATCH: CLOSES** on first re-probe (Q1 5.0). Responder now LEADS with: "FIRST thing to check: VERSION issue. `generate_surrogate_key` was introduced in dbt_utils 1.0.0 (Nov 2022); on <1.0.0 the macro doesn't exist under that name → `not found` even though install succeeded." Engineer arrives at version-pin fix (`>=1.1.0`, `<2.0.0`) + 4-cause checklist without false-route through wrong-file-location or wrong-package-name. 18th consecutive watch in 1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE pattern. Both iter1228 watches now CLOSED (currency-format closed iter1230, version-rename closes iter1231).
-- **Q4 closing-note contradicts the formula (NEW REAL DEFECT, MINOR).** The arithmetic formula `order_date + INTERVAL '1' DAY * CASE WHEN dow < target THEN target-dow ELSE (target+7)-dow END` is CORRECT and already implements Oracle NEXT_DAY (strictly-after) — for `dow == target` the ELSE branch hits and emits `+7` (next-week), not `+0`. BUT the final paragraph says "This includes the target date if today IS the target weekday. To get strictly-after (Oracle), add + INTERVAL '1' DAY." This is WRONG: the formula does NOT include the target date, and adding +1 DAY would BREAK it (engineer who follows the note ends up with NEXT_DAY('MONDAY') returning the Tuesday after next, an off-by-one overshoot). The responder is self-contradicting — the formula and the prose are pointing at different specs. Per `feedback_responder_broken_secondary_alternative.md` family: lead CORRECT, append-paragraph BROKEN. Per-instance ding, watch but NO FIX-A on first occurrence.
-- **Q4 dead `WHEN day_of_week < 1` branch (cosmetic).** In the Monday example, responder writes a CASE arm that can never fire (ISO `day_of_week` returns 1..7, so `< 1` is unreachable). Cosmetic — does not affect output — but signals the responder doesn't fully "see" the day_of_week range when composing examples. Not load-bearing.
-- **Q3 `{{ run_query('ANALYZE...', execute=true) }}` wrapper variant — slight imprecision (not wrong).** The on-run-end hook accepts a raw SQL STRING that dbt executes directly; `run_query()` is the macro-level way to execute SQL and bind results, used INSIDE macros that need to inspect query results. For an on-run-end hook the bare `"ANALYZE ..."` form is canonical and the responder DID lead with it; the `run_query` wrapper variant is added as a secondary "or you can do this" alternative. Not wrong per se (it does execute the SQL), but unnecessary scaffolding for an on-run-end use case. Verified at [docs.getdbt.com/reference/project-configs/on-run-start-on-run-end](https://docs.getdbt.com/reference/project-configs/on-run-start-on-run-end) — hook accepts `sql-statement` or `[sql-statement]` directly. Minor shave only.
+- **Q3 schema.yml `test_` prefix self-contradiction (NEW LIGHT FIX-A WARRANTED).** Responder defined macro `{% macro test_column_order(...) %}` in `macros/test_column_order.sql` (legacy form, STILL backward-compatible per docs.getdbt.com), then wrote schema.yml `- test_column_order: {column_a: end_date, ...}` AND prose "call without test_ prefix in schema.yml." Mechanism: when dbt sees a generic-test name in schema.yml, it looks up the macro `test_<name>` (prepending `test_`). So schema.yml `- test_column_order:` makes dbt look up macro `test_test_column_order` — not found, parse error. Correct YAML: `- column_order: {column_a: end_date, column_b: start_date, operator: ">"}`. The prose IS right; the example contradicts it. **VERIFIED**: at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) — "macro name = `test_<name>`, but call it by `<name>` in schema.yml (drop the prefix)." **GREP EVIDENCE — content gap (not resource defect)**: grep across resources/ for `test_column|macros/test_|generic test.*macro|legacy.*test_|tests/generic` returns ZERO hits; r27 only covers `accepted_values` + source freshness, not custom generic tests. Responder is doing best-effort recall without a strong anchor. **LIGHT FIX-A SPEC**: additive card to r27 (or r28) — "custom generic test for cross-column / multi-arg comparison" with: (a) modern preferred form `{% test column_order(model, column_a, column_b, operator) %}` block in `tests/generic/column_order.sql`; (b) legacy form `{% macro test_column_order(...) %}` in `macros/test_column_order.sql` STILL backward-compatible; (c) schema.yml call `- column_order: {column_a: ..., column_b: ..., operator: ...}` — **DROP the `test_` prefix in YAML** (dbt prepends it automatically when resolving); (d) DO-NOT-WRITE defang `- test_column_order:` in schema.yml (causes `Could not find generic test 'test_test_column_order'` parse error); (e) singular test path (`tests/test_dim_subscriptions_date_order.sql` — `SELECT * FROM ref WHERE end_date <= start_date`, rows = FAIL) as the simpler one-off; (f) keyword anchors: "custom generic test / reusable test / cross-column comparison / end_date < start_date / schema.yml test args / generic test macro / tests/generic folder / drop test_ prefix in schema.yml". Watch label: `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop FIX-A`; re-probe within 4-8 iters with structurally different framing ("custom test that takes two column names" / "reusable test for `created_at < expires_at` cross-column compare").
+- **Q1 minor framing nuance (NOT load-bearing).** Responder said "default 7-day snapshot retention (`iceberg.expire-snapshots.min-retention` default 7d); expire_snapshots physically deletes old snapshots; within 7 days recovery always possible." Strictly: `iceberg.expire-snapshots.min-retention` is the SAFETY FLOOR enforced when expire_snapshots IS invoked — not an auto-expiration clock. **Iceberg does NOT auto-expire snapshots** (verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim "Regularly expiring snapshots is recommended"). So until SOMEONE runs `expire_snapshots`, ALL historical snapshots remain queryable indefinitely. The 7d minimum just guarantees that even if a scheduled `expire_snapshots` runs, the LAST 7 DAYS of snapshots cannot be nuked. The framing "within 7 days recovery always possible" lands the right SAFE-WINDOW guarantee but implies a hard expiration clock at 7d that doesn't actually exist. Engineer's load-bearing action (rollback NOW within the safety window) is correct. Recall ceiling, NO FIX-A.
+- **Q2 minor parse-error overstating (NOT load-bearing).** Responder said "don't mix comma+CROSS JOIN keyword (parse error)" when describing the two valid UNNEST forms. Strictly, mixing `FROM t1, t2 CROSS JOIN UNNEST(...)` is a precedence/binding ambiguity, not always a hard parse error. The recommendation to pick ONE form is sound; the "parse error" wording is slightly overstated. Recall ceiling, NO FIX-A.
+- **Q1/Q2/Q4 clean otherwise.** Q1 rollback_to_snapshot 3-arg form CORRECT (Trino 467 = CALL form; ALTER TABLE EXECUTE rollback is 469+ per pinned `reference_trino_rollback_snapshot_form.md`); `$history` columns CORRECT (made_current_at/snapshot_id/parent_id/is_current_ancestor verified); "no position-delete files / no bloat from rollback" CORRECT (rollback is metadata-pointer move). Q2 UNNEST + WITH ORDINALITY canonical pin-perfect — 1-based BIGINT ordinal added LAST, alias shape `AS t(tag, position)`, LEFT JOIN UNNEST...ON TRUE for empty-array preservation. Q4 no ROWNUM + no QUALIFY + ROW_NUMBER OVER PARTITION BY + WHERE rn=1 + stable tiebreaker — all correct against Trino 467 docs.
 
 Per-question summary:
-- **Q1 5.0 (WATCH CLOSE)** — version-rename reached as #1 cause; 4-cause table covers version / dbt_packages-missing-at-compile / wrong-file-name / stale-install; `{{ generate_surrogate_key }}` call confirmed correct.
-- **Q2 5.0** — SUM(...) FILTER (WHERE year/month = current vs current-1) single-pass YoY canonical; mutually-exclusive FILTERs; *1.0/NULLIF ratio guard correct.
-- **Q3 4.5** — on-run-end runs ONCE at end (correct); bare `ANALYZE <table>` no TABLE keyword (correct); `WITH (columns = ARRAY[...])` Iceberg-valid (correct); `WITH (partitions = ARRAY[...])` Hive-only (correct). Minor `run_query` wrapper imprecision.
-- **Q4 4.25** — formula CORRECT and `day_of_week` ISO Mon=1..Sun=7 correct; closing note is SELF-CONTRADICTORY (would overshoot if engineer adds +1 DAY); dead `< 1` CASE branch is cosmetic.
+- **Q1 4.625** — rollback_to_snapshot 3-arg CALL form + `$history` query + atomic metadata semantics + safety window all correct; "default 7-day retention" framing slight overstate (it's the expire_snapshots safety FLOOR, snapshots don't auto-expire).
+- **Q2 4.875** — UNNEST WITH ORDINALITY canonical clean; "comma+CROSS JOIN mix = parse error" slight overstate but recommendation sound.
+- **Q3 3.375 (BORDERLINE FAIL — LIGHT FIX-A)** — singular test correct; legacy macro form correct (still backward-compatible); prose "drop test_ prefix in schema.yml" correct; **YAML example contradicts the prose** — `- test_column_order:` in schema.yml would parse-error.
+- **Q4 4.75** — ROW_NUMBER OVER PARTITION BY canonical clean; no QUALIFY in Trino 467 verified; tiebreaker note good.
+
+**FIX-A: ONE additive card to r27 (or r28) — custom generic test name-prefix drop in schema.yml.** Per `feedback_responder_broken_secondary_alternative.md` family the slip is in the load-bearing example (engineer explicitly asked "schema.yml reference with the two column args"), not in a secondary "for completeness" appendage — so it's worth a content fix, not just per-instance churn. Content gap confirmed: ZERO resource hits for custom-generic-test name-prefix-drop in schema.yml. Light additive card. Watch label `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop`.
 
 ---
 
-## Q1 (WATCH) — dbt-utils in packages.yml a while, works on coworker's laptop; fresh clone on new machine; `dbt deps` ran (dbt_packages/ created); `dbt run` → every `{{ dbt_utils.generate_surrogate_key([...]) }}` fails "macro 'generate_surrogate_key' not found in any package." Most likely causes on a fresh checkout after dbt deps? First thing to check — version, package-name, or skipped step?
+## Q1 — Recover after bad DELETE wiped ~3M rows from `iceberg.analytics.fct_events`. Can rows be recovered, what to run, and is there a time window?
 
-**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
-
-**WATCH OUTCOME: `iter1228 r27 §4.5A packages.yml-version-rename FIX-A` CLOSES on first re-probe.**
+**Score: 4.625** — Acc 4.5 / Clar 4.5 / App 5.0 / Compl 4.5
 
 Responder shape:
-- **FIRST thing to check: VERSION issue. `generate_surrogate_key` was introduced in dbt_utils 1.0.0 (Nov 2022); on <1.0.0 the macro doesn't exist under that name → 'not found' even though install succeeded.**
-- **Fix: pin `version: [">=1.1.0", "<2.0.0"]` in packages.yml; `dbt deps`.**
-- **4-cause table**:
-  1. Version pinned to <1.0.0 (or floor unset and stale resolved version)
-  2. `dbt_packages/` missing at compile time (CI environment skipped `dbt deps`)
-  3. Wrong file location/name (`packages.yml` must be at project root; package name `dbt-labs/dbt_utils`)
-  4. Stale install — `dbt clean` + `dbt deps`
-- **The `{{ dbt_utils.generate_surrogate_key([...]) }}` call itself is correct shape.**
-
-**Load-bearing facts VERIFIED:**
-
-1. **`generate_surrogate_key` introduced in dbt_utils 1.0.0 as rename of `surrogate_key`** — verified at [docs.getdbt.com/docs/dbt-versions/core-upgrade/Older versions/upgrading-to-dbt-utils-v1.0](https://docs.getdbt.com/docs/dbt-versions/core-upgrade/Older%20versions/upgrading-to-dbt-utils-v1.0) (WebFetch this iter): "`generate_surrogate_key()` was introduced in dbt utils v1.0 as a replacement for the deprecated `surrogate_key()` macro." Behavior change: old `surrogate_key()` treated nulls and blanks identically (duplicate-key risk); new form handles nulls correctly.
-2. **The "macro not found in any package" error surfaces literally when the resolved version is <1.0.0** — the macro genuinely doesn't exist under that name in pre-1.0.0 packages, so Jinja resolution fails the lookup. Engineer's `{{ dbt_utils.generate_surrogate_key([...]) }}` call is correct shape; the missing piece is the version.
-3. **The coworker-works-mine-doesn't framing** is the canonical fingerprint: coworker has 1.0.0+ resolved in `dbt_packages/` from an older `dbt deps`; fresh `dbt deps` on the new machine resolves a DIFFERENT version (perhaps the floor lets <1.0.0 through, or there's no pin and a yanked release got resolved). The responder correctly routes engineer to version-pinning as the FIX, not to file-location-troubleshooting.
-4. **`dbt-labs/dbt_utils` package name + `packages.yml` at project root** — standard dbt-labs documentation. Not the issue here (since `dbt_packages/` was created, install succeeded), but correctly listed as cause #3 for completeness.
-5. **`dbt clean` + `dbt deps` for stale-install** — correct corruption-recovery step.
-
-**Watch close evidence**: at iter1228 the responder FAILED to reach the version-rename row and routed to file-location/package-name troubleshooting only. The strengthened r27 §4.5A FIX-A added LEAD-WITH-VERSION-RENAME phrasing: "macro not found in any package = VERSION mismatch: generate_surrogate_key needs dbt_utils 1.0.0+, renamed from surrogate_key." The iter1231 responder now LEADS with exactly this — the strengthened card reached. WATCH CLOSES on first re-probe.
-
-Engineer leaves with: a one-line version-pin fix + 4-cause checklist + the call confirmed correct. Cites r27. Topic routed to "Oracle PL/SQL → dbt + Trino SQL migration" (dbt packaging context).
-
----
-
-## Q2 — Each account's total subscription revenue for CURRENT calendar month alongside same month LAST year. Two CTEs + join by account_id (hits events table twice). Cleaner single-pass for this-month + 12-months-ago side by side without self-join / two scans?
-
-**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
-
-Responder shape:
-- **Single-pass conditional-aggregation YoY pattern** with `SUM(...) FILTER (WHERE ...)`:
+- **YES recoverable.** Iceberg snapshots are immutable; DELETE created a new snapshot, the prior data files still exist on MinIO until `expire_snapshots` is run.
+- **Step 1 — Find pre-DELETE snapshot via `$history`**:
   ```sql
-  SELECT
-    account_id,
-    SUM(subscription_revenue) FILTER (
-      WHERE year(event_date) = year(current_date)
-        AND month(event_date) = month(current_date)
-    ) AS current_month_revenue,
-    SUM(subscription_revenue) FILTER (
-      WHERE year(event_date) = year(current_date) - 1
-        AND month(event_date) = month(current_date)
-    ) AS same_month_last_year_revenue,
-    1.0 * SUM(...) FILTER (...) / NULLIF(SUM(...) FILTER (...), 0) AS yoy_ratio
-  FROM events
-  WHERE event_date >= date_trunc('month', current_date - INTERVAL '13' MONTH)
-  GROUP BY account_id;
+  SELECT made_current_at, snapshot_id, parent_id, is_current_ancestor
+  FROM iceberg.analytics."fct_events$history"
+  ORDER BY made_current_at;
   ```
-- **One scan, mutually-exclusive FILTERs, single GROUP BY** — engineer's two-CTE-with-join becomes one TableScan + one HashAggregation.
-- **NULLIF guard** for divide-by-zero on the ratio column.
+- **Step 2 — Rollback (Trino 467 native CALL form)**:
+  ```sql
+  CALL iceberg.system.rollback_to_snapshot('analytics', 'fct_events', <snapshot_id>);
+  ```
+- **Semantics**: atomic metadata pointer move, instant, no data files touched, no position-delete files written, no table bloat.
+- **Time window**: default safety floor `iceberg.expire-snapshots.min-retention = 7d`; within 7 days recovery always possible. Check `$snapshots` for the target.
+- **Anti-pattern**: explicitly told engineer NOT to use `CREATE OR REPLACE TABLE ... AS SELECT * ... FOR VERSION AS OF <snapshot>` — rollback CALL is simpler/atomic.
 
 **Load-bearing facts VERIFIED:**
 
-1. **`SUM(expr) FILTER (WHERE cond)` native in Trino 467** — verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "The `FILTER` keyword can be used to remove rows from aggregation processing with a condition expressed using a WHERE clause." Supported for ALL aggregate functions, including `SUM`.
-2. **`year(event_date)` + `month(event_date)`** — both standard Trino 467 date-extraction functions per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html). Equivalent: `EXTRACT(YEAR FROM event_date)`, `EXTRACT(MONTH FROM event_date)`.
-3. **Sargability**: `year(event_date) = year(current_date)` and `month(event_date) = month(current_date)` — per pinned `reference_trino_unwrap_temporal_predicates.md`, Trino 467's default-on `UnwrapYearInComparison` rewrites `year(col) = literal` into a bare-column range so partition pruning STILL works on `event_date`-day-partitioned tables. So the FILTER predicates do not block pruning.
-4. **`1.0 / NULLIF(x, 0)` ratio guard** — per pinned `reference_trino_division_by_zero.md`, INTEGER/DECIMAL `/` by zero throws `DIVISION_BY_ZERO` in Trino 467; `NULLIF` returns NULL for the zero-denominator case, propagating NULL through the division as the standard idiom. `1.0 *` casts to DOUBLE so the ratio is decimal not integer-divided.
-5. **`WHERE event_date >= date_trunc('month', current_date - INTERVAL '13' MONTH)`** — outer prune scoping the scan to the 14-month window the FILTERs care about (this month + 12 months ago, with a month of slack). Engineer's two-CTE form would have done this twice; single-pass does it once.
+1. **`CALL iceberg.system.rollback_to_snapshot('schema','table',id)` is the Trino 467 form** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim `CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`. ALTER TABLE EXECUTE rollback_to_snapshot is 469+ per pinned `reference_trino_rollback_snapshot_form.md`. Responder correctly routes to the 467 form.
+2. **`$history` columns: `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter). All four column names match.
+3. **`iceberg.expire-snapshots.min-retention` default 7d** — verified at trino.io/docs/467/connector/iceberg.html: "The minimal retention period for the `expire_snapshots` command" — default `7d`.
+4. **Rollback is atomic metadata pointer move, no data-file writes, no position-delete files** — Iceberg architecture (snapshot pointer in metadata.json). Correct.
+5. **CTAS-FROM-VERSION alternative explicitly defanged** — engineer told NOT to do the heavier copy-out, use rollback. Correct routing.
 
-**Why this beats the two-CTE form**: engineer's CTEs each scan `events`; the JOIN merges them. Trino doesn't always FUSE the two TableScans into one (the optimizer treats them as logically separate Iceberg scans even if the table is the same). The single conditional-aggregation form has ONE TableScan + ONE HashAggregation — the optimizer doesn't need to fuse anything; the query plan is already minimal.
+**Minor framing slip (Acc -0.5, Compl -0.5):** Responder said "default 7-day snapshot retention" implying a hard auto-expiration clock. **Iceberg does NOT auto-expire snapshots** (verified docs verbatim "Regularly expiring snapshots is recommended"). The 7-day default is the safety FLOOR enforced when `expire_snapshots` IS invoked — guarantees the last 7 days of snapshots cannot be nuked by accident. Until someone runs `expire_snapshots`, all snapshots remain queryable indefinitely. Engineer's actionable take-away (rollback NOW within the safety window) is still correct, but the "you have 7 days" framing might mislead an engineer who thinks the clock is ticking automatically. Recall ceiling, NO FIX-A — too minor.
 
-Engineer leaves with: drop-in single-pass YoY query + sargable predicates (still prunes day-partitions via `UnwrapYearInComparison`) + ratio-guard idiom. Cites r07/r23. Topic routed to "Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL".
+Engineer leaves with: one `$history` SELECT + one `CALL rollback_to_snapshot(...)` + atomic semantics confidence. Cites r17/r13. **Topic routed to "Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup"** (rollback is the snapshot-history maintenance lever).
 
 ---
 
-## Q3 — dbt builds model but plans use stale stats; manually run ANALYZE after. dbt_project.yml on-run-end hook — set up to run ANALYZE on a few specific tables at end of every dbt run? Does on-run-end run ONCE at the very end, or after each model?
+## Q2 — Unnest a `tags` array (array of strings) to one row per tag keeping `event_id` AND the position/index of each tag in its original array.
 
-**Score: 4.5** — Acc 4.5 / Clar 5.0 / App 4.0 / Compl 4.5
-
-**Technical core clean; `run_query` wrapper variant slightly imprecise (not wrong).**
+**Score: 4.875** — Acc 4.5 / Clar 5.0 / App 5.0 / Compl 5.0
 
 Responder shape:
-1. **`on-run-end` runs EXACTLY ONCE at the very end** of `dbt run`/`dbt build`, after all models + tests complete — NOT per-model. (For per-model use `post-hook`.)
-2. **dbt_project.yml hook**:
-   ```yaml
-   on-run-end:
-     - "ANALYZE iceberg.analytics.fct_events WITH (columns = ARRAY['user_id','tenant_id','event_type'])"
-     - "ANALYZE iceberg.analytics.dim_accounts"
-   ```
-3. **Trino syntax**: bare `ANALYZE <table>` — NO TABLE keyword (engineer's instinct from Spark/Hive `ANALYZE TABLE` would parse-fail in Trino).
-4. **Iceberg `WITH (columns = ARRAY[...])`** for selective column-stat collection on large tables; `WITH (partitions = ARRAY[...])` is HIVE-ONLY (fails on Iceberg).
-5. **Variant**: also showed `{{ run_query('ANALYZE ...', execute=true) }}` wrapper (this is slightly imprecise — see slip below).
-6. **Cadence**: re-run after bulk ingests / weekly / pair with `EXECUTE optimize`.
+- **Canonical form**:
+  ```sql
+  SELECT event_id, t.tag, t.position
+  FROM events
+  CROSS JOIN UNNEST(tags) WITH ORDINALITY AS t(tag, position);
+  ```
+- **1-based BIGINT ordinal added LAST in the alias list** — must provide two aliases `AS t(tag, position)`, position cannot be omitted from the alias when WITH ORDINALITY is used.
+- **Repeated-tag gets its TRUE position** (e.g., `tags=['x','y','x']` → positions 1, 2, 3 — not restarted).
+- **Two valid forms**:
+  - Explicit `CROSS JOIN UNNEST(...) WITH ORDINALITY AS t(...)` (canonical, recommended).
+  - Comma-form `FROM events, UNNEST(tags) WITH ORDINALITY AS t(tag, position)` (legacy SQL implicit-join, also valid).
+  - Don't mix comma + CROSS JOIN keyword (parse error per responder framing).
+- **Empty/NULL array preservation**:
+  ```sql
+  LEFT JOIN UNNEST(tags) WITH ORDINALITY AS t(tag, position) ON TRUE
+  ```
+  (Rows with NULL/empty `tags` kept; ordinal padded with NULL.)
 
 **Load-bearing facts VERIFIED:**
 
-1. **`on-run-end` runs once at end of invocation** — verified at [docs.getdbt.com/reference/project-configs/on-run-start-on-run-end](https://docs.getdbt.com/reference/project-configs/on-run-start-on-run-end) (WebFetch this iter): hook description says "at the end of" `dbt run` / `dbt build`. Per [docs.getdbt.com/docs/build/hooks-operations](https://docs.getdbt.com/docs/build/hooks-operations): "The `on-run-end` hook will be executed after the last model is built." NOT per-model (that's `post-hook`).
-2. **Bare `ANALYZE <table>` Trino 467 syntax (no TABLE keyword)** — verified at [trino.io/docs/467/sql/analyze.html](https://trino.io/docs/467/sql/analyze.html): grammar is `"ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]"`. NO TABLE keyword. The `ANALYZE TABLE foo` form is Spark/Hive SQL; in Trino 467 it parse-errors. Pinned `reference_trino_offset_before_limit.md`-adjacent syntax-correctness fact.
-3. **Iceberg `WITH (columns = ARRAY[...])` valid** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetch this iter): "You can specify a subset of columns to analyzed with the optional `columns` property." Example: `ANALYZE table_name WITH (columns = ARRAY['col_1', 'col_2'])`. Correctly named.
-4. **`partitions = ARRAY[...]` is Hive-only** — Iceberg ANALYZE documentation does NOT list `partitions` as a supported property; this property appears only in the Hive connector ANALYZE properties. Engineer trying `WITH (partitions = ARRAY[...])` on an Iceberg table would hit `Catalog 'iceberg' does not support analyze property 'partitions'`. Responder's defang is correct.
-5. **on-run-end accepts raw SQL string directly** — verified at the same docs.getdbt.com URL: hook accepts `sql-statement | [sql-statement]` directly. The `run_query()` macro is for INSIDE macros that need to bind/inspect results; for on-run-end, the raw SQL string form is the canonical pattern. The `{{ run_query('ANALYZE ...', execute=true) }}` variant DOES work (it executes the SQL and the wrapper just discards the result rowset), but it's unnecessary scaffolding for a fire-and-forget ANALYZE hook.
+1. **UNNEST WITH ORDINALITY syntax + ordinal-LAST** — verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) verbatim "an additional ordinality column is added to the end" + docs example `UNNEST(...) WITH ORDINALITY AS t(a, b, rownumber)`. Matches r07 §156-186 pinned canonical.
+2. **1-based ordinal** — confirmed by docs example output rows `1, 2, 3`.
+3. **LEFT JOIN UNNEST(...) WITH ORDINALITY AS t(...) ON TRUE** — verified at the leftjoin.com / mrpbennett.dev blog explicitly demonstrates `LEFT JOIN UNNEST(...) ON TRUE` for preserving empty arrays; combining with `WITH ORDINALITY` is the standard idiom.
+4. **Comma-form valid** — implicit-cross-join SQL-92 legal in Trino, equivalent to `CROSS JOIN`.
 
-**Slip — `run_query` wrapper variant**: not wrong (it does execute the ANALYZE), but it's stylistically imprecise — the bare string form is canonical for on-run-end hooks. Engineer who copies the `run_query` form gets the same result; one extra Jinja indirection layer. Recall ceiling, not load-bearing. NO FIX-A.
+**Minor slip (Acc -0.5):** "Don't mix comma+CROSS JOIN keyword (parse error)" — strictly, mixing the two forms in the same FROM clause is a precedence/binding ambiguity issue (`FROM t1, t2 CROSS JOIN UNNEST(...)` will parse but binding may not be what the writer expected because comma binds tighter than explicit JOIN keywords). Calling it a hard parse error is slightly overstated. The recommendation to pick ONE form is sound, the wording is imprecise. Not load-bearing because the responder's two explicit examples (CROSS JOIN and comma alone) are both correct.
 
-Engineer leaves with: canonical on-run-end ANALYZE hook + correct Trino bare-ANALYZE syntax + Iceberg `columns` property + Hive `partitions` defang + cadence guidance. Cites r17/r27. Topic routed to "Trino CBO / ANALYZE TABLE / Puffin statistics".
+Engineer leaves with: one CROSS JOIN UNNEST WITH ORDINALITY query + understanding of 1-based position semantics + LEFT JOIN variant for empty-array preservation. Cites r07. **Topic routed to "Analytical query patterns on Iceberg+Trino"** (UNNEST is the array-explode analytical canonical, same routing as iter1176 Q2).
 
 ---
 
-## Q4 — Oracle `NEXT_DAY(some_date, 'MONDAY')` = next Monday strictly-after a date. No NEXT_DAY in Trino. Trino way to compute "next occurrence of a specific weekday after date X" (general, several weekdays)?
+## Q3 — Custom generic dbt test that fails if any `dim_subscriptions` row has `end_date <= start_date` (cross-column comparison, no built-in covers it). Where the file goes, the macro, schema.yml reference with the two column args.
 
-**Score: 4.25** — Acc 3.5 / Clar 4.5 / App 4.0 / Compl 5.0
-
-**Formula CORRECT; closing note SELF-CONTRADICTORY — would BREAK the formula if engineer follows it.**
+**Score: 3.375 (BORDERLINE FAIL — LIGHT FIX-A)** — Acc 3.0 / Clar 3.5 / App 3.0 / Compl 4.0
 
 Responder shape:
-1. **No `NEXT_DAY` in Trino — build via `day_of_week` + arithmetic.**
-2. **ISO `day_of_week`: Mon=1, Tue=2, ..., Sun=7.**
-3. **General formula**:
-   ```sql
-   order_date + INTERVAL '1' DAY * CASE
-     WHEN day_of_week(order_date) < target_weekday
-       THEN target_weekday - day_of_week(order_date)
-     ELSE (target_weekday + 7) - day_of_week(order_date)
-   END
-   ```
-4. Monday-specific example with dead `WHEN day_of_week < 1` branch (cosmetic dead code).
-5. **CLOSING NOTE (WRONG)**: "This includes the target date if today IS the target weekday. To get strictly-after (Oracle), add + INTERVAL '1' DAY."
+- **Path A — Singular test in `tests/test_dim_subscriptions_date_order.sql`**:
+  ```sql
+  SELECT * FROM {{ ref('dim_subscriptions') }} WHERE end_date <= start_date
+  ```
+  Rows returned = FAIL. **CORRECT.**
+- **Path B — Reusable generic test macro in `macros/test_column_order.sql`**:
+  ```jinja
+  {% macro test_column_order(model, column_a, column_b, operator) %}
+  SELECT * FROM {{ model }} WHERE NOT ({{ column_a }} {{ operator }} {{ column_b }})
+  {% endmacro %}
+  ```
+  **Macro definition CORRECT** (legacy form, still backward-compatible per docs.getdbt.com).
+- **schema.yml example**:
+  ```yaml
+  models:
+    - name: dim_subscriptions
+      tests:
+        - test_column_order: {column_a: end_date, column_b: start_date, operator: ">"}
+  ```
+  **THIS IS WRONG.** schema.yml call should be `- column_order:` (DROP the `test_` prefix); dbt internally prepends `test_` when resolving the macro. As written, dbt looks up macro `test_test_column_order` → "Could not find generic test 'test_column_order'" parse error.
+- **Trailing prose**: "Said generic macros live in macros/ (NOT tests/), name file test_*.sql, **call without test_ prefix in schema.yml**; can add config: severity/store_failures."
+  Prose says "call without test_ prefix." Example contradicts the prose.
 
-**Formula verification (CORRECT, matches Oracle NEXT_DAY):**
+**Load-bearing facts CHECKED:**
 
-Walk through all four corner cases:
-- **today=Monday(1), target=Monday(1)**: `dow < target` FALSE (1<1 false) → ELSE branch → `(1+7) - 1 = 7` → `+7 days` → **next Monday (strictly-after)**. ✓ Matches Oracle.
-- **today=Sunday(7), target=Monday(1)**: `dow < target` FALSE (7<1 false) → ELSE branch → `(1+7) - 7 = 1` → `+1 day` → **next Monday (the immediate one)**. ✓
-- **today=Monday(1), target=Friday(5)**: `dow < target` TRUE (1<5) → `5 - 1 = 4` → `+4 days` → **this Friday (strictly-after, same week)**. ✓
-- **today=Friday(5), target=Friday(5)**: `dow < target` FALSE → ELSE branch → `(5+7) - 5 = 7` → `+7 days` → **next Friday (strictly-after)**. ✓
+1. **Singular test path A correct** — `tests/<name>.sql` file with a SELECT that returns failing rows; rows returned = FAIL is the dbt singular-test convention. Verified at [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests).
+2. **Legacy macro form STILL backward-compatible** — verified at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) (WebFetched this iter): "Why? Generic tests work a lot like macros, and historically, this was the only place they could be defined." Macro form survives; modern preferred form is `{% test column_order(...) %}` block in `tests/generic/`.
+3. **schema.yml call DROPS the `test_` prefix** — verified at docs.getdbt.com: "When *calling* the test in `.yml`, you use the name *without* the prefix." dbt resolves `- column_order:` in YAML by looking up macro `test_column_order`. Correct YAML: `- column_order: {column_a: end_date, column_b: start_date, operator: ">"}`.
+4. **Responder's macro `test_column_order(model, column_a, column_b, operator)`** + YAML `test_column_order:` → dbt looks up `test_test_column_order`, NOT FOUND, parse-error halt.
 
-**Conclusion: formula ALREADY implements Oracle NEXT_DAY (strictly-after) for all cases**, including when `dow == target` (the ELSE branch fires and emits `+7`, NOT `+0`). The formula does NOT include the target date.
+**Defect mechanism**: engineer who copies the YAML literally hits a `Could not find generic test 'test_column_order'` (or similar) error at `dbt parse` / `dbt test`. A careful engineer who reads to the trailing prose ("call without test_ prefix") notices the contradiction and applies the prose rule — but copy-pasta engineers fail.
 
-**Closing note SELF-CONTRADICTS the formula it just published.** The note says "this includes the target date if today IS the target weekday" — FALSE, the ELSE branch emits `+7` not `+0`. The note then says "to get strictly-after, add + INTERVAL '1' DAY" — this would BREAK the formula by overshooting:
-- today=Monday(1), target=Monday(1): formula emits +7 (next Monday). Note's "add +1 day" → +8 → **Tuesday after next**, off by one.
-- today=Friday(5), target=Friday(5): formula emits +7. Note's "add +1 day" → +8 → **Saturday after next Friday**, off by one.
+**Grep evidence — content gap, NOT resource defect:** searched resources/ for `test_column`, `macros/test_`, `generic test.*macro`, `legacy.*test_`, `tests/generic`, `{% test |{% macro test_` → ZERO hits across all files. r27 covers `accepted_values` + source freshness + `relationships` + model contracts but does NOT have a canonical for "custom generic test with cross-column comparison." Responder is doing best-effort recall against an empty resource anchor.
 
-Engineer who reads the prose and follows it gets a broken function. Engineer who reads only the formula gets the right answer. This is a **broken-secondary-alternative** pattern per `feedback_responder_broken_secondary_alternative.md`: lead correct, append-paragraph self-contradicts the lead.
+**LIGHT FIX-A SPEC**:
+- Add additive card to r27 (or r28) titled "Custom generic test for cross-column / multi-arg comparison (e.g., `end_date > start_date`)."
+- Content:
+  - **Modern preferred form** (dbt 0.20+): `{% test column_order(model, column_a, column_b, operator) %}` block in `tests/generic/column_order.sql`.
+  - **Legacy form** (still backward-compatible): `{% macro test_column_order(model, column_a, column_b, operator) %}` block in `macros/test_column_order.sql`.
+  - **schema.yml call (BOTH forms)**: `- column_order: {column_a: end_date, column_b: start_date, operator: ">"}` — **DROP the `test_` prefix in YAML** (dbt prepends it automatically when resolving the macro/test block).
+  - **DO-NOT-WRITE defang**: `- test_column_order:` in schema.yml → dbt looks up `test_test_column_order`, parse error "Could not find generic test 'test_column_order'."
+  - **Singular test alternative** (simpler when you don't need reusability): `tests/<name>.sql` SELECT statement; rows = FAIL.
+  - **Keyword anchors**: "custom generic test / reusable test / cross-column comparison / end_date < start_date / created_at < expires_at / schema.yml test args / generic test macro / tests/generic folder / drop test_ prefix in schema.yml / Could not find generic test."
+- Watch label: `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop FIX-A`; re-probe within 4-8 iters with structurally different framing ("custom test that takes two column names" / "reusable test for `created_at < expires_at` cross-column compare" / "WHERE one column must be less than another column").
 
-**Verified facts:**
-
-1. **No `NEXT_DAY` in Trino 467** — verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): no `next_day` function in the date/time function list. Engineer's premise correct.
-2. **`day_of_week` ISO Mon=1..Sun=7** — verified at the same URL: "Returns the ISO day of the week from x. The value ranges from 1 (Monday) to 7 (Sunday)." Per [trinodb/trino PR #5149](https://github.com/trinodb/trino/pull/5149) optional second arg to set start-of-week, default Monday.
-3. **`INTERVAL '1' DAY * <int>` valid** — `INTERVAL '1' DAY` is a `INTERVAL DAY TO SECOND` (or unit-interval), supports multiplication by an integer per Trino 467 `arithmetic.md` (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) examples).
-4. **Dead `WHEN day_of_week < 1` arm** — cosmetic; ISO `day_of_week` returns 1..7 so `< 1` is unreachable. Doesn't affect output but signals incomplete review.
-
-**Dings:**
-- Acc 3.5 — formula correct (+5), self-contradicting closing note that would break the formula if followed (-1.5).
-- Clar 4.5 — formula readable; closing note creates a contradiction reader has to resolve.
-- App 4.0 — engineer who reads the prose and adds `+1 DAY` gets broken output; engineer who reads only the formula is fine.
-- Compl 5.0 — covers no-NEXT_DAY + ISO mapping + general formula + Monday example.
-
-**Resource-source check**: searched resources/ for the wrong "add +1 DAY for strictly-after" framing — no resource teaches this; the responder is freelancing the closing note. NO FIX-A on first occurrence (per `feedback_responder_broken_secondary_alternative.md` — recall ceiling, not resource-sourced). Soft watch added; re-probe in 4-8 iters under similar "NEXT_DAY / next-occurrence-of-weekday" framing.
-
-Engineer leaves with: working formula + correct ISO day_of_week mapping + a self-contradictory closing paragraph that would break the formula if followed. Cites r27. Topic routed to "Oracle PL/SQL → dbt + Trino SQL migration".
+**Topic routed to "dbt model contracts"** (structurally identical data-integrity declaration as model-contracts family, same routing as iter1216 Q3 relationships and iter1218/1221/1229 Q3 accepted_values+not_null).
 
 ---
 
-## Watch carryforward / pin maintenance
+## Q4 — Oracle ROWNUM has no Trino equivalent; LIMIT covers simple cases but Oracle used ROWNUM in subqueries for first-row-per-group. Trino equivalent / Nth-row-within-group?
 
-**Closes this iteration:**
-- `iter1228 r27 §4.5A packages.yml-version-rename FIX-A` — CLOSES on first re-probe (Q1 5.0). Strengthened LEAD card ("`macro not found in any package` = VERSION mismatch: `generate_surrogate_key` needs dbt_utils 1.0.0+, renamed from `surrogate_key`") REACHED — responder leads with it instead of routing to file-location-troubleshooting. 18th consecutive watch in 1st-NO-OP-then-LIGHT-FIX-A-then-CLOSE pattern. **Both iter1228 open watches now CLOSED** (currency-format closed iter1230, packages.yml-version-rename closes iter1231).
+**Score: 4.75** — Acc 5.0 / Clar 4.5 / App 5.0 / Compl 4.5
 
-**Soft watches added/persisted:**
-- **NEW soft watch `iter1231 Q4 NEXT_DAY-closing-note-self-contradicts`** — re-probe in 4-8 iters under "Oracle NEXT_DAY / next-occurrence-of-weekday in Trino" framing. If recurs (responder publishes correct formula then appends a wrong "add +1 DAY" coda), consider light additive line in r27 NEXT_DAY canonical: "NB: the `target_weekday + 7` ELSE branch ALREADY emits strictly-after (next-week) when today IS the target weekday — do NOT add `+ INTERVAL '1' DAY`, which overshoots by a day." Per `feedback_responder_broken_secondary_alternative.md` — recall-ceiling family. NO churn-worthy FIX-A on first occurrence.
-- `iter1230 Q2 plain-correlated-EXISTS-OVER-WARNING` (persisting) — re-probe in 3-7 iters; no recurrence this iter.
-- `iter1230 Q3 ::cast in illustrative SQL bodies` (persisting) — passive light-monitor; no recurrence this iter.
-- `iter1215 strpos-3-arg ceiling` — recall ceiling, passive watch, NO churn.
-- `iter1213 session_properties + (+)-mnemonic` — passive watch.
-- `iter1229 Q1 @v1 / "table@snapshot" snapshot-suffix Spark-only` — passive watch.
-- `iter1208 width_bucket boundary off-by-one label-phrasing` — passive light-monitor.
+Responder shape:
+- **`ROWNUM <= 10` → `LIMIT 10`** (simple top-N).
+- **First-row-per-group** (Trino canonical):
+  ```sql
+  SELECT *
+  FROM (
+    SELECT *,
+      ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY occurred_at DESC, event_id) AS rn
+    FROM events
+  )
+  WHERE rn = 1;
+  ```
+- **No ROWNUM pseudo-column in Trino** — parse error if you try `WHERE ROWNUM <= 10`.
+- **No QUALIFY in Trino 467** — must wrap subquery + filter rank in WHERE.
+- **Stable tiebreaker** in ORDER BY (e.g., `event_id`) for reproducibility across runs when multiple rows tie on the primary order column.
 
-**Pin-aligned health:**
-- iter1228 r27 §4.5A packages.yml-version-rename FIX-A — REACHED + HOLDING (Q1 lead-with-version, no false-route to file-location).
-- `reference_trino_unwrap_temporal_predicates.md` HOLDING (Q2 `year/month = literal` correctly understood as sargable, not flagged as pruning-killer).
-- `reference_trino_division_by_zero.md` HOLDING (Q2 NULLIF ratio guard correctly applied).
+**Load-bearing facts VERIFIED:**
 
-**Health indicators:**
-- All four answers within the PASS band (≥ 3.5 per dimension; iter average 4.6875).
-- WATCH closes cleanly on first re-probe (the iter1228 packages.yml-version-rename pair is now down).
-- Two questions land clean 5.0 (Q1 + Q2); one with minor stylistic shave (Q3 4.5); one with real (minor) defect (Q4 4.25 self-contradicting closing note).
-- No fabrications. No imported-prior misroute. One self-contradicting append-paragraph (Q4) — NO FIX-A.
+1. **Trino has no ROWNUM pseudo-column** — TRUE (ROWNUM is Oracle-specific; Trino has no equivalent pseudo-column). Translated via ROW_NUMBER window function.
+2. **`ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...)`** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html). Standard ranking window function.
+3. **Trino 467 has no QUALIFY** — verified via WebSearch (Trino feature request open on Starburst forum May 2024, no implementation in 467 release notes). Engineer must wrap window-function rank in subquery + filter in outer WHERE.
+4. **Stable tiebreaker note** — best practice, prevents non-deterministic results when primary order has ties. Good recall.
+5. **Translation of `ROWNUM <= 10` → `LIMIT 10`** — correct for simple top-N; doesn't preserve the `ROWNUM` column itself but Oracle ROWNUM-without-PARTITION-BY use cases are typically just row caps.
 
-**Verdict: 4.69 STRONG PASS (margin +1.19). Watch iter1228 packages.yml-version-rename CLOSES. Both iter1228 open watches now CLOSED. NO FIX-A recommended for iter1231. NO-OP — return to breadth probes (training to 2026-06-30 23:59 CST, ~1.5 days remaining).**
+**Minor Compl shave (-0.5):** Didn't mention `RANK()` / `DENSE_RANK()` as alternatives when "first" means "all tied first rows" (e.g., latest event including all events with the max timestamp). For most "first-row-per-group" use cases ROW_NUMBER is correct, but the tie-handling nuance is worth a one-liner. Recall ceiling, NO FIX-A.
+
+**Minor Clar shave (-0.5):** "Wrap subquery" phrasing assumes engineer knows that window functions can't appear in WHERE — a one-sentence "Window functions are evaluated AFTER WHERE, so you can't `WHERE row_number() OVER ... = 1` directly; wrap in a subquery and filter outside" would zero-assumption it. Not load-bearing.
+
+Engineer leaves with: one ROW_NUMBER OVER PARTITION BY template + tiebreaker discipline + no-QUALIFY workaround mental model. Cites r27. **Topic routed to "Oracle PL/SQL → dbt + Trino SQL migration"** (Oracle-to-Trino dialect translation, ROWNUM is exactly the Oracle-specific construct that doesn't translate naively).
+
+---
+
+## Topic score updates (this iteration)
+
+| Topic | Q | Score | Update |
+|---|---|---|---|
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | Q1 | 4.625 | 4.4387/228 → (1011.96 + 4.625)/229 = 1016.585/229 = **4.4393/229 PASSED** (+0.0006, margin +0.9393) |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | Q2 | 4.875 | 4.5731/164 → (749.99 + 4.875)/165 = 754.865/165 = **4.5749/165 PASSED** (+0.0018, margin +1.0749) |
+| dbt model contracts (custom generic test routing) | Q3 | 3.375 | 4.4979/14 → (62.9706 + 3.375)/15 = 66.3456/15 = **4.4230/15 PASSED** (-0.0749, margin +0.9230, still comfortable) |
+| Oracle PL/SQL → dbt + Trino SQL migration | Q4 | 4.75 | 4.4558/197 → (877.79 + 4.75)/198 = 882.54/198 = **4.4573/198 PASSED** (+0.0015, margin +0.9573) |
+
+**FIX-A: LIGHT.** ONE additive card to r27 (or r28) — custom generic test schema.yml-call drop-test_-prefix rule + DO-NOT-WRITE defang of `- test_<name>:` in YAML + modern `{% test %}` block vs legacy `{% macro test_<name> %}` form noting BOTH back-compatible. Watch label `iter1232 r27 custom-generic-test-schema.yml-test_-prefix-drop`; re-probe 4-8 iters with cross-column-compare framing.
+
+**OPEN WATCHES (carried):** iter1231 NEXT_DAY-closing-note-contradicts (soft); iter1230 EXISTS-over-warning; iter1229 @v1-Spark-syntax; iter1215 strpos-3-arg CEILING (no churn); iter1213 session_properties + (+)-mnemonic; iter1208 width_bucket-boundary.
+
+**NEW WATCH iter1232**: r27 custom-generic-test-schema.yml-test_-prefix-drop FIX-A (re-probe 4-8 iters).
+
+**Overall: 4.41 PASS** — all topics still passing healthy margins; Q3 borderline-fail is content-gap-fueled (not recall slip) so a content fix is appropriate, not just per-instance re-probe.

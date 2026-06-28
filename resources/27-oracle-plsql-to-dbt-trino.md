@@ -3053,6 +3053,73 @@ For aggregate-level thresholds, use `dbt_utils.not_null_proportion` (see above).
 - For `dbt_utils.unique_combination_of_columns` (used in §6.7): a model-level test for composite-key uniqueness, distinct from the column-level tests described here.
 - Official docs: [docs.getdbt.com/reference/resource-configs/severity](https://docs.getdbt.com/reference/resource-configs/severity), [docs.getdbt.com/reference/resource-configs/store_failures](https://docs.getdbt.com/reference/resource-configs/store_failures), [github.com/dbt-labs/dbt-utils README](https://github.com/dbt-labs/dbt-utils?tab=readme-ov-file#not_null_proportion-source).
 
+#### 6.7A1 CUSTOM GENERIC TEST — your own reusable multi-column / cross-column assertion (e.g. `end_date > start_date`)
+
+> **READ THIS FIRST if your question contains any of these keywords: `custom generic test`, `write my own dbt test`, `cross-column comparison test`, `column A must be greater than column B`, `end_date after start_date`, `fail the build if end_date <= start_date`, `reusable test macro`, `test with column arguments`, `multi-argument dbt test`, `user-defined generic test`, `two-column dbt test`, `greater-than test`, `compare two columns dbt`.** The four built-ins (`not_null` / `unique` / `accepted_values` / `relationships`) only assert on ONE column's values in isolation — none of them can express "column A must be `>` column B." For that, write a **custom generic test** (a parameterized test macro you can reuse on any table). Verified at [docs.getdbt.com/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/best-practices/writing-custom-generic-tests) and [docs.getdbt.com/guides/best-practices/writing-custom-generic-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) on 2026-06-29.
+
+**The macro (modern form — preferred).** Put it in a `.sql` file under `tests/generic/` (e.g. `tests/generic/column_greater_than.sql`). The `{% test NAME(...) %}` block registers a generic test called `NAME`. The body is a SELECT returning **the FAILING rows** — zero rows = PASS, any rows = FAIL (same convention as every dbt test):
+
+```sql
+{% test column_greater_than(model, column_name, compare_column) %}
+
+SELECT *
+FROM {{ model }}
+WHERE NOT ({{ column_name }} > {{ compare_column }})
+-- NOTE: `NOT (a > b)` also fails the row when either side is NULL (NULL > x is UNKNOWN,
+-- NOT(UNKNOWN) is UNKNOWN → row is NOT returned). If you want NULLs to FAIL too, add:
+--   OR {{ column_name }} IS NULL OR {{ compare_column }} IS NULL
+
+{% endtest %}
+```
+
+> **`column_name` is the special arg.** When you attach a generic test to a column in `schema.yml`, dbt auto-injects that column as `column_name`. The first positional arg is ALWAYS `model` (the table being tested). Any OTHER columns (here `compare_column`) are plain named kwargs you pass yourself.
+
+**Reference it in `schema.yml` — attach at the COLUMN level** (so `column_name` = `end_date` is injected automatically, and you pass `compare_column` explicitly):
+
+```yaml
+models:
+  - name: dim_subscriptions
+    columns:
+      - name: end_date
+        data_tests:              # `tests:` is still accepted as an alias (dbt 1.8 renamed it; see §6.7A)
+          - column_greater_than:
+              compare_column: start_date
+```
+
+This compiles to `SELECT * FROM dim_subscriptions WHERE NOT (end_date > start_date)` and fails `dbt build` if any subscription ends on/before it starts. Add `config: {severity: warn}` under the test to downgrade a violation to a warning.
+
+> **THE `test_`-PREFIX TRAP (this is the #1 mistake — it parse-errors).** In `schema.yml` you reference the test by its **bare registered name** — `column_greater_than:` — **NOT** `test_column_greater_than:`. dbt internally prepends `test_` when it looks up the macro, so writing `- test_column_greater_than:` makes dbt search for a macro named `test_test_column_greater_than`, which does not exist → **`Could not find generic test 'test_column_greater_than'`**. The `test_` prefix belongs ONLY on the legacy macro *definition* name (below), never on the `schema.yml` *call*.
+
+**Legacy form (still backward-compatible).** Older projects define the same thing as a `{% macro test_NAME(...) %}` in `macros/` (file `macros/test_column_greater_than.sql`):
+
+```sql
+{% macro test_column_greater_than(model, column_name, compare_column) %}
+SELECT * FROM {{ model }} WHERE NOT ({{ column_name }} > {{ compare_column }})
+{% endmacro %}
+```
+
+dbt strips the leading `test_` and registers it as the generic test `column_greater_than` — so the **`schema.yml` call is identical** (`- column_greater_than: {compare_column: start_date}`, NO `test_` prefix). Both forms work on current dbt-trino; prefer the modern `{% test %}` block in `tests/generic/` for new code.
+
+**Simpler one-off? Use a SINGULAR test instead** (no macro, no args — just a `.sql` file in `tests/` whose SELECT returns failing rows):
+
+```sql
+-- tests/assert_subscription_dates_ordered.sql
+SELECT * FROM {{ ref('dim_subscriptions') }} WHERE end_date <= start_date
+```
+
+Singular = one specific assertion, hard-coded table/columns. Generic = reusable across tables via args. Reach for the generic test only when you'll apply the same rule to more than one model.
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| `- test_column_greater_than:` in `schema.yml` | **PARSE ERROR.** dbt prepends `test_` at lookup → searches `test_test_column_greater_than` → `Could not find generic test`. Reference the BARE name `column_greater_than:` in YAML — the `test_` prefix lives only on the legacy macro *definition*. |
+| `{% test ... %}` block placed in `macros/` and expected to be found as a *macro* you `{{ call }}` | It's a TEST, not a callable macro. Put `{% test %}` blocks under `tests/generic/` (test-paths); they're invoked via `schema.yml`, not `{{ ... }}`. |
+| A generic test body that does `SELECT count(*) ...` or `SELECT 1 WHERE EXISTS(...)` | dbt counts the RETURNED ROWS as failures and compares to `error_if`/`warn_if`. Return the **failing rows themselves** (`SELECT * ... WHERE <violation>`), not a count/boolean — see §6.7A test-result mechanics. |
+
+#### Cross-references — custom generic test
+
+- §6.7A test-result mechanics (zero failing rows = PASS) — the convention the custom test body must follow.
+- `dbt_utils.expression_is_true` (a packaged generic test) handles many single-expression row-level rules WITHOUT writing your own macro — e.g. `- dbt_utils.expression_is_true: {expression: "end_date > start_date"}` at the model level is a zero-macro alternative for exactly this case. Write your own generic test only when you need a named, documented, reusable test of your own.
+
 ---
 
 ### 6.7A2 LEADING CANONICAL — dbt `ref()` vs `source()` — the DAG-edge behavioral difference (NOT just a naming convention)
