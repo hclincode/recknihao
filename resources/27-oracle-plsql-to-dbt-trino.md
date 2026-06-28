@@ -1755,6 +1755,25 @@ SELECT greatest(price_usd, price_eur, price_gbp) AS highest_price FROM products;
 
 > **Findability anchor (read first if your question contains any of these keywords):** "NEXTVAL", "sequence", "Trino sequence", "Trino CREATE SEQUENCE", "Iceberg identity column", "Iceberg auto-increment", "surrogate key", "surrogate key Trino", "surrogate key Iceberg", "hash surrogate key", "md5 surrogate key", "generate_surrogate_key", "dbt surrogate key", "md5 concat varchar Trino", "concat_ws Trino", "md5 of varchar Trino". **PRIMARY canonical replacement: `{{ dbt_utils.generate_surrogate_key(['col1', 'col2']) }}`** (idempotent, VARCHAR MD5 hex output, stable across runs and clusters). **DO NOT write bare `md5(<varchar>)` or naked `md5(concat_ws(...))`** — Trino's `md5(varbinary) -> varbinary` per [trino.io/docs/current/functions/binary.html](https://trino.io/docs/current/functions/binary.html); the type mismatch is the bug, NOT the inner function. **`concat_ws` itself DOES exist in Trino 467** as `concat_ws(separator, string1, ..., stringN) -> varchar` per [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html) — see §4.3 string-family canonical for the full signature. Hand-rolled fallback that compiles: `to_hex(md5(to_utf8(concat_ws('||', CAST(a AS VARCHAR), CAST(b AS VARCHAR)))))` OR `to_hex(md5(to_utf8(concat(CAST(a AS VARCHAR), '||', CAST(b AS VARCHAR)))))`. See the DO-NOT-WRITE table below for the full ban.
 
+> **INSTALLING dbt_utils + the "`'dbt_utils.generate_surrogate_key' is undefined` / can't resolve the macro" troubleshooting card.** Keyword anchors: *dbt_utils not found, generate_surrogate_key undefined / can't resolve / not defined, dbt deps ran but macro missing, packages.yml setup, how to install dbt_utils, dbt package macro won't resolve, 'dbt_utils' is undefined.*
+>
+> **Setup (3 steps):** (1) create **`packages.yml`** in the dbt PROJECT ROOT (same dir as `dbt_project.yml`):
+> ```yaml
+> packages:
+>   - package: dbt-labs/dbt_utils
+>     version: [">=1.1.0", "<2.0.0"]   # 1.x; generate_surrogate_key requires dbt_utils >= 1.0.0
+> ```
+> (2) run **`dbt deps`** — this materializes the package under **`dbt_packages/`**; (3) call `{{ dbt_utils.generate_surrogate_key(['account_id', 'event_type']) }}` in the model. The `{{ ... }}` Jinja braces ARE correct — it is a compile-time macro that expands to `md5(...)` SQL.
+>
+> **If `dbt deps` succeeded but the macro STILL "can't resolve" (the engineer IS already using `{{ }}`):** do NOT tell them their `{{ }}` invocation is wrong — that is a misdiagnosis. The real causes, in order of likelihood:
+> | Cause | Symptom / check | Fix |
+> |---|---|---|
+> | **Wrong macro NAME for the installed version** | dbt_utils **< 1.0.0** has the macro as **`dbt_utils.surrogate_key`** — it was RENAMED to **`generate_surrogate_key` in dbt_utils 1.0.0** (Nov 2022). On an old pinned version, `generate_surrogate_key` is genuinely undefined. | Pin `version: [">=1.1.0","<2.0.0"]` in packages.yml, re-run `dbt deps`. (Or, on a legacy pin you can't change, call `dbt_utils.surrogate_key` — note its NULL-handling differs.) |
+> | **`dbt_packages/` not present at compile time** | `dbt deps` ran in a different dir, OR `dbt_packages/` is git-ignored and CI never ran `dbt deps`. | Run `dbt deps` in the SAME project dir before `dbt run`; add `dbt deps` as a CI step (don't commit `dbt_packages/`). |
+> | **packages.yml in the wrong place / typo'd package name** | Must be `packages.yml` (not `packages.yaml`, not under `models/`) at the project root; package must be `dbt-labs/dbt_utils` (underscore in the macro namespace, hyphen+slash in the registry name). | Move/rename to `<root>/packages.yml`; fix the `package:` line. |
+> | **Stale install after a version bump** | Changed the version pin but old package still cached. | `dbt clean` then `dbt deps`. |
+> The `{{ dbt_utils.generate_surrogate_key([...]) }}` syntax the engineer wrote is correct — when it "can't resolve," the problem is the package/version/install, NOT the call site.
+
 **Why this section exists (iter437 fabrication fix).** An engineer migrating an Oracle table with `id NUMBER GENERATED ALWAYS AS IDENTITY` (or `id NUMBER DEFAULT my_seq.NEXTVAL`) to Iceberg via Spark will reflexively ask: "what's the equivalent Iceberg DDL for an identity column?" The reflexive — and WRONG — answer is "Iceberg V2 supports identity-style auto-increment columns, just generate them via Spark DDL". **That claim is FABRICATED.** This subsection installs the authoritative negation.
 
 **The canonical truth (memorize this paragraph):**
