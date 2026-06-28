@@ -1,170 +1,144 @@
-# Iteration 1223 — Judge Feedback
+# Iteration 1224 — Judge Feedback
 
-**Verdict: 4.78125 STRONG PASS — NO-OP, two minor soft watches (Q3 packages.yml install-step findability gap + Q4 Oracle-GREATEST-NULL premise slip).** Resources teach the correct Q4 fact at multiple LEADING CANONICAL slots (r23 §2221 + r27 §1721); responder slip is recall-ceiling, NOT resource-sourced. Q2 synthesis-ceiling gaps-and-islands streak LANDS clean (historical Haiku failure pattern stabilized).
+**Verdict: 4.578 PASS — iter1219 CoW-MoR FINDABILITY WATCH CLOSES (comparison REACHED).** Q1 reached the r13 §2994+ CoW/MoR comparison cleanly post-iter1219 findability-anchor add — facts on whole-file-rewrite (CoW, no delete files) vs position-delete files (MoR), `$files` content=1 diagnostic, and Trino-467-writer-MoR-only nuance are all VERIFIED correct. **BUT** the scenario-specific diagnosis was muddled: the user is SEEING delete files, which definitively means they are ALREADY on MoR; the teammate's "you're on CoW" is BACKWARDS, and the fix is COMPACTION (`EXECUTE optimize` / `rewrite_position_delete_files`) NOT a CoW→MoR mode switch. Responder's prose "CoW would rewrite your whole table — that's why your dashboard got slower" mis-attributes the slowness to a mode the engineer isn't on. Compaction is mentioned but not foregrounded as THE primary fix. Q2/Q3/Q4 all clean.
 
 Per-question summary:
-- Q1 5.0 — Iceberg time-travel `FOR TIMESTAMP AS OF DATE '...'` canonical reach, no `$snapshots`-lookup pre-step
-- Q2 4.875 — gaps-and-islands 3-CTE streak (CASE inversion variant logically equivalent to r07 §3286 canonical, output correct)
-- Q3 4.9375 — `dbt_utils.generate_surrogate_key` setup + Trino compatibility; honest flag on packages.yml gap + correct general-knowledge fill
-- Q4 4.3125 — Trino-side COALESCE-wrap fix correct + all-null CASE variant correct; "different from Oracle (which ignores NULLs)" aside is FACTUALLY WRONG (Oracle ALSO returns NULL on any NULL arg)
+- Q1 3.6875 — CoW/MoR comparison REACHED (watch CLOSES); facts correct + diagnostic + Trino-467 nuance + property syntax all clean; SCENARIO DIAGNOSIS muddled (didn't identify already-on-MoR / teammate-backwards / compaction-is-the-fix-not-mode-switch); new soft watch
+- Q2 5.0 — `CROSS JOIN UNNEST(tags) AS t(tag) GROUP BY tag` canonical + JSON-string variant + `LEFT JOIN UNNEST ... ON TRUE` empty-array handling + Oracle `TABLE()`→Trino mapping
+- Q3 4.6875 — `strategy='check'` correct for no-reliable-`updated_at`; `check_cols`+hash-diff semantics; 4 dbt_* columns; `hard_deletes='new_record'`
+- Q4 5.0 — Trino regexp_replace `$1/$2/$3` Java/Joni backreferences (NOT `\1`); `'($1) $2-$3'` example correct; `\1` defang correct
 
-Iter average: (5.0 + 4.875 + 4.9375 + 4.3125) / 4 = **4.78125**, margin +1.28.
+Iter average: (3.6875 + 5.0 + 4.6875 + 5.0) / 4 = **4.594** (rounded 4.58), margin +1.09.
 
 ---
 
-## Q1 — Iceberg time-travel `FOR TIMESTAMP AS OF DATE '...'` without finding the snapshot ID first
+## Q1 — Subscriptions Iceberg + Spark MERGE INTO + delete files accumulating; teammate says CoW→MoR
+
+**Score: 3.6875** — Acc 3.5 / Clar 4.0 / App 3.75 / Compl 3.5
+
+**Scenario.** `subscriptions` Iceberg table being updated by Spark `MERGE INTO`; after ~2 weeks dashboards slower. `EXPLAIN ANALYZE` shows "lots of delete files scanned." Teammate claims "we're on Copy-on-Write, should switch to Merge-on-Read." Engineer asks what CoW vs MoR do, how to tell which mode they're on, which to prefer.
+
+**WATCH CLOSURE — iter1219 CoW-MoR findability.** iter1219 responder HEDGED "resources don't contain a direct comparison" (FALSE; r13 §2996 has the comparison table verbatim). iter1219 LIGHT FIX-A added a keyword-anchored leading canonical at r13 §2996. iter1224 (this iter) re-probe under structurally different framing (Spark MERGE INTO + delete-files-accumulating + teammate-said-X) REACHED the CoW vs MoR comparison cleanly — findability anchor works. **WATCH CLOSES on first re-probe** (~14th consecutive watch closure in 1st-re-probe-CLOSE pattern).
+
+**Load-bearing facts CORRECT (VERIFIED):**
+
+1. **CoW semantics** — "rewrites every affected Parquet file on DELETE/UPDATE; NO delete files; slow write, fast read." VERIFIED at [Dremio — Row-level Changes on the Lakehouse](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/) ("CoW rewrites the entire data file when even a single row is updated or deleted") + [iceberglakehouse.com/iceberg/iceberg-merge-on-read](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) ("Unlike COW, Merge-on-Read does not rewrite entire files when an update or delete occurs").
+2. **MoR semantics** — "small position-delete files reference invalidated rows by ordinal position; fast write, slower read." VERIFIED at iceberglakehouse.com ("delete files that reference the data file and the ordinal position of the invalidated row") + [trinodb/trino PR #12704](https://github.com/trinodb/trino/pull/12704).
+3. **Diagnostic** — `SELECT COUNT(*) FROM iceberg.analytics."subscriptions$files" WHERE content=1` (high count = MoR / many position deletes; zero = CoW). VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `$files.content` enum (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES).
+4. **Trino 467 writer is MoR-only regardless of property** — VERIFIED via r13 §5589 + r17 §583/§721 + [trinodb/trino#17272](https://github.com/trinodb/trino/issues/17272). The `write.delete/update/merge.mode='merge-on-read'` property only governs SPARK's writer.
+5. **Property syntax** — `ALTER TABLE ... SET TBLPROPERTIES('write.delete.mode'='merge-on-read', 'write.update.mode'='merge-on-read', 'write.merge.mode'='merge-on-read')` from Spark. Correct.
+6. **Compaction mentioned** — `EXECUTE optimize` named as periodic compaction (correct fix for delete-file accumulation, verified via [Apache Iceberg knowledge base — Merge-on-Read](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) "compaction reads all delete files, applies them to the data, and writes new clean data files, resetting delete file count to zero").
+
+**DEFECT — scenario-diagnosis muddle (NOT resource-sourced, recall-ceiling reasoning slip):**
+
+The user's `EXPLAIN ANALYZE` shows "lots of delete files scanned." Per the responder's own correct fact #1, **CoW produces ZERO delete files** — so seeing delete files DEFINITIVELY means the table is **already on MoR**. The teammate's "we're on CoW" is BACKWARDS for this scenario. The slowness is caused by **accumulated MoR position-delete files** that every read must merge against the data files (read amplification), NOT by CoW whole-file rewrites.
+
+Responder's prose framing said: "With frequent updates, CoW would rewrite your whole table on each update — that's why your dashboard got slower." This mis-attributes the slowness to CoW when the engineer is on MoR. The CORRECT scenario diagnosis is:
+
+> "The delete files you're seeing in EXPLAIN ANALYZE PROVE you're already on MoR — CoW doesn't produce delete files at all. Your teammate has it backwards. The dashboards slowed because MoR position-delete files have ACCUMULATED over 2 weeks of MERGE INTO writes — every read now merges many delete files against the data files. **The fix is COMPACTION, not a mode switch.** Run `ALTER TABLE iceberg.analytics.subscriptions EXECUTE optimize(file_size_threshold => '256MB')` (Trino-side) or `CALL iceberg.system.rewrite_position_delete_files(table => 'analytics.subscriptions')` (Spark-side) on a periodic schedule (nightly or every few hours). After compaction, `$files` content=1 count drops back to near-zero and read times recover."
+
+Engineer following responder's prose would copy `SET TBLPROPERTIES write.X.mode='merge-on-read'` (a no-op — already MoR) and might also try `EXECUTE optimize` (the actual fix). They MIGHT recover via the secondary instruction but with the wrong mental model. Could file an unnecessary mode-switch ticket with the Spark team.
+
+**Resource-source check CLEAN.** r13 §2996 (CoW-vs-MoR table), r13 §1293-1326 (delete-then-purge MoR cleanup recipe), and r17 §157+ (`EXECUTE optimize` + delete-file accumulation) all teach the right facts. The bridge "delete files visible = ALREADY on MoR → teammate-backwards twist → compaction-is-the-fix" is a multi-hop synthesis that the responder didn't assemble for the specific scenario. NOT a resource gap — Haiku reasoning-ceiling slip.
+
+**NO FIX-A.** Adding an explicit "teammate-backwards diagnosis" card at r13 §2996 risks over-attracting adjacent generic mode-comparison questions per `feedback_new_card_over_attracts_adjacent.md`. The comparison + facts + diagnostic + fix tools are ALL in resources; the synthesis is what's missing.
+
+**NEW SOFT WATCH** `iter1224 Q1 CoW-MoR scenario-diagnosis-when-symptom-implies-mode + compaction-not-mode-switch`: re-probe in 4-8 iters under "I see delete files / engineer thinks they need to change mode but actually on MoR / fix is compaction" framing. If recurs, consider a very light defang line in r13 §2996 (something like "If you see delete files in `$files` or `EXPLAIN ANALYZE`, you're ALREADY on MoR — CoW produces ZERO delete files. Accumulated MoR deletes are fixed by `EXECUTE optimize`, NOT by switching modes").
+
+**Topic update.** Iceberg table maintenance 4.4399/223 → (990.0977 + 3.6875)/224 = 993.7852/224 = **4.4365/224 PASSED** (-0.0034, margin +0.9365).
+
+---
+
+## Q2 — events.tags ARRAY<VARCHAR> → count events per tag (Oracle TABLE() equivalent in Trino)
 
 **Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-**Scenario.** `accounts` Iceberg table — customer claims `account_tier='enterprise'` on Jun 1, downgraded sometime in last 3 weeks; `$snapshots` has 50 entries and engineer doesn't know which maps to which date. Wants the row as it existed on Jun 1 WITHOUT first finding the snapshot ID.
+**Scenario.** `events.tags` is an array of strings (`['mobile','enterprise','api']`). PM wants count of events per tag. Plain `SELECT tags, COUNT(*) GROUP BY tags` groups the whole array (wrong). Oracle would use `TABLE(...)`. What's the Trino way to turn each array element into its own row to GROUP BY?
 
-**Responder reach.**
-- `SELECT * FROM iceberg.analytics.accounts FOR TIMESTAMP AS OF DATE '2026-06-01' WHERE account_id = ...` — DATE literal works (Trino coerces to TIMESTAMP at start-of-day); equivalently `TIMESTAMP '2026-06-01 00:00:00 UTC'`.
-- Trino's Iceberg connector resolves to the **most recent snapshot committed AT OR BEFORE that timestamp** — no snapshot ID lookup needed.
-- Correct distinction: `FOR VERSION AS OF <snapshot_id>` is for `BIGINT` snapshot IDs (or named branch/tag); `FOR TIMESTAMP AS OF` is the time-keyed lookup.
-- Must be a DATE/TIMESTAMP **literal**, not a column reference.
-- Time-travel returns table state at that point: schema + data exactly as it was committed.
+**Load-bearing facts CORRECT (VERIFIED):**
 
-**Verification.** [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) verbatim: *"The latest snapshot of the table taken before or at the specified timestamp in the query is internally used"* and the docs example explicitly shows `SELECT * FROM example.testdb.customer_orders FOR TIMESTAMP AS OF DATE '2022-03-23';` — DATE-literal coercion confirmed in official docs. PR [trinodb/trino#10258](https://github.com/trinodb/trino/pull/10258) discussion: `DATE '2021-01-02'` is treated as `TIMESTAMP '2021-01-02 00:00:00.000000000'` for coercion purposes. `FOR VERSION AS OF` accepts BIGINT snapshot IDs or named branch/tag strings.
+1. **`CROSS JOIN UNNEST(e.tags) AS t(tag)`** — the canonical Trino array-explode. VERIFIED at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) verbatim: `CROSS JOIN UNNEST(scores) AS t(score)` example producing one row per array element.
+2. **`GROUP BY tag ORDER BY event_count DESC`** — standard aggregation pattern, no nuance.
+3. **JSON-string variant** — `CROSS JOIN UNNEST(CAST(json_parse(e.tags) AS ARRAY(VARCHAR))) AS t(tag)` correctly handles `tags` columns stored as JSON strings instead of native ARRAY. Two-step `json_parse` (string → JSON) then `CAST AS ARRAY(VARCHAR)` (JSON → typed array) is the canonical form.
+4. **`LEFT JOIN UNNEST(...) AS t(tag) ON TRUE`** — correctly handles rows where `tags` is empty or NULL. VERIFIED at trino.io/docs/467/sql/select.html verbatim: "the only condition supported by the current implementation is `ON TRUE`" with LEFT JOIN UNNEST.
+5. **Oracle `TABLE(...)`→Trino `CROSS JOIN UNNEST` mapping** — useful cross-dialect translation, explicitly addresses the engineer's Oracle background.
 
-Clean direct reach to the time-travel canonical. Cites r17/r28.
+No imported-prior slip, no broken-secondary, no over-warning, no fabrication. Pin-perfect.
 
----
-
-## Q2 — Longest streak of consecutive active days (login streak / gaps-and-islands) — SYNTHESIS-CEILING WIN
-
-**Score: 4.875** — Acc 5.0 / Clar 4.5 / App 5.0 / Compl 5.0
-
-**Scenario.** `events(user_id, event_ts)`. Distinct active days easy; engineer is stuck building runs of consecutive dates + longest unbroken run (e.g., Jun 1,2,3 skip 4 active 5,6 → longest = 3) WITHOUT a self-join per gap.
-
-**Responder reach.** Three-CTE gaps-and-islands mirroring r07 §3286 canonical (Pattern B-Streak, iter876 PIN):
-1. `flagged` — `is_new_streak = CASE WHEN date_diff('day', LAG(active_day) OVER (PARTITION BY user_id ORDER BY active_day), active_day) <> 1 THEN 1 ELSE 0 END` over `(SELECT DISTINCT user_id, CAST(event_ts AS DATE) AS active_day FROM events)`.
-2. `streaks` — `streak_id = SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY active_day)`.
-3. `streak_lengths` — `COUNT(*) AS streak_len GROUP BY user_id, streak_id`.
-4. Final: `SELECT user_id, MAX(streak_len) AS longest_streak_days GROUP BY user_id`.
-- Correctly noted CANNOT nest windows → three CTEs required.
-
-**Verification — output correct.** Trace example (Jun 1,2,3,5,6):
-- Jun 1: `LAG=NULL` → `date_diff(NULL, Jun1)=NULL` → `NULL <> 1` UNKNOWN → ELSE → `is_new_streak=0`, `streak_id=SUM=0`.
-- Jun 2,3: `date_diff=1` → `1 <> 1` FALSE → ELSE → `is_new_streak=0`, `streak_id=0`.
-- Jun 5: `date_diff=2` → `2 <> 1` TRUE → WHEN → `is_new_streak=1`, `streak_id=1`.
-- Jun 6: `date_diff=1` → `is_new_streak=0`, `streak_id=1`.
-- COUNT per streak_id: (user, 0)=3, (user, 1)=2 → MAX=3. **CORRECT.**
-
-Responder's CASE inversion (`<> 1 THEN 1 ELSE 0`) vs canonical r07's (`= 1 THEN 0 ELSE 1`) is **logically equivalent** for the SUM-over-flag streak-id construction. Canonical's first row gets `streak_id=1` (1-indexed); responder's first row gets `streak_id=0` (0-indexed). Both group consecutive days correctly because streak boundaries are detected by the INCREMENT in the running sum, not by the starting value. COUNT-per-streak-id and MAX-over-counts are unaffected by the 0-vs-1 offset.
-
-**Minor nit (-0.125 Clarity).** Responder's narrative comment "first row → new streak starts" is slightly inconsistent with the literal code path (their first row gets `is_new_streak=0` not 1, because their flag is `is_GAP_TO_PRIOR` not `is_NEW_STREAK_START`). The semantic INTENT (first row begins a streak) is preserved in the streak_id assignment, but an engineer reading the comment carefully against the CASE could be momentarily confused. Output is correct — non-load-bearing.
-
-**Synthesis-ceiling signal.** This is HISTORICALLY a Haiku synthesis-ceiling pattern (per `feedback_synthesis_ceiling_stop_churning.md` — iter951-956 gaps-and-islands streak-construction repeatedly failed across novel domains). The iter876 r07 §3277 canonical PIN is doing its job. Strong credit for landing the assembly on a fresh phrasing ("login streak" / "active days" / "longest unbroken run") with the correct 3-CTE shape AND the no-nest-windows constraint explicitly called out. Cites r07.
+**Topic update.** SQL query best practices for OLAP 4.5884/279 → (1280.1636 + 5.0)/280 = 1285.1636/280 = **4.5916/280 PASSED** (+0.0032, margin +1.0916).
 
 ---
 
-## Q3 — `dbt_utils.generate_surrogate_key` setup + Trino compatibility — minor findability gap, responder filled correctly
+## Q3 — dbt snapshots SCD-2 for plan_tier history, source updated in-place in Oracle, NO reliable updated_at
 
-**Score: 4.9375** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 4.75
+**Score: 4.6875** — Acc 4.75 / Clar 4.75 / App 4.75 / Compl 4.5
 
-**Scenario.** Oracle SEQUENCE int PKs everywhere; Iceberg has no auto-increment. dbt fact models join 3-4 staging tables; need stable unique key per output row for incremental MERGE; no single natural key works. Saw `dbt_utils.generate_surrogate_key` mentioned — needs install steps + Trino-compatibility confirmation.
+**Scenario.** Build SCD-2 plan-tier history in dbt. Source `customers` table updated in-place in Oracle, NO reliable `updated_at`. dbt snapshot strategies check vs timestamp — which fits, and what's different?
 
-**Responder reach.**
-- Model SQL: `{{ dbt_utils.generate_surrogate_key(['tenant_id', 'natural_order_id']) }} AS order_pk` in SELECT + `config(materialized='incremental', unique_key='order_pk', incremental_strategy='merge')` — mirrors r27 §4.5A canonical exactly.
-- Jinja macro → deterministic MD5 hash → VARCHAR(32) output; stable across runs AND clusters (unlike ROW_NUMBER which is only run-stable).
-- **Install** (flagged honestly as not explicitly walked through in resources): create `packages.yml` at project root with `packages: - package: dbt-labs/dbt_utils version: 1.1.1`, then `dbt deps`, then macro is available.
-- Works on Trino via dbt-trino — macro compiles to plain `md5(...)`-equivalent SQL that runs natively.
+**Load-bearing facts CORRECT (VERIFIED):**
 
-**Verification.** [github.com/dbt-labs/dbt-utils](https://github.com/dbt-labs/dbt-utils) + [docs.getdbt.com/blog/managing-surrogate-keys](https://docs.getdbt.com/blog/managing-surrogate-keys) confirm: MD5 hash, deterministic, cross-warehouse compatible, install via packages.yml + dbt deps. r27 §1865 documents the compiled-SQL shape: `md5(cast(coalesce(cast(tenant_id as varchar), '_dbt_utils_surrogate_key_null_') || '-' || coalesce(cast(natural_order_id as varchar), '_dbt_utils_surrogate_key_null_') as varchar))`. dbt-trino translates via adapter dispatch to Trino-compatible `to_hex(md5(to_utf8(...)))` — confirmed at r27 §4.5 row.
+1. **`strategy='check'` is correct for no-reliable-`updated_at`** — VERIFIED at [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots): "The check strategy is useful for tables which do not have a reliable `updated_at` column" verbatim. Engineer's literal scenario → check strategy.
+2. **`check_cols=['plan_name','billing_tier','annual_seats']`** — list of columns dbt re-hashes each run; any change in any listed column = new SCD-2 row. Correct.
+3. **timestamp strategy vs check strategy contrast** — timestamp compares an `updated_at` column (fast, single column); check re-hashes `check_cols` and detects via hash diff (slower, works without a timestamp). VERIFIED at docs.getdbt.com snapshots reference.
+4. **4 dbt_* columns** (`dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to`) — standard dbt snapshot metadata. dbt 1.9+ also adds `dbt_is_deleted` but ONLY when `hard_deletes='new_record'` is set.
+5. **`hard_deletes='new_record'`** — VALID 1.9+ option for tracking deletions as marker rows with `dbt_is_deleted=True`. Alternative `hard_deletes='invalidate'` (stamps `dbt_valid_to=now()` when row disappears) is also valid; responder picked one of two equally-correct options.
 
-**Coverage gap noted (-0.0625 Compl).** Grep `packages\.yml|dbt deps|dbt-labs/dbt_utils` across resources:
-- r27 §2524: mentions packages.yml in passing (DBT_ENV_SECRET context, not as install guide).
-- r27 §3128: `dbt deps` in a CI pseudo-script for source-freshness (not an install how-to).
-- r27 §3868: parenthetical "no dbt deps, no packages.yml entry" (negative example for exposures).
-- r27 §4555: "Cross-project reusable via `dbt deps` packages (e.g., `dbt_utils`)" — one-liner aside.
+**Minor compl shave (-0.5):**
 
-NO leading canonical that explicitly walks through: (1) create packages.yml at project root → (2) add `dbt-labs/dbt_utils` block with version → (3) run `dbt deps` → (4) macros now available in models. Responder's honest flag ("resources reference dbt_utils but don't include explicit packages.yml setup") is accurate and they filled the gap from general knowledge **correctly**. This is a minor findability/coverage gap — but the responder handled it well (transparent flag + correct fill), so the engineer is not blocked.
+- Didn't surface that with check strategy, `updated_at` is OPTIONAL (if configured, dbt uses it as the validity-window timestamp; if not, dbt falls back to current run time). Not load-bearing for engineer's literal "no reliable updated_at" scenario — they don't have one, so the fallback-to-run-time behavior is what they get by default.
+- Didn't compare `hard_deletes='invalidate'` (close validity window) vs `hard_deletes='new_record'` (insert marker row) — both valid; iter1200 Q3 covered this disambiguation cleanly. Recall-ceiling, NOT load-bearing here.
 
-**Watch (NO immediate FIX-A).** `r27 packages.yml + dbt deps install canonical iter1223 — additive findability` (responder honest flag + correct general-knowledge fill). Re-probe in 4-8 iters under varied phrasings ("how do I install dbt_utils" / "where does packages.yml go" / "do I need to install anything for dbt_utils macros"). If recurs across phrasings AND another responder fails the general-knowledge fill, additive LIGHT FIX-A on r27 with the four-step install canonical. Cites r27.
+Engineer leaves with the right answer (check strategy + check_cols + 4 dbt_* columns + hard_deletes for deletion tracking).
 
----
-
-## Q4 — Oracle `GREATEST(...)` returning NULL on Trino — Trino-side fix CORRECT, Oracle premise WRONG (responder slip)
-
-**Score: 4.3125** — Acc 3.5 / Clar 5.0 / App 5.0 / Compl 3.75
-
-**Scenario.** Engineer ported Oracle `GREATEST(last_login_at, last_purchase_at, last_support_contact_at)` for most-recent touch. Some customers have NULL on `last_purchase_at` etc.; on Trino those customers return NULL ("Trino sees any NULL arg and gives up"). Expected? Right way to make NULL columns get ignored (return max of non-null dates)?
-
-**Responder reach — Trino-side CORRECT.**
-- Trino 467 `GREATEST` / `LEAST` return NULL if ANY arg is NULL — verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html) verbatim: *"Like most other functions in Trino, they return null if any argument is null. Note that in some other databases, such as PostgreSQL, they only return null if all arguments are null."*
-- Primary fix: wrap each arg with `COALESCE` to a low-sentinel timestamp:
-  ```sql
-  GREATEST(
-    COALESCE(last_login_at,           TIMESTAMP '1970-01-01 00:00:00'),
-    COALESCE(last_purchase_at,        TIMESTAMP '1970-01-01 00:00:00'),
-    COALESCE(last_support_contact_at, TIMESTAMP '1970-01-01 00:00:00')
-  ) AS last_touch_at
-  ```
-- All-null variant (so customers with NO touches stay NULL, not stamped to epoch):
-  ```sql
-  CASE
-    WHEN last_login_at IS NULL
-     AND last_purchase_at IS NULL
-     AND last_support_contact_at IS NULL THEN NULL
-    ELSE GREATEST(COALESCE(...), COALESCE(...), COALESCE(...))
-  END
-  ```
-- Cited the `reference_trino_greatest_least_null` memory pin.
-
-**SLIP — Oracle premise propagation (factually wrong aside).** Responder said: *"This is different from Oracle (which ignores NULLs)."* **FALSE.** Per [database.guide GREATEST in Oracle](https://database.guide/greatest-function-in-oracle/) + [Oracle TimesTen GREATEST docs](https://docs.oracle.com/en/database/other-databases/timesten/22.1/sql-reference/greatest.html) + multiple Ask TOM threads: **Oracle's GREATEST ALSO returns NULL if any argument is NULL.** Oracle docs verbatim: *"If any argument is null, GREATEST returns null."*
-
-The engineer's framing ("Trino sees any NULL arg and gives up") implicitly assumed Oracle behaved differently. The responder **echoed** the mistaken premise instead of correcting it.
-
-**The resources EXPLICITLY teach the correct fact.**
-- r23 §2221 LEADING CANONICAL header: "`greatest()` / `least()` return NULL if ANY arg is NULL in Trino (Oracle + MySQL + BigQuery match; **PostgreSQL DIFFERS**)" — verbatim: *"Trino (and Oracle, MySQL, BigQuery) — greatest(...) / least(...) return NULL if ANY argument is NULL. PostgreSQL — IGNORES NULL args, returning NULL only if ALL args are NULL."*
-- r27 §1721 verbatim: *"Oracle's GREATEST / LEAST also return NULL if any arg is NULL (Oracle matches Trino here, but engineers coming from Postgres muscle memory get bitten)."*
-- r23 §2239 DO-NOT-WRITE row 2: *"Postgres and Trino greatest/least behave identically on NULL"* — FALSE; Trino+Oracle+MySQL+BigQuery match; Postgres is the outlier.
-
-Responder's "different from Oracle (which ignores NULLs)" contradicts r23 §2221 + r27 §1721 directly. **Recall-ceiling responder slip, NOT a resource defect.**
-
-**Why the slip matters but doesn't fail the answer.** The Trino-side advice (COALESCE-wrap with sentinel, plus the all-null CASE wrapper) is **the correct fix for the engineer's REAL problem** — they will solve their Trino issue by applying it. But they walk away believing Oracle was forgiving and Trino is the strict one, which is a false migration mental model — could mislead them in OTHER Oracle-to-Trino porting decisions (e.g., assuming other "strict-on-NULL" behavior is Trino-specific when it's actually shared with Oracle).
-
-**Classification.** Fits `feedback_responder_broken_secondary_alternative.md` family (LEAD passes, secondary aside is broken) AND adjacent to `feedback_responder_overwarning_folklore.md` (responder reinforced engineer's mistaken premise instead of correcting it). Per `feedback_synthesis_ceiling_stop_churning.md` discipline: do NOT churn the defang. Correct facts are ALREADY in resources at MULTIPLE LEADING CANONICAL slots. Adding MORE Oracle-matches-Trino emphasis risks regressing adjacent Postgres-differs questions. **NO FIX-A.**
-
-**Watch (NO immediate FIX-A).** `r23 §2221 Oracle-matches-Trino-on-GREATEST-NULL responder slip iter1223 — recall-ceiling, no resource fix, re-probe`. Re-probe in 6-10 iters under explicit Oracle-comparison phrasings ("does Oracle GREATEST behave the same?" / "is this Trino-specific?"); if recurs across phrasings, evaluate top-of-r27 Oracle-Trino-NULL-parity FAQ anchor as a possible additive routing card (not a content change). Cites r23/r27.
+**Topic update.** dbt snapshots SCD2 4.2964/23 → (98.8172 + 4.6875)/24 = 103.5047/24 = **4.3127/24 PASSED** (+0.0163, margin +0.8127).
 
 ---
 
-## Topic checklist updates
+## Q4 — Trino regexp_replace backreferences: $1 vs \1 (Java/Joni vs Oracle/Postgres)
 
-This iter touches:
-- **Iceberg time-travel / metadata-tables / table-maintenance** (Q1) — clean canonical reach
-- **Analytical query patterns on Iceberg+Trino** (Q2 gaps-and-islands streak) — synthesis-ceiling LANDS
-- **Oracle-PL/SQL-to-dbt-Trino migration** (Q3 dbt_utils install + Q4 Oracle GREATEST) — Q3 honest gap-flag + correct fill; Q4 Oracle-premise slip
-- **SQL-best-practices-OLAP** (Q4 GREATEST NULL canonical) — resources correct, responder slipped on echoing user's mistaken Oracle premise
+**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-All required topics REMAIN PASSED with healthy margins. Iter average **4.78125 STRONG PASS** (margin +1.28).
+**Scenario.** Oracle `REGEXP_REPLACE(phone_raw, '^([0-9]{3})([0-9]{3})([0-9]{4})$', '(\1) \2-\3')` → `'(555) 123-4567'`. Trino: does `regexp_replace` support backreferences, is `\1` right or different notation?
 
-## Source-verified outcomes this iter
+**Load-bearing facts CORRECT (VERIFIED):**
 
-- 0 Trino dialect errors (all Trino-side advice clean)
-- 1 cross-engine factual slip (Q4 Oracle GREATEST-NULL aside — recall-ceiling, NOT resource-sourced; r23 §2221 + r27 §1721 teach correctly)
-- 1 minor findability gap (Q3 dbt_utils install / packages.yml — responder honestly flagged + correctly filled from general knowledge)
-- 1 SYNTHESIS-CEILING WIN (Q2 gaps-and-islands streak — historically a Haiku failure pattern, lands clean here with a valid CASE-inversion variant of r07 §3286)
-- 0 fabrications
-- 0 over-warning folklore on Trino constructs
+1. **Trino uses `$1`/`$2`/`$3` (Java/Joni regex)** — VERIFIED at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) verbatim: "Capturing groups can be referenced in `replacement` using `$g` for a numbered group or `${name}` for a named group." Example: `regexp_replace('1a 2b 14m', '(\d+)([a-z]+) ', '3c$2 ')`.
+2. **Correct Trino form** — `regexp_replace(phone_raw, '^([0-9]{3})([0-9]{3})([0-9]{4})$', '($1) $2-$3')` produces `'(555) 123-4567'`. Verified.
+3. **`\1` DEFANG correct** — `\1` in Trino's replacement string emits a LITERAL backslash followed by `1` (no Oracle/Postgres-style backref interpretation). Engineer would get garbage like `'(\1) \2-\3'` literal output. Per `reference_trino_regex_backslash.md` (pinned), backslash is LITERAL in SQL string literals so `'\1'` in replacement is exactly two characters `\` + `1`.
+4. **Java/Joni vs Oracle/Postgres cross-dialect framing** — useful translation context for the engineer's Oracle background. Correctly flagged dialect difference.
 
-## Recommendation
+Pin-perfect. No defect.
 
-**NO-OP.** No resource edits. Commit rubric + feedback only. Two new soft-watches added:
-1. `r27 packages.yml + dbt deps install canonical iter1223 — additive findability` (re-probe 4-8 iters)
-2. `r23 §2221 Oracle-matches-Trino-on-GREATEST-NULL responder slip iter1223 — recall-ceiling, NO resource fix` (re-probe 6-10 iters)
+**Topic update.** SQL query best practices for OLAP 4.5916/280 → (1285.1636 + 5.0)/281 = 1290.1636/281 = **4.5913/281 PASSED** (-0.0003, essentially flat, margin +1.0913).
 
-## Open watches (carry-forward)
+---
 
-- iter1222: CAST-DECIMAL-money + TRY_CAST-dirty-staging (5-9 iters)
-- iter1219: CoW-MoR + format-%08d
-- iter1215: strpos-3-arg CEILING (no churn)
-- iter1213: session_properties + (+)-mnemonic
-- iter1221: quarterly-window-vs-transform
-- Light monitors: NVL-coercion, width_bucket, translate-phone-example
+## Watch ledger after iter1224
 
-## Pattern observation
+**CLOSED this iter:**
+- `iter1219 Q1 CoW-vs-MoR small-frequent-delete findability` — CLOSES. Comparison reached cleanly on first re-probe under structurally different framing (Spark MERGE INTO + delete-files-accumulating + teammate-said-X). ~14th consecutive 1st-re-probe-CLOSE.
 
-Sustainment band continues — ~14th consecutive iter with either NO-OP or watch-close + light-touch. The Q2 win is the load-bearing signal of this iter: gaps-and-islands streak construction (historical Haiku synthesis ceiling per iter951-956) has stabilized cleanly via the iter876 r07 §3277 canonical, and a domain-shifted phrasing ("login streak" not "session" not "consecutive returns") routed correctly with the 3-CTE constraint preserved AND the no-nest-windows admonition surfaced. The Q4 Oracle premise slip is the Nth recall-ceiling instance — responder echoes the user's stated mistaken premise rather than correcting it. Resources teach correctly at multiple LEADING CANONICAL slots; per stop-churning discipline, accept as ceiling and re-probe. Q1 + Q3 are clean canonical reaches with Q3's transparent gap-flag + correct fill being the kind of honest behavior we want to see when a resource doesn't have a step-by-step install walkthrough.
+**NEW soft watches:**
+- `iter1224 Q1 CoW-MoR scenario-diagnosis-when-symptom-implies-mode + compaction-not-mode-switch` — re-probe 4-8 iters under "I see delete files but engineer thinks they need a mode switch" framing. NOT a FIX-A on first occurrence (resources are correct; recall-ceiling synthesis slip). If recurs, very-light defang line at r13 §2996.
+
+**Carry-forward open watches (no probe this iter):**
+- `iter1223 Q3 packages.yml-install-canonical-gap` — re-probe 5-9 iters; FIX-A if recurs.
+- `iter1223 Q4 GREATEST-Oracle-NULL-premise-slip` — recall-ceiling, no resource fix.
+- `iter1215 strpos 3-arg synthesis ceiling` — no churn.
+- `iter1213 session_properties + (+)-mnemonic` — light-monitor.
+- `iter1222 CAST-DECIMAL/TRY_CAST` — light-monitor.
+- `iter1221 Q1 quarterly-window-vs-transform-granularity diagnosis` — light-monitor.
+- `iter1220 r10 transform-refinement-vs-column-addition cross-spec-pruning` — light-monitor.
+- `iter1218 r28+r27 accepted_values-doesnt-catch-NULL FIX-A` — open FIX-A; re-probe under "ONE dbt test catches both NULL and unexpected literals" framing.
+- `iter1214 retention_days param-fab + expire-vs-planning conflation` — CLOSED iter1218.
+- `iter1208 width_bucket boundary off-by-one` — light-monitor.
+- `iter1207 r13 §1293-1326 Spark-CALL-inline-tag` — light-monitor.
+- `iter1206 LIKE-on-ROW + $partitions-omission` — CLOSED iter1222.
+
+**Sources verified this iter:**
+- [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) — `$g` numbered backreference + `${name}` named backreference syntax verbatim
+- [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots) — check strategy for tables without reliable `updated_at`; check_cols + optional updated_at
+- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — `CROSS JOIN UNNEST(array) AS t(elem)` + `LEFT JOIN UNNEST(...) ON TRUE` empty-array form
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — `$files.content` enum (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES); `EXECUTE optimize` compaction
+- [Dremio — Row-Level Changes on the Lakehouse: CoW vs MoR](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/) — CoW rewrites entire file; MoR uses delete files
+- [iceberglakehouse.com — Merge-on-Read in Iceberg](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) — MoR position deletes accumulate; compaction is the fix
