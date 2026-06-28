@@ -1646,12 +1646,17 @@ FROM metrics;
 SELECT TRUNC(price * 1.0875, 2) AS price_with_tax FROM orders;
 -- TRUNC truncates to 2 decimal places (drops anything beyond the hundredths).
 
--- Trino — CANONICAL form (direct 2-arg truncate, same semantics as Oracle TRUNC(n, 2)):
-SELECT truncate(price * 1.0875, 2) AS price_with_tax FROM orders;
--- Equivalent verbose form (works identically; useful if you prefer to be explicit, or pre-467):
-SELECT truncate(price * 1.0875 * 100) / 100 AS price_with_tax FROM orders;
--- General verbose form for arbitrary d decimal places:
+-- Trino 467 — CANONICAL form. There is NO 2-arg truncate(n, d) on 467 (truncate is 1-arg
+-- ONLY: truncate(x) drops the fractional part toward zero). To truncate to d decimal places,
+-- scale by power(10, d), 1-arg truncate, then scale back:
 SELECT truncate(price * 1.0875 * power(10, 2)) / power(10, 2) AS price_with_tax FROM orders;
+-- Shorthand for the common d=2 case (× 100 / 100):
+SELECT truncate(price * 1.0875 * 100) / 100 AS price_with_tax FROM orders;
+-- ⚠️ DO NOT write truncate(price * 1.0875, 2) — the 2-arg overload does NOT exist on Trino 467
+-- (it was added post-467, ~Trino 471+). On 467 it errors: Unexpected parameters (decimal, integer)
+-- for function truncate. Use the scale-by-power(10,d) form above. (Use power(10,d)/100, NOT FLOOR:
+-- FLOOR rounds toward -infinity, so FLOOR(-9.999*100)/100 = -10.00, WRONG; truncate() goes toward
+-- zero, truncate(-9.999*100)/100 = -9.99, matching Oracle TRUNC.)
 
 -- Trino — SIMPLER form IF HALF_UP rounding is acceptable (NOT the same as truncation):
 SELECT round(price * 1.0875, 2) AS price_with_tax FROM orders;
@@ -1664,9 +1669,9 @@ SELECT round(price * 1.0875, 2) AS price_with_tax FROM orders;
 
 > **Never write any of the following in Trino SQL or in any dbt model targeting Trino:**
 >
-> 1. **`TRUNC(...)` used as a function name in a Trino rewrite** — `TRUNC` (uppercase or any case) is the **Oracle** name. Trino's math function is **lowercase `truncate(x)`** only. Writing `TRUNC(12.34, 2)` in Trino produces `Function 'trunc' not registered` (`trunc` is not in Trino's function registry — the function is spelled `truncate`). The lowercase form `trunc(...)` also fails for the same reason — the function is spelled `truncate`, not `trunc`. The fix is purely the name: write **`truncate(12.34, 2)`** (the 2-arg form is supported — see entry 2). **Error-message attribution (precise):** `Function 'trunc' not registered` is the **name miss** (`TRUNC` / `trunc` is not a registered function name) — the registered `truncate` accepts both 1-arg and 2-arg forms.
+> 1. **`TRUNC(...)` used as a function name in a Trino rewrite** — `TRUNC` (uppercase or any case) is the **Oracle** name. Trino's math function is **lowercase `truncate(x)`** only. Writing `TRUNC(12.34, 2)` in Trino produces `Function 'trunc' not registered` (`trunc` is not in Trino's function registry — the function is spelled `truncate`). The lowercase form `trunc(...)` also fails for the same reason. **But the fix is NOT just the name** — see entry 2: Trino 467's `truncate` is **1-arg only**, so you cannot simply write `truncate(12.34, 2)` either. The correct rewrite is `truncate(12.34 * power(10, 2)) / power(10, 2)`.
 >
-> 2. **`truncate(n, d)` — the 2-arg numeric truncation form — DOES exist on Trino 467; USE IT.** Trino's `truncate` has BOTH a 1-arg form (`truncate(x) -> [same as input]`, integer truncation toward zero) AND a 2-arg form (`truncate(x, d)` / signature `truncate(decimal(p,s), bigint) -> decimal(p,s)`) that truncates to `d` decimal places toward zero — exactly Oracle's `TRUNC(n, d)` semantics. So `truncate(12.3456, 2)` returns `12.34` and is the canonical translation. (The verbose `truncate(n * power(10, d)) / power(10, d)` / `truncate(n * 100) / 100` forms still work and are useful for clarity, but are not required.) Verified at [trino.io/docs/current/functions/math.html](https://trino.io/docs/current/functions/math.html) — both `truncate(x)` and `truncate(x, d)` are documented. **The ONLY thing that's missing is the Oracle NAME `TRUNC`** (entry 1) — not the 2-arg capability.
+> 2. **`truncate(n, d)` — the 2-arg numeric truncation form — does NOT exist on Trino 467.** (CORRECTED iter1240 — triple-source-verified against the **467** docs: rendered [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html), the GitHub `467`-tag `math.md`, AND the raw git-tag source — all show ONLY the **1-arg** `truncate(x) -> [same as input]` form.) Trino 467's `truncate` takes a single argument and drops the fractional part **toward zero** (`truncate(12.99) = 12`, `truncate(-12.99) = -12`). Calling `truncate(12.3456, 2)` on 467 errors with `Unexpected parameters (decimal(6,4), integer) for function truncate. Expected: truncate(double) ...`. **The 2-arg `truncate(x, d)` overload was added POST-467** (it appears in current/481 docs), so it is NOT available on this stack. **To truncate to `d` decimal places on Trino 467, scale by `power(10, d)`:** `truncate(n * power(10, d)) / power(10, d)` (e.g. `truncate(12.3456 * 100) / 100 = 12.34`). Toward-zero, negative-safe — do NOT use `FLOOR` (rounds toward −∞: `FLOOR(-12.3456*100)/100 = -12.35`, wrong). Or use `round(n, d)` if HALF_UP rounding is acceptable (NOT the same as truncation).
 >
 > 3. **`TRUNCATE(...)` used as a math function** — Trino has `truncate(x)` (lowercase math function, 1-arg). **Uppercase `TRUNCATE` collides with the `TRUNCATE TABLE` DDL statement in other dialects** — but `TRUNCATE TABLE` is **also NOT a Trino-side statement for Iceberg tables** (see §4.6 row "TRUNCATE TABLE t" — Trino uses `DELETE FROM t WHERE TRUE` or `materialized='table'` instead). Never write `TRUNCATE(x)` thinking it's the math function; it isn't. Write lowercase `truncate(x)`.
 >
@@ -1674,9 +1679,9 @@ SELECT round(price * 1.0875, 2) AS price_with_tax FROM orders;
 >
 > 5. **`round(n, d)` substituted for `TRUNC(n, d)` without verifying rounding-vs-truncation is acceptable** — `round` is HALF_UP rounding, `truncate` drops digits toward zero. They differ at the halfway mark (`round(1.235, 2)` = `1.24`; `truncate(1.235 * 100) / 100` = `1.23`) and for negative numbers (`round(-1.235, 2)` = `-1.24`; `truncate(-1.235 * 100) / 100` = `-1.23`). For billing, accounting, and tax computations, truncation may be the legally specified behavior — do not silently swap.
 
-**Keyword-trap phrase (memorize):** *"Anyone who writes `TRUNC(x, 2)` for Trino is using Oracle syntax — the FIX is just the name: Trino has lowercase `truncate(x, 2)` (2-arg works, same truncation semantics as Oracle). Only the spelling `TRUNC`/`trunc` is unregistered; `round(x, 2)` is the HALF_UP-rounding alternative if rounding is acceptable."*
+**Keyword-trap phrase (memorize):** *"`TRUNC(x, 2)` for Trino is wrong on TWO counts: the name (`TRUNC`/`trunc` is unregistered — it's `truncate`) AND the arity (Trino 467 `truncate` is **1-arg only** — no `truncate(x, 2)` overload until post-467). The correct 467 form is `truncate(x * power(10, 2)) / power(10, 2)` (toward-zero, negative-safe), or `round(x, 2)` if HALF_UP rounding is acceptable."*
 
-**Cross-reference.** The date-side mapping `TRUNC(dt) → date_trunc('day', dt)` is also documented in the §4.2 Date/time functions table (row 596). The §4.4B cross-dialect-spillover table includes a consolidated row for `TRUNC` (see immediately below). The migration fix for `TRUNC` is purely a **rename** (`TRUNC` → lowercase `truncate` for numeric; → `date_trunc` for dates) — the 2-arg numeric capability is fully present in Trino 467, so do NOT rewrite `TRUNC(n, 2)` into the clunky `*100/100` form unless you want the explicit version.
+**Cross-reference.** The date-side mapping `TRUNC(dt) → date_trunc('day', dt)` is also documented in the §4.2 Date/time functions table (row 596). The §4.4B cross-dialect-spillover table includes a consolidated row for `TRUNC` (see immediately below) — it already correctly states the 1-arg-only fact. The migration fix for numeric `TRUNC(n, d)` is **two-part**: rename `TRUNC` → `truncate`, AND expand to `truncate(n * power(10, d)) / power(10, d)` because the 2-arg overload is NOT in Trino 467 (added post-467). The date form `TRUNC(dt)` → `date_trunc('day', dt)` is a pure rename to a different function.
 
 ### 4.4B CROSS-DIALECT-SPILLOVER GUARDRAIL — syntax that looks valid but is NOT Trino 467
 
