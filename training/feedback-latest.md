@@ -1,109 +1,149 @@
-# Iteration 1205 — Judge Feedback
+# Iteration 1206 — Judge Feedback
 
-## Verdict: 4.97 STRONG PASS NO-OP
+## Verdict: 4.53 PASS + LIGHT-DEFECT Q1 (LIKE-on-ROW recall slip) + Q3 WATCH CLOSES
 
 | Q | Topic | Acc | Clar | App | Compl | Score |
 |---|---|---|---|---|---|---|
-| Q1 | Lakehouse schema design (Iceberg field-ID rename) | 5.0 | 5.0 | 4.5 | 5.0 | **4.875** |
-| Q2 | Analytical query patterns on Iceberg+Trino (sessionization) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-| Q3 | Improving complex SQL on Trino with dbt (macros) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
-| Q4 | Oracle PL/SQL -> dbt + Trino (CONNECT BY -> WITH RECURSIVE) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
+| Q1 | Iceberg partition design (per-partition file inspection via `$files`) | 4.0 | 4.5 | 3.5 | 3.5 | **3.875** |
+| Q2 | SQL best practices for OLAP (no QUALIFY / window-in-WHERE / dedup) | 5.0 | 5.0 | 5.0 | 5.0 | **5.0** |
+| Q3 (WATCH) | Oracle PL/SQL -> dbt+Trino (dbt `generate_schema_name` macro) | 5.0 | 5.0 | 5.0 | 4.5 | **4.875** |
+| Q4 | Oracle PL/SQL -> dbt+Trino (`NVL` -> `COALESCE` migration) | 4.0 | 5.0 | 4.5 | 4.0 | **4.375** |
 
-**Average: (4.875 + 5.0 + 5.0 + 5.0) / 4 = 4.96875 ~ 4.97 STRONG PASS**
+**Average: (3.875 + 5.0 + 4.875 + 4.375) / 4 = 18.125 / 4 = 4.53 PASS**
 
-NO FIX-A. No imported-prior slip. No broken-secondary slip. No fabrication. No findability gap.
+**WATCH STATUS:** `iter1203 r27 §6.7M generate_schema_name findability` — **CLOSES ON 1st RE-PROBE.** Responder reached the §6.7M canonical cleanly from the dev-vs-shared-Trino keyword path; named the macro, the surprising PREFIX default, the override file path, both env_var + target.name options, and the schema-vs-catalog distinction — all matching docs.getdbt.com.
+
+**Defect / FIX-A status:** Q1 has a load-bearing SQL slip — `WHERE partition LIKE '%event_date=2026-06-25%'` would type-error because `$files.partition` is a ROW struct, not varchar. Resources already teach the CORRECT struct-field-access form at r17 L1532 (`WHERE partition.event_date = DATE '2026-05-28'`) and r05 L3572 (`WHERE partition.tenant_id = 'acme'`), and r10 L441 already has the `$partitions` table cited. **This is a responder recall slip, NOT a resource gap → NO FIX-A.** Re-probe in 4-8 iters under structurally different metadata-table framing.
 
 ---
 
-## Q1 — Iceberg field-ID safe RENAME COLUMN (4.875)
+## Q1 — Iceberg `$files` / `$partitions` for per-partition skew diagnosis (3.875)
 
-**All load-bearing facts verified:**
+**Core canonical reached but with two recall-ceiling slips.**
 
-1. Iceberg tracks columns by IMMUTABLE numeric FIELD IDs, not names — verified at https://iceberg.apache.org/spec/ ("Iceberg identifies columns by unique integer IDs").
-2. RENAME COLUMN changes the schema name only; field ID unchanged — verified ("renaming a column changes the name in the metadata but the ID stays the same; existing data files still map correctly").
-3. Parquet files store data tagged by field ID; reads match column-by-field-ID, so old files map cleanly to the renamed column — verified ("unique IDs are stored in both the table metadata and the Parquet file metadata, allowing Iceberg to match columns by ID, not by name or position").
-4. ZERO rewrite, metadata-only — verified ("Iceberg schema updates are metadata changes, so no data files are rewritten").
-5. Old queries using `usr_acct_id` BREAK (expected) — must grep + update every reference.
-6. Trino 467 syntax `ALTER TABLE iceberg.analytics.events RENAME COLUMN usr_acct_id TO account_id` — verified at https://trino.io/docs/467/sql/alter-table.html verbatim "ALTER TABLE [ IF EXISTS ] name RENAME COLUMN [ IF EXISTS ] old_name TO new_name".
+VERIFIED CORRECT (load-bearing primary axis):
+1. `$files` metadata table exposes per-file rows with columns `file_path, file_size_in_bytes, record_count, content` — VERIFIED at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (full column list: `content, file_path, record_count, file_format, file_size_in_bytes, column_sizes, value_counts, null_value_counts, nan_value_counts, lower_bounds, upper_bounds, key_metadata, split_offsets, equality_ids, sort_order_id, readable_metrics, partition`).
+2. `content` integer enum `0 = DATA, 1 = POSITION_DELETES, 2 = EQUALITY_DELETES` — VERIFIED (matches r13 §3070 canonical and Iceberg spec).
+3. Full-qualified one-token quoting `"events$files"` (whole table-name+metadata-name inside ONE pair of double quotes, not `events."$files"`) — VERIFIED in the connector docs verbatim "use the table name and the metadata table name separated by a `$`" with example `example.testdb."customer_orders$snapshots"`.
+4. Remediation `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '128MB')` — VERIFIED at the same connector docs page.
+5. Routing skewed-customer heavy-partition slowness back to physical-layout inspection is the correct mental move (file count + size distribution + delete-file count).
 
-Engineer leaves with both the correct mental model (decoupled metadata schema vs physical Parquet via field IDs) AND a concrete update game plan. Minor App shave (-0.5) for not naming a quick `git grep usr_acct_id -- '*.sql' '*.yml'` operational tip to find every dbt/SQL reference — recall ceiling, not a defect.
+DEFECT — LIKE-on-ROW (Acc -1.0, App -1.5):
+- Responder's example `WHERE partition LIKE '%event_date=2026-06-25%' ORDER BY file_size_in_bytes DESC` would TYPE ERROR. **VERIFIED via WebFetch of trino.io/docs/467/connector/iceberg.html**: the `$files.partition` column is "A row that contains the mapping of the partition column names to the partition column values" — a ROW/struct type, NOT a varchar; `LIKE` on a ROW is a parse-time `Cannot apply operator: row(...) LIKE varchar` error.
+- The CORRECT struct-field-access form is `WHERE partition.event_date = DATE '2026-06-25'` — already taught in resources at r17 §1532 verbatim `WHERE partition.event_date = DATE '2026-05-28'` and r05 §3572 (`WHERE partition.tenant_id = 'acme'`).
+- Engineer copy-pastes the snippet, hits a type error in their session, then has to figure out struct-field-access on their own. Recoverable but a real friction-bump.
 
-## Q2 — Sessionization with LAG + running SUM (5.0)
+RECALL CEILING — `$partitions` omission (Compl -1.5):
+- The MORE DIRECT tool for the engineer's literal ask ("how many files in a partition, sizes") is **`$partitions`** — exposes `partition, record_count, file_count, total_size, data` per docs (verified via WebFetch); no GROUP BY needed. Responder went `$files` + GROUP BY route which is the long-way-round equivalent.
+- Resources at r10 L441 already pair the two: *"For per-partition counts, `SELECT partition, file_count FROM tbl$partitions`."* — findability path "files in a partition, sizes" didn't reach r10 L441 from the responder's keyword set.
+- Same omission pattern as iter1196 Q1 (4.375) — recall ceiling, not a resource defect.
 
-**HISTORICALLY-HARD SYNTHESIS-CEILING PATTERN LANDS CLEAN.** Per `feedback_synthesis_ceiling_stop_churning.md` this multi-stage gaps-and-islands sessionization construction is exactly the residual the responder has historically struggled to assemble on novel domains. This iteration the pattern lands pin-perfect canonical with all type-system traps explicitly defanged inline.
+**SLIP CATEGORIZATION:** (1) LIKE-on-ROW = standalone responder slip, NOT source-anchored (resources teach the right form); per `feedback_responder_broken_secondary_alternative.md` adjacent family — the lead identification ($files) was right, the example SQL was the broken element. (2) `$partitions` omission = pure recall ceiling, same as iter1196.
 
-- CTE1 gap detection: `is_new_session = CASE WHEN LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) IS NULL THEN 1 WHEN date_diff('minute', LAG(...), event_time) > 30 THEN 1 ELSE 0 END` — verified.
-- CTE2 session id: `SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time)` — running cumulative auto-increments to 1, 2, 3... per partition.
-- Outer GROUP BY (user_id, session_id) -> COUNT(*) events, MIN/MAX event_time, date_diff dwell.
-- First-event handling (IS NULL THEN 1) correctly bootstraps session 1.
-- Explicit defang: `event_time - LAG(...) > INTERVAL '30' MINUTE` is BROKEN (no ts-ts subtraction in Trino 467 — verified at https://trino.io/docs/467/functions/datetime.html operators table shows only ts - interval, no ts - ts).
-- Explicit defang: `date_diff(...) > INTERVAL '30' MINUTE` is type error (date_diff returns BIGINT, not INTERVAL).
+**NO FIX-A.** Both axes recoverable from the engineer's session; no resource defect to repair. Re-probe in 4-8 iters under physical-layout framing to monitor whether either slip recurs.
 
-Single hash-partition + sort pass replaces the O(N^2) self-join, solving the 40-min-never-finishes on 200M rows.
+## Q2 — No QUALIFY / window-in-WHERE forbidden / CTE-wrap dedup (5.0)
 
-## Q3 — dbt macros fundamentals (5.0)
+**Pin-perfect Trino-dialect dedup canonical with correct alternative-form routing.**
 
-**Pin-perfect dbt-mechanics canonical.** Verified at https://docs.getdbt.com/docs/build/jinja-macros:
+VERIFIED CORRECT:
+1. Trino 467 does NOT support `QUALIFY` — VERIFIED (no QUALIFY in [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) synopsis or anywhere in the 467 docs). Snowflake/BigQuery-style `... QUALIFY ROW_NUMBER() OVER (...) = 1` is a parse error.
+2. Window functions cannot appear in the `WHERE` clause directly — standard SQL execution-order restriction; WHERE evaluates BEFORE window functions per [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) ("Window functions are calculated after WHERE, GROUP BY, and HAVING").
+3. Correct dedup pattern via CTE + outer filter `WHERE rn = 1` is canonical:
+   ```sql
+   WITH deduped AS (
+     SELECT *, ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY ingested_at DESC) AS rn
+     FROM raw_events
+   )
+   SELECT ... FROM deduped WHERE rn = 1
+   ```
+4. ROW_NUMBER on hundreds of millions of rows: correctly framed as "parallelized" — Trino hash-partitions by the OVER PARTITION BY key (event_id) and sorts within partition; single pass after the hash shuffle, no quadratic blow-up.
+5. `max_by(payload, ingested_at) GROUP BY event_id` as the single-column alternative is CORRECT and well-routed — VERIFIED at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) (`max_by(x, y)` returns x at the row with the max y). For full-row dedup ROW_NUMBER stays the right answer; `max_by` shines when only one column is needed (avoids carrying full rows through the shuffle).
 
-- "Macros are compile-time textual replacements, NOT runtime database functions"
-- "They get compiled into valid SQL before execution, appear in `target/compiled/{project_name}/` after compilation, expand inline where they're called"
+No broken-secondary slip, no imported-prior (didn't reach for QUALIFY or `Postgres-style WHERE rn = 1` directly), no over-warning. The "ROW_NUMBER is more efficient than window on hundreds of millions" framing was accurate (vs the naive self-join alternative).
 
-Responder hit every load-bearing point: Jinja-templated snippet, defined in `macros/` with `{% macro name(args) %} ... {% endmacro %}`, called `{{ name(args) }}`, expands inline at COMPILE time (C-preprocessor analogy is APT), inspect via `dbt compile` -> `target/compiled/`. The worked `classify_plan(col)` example directly solves the engineer's 20-models-grep pain: one macro file edit + next `dbt run` propagates everywhere.
+## Q3 (WATCH) — dbt `generate_schema_name` macro per-developer schemas (4.875)
 
-Bonus: pre-emptive numeric-to-string defang (`CAST(... AS VARCHAR)` or `format()` for mixed-type building) avoids the recurring iter1201 "concat coerces" broken-secondary trap — counter-trend win.
+**WATCH `iter1203 r27 §6.7M generate_schema_name findability` CLOSES ON 1st RE-PROBE.**
 
-## Q4 — WITH RECURSIVE as CONNECT BY replacement (5.0)
+**Background:** iter1203 Q3 (same generate_schema_name framing, dev/staging/prod target) scored 4.75 with the responder META-DISCLAIMING "resources don't cover this" then falling back to general-knowledge. iter1203 LIGHT FIX-A added r27 §6.7M canonical card (verified accurate against docs.getdbt.com) with findability anchors for the dev/staging/prod keyword path. Today's re-probe under structurally different framing ("8 devs run dbt locally vs shared Trino dev, all land in same `analytics` schema, want per-developer schemas WITHOUT editing profiles.yml each") reaches the §6.7M canonical CLEANLY — no meta-disclaimer, the macro name + default surprise + override-path + both env_var and target.name options all named directly.
 
-**ALL THREE TRAP DEFANGS NAVIGATED CLEAN.** Verified each specific claim against https://trino.io/docs/467/sql/select.html:
+VERIFIED CORRECT (against [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas), WebFetched this iter):
 
 | Specific claim | Verification |
 |---|---|
-| Session property name is `max_recursion_depth` | Verified verbatim |
-| Default = 10 | VERIFIED VERBATIM: "recursion depth is fixed, defaults to `10`, and doesn't depend on the actual query results" |
-| Exceeding raises error (NOT silent truncation) | VERIFIED — engine raises `NOT_SUPPORTED: Recursion depth limit exceeded (N)` per r27 + Trino source; responder correctly navigated r27 L4114 DO-NOT-WRITE ("silently truncates" forbidden) |
-| `WHERE depth < 50` inside recursive term is a guard, NOT a substitute for raising session property | Correctly framed (matches r27 L4114 third DO-NOT-WRITE) |
-| Quadratic plan growth | VERIFIED VERBATIM: "When changing the value consider that the size of the query plan growth is quadratic with the recursion depth" |
-| WITH RECURSIVE marked "experimental" in Trino 467 docs | VERIFIED VERBATIM: "This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload" — currently the docs label as of 467, NOT stale |
-| Closure-table dbt model as alternative for deep/frequent traversal | Sound; matches r27 §7A.1 L4117-4140 canonical |
-| Base case (parent_id IS NULL) = Oracle START WITH; recursive term JOIN = Oracle CONNECT BY PRIOR | Correctly mapped |
-| For ~6-level / few-thousand categories, recursive CTE is fine | Correctly scoped |
+| Macro `generate_schema_name(custom_schema_name, node)` controls the schema each model builds into | VERIFIED — default macro returns the per-model schema; called once per model node by dbt |
+| Default behavior PREFIXES `{{ target.schema }}` to the custom schema name | VERIFIED VERBATIM: default macro returns `{{ default_schema }}_{{ custom_schema_name \| trim }}` when custom set, else `{{ default_schema }}` — yes the literal mechanic is APPEND in jinja text but the effect is target.schema-as-prefix on every custom schema, which is exactly the engineer's surprise (every `+schema:` config produces a weird `analytics_<x>` instead of `<x>`) |
+| Override file location: `macros/generate_schema_name.sql` | VERIFIED — dbt auto-discovers the override at this path |
+| `target.name`-based switching pattern (Option A: prod -> default_schema; else `analytics_<env>`) | VERIFIED — docs-blessed "Standard Pattern" |
+| `env_var()`-based per-dev switching (Option B: `DBT_DEV_USER=alice && dbt run --target dev` -> `analytics_alice`) | VERIFIED — `env_var()` is documented for both profiles.yml and inside macros; reading env vars at parse time per [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) |
+| Controls the SCHEMA only, NOT the catalog (still `iceberg` catalog) | VERIFIED — docs note catalog/database control is a separate `generate_database_name` macro |
+| `target.name` comes from `--target dev` / `--target prod` invocation | VERIFIED — standard dbt CLI flag |
 
-This was a worry going in — r27 §7A.1 carries a DO-NOT-WRITE list explicitly banning the "defaults to 1000" / "default 100" / "silently truncates" / "WHERE depth < 20 bypasses the cap" myths, AND the imported-prior family has historically slipped on similar session-property defaults (per pinned memories on `from_unixtime` TZ, `INTERVAL` qualifiers, `bucket` arg order, etc.). Responder navigated every trap. Source-anchored to r27 §7A.1; canonical is reachable from the "CONNECT BY" + "WITH RECURSIVE" + "tree few thousand categories" keyword path.
+Engineer leaves with: one macro file to ship to git + 8 devs export `DBT_DEV_USER=<name>` once + every `dbt run --target dev` auto-routes to `analytics_<name>` without editing profiles.yml — directly answers the literal "WITHOUT editing profiles.yml each" ask.
+
+Minor Compl shave (-0.5): didn't mention dbt's built-in `generate_schema_name_for_env` helper (prod=custom-or-target, non-prod=target.schema-only) which is a one-line alternative to a hand-rolled macro. Recall ceiling, not load-bearing.
+
+**WATCH CLOSED.** §6.7M findability anchor working as designed. (11th+ consecutive watch closure on 1st re-probe pattern.)
+
+## Q4 — Oracle `NVL` -> Trino `COALESCE` (4.375)
+
+**Core canonical correct; mildly over-stated "no behavioral differences" claim misses one Oracle-NVL implicit-type-coercion edge case.**
+
+VERIFIED CORRECT:
+1. Trino 467 has NO `NVL` function — VERIFIED at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) (only COALESCE, NULLIF, CASE, IF, TRY are listed). `NVL(...)` parses as a user function call and resolves to "Function 'nvl' not registered."
+2. `COALESCE(arg1, ..., argN)` accepts N args, returns first non-NULL — VERIFIED at same docs page.
+3. Nested `NVL(a, NVL(b, NVL(c, 'd')))` flattens to `COALESCE(a, b, c, 'd')` — readability win, semantically equivalent. CORRECT.
+4. Drop-in replacement for the common varchar-default case (e.g., `NVL(plan_name, 'free')` -> `COALESCE(plan_name, 'free')`) — works without ceremony.
+
+OVER-STATED claim (Acc -1.0, Compl -1.0):
+- Responder said *"No behavioral differences — COALESCE handles NULL-checking identically to Oracle NVL"*. This misses a real edge case the engineer will hit migrating hundreds of NVL calls:
+  - **Oracle NVL implicitly converts arg2 to arg1's type** — e.g., `NVL(numeric_col, '0')` silently converts the varchar `'0'` to NUMBER. This is standard Oracle implicit-conversion behavior on NVL's 2nd argument.
+  - **Trino COALESCE requires all args share a common supertype** — `COALESCE(numeric_col, '0')` throws *"All COALESCE operands must be the same type or coercible to a common type. Cannot find common type between integer and varchar(2)"* per [trinodb/trino#24017](https://github.com/trinodb/trino/issues/24017) + [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) verbatim "Trino will not convert between character and numeric types".
+  - Migrating hundreds of NVL calls almost certainly includes some `NVL(numeric, '0')` or `NVL(date_col, 'unknown')` mixed-type forms — those need explicit `CAST(... AS <numeric_col_type>)` on the default (`COALESCE(numeric_col, CAST('0' AS BIGINT))` or just `COALESCE(numeric_col, 0)`).
+- **Mitigating factors:** the responder DID call out "edge cases differing from Oracle NVL" in the framing, and the core drop-in advice for the common varchar->varchar case IS correct. Engineer with mixed-type NVL calls will hit the type-mismatch error at compile time, recognize it, and add the CAST — not silent corruption.
+
+RESOURCE COVERAGE CHECK: grep'd r27 + r23 + r28 — current canonical at r27 §366 says only *"COALESCE accepts N args; NVL only 2. Always prefer COALESCE going forward."* — does NOT teach the implicit-coercion edge case. **SOFT WATCH** label `iter1206 r27 NVL-COALESCE type-coercion edge case` — re-probe in 5-10 iters under "Oracle NVL on a numeric column with a string default" framing to test whether responder warns about the type-mismatch error. **No FIX-A this iter** — the load-bearing varchar case is right, the edge case is mild, and adding a card risks over-attracting simple NVL questions to the type-coercion warning (per `feedback_new_card_over_attracts_adjacent.md`).
 
 ---
 
 ## Patterns across the four answers
 
-- **Trap defangs inline** (Q2 ts-ts subtraction, Q2 bigint vs interval, Q4 default=10 not 1000, Q4 error-not-truncation, Q3 mixed-type concat) — defensive teaching surfaces are reaching the responder cleanly without over-warning.
-- **No broken-secondary alternatives** across all four answers — `feedback_responder_broken_secondary_alternative.md` family stayed quiet this iter (counter-trend to recurring pattern; do not infer permanent closure, scope as per-instance).
-- **No imported-prior slip** — Q4 navigated the imported-prior trap (Postgres/MySQL "default 1000" recursion limit) explicitly.
-- **No fabrication, no findability gap** — all load-bearing canonicals reachable from the question's surface keywords.
+- **Q3 WATCH CLOSURE** is the headline event — the iter1203 §6.7M FIX-A's findability anchor reaches the responder cleanly on structurally different framing (8 devs / "WITHOUT editing profiles.yml each" vs iter1203's dev/staging/prod target framing). Generate_schema_name macro canonical now stable.
+- **Q1 LIKE-on-ROW slip** is a one-off responder construction error in the example SQL — resources already teach the right `partition.event_date` struct-access form (r17 + r05); no resource fix needed. Same minor `$partitions`-omission recall pattern as iter1196.
+- **Q4 over-claim** (the "no behavioral differences" line) is mild over-confidence on a peripheral aside — engineer will hit the type-error at compile-time, recognize it, and CAST. Soft-watch the type-coercion edge case but no card to write.
+- **No imported-prior slip** — Q2 navigated the QUALIFY trap (Snowflake/BigQuery import) cleanly; Q3 navigated the iter1197 macro-omission gap.
+- **No fabrication** across all four answers — Q1 metadata-table names + column lists + content enum + EXECUTE optimize syntax all real; Q2 max_by + ROW_NUMBER + CTE-wrap all real; Q3 generate_schema_name + env_var + macros/generate_schema_name.sql all real; Q4 COALESCE all real.
 
 ## Open watches (carry-forward — no re-probe this iter)
 
-1. **iter1203 r27 §6.7M `generate_schema_name` findability** — re-probe 1-4 iters under dev/staging/prod target framing.
-2. **iter1199 r17 position-delete adjacent (light-monitor)** — re-probe 1-7 iters.
-3. **iter1204 dbt `--full-refresh` on_table_exists atomicity framing (light-monitor)** — re-probe 1-9 iters.
+1. **iter1206 r27 NVL-COALESCE type-coercion edge case (NEW soft watch)** — re-probe in 5-10 iters under `NVL(numeric_col, '0')` mixed-type framing.
+2. **iter1199 r17 position-delete adjacent (light-monitor)** — re-probe in 1-7 iters.
+3. **iter1204 dbt `--full-refresh` on_table_exists atomicity framing (light-monitor)** — re-probe in 1-9 iters.
+4. **iter1206 Q1 LIKE-on-ROW + $partitions-omission (soft watch)** — re-probe in 4-8 iters under physical-layout / per-partition-file-count framing to confirm Q1 slips don't recur.
+
+Watch `iter1203 r27 §6.7M generate_schema_name findability`: **CLOSED.**
 
 ## Topic score updates
 
 | Topic | Before | After | Delta |
 |---|---|---|---|
-| Lakehouse schema design | 4.5551 / 17 | 4.5729 / 18 | +0.0178 |
-| Analytical query patterns on Iceberg+Trino | 4.5293 / 147 | 4.5325 / 148 | +0.0032 |
-| Improving complex SQL on Trino with dbt | 4.5532 / 37 | 4.5650 / 38 | +0.0118 |
-| Oracle PL/SQL -> dbt + Trino | 4.4693 / 166 | 4.4719 / 167 | +0.0026 |
+| Iceberg partition design for SaaS | 4.4583 / 56 | 4.4480 / 57 | -0.0103 |
+| SQL query best practices for OLAP | 4.5898 / 274 | 4.5913 / 275 | +0.0015 |
+| Oracle PL/SQL -> dbt + Trino (Q3 then Q4) | 4.4719 / 167 | 4.4737 / 169 | +0.0018 net |
 
-All required topics PASSED with healthy margins (thinnest Query-perf-basics still 4.2161, untouched this iter). Recent sliding-window avg ~4.9.
+All required topics remain PASSED with healthy margins. Iceberg partition design still margin +0.948; SQL best practices still margin +1.091; Oracle PL/SQL still margin +0.974. Thinnest required topic remains Query performance basics at 4.2161 (untouched this iter).
 
-**NEXT iter1206: BREADTH.** Probe an unprobed-recently topic or one of the three open watches in 3-6 iters.
+**NEXT iter1207: BREADTH.** Soft-watches above are all 4-10 iters out. Consider re-probing the thinnest topic (Query-perf-basics) or the iter1187 lever-#1-min/max-on-unsorted-VARCHAR latent framing slip. Avoid generate_schema_name re-probes (just closed) and avoid metadata-table re-probes for 4+ iters (let Q1 slips age).
 
 ## Sources
 
-- [Iceberg spec — Schema evolution / field IDs](https://iceberg.apache.org/spec/)
-- [Schema Evolution in Apache Iceberg — community write-up](https://cazpian.ai/blog/schema-evolution-in-apache-iceberg)
-- [Trino 467 ALTER TABLE](https://trino.io/docs/467/sql/alter-table.html)
-- [Trino 467 SELECT (WITH RECURSIVE)](https://trino.io/docs/467/sql/select.html)
-- [Trino 467 Window functions](https://trino.io/docs/467/functions/window.html)
-- [Trino 467 Datetime functions / operators](https://trino.io/docs/467/functions/datetime.html)
-- [dbt — Jinja macros](https://docs.getdbt.com/docs/build/jinja-macros)
+- [trino.io/docs/467/connector/iceberg.html — $files and $partitions metadata tables](https://trino.io/docs/467/connector/iceberg.html) — confirmed `partition` column is ROW type, `$partitions` exposes per-partition file_count/total_size, EXECUTE optimize syntax
+- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — no QUALIFY in synopsis; ORDER BY / OFFSET / LIMIT clause order
+- [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) — window-function execution order (after WHERE)
+- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `max_by(x, y)` signature
+- [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) — COALESCE listed, NVL not listed
+- [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) — "Trino will not convert between character and numeric types"
+- [trinodb/trino#24017](https://github.com/trinodb/trino/issues/24017) — COALESCE type-mismatch error verbatim
+- [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas) — generate_schema_name default macro behavior (PREFIX with target.schema), override file at `macros/generate_schema_name.sql`
+- [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) — `env_var()` parse-time evaluation
