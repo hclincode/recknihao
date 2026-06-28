@@ -3667,25 +3667,34 @@ Subtract a fixed lookback window (here 3 days) so late-arriving rows still get c
 >
 > 1. **TRINO MERGE *DOES* support a conditional matched branch.** `WHEN MATCHED AND <condition> THEN UPDATE SET ...` (and `WHEN MATCHED AND <condition> THEN DELETE`) is **valid Trino 467 MERGE syntax** — verified at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) (docs example: `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE`) and used in the canonical CDC MERGE at §4.6 (`WHEN MATCHED AND s.op = 'd' THEN DELETE`). It is **NOT** a Snowflake/Databricks-only extension. So a hand-written MERGE can guard the update with `WHEN MATCHED AND DBT_INTERNAL_SOURCE.updated_at > DBT_INTERNAL_DEST.updated_at THEN UPDATE SET ...`.
 >
-> 2. **dbt's COMPILED merge omits that AND by default** — dbt generates a bare `WHEN MATCHED THEN UPDATE SET ...` (no predicate), so every matched row is overwritten unconditionally, **older or newer**. To inject the guard into a dbt-managed merge, use the **`incremental_predicates`** config — do NOT hand-edit the compiled SQL:
+> 2. **dbt's COMPILED merge omits that AND by default** — dbt generates a bare `WHEN MATCHED THEN UPDATE SET ...` (no predicate), so every matched row is overwritten unconditionally, **older or newer**.
+>
+> **The robust fix is SOURCE-SIDE — filter the model so no stale row ever reaches the MERGE.** Do BOTH: (a) dedupe the batch to one row per key, and (b) drop any incoming row that is not strictly newer than what the target already holds:
 >
 > ```sql
-> {{ config(
->     materialized='incremental',
->     incremental_strategy='merge',
->     unique_key='subscription_id',
->     incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]
-> ) }}
+> {{ config(materialized='incremental', incremental_strategy='merge', unique_key='subscription_id') }}
+> WITH ranked AS (
+>     SELECT *, ROW_NUMBER() OVER (PARTITION BY subscription_id ORDER BY updated_at DESC) AS rn
+>     FROM {{ ref('stg_subscriptions') }}
+> )
+> SELECT * FROM ranked s WHERE rn = 1
+> {% if is_incremental() %}
+>   AND NOT EXISTS (   -- drop late rows older-or-equal than the existing target row → no clobber, no dup
+>     SELECT 1 FROM {{ this }} t
+>     WHERE t.subscription_id = s.subscription_id AND t.updated_at >= s.updated_at
+>   )
+> {% endif %}
 > ```
 >
-> This adds the target-side predicate so only rows where the incoming `updated_at` is strictly newer participate in the UPDATE — i.e. "only update if source is newer." Full mechanism + the explicit-column-list compiled-MERGE shape at **[resource 13 § incremental_predicates / out-of-order guard](13-postgres-to-iceberg-ingestion.md)** (the `DBT_INTERNAL_DEST` / `DBT_INTERNAL_SOURCE` alias canonical).
+> With the source pre-filtered this way, the **plain unconditional** merge is already correct — every surviving row is genuinely newer.
 >
-> **Pre-deduping the staging batch to one-row-per-key (`ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) = 1`) is NECESSARY but NOT SUFFICIENT** — it removes duplicate keys *within a single batch*, but it does NOT stop an older batch row from overwriting a NEWER row already committed to the target by an *earlier run*. The cross-run guard is the `incremental_predicates` comparison above, not the within-batch dedupe.
+> **⚠️ Do NOT reach for `incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]` as the only-update-if-newer guard.** `incremental_predicates` are added to the MERGE's **`ON` / join condition** (dbt: "limits the scan of the existing table"), NOT to `WHEN MATCHED`. So a late OLDER row **fails the join → falls to `WHEN NOT MATCHED` → INSERTs a DUPLICATE `subscription_id`** (verified [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy); dbt does not validate this). `incremental_predicates` is the right tool for **partition-pruning / scan-narrowing** (`DBT_INTERNAL_DEST.day_ts >= DATE '...'`), not for out-of-order-update protection. Full reconciliation at **[resource 13 § incremental_predicates / out-of-order guard](13-postgres-to-iceberg-ingestion.md)**.
 >
 > | DO NOT write | Why it's wrong |
 > |---|---|
 > | "Trino MERGE can't do `WHEN MATCHED AND cond THEN UPDATE` — that's a Snowflake/Databricks extension." | **FALSE.** Trino 467 MERGE supports the conditional matched branch ([sql/merge.html](https://trino.io/docs/467/sql/merge.html); §4.6 canonical). The absent shorthand is `UPDATE SET *` / `INSERT *`, not the `AND condition`. |
-> | "Pre-dedupe staging to `rn=1` makes the merge only-update-if-newer." | Half-true: it dedupes *within* the batch but does NOT protect a target row written by a *prior* run from an older late arrival. Add `incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]` for the cross-run guard. |
+> | "Pre-dedupe staging to `rn=1` makes the merge only-update-if-newer." | Half-true: `rn=1` dedupes *within* the batch but does NOT protect a target row written by a *prior* run from an older late arrival. Add the `{% if is_incremental() %} ... NOT EXISTS (... t.updated_at >= s.updated_at)` source-side filter above for the cross-run guard. |
+> | "`incremental_predicates=['DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at']` gives clean only-update-if-newer." | **NO — silent duplicate-insert.** The predicate is in the `ON` clause, so the older row fails the match and INSERTs a second row with the same key. Guard on the SOURCE side instead (filter out older-or-equal rows). |
 
 **DO-NOT-WRITE callout (load-bearing — both bullets are invalid SQL or anti-patterns):**
 

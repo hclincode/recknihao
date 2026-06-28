@@ -5526,7 +5526,22 @@ VALUES (DBT_INTERNAL_SOURCE.order_id, DBT_INTERNAL_SOURCE.customer_id, ...);
 > ) }}
 > ```
 >
-> `incremental_predicates` adds the listed conditions to the MERGE's `ON` clause (or as additional `AND ...` predicates depending on adapter version), so only target rows that satisfy the predicate participate in the UPDATE. This is the correct way to add "only update if source is newer" semantics, file-pruning hints (e.g., `DBT_INTERNAL_DEST.partition_date >= ...`), or any other target-side filter to a dbt-managed MERGE.
+> `incremental_predicates` adds the listed conditions to the MERGE's **`ON` / join condition** (ANDed with the `unique_key` match — dbt docs: it *"limits the scan of the existing table"*), NOT to the `WHEN MATCHED` branch. That placement is exactly right for **scan-narrowing / partition-pruning** hints (e.g., `DBT_INTERNAL_DEST.partition_date >= DATE '...'`): a target row outside the window simply isn't scanned, and since the source for that key isn't in this batch either, nothing wrong happens.
+>
+> **⚠️ The `updated_at <` "only update if newer" guard has a DUPLICATE-INSERT TRAP — read this before using it.** Because the predicate lives in the `ON` clause, a **late OLDER** source row (whose `updated_at` is less than the target's existing value) **fails the join match** → falls through to `WHEN NOT MATCHED` → **gets INSERTed as a second row with the same `unique_key`** (dbt does not validate this; [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy) — "advanced use," no dup-insert warning). So `incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]` ALONE does **not** give clean only-update-if-newer — it silently creates duplicate keys for out-of-order arrivals. **The complete fix is SOURCE-SIDE:** in the model SELECT, (a) dedupe the batch to one row per key (`ROW_NUMBER() OVER (PARTITION BY key ORDER BY updated_at DESC) = 1`), AND (b) drop any incoming row that is not strictly newer than what the target already holds, so no stale row ever reaches the MERGE:
+>
+> ```sql
+> {% if is_incremental() %}
+>   -- keep only rows newer than the current target row for that key (prevents older-overwrites-newer AND dup-insert)
+>   WHERE NOT EXISTS (
+>     SELECT 1 FROM {{ this }} t
+>     WHERE t.order_id = DBT_INTERNAL_SOURCE_BASE.order_id
+>       AND t.updated_at >= DBT_INTERNAL_SOURCE_BASE.updated_at
+>   )
+> {% endif %}
+> ```
+>
+> With the source pre-filtered this way, a **plain unconditional** `merge` (no `incremental_predicates`) is already correct — every row that reaches the MERGE is genuinely newer, so the unconditional `WHEN MATCHED THEN UPDATE` never clobbers a fresher row and never inserts a stale duplicate. Use `incremental_predicates` for partition-pruning; use the source-side `NOT EXISTS` filter (or a downstream `unique` test as a safety net) for out-of-order-update protection.
 
 ### `on_schema_change` — the FOUR options and the correct default
 

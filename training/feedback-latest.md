@@ -1,149 +1,118 @@
-# Iteration 1234 — Judge Feedback
+# Iteration 1235 — Judge Feedback
 
 ## Verdict
 
-**Overall: 3.5625 — BARELY PASS at threshold.** Q3 is a substantive FAIL (2.125) on the dbt-incremental-merge late-arriving-older-row scenario with TWO compounding errors: (1) factually-wrong claim about Trino MERGE syntax, (2) wrong cross-run solution. Q2 is a borderline-pass (3.0) responder-recall-slip on the well-documented "no expressions inside ROLLUP" rule. Q1 and Q4 are clean.
+**Overall: 4.0625 — SOLID PASS.** Q1 the iter1234 re-probe LANDS THE PRIMARY MERGE-WHEN-MATCHED-AND MYTH CORRECTION + the incremental_predicates direction reach findably — but introduces a NEW recall-ceiling subtlety on the COMPILED-SQL placement (responder said dbt compiles incremental_predicates as "WHEN MATCHED AND ..." — actual dbt-core+dbt-trino places it in the ON clause, which for the `<` newer guard creates a duplicate-insert via WHEN NOT MATCHED). Q2 is a structurally-correct LEFT JOIN+IS NULL anti-join with a meaningful completeness gap (missing the question's `event_type='setup_complete'` LHS filter). Q3 pin-perfect dbt source freshness canonical. Q4 clean SYSDATE/CURRENT_TIMESTAMP/CURRENT_DATE/INTERVAL canonical with one minor SYSDATE→LOCALTIMESTAMP-precision shave.
 
-**FIX-A RECOMMENDATION: YES — LIGHT FIX-A WARRANTED on Q3 (findability + myth-defang).** See §FIX-A SPEC at end.
+**iter1234 PRIMARY WATCH** (`Trino-MERGE-WHEN-MATCHED-AND-myth + r13-incremental_predicates-only-update-if-newer findability`): **CLOSES on first re-probe.** The myth correction REACHED ("Trino 467 DOES support conditional WHEN MATCHED — that's NOT a Snowflake/Databricks-only extension"). The `incremental_predicates=['DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at']` solution REACHED with keyword-findable anchoring. 19th consecutive 1st-re-probe-CLOSE in the NO-OP→LIGHT-FIX-A→CLOSE pattern.
+
+**NEW SOFT WATCH** (`iter1235 incremental_predicates-placed-in-ON-clause-creates-duplicate-insert-on-late-older-row`): responder's claim that incremental_predicates "adds WHEN MATCHED AND ..." is mechanistically off — dbt compiles incremental_predicates into the ON clause (verified at [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy)), which for the `<` newer guard makes the late-older row fail the ON match and fall to WHEN NOT MATCHED → INSERT, producing a duplicate by `account_id`. The directional answer + myth correction are right (per the verify-section's "do not over-penalize"), but a sibling caveat or `merge_update_columns`-pair note would close the loop. Re-probe in 4-8 iters under "late-older row inserted as duplicate after I added incremental_predicates" framing. **NO FIX-A this iter** — passive monitor only; primary axis closed cleanly.
+
+**Q2 missing setup_complete filter**: per-instance literal-question-comprehension slip (multi-condition stem, second condition dropped). Adjacent to `feedback_responder_broken_secondary_alternative.md` family (lead correct, secondary requirement dropped). NO FIX-A — recall ceiling, not resource-sourced.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Iceberg time travel to wall-clock time (FOR TIMESTAMP AS OF) — 4.375
+### Q1 — dbt incremental merge with out-of-order CDC + Trino MERGE WHEN MATCHED AND myth — 3.875
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Acc | 4.0 | Primary answer `FOR TIMESTAMP AS OF TIMESTAMP '2026-06-18 09:00:00'` correct and verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html). Snapshot-closest-not-after semantics correct. 7-day retention caveat correctly raised. **MINOR SLIP — `FOR VERSION AS OF '<snapshot_id>'` aside with snapshot_id QUOTED**: Trino 467 docs show numeric snapshot_id is BIGINT unquoted (`FOR VERSION AS OF 8954597067493422955`); only NAMED tags/branches take quoted strings (`FOR VERSION AS OF 'historical-tag'`). Engineer copying `'<numeric_snapshot_id>'` from $snapshots hits a type mismatch and recovers by removing quotes. Not load-bearing (engineer's actual ask was wall-clock time, not snapshot_id). |
-| Clar | 4.5 | Wall-clock-to-snapshot mapping mechanism explained well. |
-| App | 4.5 | Engineer arrives at working query for the stated wall-clock-time use case. |
-| Compl | 4.5 | Covers TIMESTAMP form + retention caveat + VERSION-AS-OF aside. |
+| Acc | 3.5 | **MYTH CORRECTION — CORRECT (LOAD-BEARING)**: "Coworker is wrong on both counts. Trino 467 DOES support conditional WHEN MATCHED" — VERIFIED at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) (WebFetched this iter): docs verbatim `WHEN MATCHED [ AND condition ] THEN UPDATE SET (column = expression [, ...])` and `WHEN MATCHED [ AND condition ] THEN DELETE`, with explicit example `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE` + "For each source row, the WHEN clauses are processed in order. Only the first matching WHEN clause is executed" (first-match-wins semantics). The 8-instance-prior assumed-absence imported-prior (after starts_with/to_char/listagg/array_sum/format_number/migrate/LATERAL/MERGE-AND) is now broken on the MERGE-AND axis. **DBT MERGE OVERWRITE FRAMING — CORRECT**: "dbt's compiled MERGE does NOT compare timestamps by default — overwrites unconditionally" matches dbt-core behavior. **INCREMENTAL_PREDICATES DIRECTION — CORRECT**: `incremental_predicates=["DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"]` IS the dbt-native lever — VERIFIED at [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy). **MECHANISM SUBTLETY — IMPRECISE (recall ceiling, not load-bearing for the directional answer)**: responder said this "adds `WHEN MATCHED AND DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at`". The dbt docs (WebFetched) show incremental_predicates is added to the **ON clause**, not as WHEN MATCHED AND: `merge into ... DBT_INTERNAL_DEST from ... DBT_INTERNAL_SOURCE on DBT_INTERNAL_DEST.id = DBT_INTERNAL_SOURCE.id and DBT_INTERNAL_DEST.session_start > dateadd(day, -7, current_date) when matched then update ...`. For the `<` newer-guard predicate, a late-older row fails the ON condition (account_id matches BUT `dest.updated_at < source.updated_at` is FALSE because dest is newer) → falls to WHEN NOT MATCHED → INSERT → produces a duplicate row by account_id. The "older incoming row skips the UPDATE" half is TRUE but the implied "only update if newer, otherwise no-op" conclusion is INCOMPLETE for dbt-core+dbt-trino's standard placement. **MONOTONICITY CAVEAT — CORRECT**: identical-timestamp sequence-number tiebreaker note is sound. |
+| Clar | 4.5 | "Coworker is wrong on both counts" lead + grammar citation + dbt-default-overwrite framing + single-line incremental_predicates config + monotonicity caveat is a clean explanation. Beginner can follow. |
+| App | 3.5 | Direction is actionable (engineer adds the incremental_predicates line, gets a guard against most stale overwrites). BUT the duplicate-insert failure mode under standard ON-clause placement would surface in production with the exact scenario the engineer described (late-older row). Engineer's correct compound action would be `incremental_predicates=[...]` + either `merge_update_columns=[...]` (limiting WHEN MATCHED branch) OR pairing with a downstream `unique` test + dedup view. Engineer following responder verbatim may still see duplicates; recovers by adding `merge_update_columns` or moving to a custom merge. |
+| Compl | 4.0 | Both halves of the question (myth correction + config) answered with the monotonicity tiebreaker noted. Missing: explicit caveat that the ON-clause placement can let late-older rows INSERT (not just skip UPDATE), and the `merge_update_columns` companion lever. |
 
-**Routing**: Iceberg table maintenance (matches iter1229/iter1232 routing for time-travel/snapshot questions).
+**Routing**: Improving complex SQL performance on Trino with dbt (line 482) — matches iter1234 Q3 routing for dbt-incremental-merge/late-arriving-row scenarios.
 
-### Q2 — ROLLUP for subtotals + grand total in ONE scan — 3.0
-
-| Dim | Score | Reasoning |
-|---|---|---|
-| Acc | 2.0 | **CONFIRMED PARSE-TIME BUG**. Responder wrote `GROUP BY ROLLUP(plan_tier, date_trunc('month', billing_date))` — VERIFIED at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) (WebFetched this iter): *"Complex grouping operations do not support grouping on expressions composed of input columns. Only column names are allowed."* Trino 467 ROLLUP / CUBE / GROUPING SETS accept COLUMN NAMES (or ordinals) ONLY — `date_trunc('month', billing_date)` IS an expression and will FAIL analysis. Engineer copying the SQL hits a parse error. The fix (pre-compute `date_trunc('month', billing_date) AS billing_month` in a CTE, then `ROLLUP(plan_tier, billing_month)`) is NOT shown. The CASE GROUPING(...) logic itself is technically sound but moot because the query won't run. GROUPING SETS ((plan_tier), ()) aside also uses bare column name — correct. |
-| Clar | 4.0 | ROLLUP-vs-GROUPING-SETS distinction taught well; GROUPING() function explained. |
-| App | 2.5 | Engineer hits parse error, has to debug the fix from scratch. |
-| Compl | 3.5 | Right shape (ROLLUP + GROUPING() + label CASE) for the question, but the exact syntax fails. |
-
-**Classification: RESPONDER RECALL SLIP on well-documented + findable content** — `Trino-complex-grouping-column-names-only` pinned memory + r28 §452/§580/§589 prominently anchor this rule with DO-NOT-COPY `date_trunc(...)` examples and pre-compute-in-CTE-then-ROLLUP-over-name pattern. The keyword chain "ROLLUP + date_trunc + month" should have routed to the disambiguation card; it did not. **NOT a content gap. NO FIX-A** — per `feedback_responder_broken_secondary_alternative.md` family adjacent (responder reached the correct PATTERN at the conceptual level but slipped on the documented Trino-vs-Postgres/Snowflake syntactic constraint). Recall ceiling.
-
-**Routing**: Analytical query patterns on Iceberg+Trino.
-
-### Q3 — dbt incremental merge late-arriving older row — 2.125 (FAIL)
+### Q2 — Anti-join: accounts with setup_complete but ZERO usage in 30 days — 3.125
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Acc | 1.5 | **TWO COMPOUNDING FACTUAL ERRORS.** |
-| Clar | 3.5 | Code shape explained clearly; the conclusions are clearly stated (just wrong). |
-| App | 1.5 | Engineer follows advice → target row STILL gets overwritten by older row → silent data corruption in production. |
-| Compl | 2.0 | Misses the canonical dbt-trino-native answer (`incremental_predicates`) entirely. |
+| Acc | 3.0 | **LEFT JOIN + IS NULL anti-join pattern — CORRECT** as a structural choice. **30-day predicate in ON not WHERE — CORRECT** (load-bearing): putting it in WHERE would convert the LEFT JOIN to an effective INNER JOIN (NULL rows from no-match side fail the WHERE filter, so anti-join collapses to "accounts with usage in 30 days"). Putting it in ON keeps the no-match LEFT side intact. Verified pattern. **`WHERE ue.account_id IS NULL` — CORRECT** anti-join filter. **"Duplicates not a problem" — CORRECT** (any account with ≥1 usage row fails the IS NULL check on at least one row, so ALL its rows drop; only zero-match accounts survive). **"Trino converts to SemiJoin" — MILD TERMINOLOGY SLIP**: Trino's optimizer typically rewrites LEFT JOIN + IS NULL into a left-anti-join (LeftAntiJoin operator), not the SemiJoin operator (which is for IN/EXISTS forms). Both are O(N+M) hash-join-family plans; conceptually fine for the perf claim, but the operator name is off. **MISSING `WHERE oe.event_type='setup_complete'` — CORE QUESTION FILTER DROPPED**: the question literally says "accounts with onboarding_events.event_type='setup_complete'" as the LHS spec. The responder's query has FROM onboarding_events oe with NO event_type filter, so it returns accounts with ANY onboarding event AND zero usage — a SUPERSET of the asked answer. This is the meaningful Acc shave. |
+| Clar | 4.0 | The ON-vs-WHERE-placement explanation is the canonical SQL-pedagogy point and is well-framed. Duplicate-explanation is clean. |
+| App | 3.0 | Engineer pastes, gets a result, but the rows include accounts that NEVER completed setup (e.g. abandoned signups) — wrong cohort for the question. They'd notice when comparing the count against a sanity-check `SELECT COUNT(*) FROM onboarding_events WHERE event_type='setup_complete'` baseline. Recovers in 30 seconds by adding the filter, but only after spotting the discrepancy. |
+| Compl | 2.5 | The question stem had TWO conditions on the LHS (event_type='setup_complete' AND no usage in 30 days); responder addressed only the second. Half-answered the literal ask. |
 
-**Error 1 — FACTUALLY WRONG: "Trino MERGE does NOT support WHEN MATCHED AND condition (Snowflake/Databricks extension)."** VERIFIED at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) (WebFetched this iter):
-- `WHEN MATCHED [ AND condition ] THEN DELETE`
-- `WHEN MATCHED [ AND condition ] THEN UPDATE SET ( column = expression [, ...] )`
-- `WHEN NOT MATCHED [ AND condition ] THEN INSERT [ column_list ] VALUES (expression, ...)`
+**Routing**: Analytical query patterns on Iceberg+Trino (line 89) — anti-join is a canonical analytical SQL pattern.
 
-Docs explicitly show `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE`. Resource r27 §2171, §2174, §2187 verbatim teach multi-branch `WHEN MATCHED AND s.op='d' THEN DELETE` / `WHEN MATCHED AND s.op IN ('u','c','r') THEN UPDATE SET ...` and explicitly state "Multiple `WHEN MATCHED [AND condition]` branches are supported." The responder propagated the EXACT myth that r13 §5514 flags as "a very common AI-generated mistake" — but the responder ALSO mis-attributed the limitation to TRINO (the r13 warning is about default dbt-compiled MERGE not adding the AND, NOT about Trino MERGE syntax). This is an imported-prior (Snowflake-MERGE-vs-Trino-MERGE) recurrence.
-
-**Error 2 — WRONG CROSS-RUN SOLUTION: pre-dedupe staging via `ROW_NUMBER() PARTITION BY subscription_id ORDER BY updated_at DESC` + `WHERE rn = 1` does NOT solve the asked scenario.** The engineer's stated scenario is a CROSS-RUN ordering bug:
-- This run's batch has ONE row for `subscription_id=X` with `updated_at=yesterday` (the late row).
-- `rn=1` keeps it (it's the only row for that key in THIS batch).
-- The merge's `WHEN MATCHED THEN UPDATE` then unconditionally overwrites the target's `updated_at=this-morning` row with the older `updated_at=yesterday` row.
-- Result: target now holds the older data. The "idempotent: only updates if source has a newer updated_at" conclusion is FALSE.
-
-Pre-dedupe ROW_NUMBER solves the WITHIN-BATCH dup case (one batch has two rows for the same key). That is a different problem from what was asked.
-
-**Missing — the correct dbt-trino-native answer is `incremental_predicates`.** VERIFIED at [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy) (WebFetched this iter):
-```jinja
-{{ config(
-    materialized='incremental',
-    unique_key='subscription_id',
-    incremental_strategy='merge',
-    incremental_predicates=[
-        "DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at"
-    ]
-) }}
-```
-dbt-trino adds the listed predicate to the MERGE's ON clause alongside `DBT_INTERNAL_DEST.subscription_id = DBT_INTERNAL_SOURCE.subscription_id`. When the source is OLDER than the dest, the ON clause evaluates FALSE → NOT MATCHED branch. (Caveat: with `unique_key` set, dbt's default `WHEN NOT MATCHED THEN INSERT` would then attempt to insert a duplicate key — this is a known nuance and a reason why some adapters route the predicate to `WHEN MATCHED AND ...` instead. r13 §5529 hedges this with "ON clause (or as additional AND ... predicates depending on adapter version)" — accurate hedge for the dbt-trino case.) This canonical lives at **resources/13-postgres-to-iceberg-ingestion.md §5516-5529** and is NOT anchored or cross-referenced from r27/r28's dbt-merge sections where the question's keywords ("late-arriving older row", "only update if newer", "merge overwrite", "blindly overwrite target") naturally lead.
-
-**Routing**: Improving complex SQL performance on Trino with dbt (matches iter1162 Q4 routing for dbt incremental_strategy questions).
-
-### Q4 — Oracle NVL2 → Trino CASE / IF — 4.75
+### Q3 — dbt source freshness configuration + separate command — 4.875
 
 | Dim | Score | Reasoning |
 |---|---|---|
-| Acc | 5.0 | Trino 467 has NO NVL2 — verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) (conditional functions are CASE / IF / COALESCE / NULLIF / TRY only). `CASE WHEN col IS NOT NULL THEN 'has a value' ELSE 'is null' END` valid. `IF(col IS NOT NULL, 'has a value', 'is null')` valid (Trino IF is 3-arg). NVL → COALESCE mapping correct. NULLIF → NULLIF identity correct. |
-| Clar | 4.5 | Mapping table is clean. |
-| App | 5.0 | Bulk find-replace regex suggestion is actionable. |
-| Compl | 4.5 | Covers both CASE and IF forms; adjacent NVL/NULLIF mappings noted. |
+| Acc | 5.0 | **YAML structure — CORRECT (verified for dbt v1.9+)**: WebFetched [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness) verbatim: `sources: - name: <source_name> config: freshness: warn_after: count: <int> period: minute \| hour \| day error_after: count: <int> period: minute \| hour \| day` + `tables: - name: <table_name> config: freshness: ...`. Responder's placement of `freshness:` under `config:` at both source and table level matches the current dbt 1.9+ structure verbatim. **Period enum minute/hour/day only — CORRECT** (no week/quarter/second). **loaded_at_field at table level — CORRECT**. **Separate command — CORRECT**: WebFetched confirmation that `dbt source freshness` is a separate command, NOT run by `dbt run` or `dbt build`. **Exit non-zero on error_after — CORRECT**. **target/sources.json state output — CORRECT** (matches dbt docs). **CI gate with set -e — CORRECT** operational pattern. |
+| Clar | 4.5 | Clean source/table split, period enum stated upfront, command-separate-from-run-build crystal clear. |
+| App | 5.0 | Engineer assembles the schema.yml + CI bash gate verbatim and the warn-at-2h / error-at-6h behavior works as asked. |
+| Compl | 5.0 | Both halves (schema.yml location + separate-command-or-automatic) answered with operational CI integration as bonus. |
 
-**Routing**: Oracle PL/SQL → dbt+Trino migration.
+**Routing**: dbt sources / source freshness (line 521) — exact-fit topic.
+
+### Q4 — Oracle SYSDATE arithmetic → Trino INTERVAL + CURRENT_DATE/NOW/CURRENT_TIMESTAMP — 4.375
+
+| Dim | Score | Reasoning |
+|---|---|---|
+| Acc | 4.0 | **CURRENT_DATE → DATE — CORRECT**. **CURRENT_DATE - INTERVAL '7' DAY → DATE — CORRECT** (verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) operators table). **CURRENT_TIMESTAMP / NOW() = TIMESTAMP(3) WITH TIME ZONE — CORRECT** verbatim. **Oracle SYSDATE → CURRENT_TIMESTAMP — MILD IMPRECISION** (non-load-bearing for the actual use case): Oracle SYSDATE is a session-local datetime WITHOUT time zone; the exact Trino equivalent type is `LOCALTIMESTAMP` (returns `timestamp(3)` no-TZ per docs) NOT `CURRENT_TIMESTAMP` (which is TIMESTAMP WITH TIME ZONE). For date-arithmetic filter use cases (`< CURRENT_DATE - INTERVAL '7' DAY` against a TIMESTAMP partition column), implicit TIMESTAMP↔TIMESTAMP WITH TIME ZONE coercion makes the comparison work correctly and partition pruning still fires (matches pinned `reference_trino_timestamp_tz_coercion.md`), so the answer is operationally correct — but the type-identity claim is imprecise. **TRUNC(SYSDATE) → CURRENT_DATE — CORRECT**. **SYSTIMESTAMP → CURRENT_TIMESTAMP — CORRECT** (both are WITH TIME ZONE). **`SET TIME ZONE 'America/New_York'` — CORRECT** (WebFetched [trino.io/docs/467/sql/set-time-zone.html](https://trino.io/docs/467/sql/set-time-zone.html) verbatim "Use a region-based time zone identifier for specifying the time zone: `SET TIME ZONE 'America/Los_Angeles'`"; `SET SESSION time_zone=...` defang correct — that form doesn't exist in 467). **DATE vs TIMESTAMP partition routing — CORRECT** (CURRENT_DATE for DATE partition col, CURRENT_TIMESTAMP for TIMESTAMP col, mix needs CAST). |
+| Clar | 4.5 | Clean Oracle→Trino mapping table, INTERVAL arithmetic illustrated, partition-column routing rule explicit. |
+| App | 4.5 | Engineer pastes `CURRENT_DATE - INTERVAL '7' DAY` and `CURRENT_TIMESTAMP - INTERVAL '30' DAY` and they work for both DATE and TIMESTAMP partition columns. |
+| Compl | 4.5 | Covers Oracle→Trino mapping for SYSDATE/TRUNC/SYSTIMESTAMP, INTERVAL arithmetic with both DATE and TIMESTAMP return paths, partition-column routing, and the session timezone form. Could mention `at_timezone(x, 'America/New_York')` for explicit per-expression TZ conversion (not asked). |
+
+**Routing**: Oracle PL/SQL → dbt + Trino SQL migration (line 379) — Oracle-function-translation matches.
 
 ---
 
-## Direct answers to teacher's three explicit questions
+## Overall iteration
 
-### (1) Is Q2 a recall slip vs content gap?
-
-**RECALL SLIP, not content gap.** Resources cover this rule prominently:
-- Pinned memory `reference_trino_complex_grouping_column_names_only.md` explicitly: "GROUPING SETS/CUBE/ROLLUP accept COLUMN NAMES ONLY (no expressions; pre-compute in CTE); plain GROUP BY accepts expressions."
-- r28 §452, §580, §589 anchor it with DO-NOT-COPY `date_trunc(...)` examples + the pre-compute-then-ROLLUP-over-bare-name canonical.
-- r27 (referenced via r28 cross-link) also defangs the Postgres/Snowflake-allowed-inside-ROLLUP imported prior.
-
-The keyword chain "ROLLUP + date_trunc + month/quarter" should have routed to the disambiguation card; recall didn't reach it. NO content fix needed.
-
-### (2) Is the Q3 Trino-MERGE-conditional claim wrong?
-
-**YES, FACTUALLY WRONG.** Verified at trino.io/docs/467/sql/merge.html — Trino 467 MERGE supports `WHEN MATCHED [ AND condition ] THEN UPDATE SET ...` / `THEN DELETE` and `WHEN NOT MATCHED [ AND condition ] THEN INSERT ...`. Docs example: `WHEN MATCHED AND s.address = 'Centreville' THEN DELETE`. r27 §2171/§2174/§2187 already teach the correct Trino MERGE multi-branch + AND-condition pattern. The responder's misattribution to "Snowflake/Databricks extension" is an imported-prior error (likely confusion between "default dbt-compiled MERGE omits the AND condition" and "Trino MERGE syntax doesn't support the AND condition").
-
-### (3) Is a LIGHT FIX-A warranted for Q3 findability?
-
-**YES — LIGHT FIX-A WARRANTED.** Both sub-issues recur if left:
-- The "Trino MERGE doesn't support WHEN MATCHED AND" myth is propagated by Snowflake/Databricks-trained LLMs. This is the 8th instance of an imported-prior assumed-absence error against Trino syntax (after starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL).
-- The "only update if newer" / "late-arriving older row" canonical answer (`incremental_predicates=['DBT_INTERNAL_DEST.x < DBT_INTERNAL_SOURCE.x']`) lives at r13 §5516-5529 but is NOT anchored from the r27/r28 dbt-merge sections where the question's keywords lead.
-
-#### FIX-A SPEC — exactly where to anchor
-
-**Anchor 1 (r27 §4.6 / §6.8 area — dbt-merge canonical):** Add a 5-7 line callout near the existing dbt-incremental-merge CANONICAL (around r27 §6.8 is-incremental WHERE-clause guardrail neighborhood, or §4.6 MERGE section after §2187 "Correct claims preserved" list) with:
-- Keyword anchors: "late-arriving older row", "out-of-order updated_at", "merge overwrites newer with older", "only update if source is newer", "guard against stale row overwriting fresh row in incremental merge".
-- Load-bearing fact: Trino MERGE syntactically SUPPORTS `WHEN MATCHED AND ... THEN UPDATE` (see r27 §2171 / §2187 — cross-ref); but dbt-compiled MERGE does NOT emit the AND condition by default.
-- The dbt-trino-native solution: `incremental_predicates=['DBT_INTERNAL_DEST.updated_at < DBT_INTERNAL_SOURCE.updated_at']` (cross-ref to r13 §5516-5529 for the full canonical).
-- DO-NOT-WRITE row: "Trino MERGE doesn't support WHEN MATCHED AND condition — it's Snowflake/Databricks only" — INLINE-MARK WRONG, point at the r27 §2187 list of "Correct claims preserved — Trino-valid".
-
-**Anchor 2 (r28 around line 382 — incremental_predicates partition-pruning lever):** Add a 3-line sibling row next to the existing partition-aligned-merge `incremental_predicates` row noting the second use case: "only-update-if-newer" semantics for late-arriving CDC, with cross-ref to r13 §5516-5529.
-
-**Anchor 3 (r13 §5514 — defang myth more sharply):** The existing CRITICAL warning at r13 §5514 ("a very common AI-generated mistake is to claim dbt compiles `WHEN MATCHED AND s.updated_at > t.updated_at THEN UPDATE SET ...`") is currently dbt-scoped. Add one sentence disambiguating dbt-COMPILED MERGE (doesn't add the AND by default) from TRINO MERGE SYNTAX (supports the AND — see r27 §2171/§2187). This closes the imported-prior loop.
-
-**Watch label**: `iter1234 Trino-MERGE-WHEN-MATCHED-AND-myth + r13-incremental_predicates-only-update-if-newer findability + cross-ref FIX-A`. Re-probe within 4-8 iters under framings like:
-- "late-arriving row in dbt incremental, target already has newer, how to guard"
-- "dbt merge only update if source is newer"
-- "Trino MERGE conditional update — does it support WHEN MATCHED AND"
-
-If the re-probe lands the `incremental_predicates` canonical AND correctly states Trino MERGE supports `WHEN MATCHED AND ...`, watch closes. Same family as iter948 r07 HAVING-trims-memory and iter1226 r17/r21 table_changes-MoR — recurring AI-misconception traced to a resource findability gap.
+**(3.875 + 3.125 + 4.875 + 4.375) / 4 = 16.25 / 4 = 4.0625 — SOLID PASS** (margin +0.5625 above the 3.5 threshold).
 
 ---
 
-## Patterns this iteration
+## FIX-A assessment
 
-1. **Imported-prior assumed-absence — 8th instance.** Q3 "Trino MERGE doesn't support WHEN MATCHED AND" follows the same pattern as starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL — assuming a foreign-looking feature isn't in Trino. This pattern is now systematic enough that the teacher might consider a unified myth-defang index in r27 / r28 (one place LLMs can land that lists "Trino DOES have X — Snowflake/Databricks prior is wrong").
-2. **Complex-grouping expression-allowed prior — recurrence.** Q2 echoes the `Trino-complex-grouping-column-names-only` pinned memory error. Recall ceiling on findable content.
-3. **Cross-run vs within-batch dedup confusion (Q3).** Pre-dedupe-to-rn=1 is a common LLM auto-pilot answer that DOESN'T address the cross-run late-arriving-older-row scenario. This is a NEW responder-pattern note — worth tracking if recurs.
-4. Q1 minor `FOR VERSION AS OF '<snapshot_id>'` quoted-string slip is a recall ceiling (not load-bearing for the wall-clock question), passive monitor only.
+### Watches reached / closed
+
+| Watch | Status | Notes |
+|---|---|---|
+| iter1234 `Trino-MERGE-WHEN-MATCHED-AND-myth + incremental_predicates-only-update-if-newer findability` | **CLOSED on first re-probe** | Myth correction reached verbatim ("coworker is wrong on both counts"). incremental_predicates solution reached with keyword-findable anchoring at r27/r28. 19th consecutive 1st-re-probe-CLOSE. |
+
+### NEW soft watches
+
+| Watch | Severity | Notes |
+|---|---|---|
+| `iter1235 incremental_predicates-placed-in-ON-clause-creates-duplicate-insert-on-late-older-row` | SOFT (passive monitor) | Responder said dbt compiles incremental_predicates as "WHEN MATCHED AND ..."; actual placement is the ON clause per [docs.getdbt.com/docs/build/incremental-strategy](https://docs.getdbt.com/docs/build/incremental-strategy). For the `<` newer guard, late-older row fails ON → falls to WHEN NOT MATCHED → INSERT → duplicate by account_id. Direction is right; mechanism + dup-insert caveat both miss. Re-probe in 4-8 iters under "I added incremental_predicates and now I have duplicate keys after late-arriving older rows" framing. **NO FIX-A this iter** — primary axis closed cleanly; sibling caveat is a recall ceiling on a now-anchored canonical, not a missing canonical. If recurs, light additive line in r27 dbt-merge card: "NB: dbt places incremental_predicates in the MERGE ON clause — a `<` newer guard SKIPS the UPDATE on late-older rows (good) BUT lets the row fall to WHEN NOT MATCHED → INSERT (duplicate). Pair with `merge_update_columns` or a downstream dedup view, OR use a custom merge with the predicate explicitly inside WHEN MATCHED AND." |
+
+### Other open watches (carry-forward only)
+
+- iter1234 ROLLUP-date_trunc-expr (soft) — not re-probed this iter
+- iter1234 FOR-VERSION-AS-OF-quoting (passive) — not re-probed this iter
+- iter1233 IGNORE-NULLS-framing — not re-probed this iter
+- iter1231 NEXT_DAY-closing-note (soft) — not re-probed this iter
+- iter1230 plain-correlated-EXISTS-OVER-WARNING + `::cast` (light-monitors) — not re-probed this iter
+- iter1215 strpos-3-arg ceiling — not re-probed this iter
+- iter1213 session_properties/(+) — not re-probed this iter
+- iter1208 width_bucket boundary-label — not re-probed this iter
+
+### NO new FIX-A this iter
+
+Primary watch closed cleanly. The new soft watch is a recall-ceiling sibling caveat on a now-anchored canonical (r27 §3651+/r28 §382 keyword anchor + r13 §5514 mechanism). The dbt-trino-MERGE-from-incremental_predicates ON-clause-creates-duplicate subtlety is a real edge case but a single-instance slip on a primary-axis-closed canonical does not warrant immediate resource churn per `feedback_synthesis_ceiling_stop_churning.md` ("after a FIX-A closes the specific FAIL-causing sub-bug ... if the responder STILL can't assemble the full hard ... that residual is a Haiku synthesis ceiling NOT a resource gap"). Passive watch only.
 
 ---
 
-## Rubric topic updates this iteration
+## Topic score updates
 
-| Topic | Prior | Q | Score | New |
-|---|---|---|---|---|
-| Iceberg table maintenance | 4.4393/229 | Q1 | 4.375 | 4.4391/230 (-0.0002) |
-| Analytical query patterns on Iceberg+Trino | 4.5715/166 | Q2 | 3.0 | 4.5621/167 (-0.0094) |
-| Improving complex SQL performance on Trino with dbt | 4.5478/53 | Q3 | 2.125 | 4.5029/54 (-0.0449) |
-| Oracle PL/SQL → dbt+Trino migration | 4.4600/199 | Q4 | 4.75 | 4.4615/200 (+0.0015) |
+| Topic | Before | This iter Q | Score | After | Margin |
+|---|---|---|---|---|---|
+| Improving complex SQL performance on Trino with dbt (line 482) | 4.5029 / 54 | Q1 | 3.875 | (243.1584 + 3.875)/55 = 4.4915/55 | +0.9915 |
+| Analytical query patterns on Iceberg+Trino (line 89) | 4.5621 / 167 | Q2 | 3.125 | (761.869 + 3.125)/168 = 4.5535/168 | +1.0535 |
+| dbt sources / source freshness (line 521) | 4.5995 / 11 | Q3 | 4.875 | (50.594 + 4.875)/12 = 4.6225/12 | +1.1225 |
+| Oracle PL/SQL → dbt + Trino SQL migration (line 379) | 4.4615 / 200 | Q4 | 4.375 | (892.29 + 4.375)/201 = 4.4610/201 | +0.9610 |
 
-All topics still PASS healthy margins. Overall iter1234 avg = **3.5625 PASS at threshold** (would have been ~4.5+ without Q3).
+All four touched topics remain PASSED with healthy margins. No threshold breaches, no demotions.
+
+---
+
+## Note for teacher
+
+- The primary iter1234 axis is closed: the responder reached the "Trino MERGE DOES support WHEN MATCHED AND" myth correction AND the incremental_predicates solution on first re-probe. The r27/r28 anchoring + r13 cross-ref FIX-A from iter1234 worked exactly as spec'd.
+- The new soft watch (`incremental_predicates-placed-in-ON-clause-creates-duplicate-insert`) is **passive only** for now. Do not pre-emptively change r27/r28; let the watch ride 4-8 iters and only act if it recurs under a "I added incremental_predicates and now I have duplicates" framing. Pre-emptive churn risks `feedback_new_card_over_attracts_adjacent` regression on the now-clean merge-myth canonical.
+- Q2 responder dropped a literal multi-condition stem clause — per `feedback_responder_broken_secondary_alternative.md` family, this is a per-instance reading-comprehension slip, NOT resource-sourced. No fix.
+- Q4 SYSDATE→CURRENT_TIMESTAMP imprecision is mild and operationally harmless for the date-arithmetic use case; do not add a LOCALTIMESTAMP card unless a question lands that turns on the no-TZ distinction (rare in the SaaS-engineer-question pool).
