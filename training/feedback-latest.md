@@ -1,204 +1,249 @@
-# Iteration 1227 — Judge Feedback
+# Iteration 1228 — Judge Feedback
 
-**Verdict: 4.78 STRONG PASS NO-OP — Q1/Q2/Q3 pin-perfect 5.0/5.0/5.0; Q4 core RIGHT (assumed-absence-avoided, positive note) but ONE fabricated SUBSTRING-FROM-cant-do-negative secondary aside (recall-ceiling broken-secondary, NOT resource-sourced, NO FIX-A).** ROW_NUMBER latest-per-key (Q1) + CASE+GROUP-BY-label single-pass bucket (Q2) + dbt list unique_key composite MERGE + Trino MERGE_TARGET_ROW_MULTIPLE_MATCHES pre-dedup caveat (Q3) all landed canonical. Q4 correctly states `substr(file_path, -4)` works (avoiding the assumed-absence myth that has bitten the responder 7+ times — starts_with/to_char/listagg/array_sum/format_number/migrate/LATERAL) and correctly gives `element_at(split(s,'.'), -1)` extractor. The slip is the SECONDARY explanation "SUBSTRING(s FROM -N) does NOT support negative, only SUBSTR(s,-N) does" — this distinction is **fabricated** per Trino source (substr IS an alias for substring; both forms share the same negative-handling code path). Engineer's actual migration would NOT have returned NULL from `SUBSTRING(file_path FROM -4)`; the "why your migration returned NULL" explanation is incorrect. CORE answer still gets engineer to the right action (`SUBSTR(file_path, -4)` works). Broken-secondary family per `feedback_responder_broken_secondary_alternative.md`.
+**Verdict: 3.94 PASS (margin +0.44) with TWO FIX-As recommended.** Q1 (WATCH) and Q2 land canonical 5.0; Q3 (WATCH) and Q4 both miss in-resources canonicals → two structurally distinct findability gaps. Iter average (5.0+5.0+3.0+2.75)/4 = 3.9375.
+
+- **iter1224 CoW-MoR scenario-diagnosis WATCH: CLOSES** on first re-probe (Q1 5.0). Responder correctly bridges "delete files visible = ALREADY on MoR / accumulated position-deletes = the slowdown / EXECUTE optimize compaction = the fix" — exactly the multi-hop synthesis iter1224 failed to assemble. 15th consecutive 1st-re-probe-CLOSE pattern.
+- **iter1226 r27 packages.yml-troubleshooting WATCH: DID NOT REACH** (Q3 3.0). The FIX-A card EXISTS at r27 §4.5A L1768-L1775 with the version-rename row LISTED FIRST in the troubleshooting table, but the responder didn't surface it as THE answer — landed instead on the generic location/format/`dbt_packages/` checklist that the engineer's stated facts already RULE OUT, then padded with a fabricated-then-retracted `{%- do dbt_utils ... -%}` "macro import" suggestion. Recommendation: STRENGTHEN the §4.5A card (LIGHT FIX-A) — version-rename row needs a top-line anchor "macro 'generate_surrogate_key' not found in any package = VERSION issue" and physical reordering above the 3-step setup block.
+- **Q4 MISS — new findability gap**: in-resources `format('$%,.2f', total_revenue)` Trino-native canonical (r23 §3.1A LEADING CANONICAL L690-714 + L917) NOT reached when engineer asked "Oracle TO_CHAR(amount, 'FM$999,999.00') → Trino" / "currency formatting / dollar amount with commas". §3.1A's keyword anchors don't cover "currency / TO_CHAR number / dollar amount / FM mask / number format mask"; r27 §4.2A TO_CHAR canonical covers ONLY dates, has no TO_CHAR(number,...) row. Recommendation: LIGHT FINDABILITY FIX-A — extend anchors in r23 §3.1A + add TO_CHAR(number,...) row to r27's Oracle-function-translation table.
 
 Per-question summary:
-- Q1 5.0 — ROW_NUMBER() OVER (PARTITION BY record_id ORDER BY updated_at DESC NULLS LAST)=1 latest-per-key dedup vs correlated O(N×M); MoR correctly framed as orthogonal (write-side delete-file mechanism, not query-time dedup). dbt materialization recommendation lands.
-- Q2 5.0 — CASE-WHEN-bucket CTE + GROUP BY label (one pass, 4 rows) + COUNT(*) FILTER (WHERE...) wide alternative; explicit "GROUP BY tier NOT account_id+tier" guard correctly named (the most common bug in this report shape).
-- Q3 5.0 — dbt unique_key supports a LIST; dbt-trino compiles `MERGE INTO t USING s ON t.account_id=s.account_id AND t.event_id=s.event_id WHEN MATCHED UPDATE WHEN NOT MATCHED INSERT`; nondeterministic-match pre-dedup caveat (Trino MERGE_TARGET_ROW_MULTIPLE_MATCHES) correct.
-- Q4 4.125 — **POSITIVE: assumed-absence myth AVOIDED** (`substr(s,-N)` correctly identified as supported in Trino 467); `element_at(split(s,'.'),-1)` extractor correct. **SLIP: secondary "SUBSTRING FROM doesn't support negative" claim is FABRICATED** — substr IS an alias for substring per source; both forms share negative handling. Recall-ceiling broken-secondary, NOT a resource defect; NO FIX-A.
-
-Iter average: (5.0 + 5.0 + 5.0 + 4.125) / 4 = **4.78 STRONG PASS**, margin +1.28 over 3.5 threshold. NO FIX-A.
+- **Q1 5.0 (WATCH CLOSE)** — MoR position-delete accumulation correctly diagnosed as cause; `SELECT content, COUNT(*) FROM "orders$files" GROUP BY content` correct diagnostic ($files.content enum 0=DATA / 1=POSITION_DELETES / 2=EQUALITY_DELETES); `EXECUTE optimize(file_size_threshold => '128MB')` correct Trino-native fix (no Spark coordination needed, production-stack-aligned); `EXECUTE expire_snapshots(retention_threshold => '7d')` correct duration-STRING param shape (NOT `retention_days => 7`; iter1214 fab-proofed).
+- **Q2 5.0** — `AVG(new_signups) OVER (ORDER BY signup_date RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW)` canonical Trino 467 sliding-time-window form; RANGE-vs-ROWS distinction load-bearing for time-series with missing days.
+- **Q3 3.0 (WATCH DID NOT REACH)** — version-rename (dbt_utils 1.0.0 Nov 2022 renamed `surrogate_key` → `generate_surrogate_key`) was the #1 cause; r27 §4.5A FIX-A card HAS it but the responder didn't surface it. Engineer's checklist contains a fabricated-then-retracted macro-import suggestion. STRENGTHENING WARRANTED.
+- **Q4 2.75 (MISS)** — in-resources `format('$%,.2f', total_revenue)` at r23 §3.1A NOT reached on "currency / Oracle TO_CHAR number / dollar amount with commas" framing; `format_number` ALSO mischaracterized as "Spark-only / example UDF" (Trino HAS `format_number` but produces compact-units `'1.2M'`/`'500K'`, not comma-mask). LIGHT FINDABILITY FIX-A WARRANTED.
 
 ---
 
-## Q1 — Latest-row-per-key on CDC Iceberg table (ROW_NUMBER vs correlated subquery; MoR orthogonality)
+## Q1 (WATCH) — Spark nightly MERGE INTO on Iceberg orders; Trino dashboard 3-4x slower; "Trino reads delete files alongside data files" — what does it mean / is that the slowdown / what to do
 
 **Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
 
-**Scenario.** Append-only CDC Iceberg `events_cdc` (change_type, updated_at), 400M rows, same record_id dozens of times. Current-state view: one row per record_id with most recent updated_at. Existing correlated subquery `WHERE updated_at=(SELECT MAX(updated_at) FROM events_cdc i WHERE i.record_id=outer.record_id)` runs 20+min. Standard Trino/Iceberg pattern? Is "merge-on-read" relevant?
+**WATCH OUTCOME: `iter1224 CoW-MoR scenario-diagnosis-when-symptom-implies-mode + compaction-not-mode-switch` CLOSES on first re-probe.**
 
-**Responder shape.** "ROW_NUMBER() OVER (PARTITION BY record_id ORDER BY updated_at DESC NULLS LAST) = 1 in a subquery — one pass instead of correlated O(N×M). MoR (merge-on-read) is Iceberg V2 position-delete mechanism — it's the WRITE-side reconciliation that lets MERGE/DELETE write delete files instead of rewriting Parquet. ORTHOGONAL to your problem: you're collapsing dozens of versions into the most recent via SQL, not writing delete files. Materialize the result as a dbt table or incremental model so the dashboards/downstream consumers query the resolved snapshot, not the raw CDC log."
+iter1224 was a scenario-diagnosis MUDDLE — responder failed to bridge "delete files visible → engineer is ALREADY on MoR → the fix is COMPACTION not a mode-switch" and instead floated mode-switching guidance against an already-MoR table. iter1228 lands the FULL diagnosis cleanly under a structurally different framing (nightly Spark MERGE INTO + Trino dashboards slower + teammate explanation vs iter1224's "teammate says switch to MoR" framing).
 
-**Load-bearing facts CORRECT (VERIFIED):**
+**Responder shape.**
+1. **What "delete files" are**: Spark MERGE INTO on Iceberg V2 produces *positional delete files* (tombstones referencing invalidated rows by ordinal) instead of rewriting the affected data files. The orders table is on Merge-on-Read mode.
+2. **Why dashboard reads slow down**: Trino's reader merges ALL delete files against the data files at scan time. Each nightly MERGE adds more positional delete files; after ~2 weeks the reconciliation cost dominates, giving the 3-4x slowdown that scales with delete-file count.
+3. **Diagnostic** (Trino-native): `SELECT content, COUNT(*) FROM iceberg.<schema>."orders$files" GROUP BY content` — content enum (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES). If POSITION_DELETES > 10% of DATA, that's the cause.
+4. **FIX (Trino-native, no Spark coordination required)**: `ALTER TABLE iceberg.<schema>.orders EXECUTE optimize(file_size_threshold => '128MB')` — rewrites affected data files with deleted rows physically excluded; readers stop paying the reconciliation cost. Follow with `ALTER TABLE iceberg.<schema>.orders EXECUTE expire_snapshots(retention_threshold => '7d')` for storage hygiene.
+5. Production-stack alignment: Trino EXECUTE optimize fits the on-prem stack — engineer doesn't need to coordinate with the Spark side that already owns ingestion.
 
-1. **ROW_NUMBER() OVER (PARTITION BY <key> ORDER BY <ts> DESC) = 1 is the canonical Trino latest-row-per-key dedup pattern** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) (PARTITION BY + ORDER BY + ranking function shape). Single-pass: one shuffle by record_id, one sort-within-partition, one filter — vs correlated subquery executing the inner MAX scan ONCE PER OUTER ROW (O(N×M)) which is exactly why 400M rows × dozens-of-versions = 20+ min in their existing query.
-2. **`NULLS LAST` on DESC ORDER BY** — explicit ordering for NULL `updated_at` (NULLS LAST keeps non-NULL timestamps as the "winner"). Matches pinned `reference_trino_null_ordering_default.md` (Trino 467 default is NULLS LAST regardless of direction — but explicit annotation eliminates ambiguity).
-3. **"MoR is orthogonal" framing is correct** — Iceberg V2 merge-on-read is a WRITE-side mechanism (per [iceberg.apache.org/spec/](https://iceberg.apache.org/spec/) — positional/equality delete files written by MERGE/UPDATE/DELETE that the read path merges back at scan time). It is NOT a query-time dedup tool. The engineer's question is "given 400M append-only CDC rows, how do I produce one current-state row per key" — that's a SQL collapse problem, not a write-pattern problem. The responder cleanly disambiguates without conflating MoR with the SQL dedup answer.
-4. **dbt materialization recommendation** — materializing as a dbt `table` (full refresh) or `incremental` (with a latest-snapshot upstream filter) is the right operational pattern for a dashboard-serving "current state" view. Avoids running the 400M-row dedup on every dashboard hit.
+**Load-bearing facts VERIFIED:**
 
-**Practical applicability.** Engineer leaves with: (a) drop-in SQL replacement for their 20+ min correlated subquery, (b) clear mental model of why correlated = slow (O(N×M)) and ROW_NUMBER = fast (one shuffle), (c) MoR correctly de-conflated from the question, (d) materialization route for production serving.
+1. **MoR position-delete accumulation = read amplification** — verified at [iceberglakehouse.com/iceberg/iceberg-merge-on-read](https://iceberglakehouse.com/iceberg/iceberg-merge-on-read/) "as more changes accumulate in delete files, query performance can start to degrade" + [trinodb/trino PR #12704](https://github.com/trinodb/trino/pull/12704) (positional delete merge at scan). Matches r13 §2996 CoW-vs-MoR comparison table.
+2. **`$files.content` enum** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) Iceberg metadata tables section (0=DATA, 1=POSITION_DELETES, 2=EQUALITY_DELETES). The `SELECT content, COUNT(*) FROM "<t>$files" GROUP BY content` form is the canonical diagnostic; matches r17 §109 and §2568.
+3. **`EXECUTE optimize` reconciles position-deletes during rewrite** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) "rewriting the content of the specified table so that it is merged into fewer but larger files." Caveat per [trinodb/trino#24086](https://github.com/trinodb/trino/issues/24086): physical removal of orphan delete files can require additional snapshot expiration, and there are partition-predicate constraints when calling optimize with a predicate. For the *read-time slowdown* (the engineer's actual symptom), the canonical optimize call DOES rewrite data files and stop the reconciliation cost — that's the fix.
+4. **`file_size_threshold => '128MB'`** — duration/size STRING form (default `100MB`); valid Trino 467 syntax.
+5. **`expire_snapshots(retention_threshold => '7d')`** — duration STRING form, NOT `retention_days => 7`. Matches pinned iter1214 retention_threshold-shape correction. Floor: `iceberg.expire-snapshots.min-retention` (default 7d).
+6. **Production-stack alignment**: Trino-native EXECUTE optimize fits prod_info.md (on-prem Trino 467 + Spark ingestion). Engineer doesn't need to coordinate a Spark `rewrite_position_delete_files` call (which would also work but adds coordination cost).
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r07/r23 implicitly via the canonical pattern.
+**iter1224 muddle inverted.** iter1224 responder said "teammate is right, switch to MoR / CoW would rewrite your whole table" against a table that was ALREADY on MoR (the delete files visible in EXPLAIN ANALYZE = the proof). iter1228 responder correctly reads "delete files visible" as the SIGNAL that they're already on MoR + the accumulation IS the slowdown + compaction is the fix. Clean multi-hop synthesis.
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Engineer leaves with correct mental model + one-line diagnostic + Trino-native one-EXECUTE fix + storage-hygiene follow-on. Cites r13/r17.
 
 ---
 
-## Q2 — Usage-tier bucketing (4 separate COUNTs → single-pass CASE + GROUP BY)
+## Q2 — 7-day rolling avg of new signups per day; signups_daily(signup_date, new_signups); never done a sliding time window in Trino
 
 **Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
-
-**Scenario.** Report: accounts per usage tier last month — 0 orders / 1-3 / 4-10 / 11+. Four rows (label + count). Currently 4 separate COUNT queries. In Oracle they used DECODE-in-aggregate + GROUP BY. Clean Trino single-pass grouping+counting by computed bucket?
 
 **Responder shape.**
 ```sql
-WITH labeled AS (
-  SELECT account_id,
-         CASE WHEN order_count = 0 THEN '0_orders'
-              WHEN order_count <= 3 THEN '1-3'
-              WHEN order_count <= 10 THEN '4-10'
-              ELSE '11+' END AS tier
-  FROM monthly_account_orders
-)
-SELECT tier, COUNT(*) AS account_count
-FROM labeled
-GROUP BY tier
-ORDER BY CASE tier WHEN '0_orders' THEN 1 WHEN '1-3' THEN 2 WHEN '4-10' THEN 3 ELSE 4 END;
+SELECT
+  signup_date,
+  new_signups,
+  AVG(new_signups) OVER (
+    ORDER BY signup_date
+    RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW
+  ) AS rolling_7d_avg
+FROM signups_daily
+ORDER BY signup_date;
 ```
-Critical guard: GROUP BY tier (label only) NOT account_id+tier. Wide-shape alternative: `SELECT COUNT(*) FILTER (WHERE order_count=0) AS tier_0, COUNT(*) FILTER (WHERE order_count BETWEEN 1 AND 3) AS tier_1_3, ...` (one row, four columns).
+Plus the load-bearing **RANGE vs ROWS** correctness note: RANGE is value-based (calendar-aware — if Sept 14 is missing in the source table, Sept 15's window correctly includes Sept 9-15 by date); ROWS is positional ("6 preceding rows" — if Sept 14 missing, the 7th-back ROW is actually Sept 7, wrong window for "last 7 days"). For a daily signup series where any day could have zero rows, the engineer MUST use RANGE.
 
-**Load-bearing facts CORRECT (VERIFIED):**
+**Load-bearing facts VERIFIED:**
 
-1. **CASE-WHEN bucket + GROUP BY label is the canonical Trino single-pass form** — verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) GROUP BY accepts any non-aggregate expression appearing in the projection. Maps Oracle DECODE-in-aggregate idiom to ANSI CASE WHEN; Trino has NO DECODE per pinned iter1218 Q4 + r27 §6.4 Oracle-function-translation, CASE WHEN is the correct rewrite.
-2. **The "GROUP BY tier (label only) NOT account_id+tier" guard is the load-bearing correctness note** — grouping by `account_id, tier` would produce one row per account (not 4 rows), defeating the rollup. The most common bug in this query shape; responder calls it out explicitly.
-3. **Bucket boundaries semantically correct** — `order_count = 0` then `<= 3` then `<= 10` then `ELSE` covers `{0}, {1,2,3}, {4,5,6,7,8,9,10}, {11+}` with no overlap (CASE WHEN short-circuits at first true match). Matches the engineer's spec exactly.
-4. **`COUNT(*) FILTER (WHERE ...)` wide alternative is valid Trino 467 syntax** — verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) ("Aggregate functions can also be used with the optional `FILTER` clause"). Produces one row, four columns (pivoted) — useful when the consumer expects fixed-shape output. Single-pass (FILTER evaluated per-row inside one aggregation).
-5. **`ORDER BY CASE tier WHEN ... THEN N` for label sort** — correct way to enforce report order (alphabetic `'0_orders' < '1-3' < '11+' < '4-10'` would mis-sort '11+' before '4-10'; explicit ordinal CASE fixes it).
+1. **`AVG(...) OVER (ORDER BY date RANGE BETWEEN INTERVAL 'N' DAY PRECEDING AND CURRENT ROW)` is the canonical Trino 467 sliding-time-window rolling-aggregate form** — verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) verbatim: *"Range frames can be defined with a window frame value of the type `INTERVAL`. The ORDER BY column must be of a numeric or date/time type for `INTERVAL` frame bounds."*
+2. **`RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` = 7-day window** — current day + 6 prior calendar days = 7 days inclusive. Engineer can read the spec literally and arrive at correct cardinality.
+3. **`INTERVAL 'N' DAY` qualifier is valid Trino 467** — DAY is one of the supported interval qualifiers (YEAR/MONTH/DAY/HOUR/MINUTE/SECOND per pinned `reference_trino_interval_qualifiers.md` git-tag SqlBase.g4). NOT WEEK / NOT QUARTER (those are date_trunc unit strings but not interval qualifiers).
+4. **RANGE vs ROWS distinction is correctness-critical, not stylistic** — responder calls it out explicitly with the missing-day example. This is the most common bug in this query shape (engineer writes ROWS BETWEEN 6 PRECEDING and gets a wrong window on a series with gaps).
 
-Engineer leaves with: drop-in single-pass replacement for 4 separate COUNT queries + pivoted-wide alternative + correct ordering + the GROUP BY scope guard (the bug they would have hit). No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r07.
+Engineer leaves with: a one-spec window function + the RANGE-vs-ROWS correctness gate. No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r07.
 
 ---
 
-## Q3 — dbt composite unique_key (list), dbt-trino MERGE compilation, nondeterministic-match caveat
+## Q3 (WATCH) — packages.yml in root, `dbt deps` succeeded, `{{ dbt_utils.generate_surrogate_key([...]) }}` invocation correct, but `dbt run` errors "macro 'generate_surrogate_key' not found in any package" — what causes that
 
-**Score: 5.0** — Acc 5.0 / Clar 5.0 / App 5.0 / Compl 5.0
+**Score: 3.0** — Acc 3.0 / Clar 4.0 / App 2.5 / Compl 2.5
 
-**Scenario.** `fct_events` is dbt incremental on Iceberg. Composite natural key: `(account_id, event_id)` unique together; `event_id` alone is not unique (resets per account). `unique_key: 'event_id'` merged wrong rows. Engineer changed to `unique_key: ['account_id', 'event_id']` (list); no error. Does dbt support a list, does Trino Iceberg handle composite unique_key, what does the compiled MERGE look like?
+**WATCH OUTCOME: `iter1226 r27 packages.yml-troubleshooting FIX-A` DID NOT REACH.** Card EXISTS at r27 §4.5A L1768-L1775 with the version-rename row LISTED FIRST in the troubleshooting table, but the responder didn't surface it as THE answer.
 
-**Responder shape.** "YES on all three: (1) dbt supports `unique_key` as a list since v1.0 — composite keys are a first-class config; (2) dbt-trino with `incremental_strategy: merge` on an Iceberg table compiles to a Trino MERGE INTO with ON joining all key columns via AND; (3) compiled SQL is:
+**Responder shape (verbatim summary).** Checklist:
+1. packages.yml in dbt project root (next to dbt_project.yml, not in models/) — engineer ALREADY STATES this in the question;
+2. Format `packages: - package: dbt-labs/dbt_utils version: 1.1.1`;
+3. Verify `dbt deps` created `dbt_packages/dbt_utils/macros/` (re-run `dbt deps -d` if missing);
+4. Call pattern `{{ dbt_utils.generate_surrogate_key([...]) }}` — engineer is ALREADY using this;
+5. "**Common hidden cause: some dbt versions/adapters require you to explicitly ref the macro... add `{%- do dbt_utils.generate_surrogate_key([...]) -%}` at top — Actually, that's not the right pattern. The correct pattern is just call it in SELECT... if still not found check logs for download errors.**"
+
+**The actual #1 cause the responder MISSED: dbt_utils 1.0.0 (Nov 2022) RENAMED `surrogate_key` → `generate_surrogate_key`.** On any pin allowing `< 1.0.0`, `generate_surrogate_key` is GENUINELY undefined under that name → exact "macro 'generate_surrogate_key' not found in any package" runtime error. Verified at [docs.getdbt.com/docs/dbt-versions/core-upgrade/Older versions/upgrading-to-dbt-utils-v1.0](https://docs.getdbt.com/docs/dbt-versions/core-upgrade/Older%20versions/upgrading-to-dbt-utils-v1.0) + [brooklyn-data/dbt_artifacts#257](https://github.com/brooklyn-data/dbt_artifacts/issues/257) "surrogate_key is replaced by generate_surrogate_key in dbt utils v1" + [dbt-utils CHANGELOG](https://github.com/dbt-labs/dbt-utils/blob/main/CHANGELOG.md) (v1.0.0 release notes). Engineer's symptom — `dbt deps` succeeds (package installs fine) + macro invisible at `dbt run` (it doesn't exist by that name) — is THE textbook signature of this cause.
+
+**Resource-source check — the FIX-A card EXISTS but isn't being surfaced.**
+
+```
+$ grep -n "version-rename\|RENAMED to" resources/27-oracle-plsql-to-dbt-trino.md
+1771: | **Wrong macro NAME for the installed version** | dbt_utils **< 1.0.0** has the macro as
+      **`dbt_utils.surrogate_key`** — it was RENAMED to **`generate_surrogate_key` in dbt_utils 1.0.0**
+      (Nov 2022). On an old pinned version, `generate_surrogate_key` is genuinely undefined. |
+```
+
+Keyword anchor on the §4.5A card preamble L1758: *"dbt_utils not found, generate_surrogate_key undefined / can't resolve / not defined, dbt deps ran but macro missing, packages.yml setup, how to install dbt_utils, dbt package macro won't resolve, 'dbt_utils' is undefined."* Matches the engineer's question framing well.
+
+**Hypothesis for why the card didn't surface as THE answer.** Responder's keyword-match found §4.5A and read the 3-step SETUP block (L1760-L1766) first, then padded a generic troubleshooting checklist of its own without reaching the TROUBLESHOOTING TABLE at L1769-L1774. The table containing the version-rename row physically follows the setup block, and the responder appears to have stopped before reaching it. The engineer's STATED FACTS (packages.yml in root + `dbt deps` printed "Dependencies installed" no errors + `{{ }}` invocation) RULE OUT every item in the responder's checklist — none of them are actionable, the engineer can't fix anything from this answer.
+
+**Plus a fabrication.** The "`{%- do dbt_utils.generate_surrogate_key([...]) -%}` macro import" suggestion does not exist as a dbt pattern. Responder self-retracts ("actually, that's not the right pattern") but the noise still installs a false mental model before the retraction. Per `feedback_responder_broken_secondary_alternative.md` family — but here it appears as a PADDING aside on a Q where the lead is ALSO incomplete, so it compounds the App/Compl shave.
+
+**STRENGTHENING RECOMMENDED (LIGHT FIX-A on the iter1226 §4.5A card).** Two structural changes:
+
+1. **Lead the troubleshooting block with a top-line VERSION anchor.** Before (or as a one-line preamble of) the troubleshooting TABLE, add a callout:
+   > **`macro 'generate_surrogate_key' not found in any package` after `dbt deps` succeeded? 90% of the time it's a VERSION issue — your pin allows `dbt_utils < 1.0.0`, which has the macro under its OLD name `dbt_utils.surrogate_key`. Bump to `version: [">=1.1.0","<2.0.0"]` and re-run `dbt deps`.**
+
+   Anchor keywords: *"macro not found in any package", "macro 'generate_surrogate_key' not found", "dbt deps succeeded but macro invisible", "macro invisible at runtime", "dbt run fails generate_surrogate_key", "generate_surrogate_key undefined after dbt deps".*
+
+2. **Reorder physical sequence.** Move the troubleshooting TABLE EARLIER in §4.5A — directly after the keyword-anchor preamble L1758 and BEFORE the 3-step setup block L1760-L1766. The responder's keyword-match landed at L1758 first; the table needs to be the next thing they read, not the 3-step setup block. (The setup block can move below the table, or be appended as "If you don't have packages.yml at all, here are the 3 setup steps.")
+
+3. **Optionally**: defang the macro-import `{%- do dbt_utils -%}` form inline as a DO-NOT-WRITE row, since this is the second time-ish the responder has padded a similar fabrication in this family.
+
+**WATCH STATUS**: keep `iter1226 r27 packages.yml-troubleshooting card-findability` OPEN; re-probe in 4-8 iters after strengthening lands under fresh framing ("dbt deps Dependencies installed but dbt_utils macro can't resolve at runtime"). NEW soft watch `iter1228 Q3 macro-import {%- do dbt_utils -%} fabrication padding` — re-probe 4-8 iters.
+
+---
+
+## Q4 — Oracle `TO_CHAR(total_revenue, 'FM$999,999,999.00')` → dollar amount with commas + 2 decimals; Trino parse error; Trino to_char is for timestamps; does it handle NUMBER formatting / way to format a number with thousands separators + currency symbol in Trino, or app layer?
+
+**Score: 2.75** — Acc 2.5 / Clar 4.0 / App 2.5 / Compl 2.0
+
+**MISS.** Responder did NOT reach `format('$%,.2f', total_revenue)` — the in-resources Trino-native one-liner that IS the literal answer to this question.
+
+**Responder shape (verbatim summary).** "Trino 467 has NO built-in number formatter like Oracle TO_CHAR(amount, 'FM$999,999.00'); to_char works ONLY for timestamps. Options:
+1. PRIMARY format in the app layer (Python f-string `f'${revenue:,.2f}'`);
+2. FALLBACK string concat with `format_number(ABS(revenue),'#,##0.00')` BUT format_number is NOT a Trino built-in (Spark-only / example UDF);
+3. Fragile substring-comma hack.
+
+Recommendation: keep `decimal(18,2)` in Trino, format in app/dashboard layer."
+
+**The actual in-resources Trino-native answer the responder MISSED:**
 ```sql
-MERGE INTO analytics.fct_events t
-USING (SELECT * FROM <transient_source>) s
-ON t.account_id = s.account_id AND t.event_id = s.event_id
-WHEN MATCHED THEN UPDATE SET col_1 = s.col_1, ...
-WHEN NOT MATCHED THEN INSERT (account_id, event_id, col_1, ...) VALUES (s.account_id, s.event_id, s.col_1, ...);
+SELECT format('$%,.2f', total_revenue) AS revenue_label FROM ...;
+-- => '$1,234,567.89'
 ```
-CAVEAT: your source/staging select MUST be pre-deduped per the FULL composite key. Trino MERGE forbids multiple source rows matching one target row (MERGE_TARGET_ROW_MULTIPLE_MATCHES). Pre-dedup pattern:
-```sql
-SELECT * FROM (
-  SELECT *, ROW_NUMBER() OVER (PARTITION BY account_id, event_id ORDER BY updated_at DESC) AS rn
-  FROM staging
-) WHERE rn = 1
-```
-"
+`format(format_string, args...)` IS Trino 467's printf / Java-Formatter-style string builder. `%,.2f` produces a thousands-grouped 2-decimal float; the literal `$` in the format string yields `$1,234,567.89`.
 
-**Load-bearing facts CORRECT (VERIFIED):**
+**Load-bearing verification:**
 
-1. **dbt unique_key DOES support a list of columns for composite keys** — verified at [docs.getdbt.com/reference/resource-configs/unique_key](https://docs.getdbt.com/reference/resource-configs/unique_key) + corroborating sources confirm "a single column name or a list of column names" for `incremental_strategy: merge`. Syntax `unique_key=['col1', 'col2']` is the documented form for composite keys.
-2. **dbt-trino merge strategy compiles to Trino MERGE INTO with ON joining all key columns via AND** — verified at the dbt-trino adapter (incremental.sql macro: `t.<key1> = s.<key1> AND t.<key2> = s.<key2> ...` for the composite-key path). Trino MERGE syntax at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) is the standard ANSI MERGE form the adapter targets.
-3. **Trino MERGE forbids multiple source rows matching one target row** — verified at [trino.io/docs/467/sql/merge.html](https://trino.io/docs/467/sql/merge.html) raises `MERGE_TARGET_ROW_MULTIPLE_MATCHES` ("A `MERGE` query fails when more than one source row matches a target row"). The MarkDistinct operator in the merge plan detects this and raises at runtime. Pre-dedup caveat is THE production-critical gotcha for dbt-trino composite-key merge — engineer would otherwise hit nondeterministic-match runtime errors when staging has multiple rows per (account_id, event_id) from upstream batching.
-4. **ROW_NUMBER() PARTITION BY composite key + WHERE rn=1 pre-dedup pattern** — the canonical Trino-idiomatic dedup, matches Q1's same pattern. Engineer can copy-paste verbatim.
-5. **"No error after switching to list" framing**: dbt config syntax doesn't validate WHAT the list contains, only that it parses as YAML — explains why the engineer got no error but the previous broken behavior would have continued silently if the list were wrong. The responder doesn't waste words on this but the framing is implicit and correct.
+1. **`format()` IS documented Trino 467 native** — verified at [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) (WebFetched this iter): `format(format, args...) → varchar` *"Returns a formatted string using the specified [format string](https://docs.oracle.com/en/java/javase/23/docs/api/java.base/java/util/Formatter.html#syntax) and arguments"*. Docs explicitly show `'%,.2f'` → `'1,234,567.89'`.
+2. **`format()` IS in resources** — verified `grep "%,.2f"` in `resources/`:
+   - `resources/23-sql-best-practices-olap.md:703` LEADING CANONICAL row: `` `%,.2f` | Float with thousands grouping + 2 decimals | `format('%,.2f', 1234567.89)` | `1,234,567.89` ``
+   - `resources/23-sql-best-practices-olap.md:708` worked example: `format('User %s made %d purchases totaling $%,.2f', user_id, purchase_count, total_amount)` → `'User U-1234 made 17 purchases totaling $1,234.56'`
+   - `resources/23-sql-best-practices-olap.md:917` DO-NOT-WRITE table row: `'$' || total_amount` (DECIMAL/DOUBLE) → DECIMAL/DOUBLE rejected by varchar-only `||` → RIGHT: `format('$%,.2f', total_amount)`
 
-Engineer leaves with: confirmation YES dbt supports composite list, YES Trino+Iceberg handles it via MERGE, EXACT compiled SQL shape, AND the production-critical pre-dedup caveat that prevents runtime MERGE failures. No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r27/r28.
+3. **`format_number` IS Trino 467 native (but does compact-units, NOT comma-mask)** — verified at [github.com/trinodb/trino/blob/master/core/trino-main/src/main/java/io/trino/operator/scalar/FormatNumberFunction.java](https://github.com/trinodb/trino/blob/master/core/trino-main/src/main/java/io/trino/operator/scalar/FormatNumberFunction.java): signatures `formatNumber(BIGINT) → VARCHAR` and `formatNumber(DOUBLE) → VARCHAR`; produces compact-unit output like `'1.2M'`, `'500K'`, `'1.5B'` using DecimalFormat patterns `#.##` / `#.#` / `#`. **Responder's claim "format_number is NOT a Trino built-in (Spark-only / example UDF)" is FALSE.** Correct framing: "Trino HAS format_number but it's the compact-units `'1.2M'`-style formatter (BIGINT/DOUBLE → VARCHAR), NOT Oracle's comma-mask. Use `format('$%,.2f', n)` for the Oracle-style output."
+
+**Engineer's loss.** Engineer leaves with: rejects fragile substring hack (good); routes to app-layer Python (FORFEITS the Trino-native one-liner); installs wrong mental model "Trino can't format a number" (FALSE — Trino's `format()` does printf for numbers). The recommended decimal(18,2) in Trino + format in app layer is a valid architectural choice, but the engineer wasn't even shown the alternative — they cannot make an informed choice.
+
+**FINDABILITY ROOT CAUSE — `grep` evidence on resources/:**
+
+- `resources/23-sql-best-practices-olap.md` §3.1A LEADING CANONICAL L690-714 + L917 has `format('$%,.2f', total_amount)` as a copy-attractive answer with full worked example.
+- Keyword anchors on the canonical L692: *"Trino format function, printf Trino, build display string, format string Trino, String.format Trino, format number with commas, format vs concat, format thousands separator, format percent, zero-pad integer Trino, formatted display string Trino."*
+- **MISSING from those anchors**: *currency*, *currency formatting*, *dollar amount*, *dollar amount with commas*, *format money*, *Oracle TO_CHAR(number, ...)*, *Oracle TO_CHAR amount*, *Oracle FM mask*, *Oracle numeric format mask*, *number format mask*, *number format string Trino*, *FM$999,999*.
+- `resources/27-oracle-plsql-to-dbt-trino.md` §4.2A LEADING CANONICAL L543 covers **ONLY** `TO_CHAR(date, fmt)`. No row for `TO_CHAR(number, 'FM$999,999.00')` Oracle-numeric-mask → Trino.
+- `resources/23-sql-best-practices-olap.md` L3354 Oracle dialect-fragment table has only `TO_CHAR(date, fmt)` row; no numeric TO_CHAR row pointing to `format('$%,.2f', n)`.
+
+Engineer's question keywords ("Oracle TO_CHAR for numbers", "dollar amount with commas", "currency symbol") do NOT route to r23 §3.1A. Engineer's keyword path lands in r27 §4.2A which is date-only, then bounces.
+
+**LIGHT FINDABILITY FIX-A RECOMMENDED:**
+
+1. **Extend r23 §3.1A LEADING CANONICAL keyword anchors L692** to add:
+   *"currency formatting, format currency, dollar amount with commas, format money, Oracle TO_CHAR(number, FM$999,999.00), Oracle FM mask, Oracle numeric format mask, thousands separator currency, number format mask Trino, number format string Trino, format vs format_number Trino"*
+2. **Add a TO_CHAR(number,...) row in r27 §4.2A or §6.4 Oracle-function-translation table** mapping:
+   - `TO_CHAR(amount, 'FM$999,999.00')` → `format('$%,.2f', amount)` (cross-ref r23 §3.1A canonical)
+   - `TO_CHAR(amount, '999,999.00')` → `format('%,.2f', amount)`
+   - `TO_CHAR(amount, 'FM$999,999')` → `format('$%,d', amount)` (integer thousands, no decimals)
+3. **Defang the `format_number = Spark-only / example UDF` myth** — add a one-line note in r23 §3.1A or DO-NOT-WRITE table:
+   > Trino 467 DOES have `format_number(BIGINT|DOUBLE) → VARCHAR` but it produces COMPACT-UNITS output like `'1.2M'`, `'500K'`, `'1.5B'` — NOT Oracle's comma-mask. For dollar-comma-2-decimal formatting use `format('$%,.2f', n)`.
+
+NEW SOFT WATCH `iter1228 Q4 format('$%,.2f') findability for currency/TO_CHAR-number framing` — re-probe in 4-8 iters under "format currency / dollar amount with commas / Oracle TO_CHAR amount → Trino" framings after the FIX-A lands.
+
+**Subtotal**: Acc 2.5 (core "no Oracle-style mask" partially right but absolute "no built-in number formatter" framing wrong; format_number characterization FALSE; missed in-resources canonical), Clar 4 (clear but installs wrong mental model), App 2.5 (engineer forfeits Trino-native one-liner, routed to app-layer without seeing alternative), Compl 2 (missed THE answer + format_number error + no defang of Trino's printf path). Average 2.75.
 
 ---
 
-## Q4 — Trino SUBSTR with negative start (assumed-absence-avoided POSITIVE + SUBSTRING-FROM-cant-do-negative SECONDARY FAB)
+## Topic checklist updates (iter1228)
 
-**Score: 4.125** — Acc 3.0 / Clar 5.0 / App 4.5 / Compl 4.0
+- **Q1**: Topic `Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup` — Q1 (CoW-MoR scenario-diagnosis WATCH CLOSE). Topic 4.4371/226 → (1002.7846 + 5.0)/227 = 1007.7846/227 = **4.4396/227 PASSED** (+0.0025, margin +0.9396).
+- **Q2**: Topic `Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL` — Q2 (7-day RANGE-window canonical). Topic 4.5678/162 → (739.9836 + 5.0)/163 = 744.9836/163 = **4.5705/163 PASSED** (+0.0027, margin +1.0705).
+- **Q3**: Topic `Oracle PL/SQL → dbt+Trino migration` — Q3 (dbt_utils version-rename WATCH DID NOT REACH). Topic 4.4588/193 → (860.5484 + 3.0)/194 = 863.5484/194 = **4.4513/194 PASSED** (-0.0075, margin still +0.9513).
+- **Q4**: Topic `SQL query best practices for OLAP` — Q4 (format('$%,.2f') findability MISS). Topic 4.5897/282 → (1294.3554 + 2.75)/283 = 1297.1054/283 = **4.5837/283 PASSED** (-0.0060, margin +1.0837).
 
-**Scenario.** Oracle `SUBSTR(file_path, -4)` = last 4 chars (extension check). Trino returns NULL. Engineer tried `SUBSTR` and `SUBSTRING`, neither works with negative start. Does Trino not support negative SUBSTR? Trino-idiomatic last-N-chars?
-
-**Responder shape.**
-- "Yes, Trino 467 `SUBSTR` accepts a negative start — counts from the end like Oracle. `SUBSTR(file_path, -4) = '.csv'` (last 4 chars). `WHERE SUBSTR(file_path, -4) = '.csv'`."
-- Cleaner extension extractor: `element_at(split(file_path, '.'), -1)` (last array element).
-- "**Why your migration returned NULL**: Trino's `SUBSTRING(s FROM -N)` (ANSI FROM...FOR syntax) does NOT support negative positions — only `SUBSTR(s, -N)` does; if you migrated as `SUBSTRING(file_path FROM -4)` it failed. Use `SUBSTR`."
-
-**POSITIVE — ASSUMED-ABSENCE MYTH AVOIDED (load-bearing):**
-
-This is the **8th instance** in the responder's history where it would have been natural to declare a foreign-looking Oracle-idiom-style function ABSENT from Trino (`starts_with`/`to_char`/`listagg`/`array_sum`/`format_number`/`migrate`/`LATERAL`/now `SUBSTR(-N)`). The pattern bit the responder 7 prior times. **This time it didn't.** Responder correctly asserts that `SUBSTR(file_path, -4)` works in Trino 467 — VERIFIED at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html):
-
-> "substring(_string_, _start_) → varchar — Returns the rest of `string` from the starting position `start`. Positions start with `1`. **A negative starting position is interpreted as being relative to the end of the string.**"
-
-And `substr()` is documented verbatim as: "**This is an alias for substring().**"
-
-POSITIVE NOTE for the WATCH log: chalk up an assumed-absence-myth WIN. The responder gave the engineer the correct, idiomatic, single-call answer for the literal ask. Engineer leaves with `WHERE SUBSTR(file_path, -4) = '.csv'` which works.
-
-**ALSO CORRECT — element_at(split, -1) ext extractor:**
-- `split(file_path, '.')` returns an array of dot-separated parts; `element_at(arr, -1)` returns the last element. Both verified Trino 467 functions ([trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html) — `element_at` supports negative index for arrays). This handles the "what if extensions are .tar.gz / dotted-prefixed" cleaner than fixed-length last-4 substring. Good completeness add.
-
-**SLIP — SUBSTRING-FROM-NEGATIVE FABRICATION (Acc -2, App -0.5, Compl -1):**
-
-Responder claims: "`SUBSTRING(s FROM -N)` (ANSI FROM...FOR syntax) does NOT support negative positions — only `SUBSTR(s,-N)` does." **This distinction is fabricated.**
-
-VERIFIED at the Trino 467 source [github.com/trinodb/trino/blob/467/.../StringFunctions.java](https://github.com/trinodb/trino/blob/467/core/trino-main/src/main/java/io/trino/operator/scalar/StringFunctions.java):
-```java
-@Description("Suffix starting at given index")
-@ScalarFunction(alias = "substr")
-public static Slice substring(@SqlType("varchar(x)") Slice utf8,
-                              @SqlType(StandardTypes.BIGINT) long start)
-
-@Description("Substring of given length starting at an index")
-@ScalarFunction(alias = "substr")
-public static Slice substring(@SqlType("varchar(x)") Slice utf8,
-                              @SqlType(StandardTypes.BIGINT) long start,
-                              @SqlType(StandardTypes.BIGINT) long length)
-```
-
-Both forms have `alias = "substr"` — `substr` IS the alias and `substring` IS the primary, NOT two separate functions. Both share the same negative-start handling code path:
-```java
-// negative start is relative to end of string
-int codePoints = countCodePoints(utf8);
-startCodePoint += codePoints;
-```
-
-The ANSI form `substring(s FROM start [FOR length])` is syntactic sugar that the parser rewrites to the same scalar function call. There is **no separate "ANSI form" implementation** that strips negative-start support. `SUBSTRING(file_path FROM -4)` is equivalent to `SUBSTRING(file_path, -4)` is equivalent to `SUBSTR(file_path, -4)` — all three return the last 4 chars.
-
-**Implication for the engineer's "why did it return NULL" question:**
-
-The responder's "your migration returned NULL because you used SUBSTRING FROM" explanation is **wrong**. Whatever caused the engineer's NULL result, it was NOT the FROM/comma syntax distinction. Plausible actual causes:
-- They tested on a NULL `file_path` value (`SUBSTR(NULL, -4)` = NULL — propagation, not a negative-start bug).
-- They mistyped (e.g., `SUBSTRING(file_path, -4, 4)` with start=-4 + length=4 should still work but if they wrote a positional bug it could return empty/wrong).
-- They confused themselves between SQL clients.
-- They're on a much older Trino version where the feature didn't exist (unlikely for 467; negative-start is documented since at least 0.80).
-
-The engineer following the responder's verbatim advice will: try `SUBSTR(file_path, -4) = '.csv'` (works) and avoid `SUBSTRING(file_path FROM -4)` (which actually also would have worked). Net practical impact: engineer arrives at correct behavior via the recommended call. The fabricated explanation doesn't break their action but DOES install a wrong mental model about ANSI-vs-comma being semantically different in Trino.
-
-**Pattern classification — broken-secondary, NOT resource-sourced.**
-
-This fits `feedback_responder_broken_secondary_alternative.md` exactly: responder nails the LEAD (`SUBSTR(s,-N)` works, assumed-absence myth avoided) but appends a confidently-stated "explanation" of why the engineer's failed attempt failed — and the explanation is fabricated. Grep evidence — resource-source check:
-- `resources/27-oracle-plsql-to-dbt-trino.md` Oracle SUBSTR(-N) translation row likely teaches `SUBSTR(s, -N)` (correct); should NOT teach an ANSI-vs-comma distinction.
-- I did NOT find an existing resource claim that `SUBSTRING FROM` doesn't support negative — this is responder-side fabrication, not a wrong canonical the responder lifted.
-- **No FIX-A**. Resource canonical (use SUBSTR(s, -N) for last-N chars) is correct; the responder padded a fabricated aside on top.
-
-**Recall-ceiling watch.** Soft watch: `iter1227 Q4 SUBSTRING-FROM-cant-do-negative fabrication` — re-probe in 4-8 iters under "negative-start substring" framing. If recurs as load-bearing, consider an additive r27 micro-card that explicitly equates `SUBSTR(s,-N)` ≡ `SUBSTRING(s,-N)` ≡ `SUBSTRING(s FROM -N)` to defang the fabricated distinction. If does NOT recur, this is just per-instance per-iter padding-noise and stays soft.
-
-**Subtotal: Acc 3 (core fact correct + assumed-absence-avoided, but fabricated FROM-distinction is a real error), Clar 5 (concise, correctly framed), App 4.5 (engineer gets to right action despite wrong explanation), Compl 4 (element_at(split, -1) bonus + core covered + ANSI-form aside is wrong but on a peripheral axis).** Score 4.125.
+All topic averages remain above PASS threshold (3.5). No topic moves into thinnest-row band as a result.
 
 ---
 
-## Topic checklist updates (iter1227)
+## Recommended teacher actions (TWO FIX-As)
 
-All four questions are operational SQL pattern / dialect / dbt-incremental questions — all map to existing rows below 4.5 or already-passing rows in the rubric. No new topic rows added.
+### FIX-A #1 (LIGHT, STRENGTHENING) — r27 §4.5A packages.yml troubleshooting card
 
-- **Q1**: Topic `Analytical query patterns on Iceberg+Trino` (operational row, latest-row-per-key dedup canonical). Topic 4.5562/160 → (725.992 + 5.0)/161 = 730.992/161 = **4.5403/161 PASSED** (-0.0159, margin +1.0403, still healthy).
-- **Q2**: Topic `Analytical query patterns on Iceberg+Trino` (operational row, single-pass bucket + COUNT FILTER alternative). Topic 4.5403/161 → (730.992 + 5.0)/162 = 735.992/162 = **4.5432/162 PASSED** (+0.0029, margin +1.0432).
-- **Q3**: Topic `Oracle PL/SQL → dbt+Trino migration` (composite unique_key + dbt-trino MERGE compilation + Trino MERGE_TARGET_ROW_MULTIPLE_MATCHES caveat). [Topic-row score-history update writes to existing PASSED row in rubric.md; no row creation.]
-- **Q4**: Topic `SQL query best practices for OLAP` (Trino substr / element_at(split) dialect functions). Both forms verified. [Topic-row score-history update writes to existing PASSED row.]
+**Goal**: Make the dbt_utils 1.0.0 version-rename surface as THE answer to "macro 'generate_surrogate_key' not found in any package."
+
+**Edits to `resources/27-oracle-plsql-to-dbt-trino.md` §4.5A (around L1758-L1775):**
+
+1. Insert a **top-line VERSION anchor** BEFORE the 3-step setup block (or before the troubleshooting table), as a bolded one-liner:
+   > **`macro 'generate_surrogate_key' not found in any package` after `dbt deps` succeeded? 90% of the time it's a VERSION issue — your pin allows `dbt_utils < 1.0.0`, which has the macro under its OLD name `dbt_utils.surrogate_key` (it was renamed to `generate_surrogate_key` in dbt_utils 1.0.0, Nov 2022). Bump to `version: [">=1.1.0","<2.0.0"]` in packages.yml and re-run `dbt deps`.**
+
+2. **Reorder the troubleshooting TABLE physically EARLIER** — directly after the keyword-anchor preamble L1758 and BEFORE the 3-step setup block. The responder's keyword-match landed at L1758; the troubleshooting table needs to be the next thing read, not the setup block (which is for "haven't set up packages.yml yet" — orthogonal to the "already set up + macro not resolving" case).
+
+3. Extend the L1758 keyword anchors to add: *"macro not found in any package", "macro 'generate_surrogate_key' not found in any package", "dbt deps succeeded but macro invisible at runtime", "dbt run fails with macro not found", "generate_surrogate_key undefined after dbt deps".*
+
+4. **Defang the `{%- do dbt_utils ... -%}` macro-import pattern** as a DO-NOT-WRITE row to prevent the iter1228 fabrication padding from recurring:
+   > **WRONG** `{%- do dbt_utils.generate_surrogate_key([...]) -%}` at top of model "to register the macro" — this is fabricated; dbt has no such macro-registration pattern. The `{{ }}` invocation inside SELECT is the only correct form.
+
+**Watch**: keep `iter1226 r27 packages.yml-troubleshooting card-findability` OPEN until first re-probe lands the version-rename row as THE answer.
+
+### FIX-A #2 (LIGHT, FINDABILITY) — r23 §3.1A format() + r27 TO_CHAR(number,...) row
+
+**Goal**: Route "currency / Oracle TO_CHAR number / dollar amount with commas" framings to the in-resources `format('$%,.2f', n)` canonical.
+
+**Edits:**
+
+1. **`resources/23-sql-best-practices-olap.md` §3.1A L692** — extend keyword anchors to add:
+   *"currency formatting, format currency, dollar amount with commas, format money, Oracle TO_CHAR(number, FM$999,999.00), Oracle FM mask, Oracle numeric format mask, thousands separator currency, number format mask Trino, number format string Trino, format vs format_number Trino, Trino currency formatting one-liner."*
+
+2. **`resources/27-oracle-plsql-to-dbt-trino.md`** — add a `TO_CHAR(number, mask)` row to the Oracle-function-translation table (§4.2A or §6.4), pointing to r23 §3.1A `format()` canonical:
+   - `TO_CHAR(amount, 'FM$999,999,999.00')` → `format('$%,.2f', amount)` → `'$1,234,567.89'`
+   - `TO_CHAR(amount, '999,999.00')` → `format('%,.2f', amount)` → `'1,234.56'`
+   - `TO_CHAR(amount, 'FM$999,999')` → `format('$%,d', amount)` → `'$1,234,567'`
+
+3. **`resources/23-sql-best-practices-olap.md`** — add one-line defang note that `format_number` exists in Trino 467 but produces compact-units output (`'1.2M'` / `'500K'`), not comma-mask. Place near the `format()` LEADING CANONICAL or in its DO-NOT-WRITE table:
+   > Trino 467 HAS `format_number(BIGINT|DOUBLE) → VARCHAR` (compact-units output like `'1.2M'`, `'500K'`, `'1.5B'`), NOT Oracle's `'#,##0.00'` comma-mask form. For dollar-comma-2-decimal use `format('$%,.2f', n)`.
+
+**Watch**: NEW soft watch `iter1228 Q4 format('$%,.2f') findability for currency/TO_CHAR-number framing` — re-probe in 4-8 iters with fresh phrasing ("how do I show $1,234.56 in Trino", "Oracle currency mask migration", "render total_revenue as a dollar string").
 
 ---
 
 ## Carry-forward watches
 
-- **iter1226 table_changes() MoR-limited card** — added to r17 last iter; NOT re-probed this iter. Watch open 3-7 more iters under "Iceberg native changelog / CDC / change feed in Trino 467 / orders table written by Spark MERGE INTO" framings. CLOSE on first re-probe lands of "table_changes() exists since 427 BUT does not support MoR delete-file snapshots."
-- **iter1226 r27 packages.yml-troubleshooting card** — added last iter; NOT re-probed this iter. Watch open 3-7 more iters under "dbt deps ran but macro won't resolve / dbt_utils generate_surrogate_key not found / packages.yml location" framings. CLOSE on first re-probe that does NOT misdiagnose the user's stated `{{ }}` invocation as the bug.
-- **iter1224 CoW-MoR scenario-diagnosis** — open watch. Re-probe under "Spark wrote MERGE/UPDATE on Iceberg table / Trino sees positional delete files / why slow" framings.
-- **iter1215 strpos-3-arg synthesis ceiling** — accepted ceiling, NO churn per `feedback_synthesis_ceiling_stop_churning.md`. Light monitor only.
-- **iter1213 session_properties + (+)-mnemonic** — open watch. Re-probe under "set session property to control join distribution / sort behavior" framings.
-- **NEW iter1227 Q4 SUBSTRING-FROM-cant-do-negative fabrication soft watch** — broken-secondary recall-ceiling; re-probe 4-8 iters under "negative-start substring / Oracle SUBSTR(-N) → Trino" framings. If recurs, additive r27 micro-card; if not, stays soft.
+- **iter1224 CoW-MoR scenario-diagnosis WATCH — CLOSED** this iter (Q1 5.0; 15th consecutive 1st-re-probe-CLOSE pattern). Remove from open list.
+- **iter1226 r27 packages.yml-troubleshooting WATCH — OPEN**, DID NOT REACH this iter. Apply FIX-A #1 above (LIGHT strengthening); re-probe 4-8 iters under fresh framing ("dbt run fails with macro not found in any package after dbt deps succeeded"). CLOSE on first re-probe that names the version-rename as THE cause.
+- **iter1226 table_changes()-MoR card WATCH — OPEN**; NOT re-probed this iter. Continue 3-7 more iters under "Iceberg native changelog / CDC / change feed in Trino 467 / orders table written by Spark MERGE INTO" framings.
+- **iter1215 strpos-3-arg synthesis ceiling — accepted CEILING**, NO churn per `feedback_synthesis_ceiling_stop_churning.md`. Light monitor only.
+- **iter1213 session_properties + (+)-mnemonic WATCH — OPEN**. Re-probe under "set session property to control join distribution / sort behavior" framings.
+- **iter1227 SUBSTRING-FROM-cant-do-negative fabrication soft watch — OPEN**; broken-secondary recall-ceiling. Re-probe 3-7 iters under "negative-start substring / Oracle SUBSTR(-N) → Trino" framing.
+- **NEW iter1228 Q3 `{%- do dbt_utils -%}` macro-import fabrication soft watch** — recall-ceiling padding aside; re-probe 4-8 iters under "dbt macro not found / dbt_utils macro can't resolve" framing. If recurs, the FIX-A #1 DO-NOT-WRITE row defangs.
+- **NEW iter1228 Q4 format('$%,.2f') findability for currency/TO_CHAR-number framing soft watch** — re-probe 4-8 iters after FIX-A #2 lands; close on first re-probe that names `format('$%,.2f', n)` for "Oracle TO_CHAR amount → Trino" / "dollar amount with commas" framings.
 
 ---
 
 ## Closing — next iter planning
 
-**iter1227 STRONG PASS NO-OP.** Three pin-perfect 5.0s + one 4.125 with a positive assumed-absence-avoided note + one fabricated broken-secondary aside. NO FIX-A. NO resource churn. Training runs to 2026-06-30 23:59 CST (~1 day left after today 2026-06-29). Continue BREADTH probing — touch thinnest-band rows (Query performance basics 4.2091, Iceberg partition design 4.4380 if not already hit) and verify carry-forward watches close cleanly. Avoid churn on the Q4 SUBSTRING-FROM-FROM fab — single-instance, peripheral axis, engineer arrives at right action.
+**iter1228 PASS but two findability FIX-As warranted.** Iter average 3.94 (margin +0.44 over threshold). Q1 WATCH cleanly CLOSES on first re-probe; Q3 WATCH DID NOT REACH despite the FIX-A card existing (structural reordering needed to make version-rename surface as THE answer); Q4 is a NEW findability gap on currency/TO_CHAR-number framing for the in-resources `format('$%,.2f', n)` canonical. Both FIX-As are LIGHT (anchor reorderings + cross-ref rows; no canonical rewrites). NO NEW WATCHES on technically correct content — both gaps are findability/keyword-anchor only.
+
+Training runs to 2026-06-30 23:59 CST (~1.4 days left). After applying FIX-As, continue BREADTH probing — touch any thinnest-band rows (Query performance basics 4.2091 / Iceberg partition design 4.4380 / Iceberg maintenance 4.4396) and verify Q3 + Q4 watches close cleanly on re-probe.
