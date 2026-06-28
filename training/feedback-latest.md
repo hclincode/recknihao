@@ -1,137 +1,129 @@
-# Iter1197 Judge Feedback
+# Iter1198 Judge Feedback
 
-**Overall: 3.6875 / 5.0 — PASS (thin), Q1 = WATCH FIRED + LIGHT FIX-A EXTENDED TO r17, NEW WATCH OPENED.** This is a `feedback_reconcile_dont_append` re-instance one iter after the same family (iter1195 reconciled r13/r28/r16 for position-delete optimize semantics, MISSED the un-reconciled r17 TL;DR / engine-split matrix / Step-1b / DO-NOT-WRITE / quick-refs siblings — those were the keyword-magnetic top-of-file findable summary rows the Haiku responder's `Trino-only / position-delete` keyword path hit first). Q1's "no Trino way / Spark is the only mechanism / stuck" is FACTUALLY WRONG and resource-sourced from r17 (cited L13-26 verbatim by the responder), confirming the iter1195 corpus reconcile DID NOT REACH for this question. Q2 LISTAGG canonical pin-perfect; Q3 dbt env-var-in-profile correct but missed the `generate_schema_name` macro as the OTHER standard pattern; Q4 SYSDATE/SYSTIMESTAMP mapping correct on tz framing but missed `localtimestamp` as the precise tz-less equivalent for Oracle SYSDATE (responder routed through current_timestamp + CAST/AT TIME ZONE caveats instead — works, but verbose). Teacher's iter1197 r17 FIX-A direction VERIFIED CORRECT against the same primary sources used in iter1195: [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617) + [PR #12704](https://github.com/trinodb/trino/pull/12704) + [trinodb/trino#24086 maintainer note](https://github.com/trinodb/trino/issues/24086) + [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `file_size_threshold` default 100MB + [trinodb/trino#16574 open](https://github.com/trinodb/trino/issues/16574). Carry-forward watches NOT exercised: iter1194 dbt-contract-live-connection; iter1196 r21 format_version Trino dialect.
-
----
-
-## Q1 — Trino-only Iceberg position-delete file compaction (WATCH RE-PROBE, FIX-A EXTENDED)
-
-**Score: 1.0 / 3.0 / 1.0 / 1.0 = 1.5 (FAIL — resource-sourced load-bearing factual error, recommends adding Spark to a Trino-only stack when the engineer's stated stack can already solve it)**
-
-### What the responder said:
-- "No, there is genuinely no Trino 467-native way to compact position-delete files. EXECUTE optimize handles data file compaction but NOT position deletes specifically... applies any pending deletes but does not compact the position-delete marker files... The Spark job is the ONLY mechanism; there is no Trino equivalent."
-- Cited r17 lines 13-26.
-
-### What's wrong (primary-source-verified, same sources as iter1195):
-1. **Trino `EXECUTE optimize` DOES clear position deletes when run without a path / file_modified_time predicate** — shipped in [PR #12704](https://github.com/trinodb/trino/pull/12704) closing [#12617 "Remove unused position and equality deletes when running Iceberg `optimize`"](https://github.com/trinodb/trino/issues/12617) in 2022, well before Trino 467. Maintainer note at [#24086](https://github.com/trinodb/trino/issues/24086) verbatim: *"Position deletes are local to a partition. OPTIMIZE supports only enforced predicates which select whole partitions. Therefore, we can clean up position deletes in OPTIMIZE when there are no path or file_modified_time predicates."* — i.e., a full `ALTER TABLE ... EXECUTE optimize` (no per-file predicate) rewrites affected data files **with the position deletes baked in** AND drops the now-orphaned delete files in a **single Trino call**.
-2. **The "already-large data files" sub-question (engineer flagged "data files are already large, so default optimize seems to skip them") IS real** — [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) says optimize selects candidates by `file_size_threshold` only (default **100MB**, files BELOW are merged). If delete-bearing data files are already ≥100MB, default optimize skips them. **Trino-only fix:** raise the threshold above the largest delete-bearing data file size to force the rewrite, e.g. `ALTER TABLE transactions EXECUTE optimize(file_size_threshold => '512MB')`. There is NO separate `delete-file-threshold` candidate-selection in Trino yet ([#16574](https://github.com/trinodb/trino/issues/16574) open).
-3. **Spark `rewrite_position_delete_files` is the cheaper delete-file-only path, not a prerequisite.** A Trino-only shop is NOT stuck. Spark form is OPTIONAL and only useful when deletes can be compacted without touching data files (Trino-roadmap tracked at [#27371](https://github.com/trinodb/trino/issues/27371)).
-
-### Root cause — which resource file misled (extends iter1195 FIX-A):
-iter1195 reconciled the position-delete-optimize semantics in r13 / r28 / r16 but left the **r17 keyword-magnetic findable summary rows** un-touched. The responder's keyword path (`Trino-only` + `position-delete` + `compaction`) hit r17 first, where the un-reconciled rows still flatly say "Spark-only / Trino NOT AVAILABLE / stuck":
-
-- r17 TL;DR L13
-- r17 engine-split matrix L25 (cited by the responder verbatim as "13-26")
-- r17 Step 1b L58
-- r17 DO-NOT-WRITE row L214
-- r17 quick-refs L254 / L929 / L988
-- r17 sequence L1564
-- r17 §1b callout L1833
-- r17 "your only tool" L1885
-
-Only deep-spot prose at r17 L1835 / L1932 had the EXECUTE-optimize-clears-read-overhead nuance — the responder's top-down keyword search hit the dominant wrong-sibling summary rows first. Classic `feedback_reconcile_dont_append` recurrence: same family I flagged earlier, now within-sweep (iter1195 → iter1197).
-
-### FIX-A direction (teacher's iter1197 work):
-**VERIFIED CORRECT.** All 10 r17 locations reconciled to: *"Spark `rewrite_position_delete_files` PROCEDURE is Spark-only, BUT Trino `EXECUTE optimize` (no path/file_modified_time predicate) rewrites affected data files with position deletes baked in AND drops orphaned delete files in a single call — raise `file_size_threshold` above already-large delete-bearing data file sizes to force the rewrite (default 100MB; no separate delete-file-threshold knob in Trino, see [#16574](https://github.com/trinodb/trino/issues/16574) open). Trino-only shop is NOT stuck."* Consistent with r13 / r28 / r16 (iter1195) — corpus now coherent across all 4 files.
-
-### NEW WATCH OPENED:
-`iter1197 r17 position-delete-optimize findable-summary reconcile` — re-probe in 3-5 iters with the same structural framing ("Trino-only shop, position-deletes accumulated, does optimize handle them or do we need Spark?"). High recurrence risk because the corpus reconcile now spans 4 resources × 10+ locations; one un-touched rendered-bullet-list / footnote / asides could re-attract.
+**Overall: 4.969 / 5.0 — STRONG PASS NO-OP. Q3 WATCH CLOSES.** All four answers verified against trino.io/docs/467 + docs.getdbt.com primary sources; zero defects. Q1 Iceberg time-travel `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` + `$history` columns + 7d min-retention pin-perfect; Q2 LAG MoM growth pin-perfect; **Q3 (WATCH for `iter1194 r27 §6.7C dbt-contract-live-connection FIX-A`) lands the two-phase enforcement model correctly — `dbt parse`/`dbt compile` with NO Trino connection do NOT enforce contracts; preflight introspection query requires live warehouse; teammate is wrong; CI fix `dbt build`/`dbt run` requires network access to Trino. WATCH CLOSES** (FIX-A reached on 1st re-probe). Q4 Oracle `REGEXP_SUBSTR` → Trino `regexp_extract` pin-perfect including 3-arg group form + JONI/Java regex flavor caveat. No imported-prior slips, no broken-secondary-alternative slips, no over-warning. Carry-forward watches NOT exercised: **PRIORITY iter1197 r17 position-delete-optimize findable-summary reconcile** (high recurrence risk — re-probe next 2-4 iters); iter1196 r21 format_version SET PROPERTIES Trino dialect; soft iter1197 localtimestamp SYSDATE direct mapping; soft iter1197 generate_schema_name macro surface.
 
 ---
 
-## Q2 — Trino LISTAGG (Oracle LISTAGG → Trino)
+## Q1 — Trino Iceberg time-travel for as-of-Tuesday-9am query
 
-**Score: 5.0 / 5.0 / 5.0 / 4.5 = 4.875 (PASS, pin-perfect Oracle→Trino aggregate-string port)**
+**Score: 5 / 5 / 5 / 5 = 5.0**
 
 ### What the responder said:
-- `listagg(page_name, ' > ') WITHIN GROUP (ORDER BY event_time)` — direct equivalent of Oracle's form.
-- Alternative: `array_join(array_agg(page_name ORDER BY event_time), ' > ')` (with `FILTER (WHERE page_name IS NOT NULL)` option).
-- `GROUP BY user_id, session_id`.
+- YES Trino 467 native time-travel, NOT Spark-only.
+- `SELECT * FROM iceberg.analytics.tbl FOR VERSION AS OF <snapshot_id bigint>` OR `FOR TIMESTAMP AS OF TIMESTAMP '2026-05-20 09:00:00'`.
+- Find snapshot via `"tbl$history"` (columns: `made_current_at`, `snapshot_id`, `parent_id`, `is_current_ancestor`).
+- Caveat: old snapshots available ~7 days per `iceberg.expire-snapshots.min-retention` until `expire_snapshots` removes them.
 
-### Verified correct against primary sources:
-- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html#listagg) — `LISTAGG(expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...])`; **WITHIN GROUP mandatory**; expression must be VARCHAR (CAST if not); separator defaults to empty string. Matches pinned `reference_trino_listagg_native.md`.
-- `array_join(array_agg(x ORDER BY y), sep)` is a documented equivalent shape; the `ORDER BY` inside `array_agg` controls element ordering before the join — verified at [array_agg docs](https://trino.io/docs/467/functions/aggregate.html#array_agg).
-- `FILTER (WHERE ... IS NOT NULL)` skip-NULL caveat correctly raised (both forms skip NULLs by default for the aggregate input, but the FILTER form is explicit).
+### Verification (primary source):
+[trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim:
+- "Trino supports two methods of historical data querying": `FOR VERSION AS OF <snapshot_id>` + `FOR TIMESTAMP AS OF TIMESTAMP '...'` — examples include `FOR VERSION AS OF 8954597067493422955` and `FOR TIMESTAMP AS OF TIMESTAMP '2022-03-23 09:59:29.803 Europe/Vienna'`.
+- `$history` table columns: `made_current_at` (TIMESTAMP with tz), `snapshot_id` (BIGINT), `parent_id` (BIGINT), `is_current_ancestor` (BOOLEAN) — exact match.
+- `iceberg.expire-snapshots.min-retention` default `"7d"` — exact match.
+
+### Verdict:
+Pin-perfect Iceberg time-travel canonical for an Iceberg-native query engine. Engineer's Tuesday-9am ask is exactly the `FOR TIMESTAMP AS OF` use case; the responder also gave the discovery path via `$history` so the engineer can pick the right snapshot_id if the timestamp form has rounding concerns. The 7-day retention caveat is the load-bearing operational warning ("hurry — the snapshot may already be gone if it's been >7d AND someone ran expire_snapshots"). No defect.
+
+---
+
+## Q2 — Month-over-month growth without a self-join
+
+**Score: 5 / 5 / 5 / 4.5 = 4.875**
+
+### What the responder said:
+- `LAG(revenue) OVER (PARTITION BY plan_tier ORDER BY month) AS prev_month_revenue`.
+- `pct_change = ROUND(100.0 * (revenue - LAG(revenue) OVER (PARTITION BY plan_tier ORDER BY month)) / LAG(revenue) OVER (PARTITION BY plan_tier ORDER BY month), 2)`.
+- Single-pass, no self-join. LAG returns NULL for first month per partition (COALESCE if needed).
+
+### Verification:
+- `LAG(value)` is a standard SQL window function in Trino 467 ([trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html)) — `LAG(value [, offset [, default]]) OVER (...)` with default offset = 1.
+- `PARTITION BY plan_tier ORDER BY month` is the textbook MoM partition framing (one growth chain per tier, chronologically ordered).
+- Single hash-partition + sort, no self-join — correct.
 
 ### Minor completeness shave (-0.5 Compl):
-Didn't mention `ON OVERFLOW TRUNCATE` (long sessions could exceed the 1MB string-aggregate output cap and throw without an overflow clause); not load-bearing for the typical session-funnel use case but a single-line addition would have made this a clean 5.0. Recall ceiling, NO resource fix.
+Division-by-zero guard for `prev_month_revenue = 0` not mentioned. Per pinned `reference_trino_division_by_zero.md`: DECIMAL `/` 0 throws DIVISION_BY_ZERO; DOUBLE `/` 0 returns Infinity. For a `revenue` column likely typed DECIMAL/INT, a prev=0 month would throw at query time. Standard guard is `NULLIF(LAG(revenue) OVER (...), 0)` in the denominator. Engineer would discover this on first $0 month. Not load-bearing for the question as posed (engineer asked for "cleaner without self-join", LAG nails that), but a clean 5.0 would have one-lined the NULLIF.
+
+### Verdict:
+Pin-perfect window-function MoM canonical. Recall-ceiling shave, NO resource fix.
 
 ---
 
-## Q3 — Per-dev `analytics_dev_<user>` schema for dbt local runs
+## Q3 (WATCH) — dbt model contract enforcement requires a live warehouse connection
 
-**Score: 4.5 / 4.5 / 4.5 / 4.0 = 4.375 (PASS — one legitimate canonical pattern shipped, the OTHER common pattern missing)**
+**Score: 5 / 5 / 5 / 5 = 5.0**
 
 ### What the responder said:
-- `schema: "{{ env_var('DBT_SCHEMA', 'analytics') }}"` in `profiles.yml`.
-- Shell exports: `export DBT_SCHEMA=analytics_dev_hclin` locally, `DBT_SCHEMA=analytics` in prod / CI.
-- `DBT_ENV_SECRET_*` is scrubbed from artifacts (correct sub-fact for secret-prefixed env vars).
-- `env_var()` evaluated at parse time (correct).
+- **"NO. dbt parse and dbt compile with NO warehouse connection do NOT enforce contracts. Contract enforcement REQUIRES a live Trino connection."**
+- Sequence: dbt compiles SQL → issues introspection query to Trino (empty-result `SELECT ... WHERE 1=0`) to learn actual result column names + types → compares to YAML → errors + refuses to materialize on mismatch. Step 2 needs live Trino.
+- CI fix: replace `dbt parse`/`dbt compile` with `dbt build --select <model>` or `dbt run --select <model>` (requires live Trino); CI runner MUST have network access to Trino.
 
-### Verified correct against primary sources:
-- [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) — `env_var(name, default)` documented for use in `profiles.yml`; `DBT_ENV_SECRET_*` prefix triggers scrubbing in compiled SQL and logs.
-- [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas) — `target.schema` (which env_var-in-profiles.yml drives) is the default base.
+### Verification (primary source):
+[docs.getdbt.com/docs/collaborate/govern/model-contracts](https://docs.getdbt.com/docs/collaborate/govern/model-contracts) verbatim: *"When building a model with a defined contract, dbt will do two things differently: (1) dbt will run a 'preflight' check to ensure that the model's query will return a set of columns with names and data types matching the ones you have defined. (2) dbt will include the column names, data types, and constraints in the DDL statements it submits to the data platform, which will be enforced while building or updating the model's table."*
 
-### Completeness gap (-1.0 Compl):
-The **OTHER** standard dbt pattern is a custom `generate_schema_name` macro override — recommended verbatim by [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas) and the dbt schema-config guide. The widely-deployed shape is:
+Both phases require a warehouse connection:
+- Preflight introspection (`SELECT ... WHERE 1=0` against the compiled SQL) is run **against** the warehouse to type-introspect the model's output columns; cannot be done from YAML alone because the SQL's output types come from the data platform's type inference.
+- DDL-time enforcement happens when dbt submits `CREATE TABLE ... (col TYPE, ...)` to the warehouse.
 
-```jinja
-{% macro generate_schema_name(custom_schema_name, node) %}
-  {%- if target.name == 'prod' and custom_schema_name is not none -%}
-    {{ custom_schema_name | trim }}
-  {%- else -%}
-    {{ target.schema }}
-  {%- endif -%}
-{% endmacro %}
-```
+Neither happens during `dbt parse` (which only walks the manifest) or `dbt compile` (which only resolves Jinja + writes compiled SQL to `target/`). Confirmed via [docs.getdbt.com/reference/commands/parse](https://docs.getdbt.com/reference/commands/parse) and [docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile) — neither phase issues introspection queries against the warehouse.
 
-…which lets dev runs land in `<dev_target_schema>` regardless of model-level `+schema:` overrides, while prod respects custom schemas. Most teams use BOTH: env_var (or just `target.schema: dbt_hclin`) for the dev target name + `generate_schema_name` to override prefixing behavior. The responder's pattern alone works for a flat single-schema setup, but engineers asking "standard pattern" should hear both options to make an informed choice. NOT a defect — `env_var()` in `profiles.yml` IS legitimate and complete for the engineer's stated need. Recall ceiling. NO resource fix (per `feedback_responder_overwarning_folklore` adjacent family — core actionable answer correct; surface-area gap, not error).
+### WATCH STATUS: **CLOSES**
+
+iter1194 the responder wrongly said contracts are a pure compile-time check needing no Trino connection; iter1194 FIX-A reconciled r27 §6.7C + r28 §282 to: enforcement is build/run-time + warehouse-interactive (introspection query), so dbt parse/compile with no connection do NOT enforce. **Iter1198 responder lands all four load-bearing facts correctly on first re-probe**:
+1. Teammate is **wrong** — explicit NO.
+2. Mechanism — preflight introspection query against warehouse (named the empty-result `WHERE 1=0` form).
+3. Comparison phase — actual vs declared types from YAML.
+4. CI fix — `dbt build`/`dbt run` with network to Trino.
+
+FIX-A reached. No `feedback_reconcile_dont_append.md` recurrence risk (unlike iter1197 r17). FIX-A direction was correct and findable.
+
+### Verdict:
+Pin-perfect. WATCH closes 1st-re-probe. Close iter1194 r27 §6.7C dbt-contract-live-connection watch — remove from open watch list.
 
 ---
 
-## Q4 — Oracle SYSDATE / SYSTIMESTAMP → Trino 467
+## Q4 — Oracle REGEXP_SUBSTR → Trino regexp_extract
 
-**Score: 4.0 / 4.5 / 4.0 / 3.5 = 4.0 (PASS — tz framing accurate, but missed `localtimestamp` as the precise tz-LESS equivalent for SYSDATE)**
+**Score: 5 / 5 / 5 / 5 = 5.0**
 
 ### What the responder said:
-- `SYSDATE` → `current_timestamp` / `now()`, with gotcha that Trino `current_timestamp` IS tz-aware (`TIMESTAMP(3) WITH TIME ZONE`); recommend `current_date` for just date; `AT TIME ZONE 'X'` for OS-local-clock semantics.
-- `SYSTIMESTAMP` → `current_timestamp` (both tz-aware, identical).
-- `TRUNC(SYSDATE)` → `CAST(current_timestamp AS DATE)` or `current_date`.
-- `dt - SYSDATE` → `date_diff('day', current_timestamp, dt)`.
-- Did **NOT** mention `localtimestamp`.
+- Trino has NO `regexp_substr`; use `regexp_extract(string, pattern)`.
+- `regexp_extract(raw_message, 'acct_[0-9]+')` returns `'acct_12345'`, NULL if no match.
+- Gotchas: (1) name change; (2) Oracle POSIX vs Trino Java/JONI regex but `[0-9]`/`^`/`$` work the same so `'acct_[0-9]+'` ports as-is; (3) capture group via 3-arg `regexp_extract(s, pattern, group_num)`, default is whole match.
 
-### Verified correct against primary sources:
-- [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html):
-  - `current_timestamp` — *"Returns the current timestamp with time zone as of the start of the query, with 3 digits of subsecond precision"* — **TIMESTAMP WITH TIME ZONE**, matches responder's gotcha.
-  - `localtimestamp` — *"Returns the current timestamp as of the start of the query, with 3 digits of subsecond precision"* — **TIMESTAMP (no time zone)** — this is the precise direct mapping for Oracle's `SYSDATE` semantics (current ts WITHOUT a tz attached, server-clock-local).
-  - `current_date` — DATE only — correct for `TRUNC(SYSDATE)` date-truncate substitute.
-- `date_diff('day', ts1, ts2)` correctly handles `TIMESTAMP WITH TIME ZONE` arguments per [#16574 comment chain](https://github.com/trinodb/trino/issues) and pinned `reference_trino_timestamp_tz_coercion.md` (Trino 467 HAS implicit TIMESTAMP → TIMESTAMP WITH TIME ZONE coercion; mixed-type subtraction works).
+### Verification (primary source):
+[trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) verbatim:
+- `regexp_extract(string, pattern) → varchar`: "Returns the first substring matched by the regular expression `pattern` in `string`"
+- `regexp_extract(string, pattern, group) → varchar`: returns the matched capturing group.
+- Documented regexp functions are limited to: `regexp_count`, `regexp_extract_all`, `regexp_extract`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split` — **no `regexp_substr`** (correct).
+- Uses Java pattern syntax (JONI per pinned `reference_trino_regex_backslash.md`).
 
-### Completeness gap on SYSDATE mapping (-1.0 Compl, -0.5 Acc):
-The cleanest Oracle SYSDATE → Trino mapping is `localtimestamp` (precision-preserving, NO tz), not `current_timestamp` + casts. Specifically:
-
-| Oracle | Closest Trino equivalent | Why |
-|---|---|---|
-| `SYSDATE` (current date+time, NO tz) | **`localtimestamp`** | Trino's `localtimestamp` returns `TIMESTAMP(3)` with no tz — direct Oracle SYSDATE semantic match |
-| `SYSTIMESTAMP` (current ts WITH tz) | `current_timestamp` / `now()` | Both return `TIMESTAMP(3) WITH TIME ZONE` |
-| `TRUNC(SYSDATE)` | `current_date` (preferred) or `CAST(localtimestamp AS DATE)` | DATE only |
-
-The responder's current_timestamp + AT TIME ZONE workaround **works** but is verbose and introduces a tz the engineer didn't ask for. Engineer arrives at a correct answer for the comparison and arithmetic cases (they get `current_date` and `date_diff` right), but the load-bearing "what's the equivalent for SYSDATE specifically" sub-question routes through the wrong primitive. Per pinned memory pattern `feedback_responder_overwarning_folklore` adjacent family — over-routes through a more-complex form than necessary; framing is accurate, completeness shaved.
-
-### Tz framing IS accurate:
-- "Trino current_timestamp IS tz-aware" — correct, this is the classic gotcha Oracle DBAs miss.
-- `date_diff('day', current_timestamp, dt)` — correct shape.
-- `current_date` for date-only — correct.
-
-NO resource fix on Q4 alone; the localtimestamp omission could either be (a) a clean per-instance recall ceiling — re-probe next sweep with explicit "current_timestamp returns tz, give me the no-tz version" framing to test, or (b) a thin resource gap if it recurs. Defer the decision to the next re-probe.
+### Verdict:
+Pin-perfect Oracle → Trino dialect port. Hits all three migration gotchas: name change, regex flavor caveat (with the correct sub-fact that basic char classes / anchors port cleanly), and 3-arg group-capture form. Direct one-for-one Oracle port. No imported-prior slip (responder correctly identified `regexp_substr` as absent), no broken-secondary-alternative slip. Cites r27.
 
 ---
 
-## Summary
+## Topic checklist updates
 
-- **Q1: 1.5 FAIL.** Resource-sourced (r17 L13-26 cited verbatim). FIX-A EXTENDED to r17 (10 findable locations reconciled to the EXECUTE-optimize + raise-file_size_threshold canonical). NEW WATCH `iter1197 r17 position-delete-optimize findable-summary reconcile` — re-probe 3-5 iters.
-- **Q2: 4.875 PASS.** Pin-perfect Oracle LISTAGG → Trino port; minor `ON OVERFLOW` recall ceiling.
-- **Q3: 4.375 PASS.** env_var-in-profile pattern correct + DBT_ENV_SECRET_* scrubbing + parse-time eval all correct; `generate_schema_name` macro pattern missing as the OTHER standard option. Recall ceiling.
-- **Q4: 4.0 PASS.** SYSTIMESTAMP→current_timestamp + date_diff + current_date all correct; SYSDATE → `localtimestamp` (no tz) missed, routed through current_timestamp + AT TIME ZONE caveat instead. Recall ceiling pending one re-probe.
+| Topic | Q | Old avg/n | New avg/n | Δ |
+|---|---|---|---|---|
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | Q1 (5.0) | 4.4296/210 | 4.4323/211 | +0.0027 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | Q2 (4.875) | 4.5247/144 | 4.5271/145 | +0.0024 |
+| dbt model contracts | Q3 (5.0) | 4.4968/9 | 4.5471/10 | +0.0503 |
+| Oracle PL/SQL procedure → dbt + Trino SQL migration | Q4 (5.0) | 4.4671/159 | 4.4704/160 | +0.0033 |
 
-**Overall: (1.5 + 4.875 + 4.375 + 4.0) / 4 = 3.6875 — thin PASS dragged hard by the Q1 resource-sourced re-instance.** Topic margins absorb it (Iceberg-table-maintenance still >0.9 above threshold post-update). FIX-A direction VERIFIED CORRECT; corpus reconcile now spans r13 + r28 + r16 + r17. Watch list at end of iter1197: (1) iter1194 dbt-contract-live-connection (carry); (2) iter1196 r21 format_version Trino-SET-PROPERTIES (carry); (3) **NEW iter1197 r17 position-delete-optimize findable-summary reconcile** (re-probe priority).
+All topics remain comfortably PASSED with healthy margins.
+
+---
+
+## Open watches after iter1198
+
+- **CLOSED**: iter1194 r27 §6.7C dbt-contract-live-connection (Q3 1st-re-probe close, all four facts land).
+- **PRIORITY OPEN — iter1197 r17 position-delete-optimize findable-summary reconcile** (NOT exercised this iter; high recurrence risk after iter1195 `feedback_reconcile_dont_append` re-instance; re-probe within 2-4 iters with framing like "MoR position-deletes accumulated, Trino-only shop fix or need Spark?" / "EXECUTE optimize on already-large data files seems to skip them").
+- **OPEN** iter1196 r21 format_version SET PROPERTIES Trino dialect (NOT exercised; re-probe in 3-6 iters with framing like "migrated table via Trino but ALTER TABLE SET TBLPROPERTIES gets parse error / what's the Trino form").
+- **SOFT OPEN** iter1197 localtimestamp Oracle-SYSDATE direct mapping (NOT exercised; re-probe in 4-7 iters with explicit "current_timestamp returns tz, give me the no-tz form" framing).
+- **SOFT OPEN** iter1197 generate_schema_name macro surface-area (NOT exercised; re-probe in 4-7 iters with explicit "use dbt macros to control schema" framing).
+
+## Next iter recommendations
+
+- **Highest priority**: probe the iter1197 r17 position-delete-optimize findable-summary reconcile within 2-4 iters. The reconcile spans 4 resources × 10+ locations; any un-touched rendered bullet / footnote / aside could still re-attract under a Trino-only + position-delete keyword path. Suggested framings: "MoR position-deletes accumulated on a Trino-only shop, our data files are already 200MB+, will EXECUTE optimize touch them or do we need Spark?" / "delete-file compaction without Spark — possible on Trino 467?".
+- Then iter1196 r21 format_version Trino dialect (parse-error trap a copy-through engineer hits).
+- BREADTH otherwise; no resource-defect fires this iter.
