@@ -427,7 +427,15 @@ dbt 1.8 renamed the YAML key from `tests:` to `data_tests:` to disambiguate from
 > - **"every combination including each column alone"** (per-region AND per-product independent margins) **→ `CUBE(region, product)`.**
 > - **"only specific named grouping sets"** (a hand-picked list, NOT the cross-tab detail) **→ `GROUPING SETS (...)`.**
 >
-> **⭐ MOST-MISROUTED CASE — "totals by X AND by Y AND a grand total, in one query" (two DIFFERENT dimensions; you're replacing 2–3 separate `UNION ALL`'d `GROUP BY` queries) → `GROUPING SETS ((x), (y), ())`, NOT `ROLLUP`.** `ROLLUP(x, y)` does **NOT** emit a by-`y`-only row, so it silently DROPS one of the two breakdowns you asked for. If your ask is "signups by country, AND by plan tier, AND overall" — or any "by A and by B and a total" — copy the GROUPING SETS block immediately below, NOT the ROLLUP block under it.
+> **🧭 STEP 0 — ASK THIS ONE QUESTION FIRST: do you want the per-`(A,B)` DETAIL rows (one row for EACH combination, e.g. "Platform / High", "Platform / Low", "Billing / High")?**
+> - **YES — you want the `(A,B)` detail rows, PLUS a subtotal per `A` (collapsing all `B`), PLUS one grand total** = a **DRILL-DOWN HIERARCHY** (`A` → `B`) **→ `ROLLUP(A, B)`** = `GROUPING SETS ((A,B), (A), ())`. This is the answer for *"detail per (team, priority), then a per-team subtotal across all priorities, then a grand total"* / *"(region, product) detail + per-region subtotal + total"* / any *"X then Y drill-down with subtotals"*. **Do NOT add a `(B)`-only set** — the engineer did NOT ask for per-priority-only / per-product-only rows; adding `(B)` makes it `CUBE`, not the hierarchy they asked for.
+> - **NO — you do NOT want the per-`(A,B)` combination detail; you only want a by-`A` summary AND a separate by-`B` summary AND a grand total** → `GROUPING SETS ((A), (B), ())` (the ⭐ case just below).
+>
+> **The single discriminator: "by X AND by Y" WITH the per-`(X,Y)` DETAIL rows + per-X subtotal = `ROLLUP(X, Y)` (a hierarchy). "by X AND by Y" with NO combination detail (two independent one-dimension summaries) = `GROUPING SETS ((X),(Y),())`.** Both asks say "by X and by Y" — the deciding factor is whether the per-`(X,Y)` detail row is wanted. If it is → ROLLUP.
+>
+> **⚠️ DEFANG — for a "detail + per-A subtotal + grand total" HIERARCHY, do NOT write `GROUP BY GROUPING SETS ((A,B), (A), (B), ())`.** That four-tuple includes the unrequested `(B)`-only margin and IS literally `CUBE(A, B)` — it emits per-`B`-only rows the hierarchy report never asked for. The hierarchy is exactly `ROLLUP(A, B)` = `GROUPING SETS ((A,B), (A), ())` — **THREE** tuples, NO `(B)`.
+>
+> **⭐ MOST-MISROUTED CASE — "totals by X AND by Y AND a grand total, in one query" (two DIFFERENT dimensions, NO per-`(X,Y)` detail row; you're replacing 2–3 separate `UNION ALL`'d `GROUP BY` queries) → `GROUPING SETS ((x), (y), ())`, NOT `ROLLUP`.** `ROLLUP(x, y)` does **NOT** emit a by-`y`-only row, so it silently DROPS one of the two breakdowns you asked for. If your ask is "signups by country, AND by plan tier, AND overall" — or any "by A and by B and a total" — copy the GROUPING SETS block immediately below, NOT the ROLLUP block under it.
 >
 > ✅ **COPY THIS for "totals by X AND by Y AND grand total" (two independent breakdowns in one query, NO cross-detail — replaces 3 UNION ALL'd GROUP BYs):**
 > ```sql

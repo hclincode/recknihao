@@ -28,6 +28,42 @@
 
 ---
 
+## DETECTING A STALLED / STALE UPSTREAM SOURCE — make dbt FAIL or WARN when raw data stops arriving (dbt source freshness)
+
+> **READ THIS if your problem sounds like ANY of these (a STALE-SOURCE narrative — you may not know the feature name):** "our nightly `dbt run`/`dbt build` finished GREEN but the dashboard showed numbers that were a day / two days old"; "the **Fivetran / Airbyte / Kafka / Spark / external loader** sync **silently stopped** writing to the raw table and dbt **happily ran on stale data and reported success**"; "the upstream raw / source table **hasn't received new rows in N hours** and **nothing complained / no visible error**"; "how do I get **dbt itself to detect / alert / fail / warn** when an upstream source is **stale / outdated / behind / not updated recently**"; "detect a **stalled ingestion pipeline** / late-arriving source from inside dbt". **The feature you want is `dbt source freshness`. The answer is YES — dbt can do exactly this. Do NOT hedge or defer to external docs; the essentials are right here, and the FULL canonical (q-pattern matcher, worked example, "does it block downstream?") is at [resources/27-oracle-plsql-to-dbt-trino.md §6.7B](27-oracle-plsql-to-dbt-trino.md).**
+
+**Why a green `dbt run` does NOT catch this:** `dbt run` / `dbt build` only check that your models *compiled and materialized* — they do NOT look at how OLD the source data is. A source that stopped updating 36 hours ago still SELECTs fine, so the run is green. You need a **separate, explicit freshness check** on the *source*, not the model.
+
+**The fix — three ingredients:**
+
+1. **Declare the raw table as a dbt `source`** (in a `sources.yml` / `_sources.yml` under `models/`) — NOT a `ref()`.
+2. **Add a `freshness:` block + `loaded_at_field:`** naming a timestamp column that advances every time new rows land (e.g. `_loaded_at`, `ingested_at`, `batch_loaded_at`). **On dbt-trino you MUST supply `loaded_at_field` explicitly** — the warehouse-metadata fallback (no `loaded_at_field`) is only supported on Snowflake/Redshift/BigQuery/Databricks, NOT dbt-trino.
+3. **Run `dbt source freshness` as its OWN pipeline step** — it is a SEPARATE command, NOT run by `dbt run` or `dbt build`. Gate your pipeline on its non-zero exit.
+
+```yaml
+# models/_sources.yml  — dbt 1.10+ nests loaded_at_field + freshness under config:
+sources:
+  - name: raw_events
+    schema: raw
+    tables:
+      - name: events
+        config:
+          loaded_at_field: ingested_at            # a column that advances on every load
+          freshness:
+            warn_after:  {count: 6,  period: hour} # WARN if newest row > 6h old
+            error_after: {count: 12, period: hour} # ERROR (non-zero exit) if > 12h old
+```
+
+```bash
+# Run as its own CI/orchestration step BEFORE the build — exits non-zero on 'error' state:
+dbt source freshness          # NOT executed by `dbt run` / `dbt build`
+dbt build                     # only reached if the freshness gate passed
+```
+
+Under the hood dbt runs `SELECT MAX(ingested_at) FROM raw.events` against Trino, compares to now, and emits `pass` / `warn` / `error` per source to `target/sources.json`. A freshness `error` does NOT auto-block downstream models inside a plain `dbt run` — it gates the pipeline only because you ran it as a separate step whose non-zero exit your CI runner halts on. **Full detail (q-pattern matcher, `filter:` to keep the freshness scan cheap on a large Iceberg table, source-vs-table override hierarchy, `source_status:fresher+` selector): [r27 §6.7B](27-oracle-plsql-to-dbt-trino.md).**
+
+---
+
 ## TOP-OF-DOC CALLOUT #1 — Spark write API: the API-CONFUSION GUARDRAIL (read BEFORE writing any Spark-to-Iceberg recipe)
 
 > **The single most important rule in this entire document.** When you are writing a Spark-to-Iceberg ingestion recipe, the **final line that emits the write** MUST be one of these four DataFrameWriterV2 forms. Anything else is wrong on this stack (Iceberg 1.5.2 + Spark + SparkCatalog plugin + Hive Metastore).
