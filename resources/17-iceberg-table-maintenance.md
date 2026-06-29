@@ -182,6 +182,33 @@
 > | `EXECUTE expire_snapshots(retention_duration => INTERVAL '7' DAY)` | WRONG parameter name AND type. | `EXECUTE expire_snapshots(retention_threshold => '7d')` — the param is **`retention_threshold`**, a **varchar** like `'7d'`. |
 > | "`expire_snapshots` only **marks** files as orphaned / doesn't free MinIO space by itself; you must run `remove_orphan_files` afterward to **actually delete** the data files." (role-inversion) | **BACKWARDS.** `expire_snapshots` **physically deletes** (issues the object-store DELETEs for) the data + manifest + manifest-list files that the expired snapshots **exclusively** referenced — it **IS** the primary mechanism that reclaims the storage held by deleted-row / superseded data. It does NOT merely "mark." `remove_orphan_files` is a **DIFFERENT, smaller** garbage class: files that are referenced by **NO** snapshot's metadata at all (debris from failed/aborted writes / partial commits), found by listing storage and diffing against all reachable metadata — NOT the deleted-row data files (those are owned by old snapshots and reclaimed by `expire_snapshots`). | "`EXECUTE expire_snapshots(retention_threshold => '7d')` is what reclaims the storage from your DELETEs (it deletes the old snapshots' exclusively-owned files). `remove_orphan_files` is an **optional supplement** that cleans up failed-write leftovers — not the primary reclaim, and not where your deleted-row bytes live." |
 
+### LEADING CANONICAL — ROW-LEVEL `DELETE` then "storage didn't shrink even after `expire_snapshots`": the reclaim lever is `EXECUTE optimize` (NOT `remove_orphan_files`)
+
+> **Keyword anchors (route HERE — this is the ROW-LEVEL sibling of the partition-aligned purge canonical above):** deleted rows but storage didn't shrink, deleted test records and disk usage is the same, ran expire_snapshots but MinIO barely changed, DELETE on a non-partition column didn't free space, row-level delete reclaim storage, why is storage the same after I deleted rows, deleted 4 million rows but bytes unchanged, position delete files after DELETE, MoR delete doesn't free disk, expire_snapshots didn't reclaim space after deleting rows, how to actually free space after a row-level DELETE, optimize vs expire_snapshots after delete.
+
+> **THE ONE FACT:** a **ROW-LEVEL `DELETE`** (the `WHERE` filters on a NON-partition column — e.g. `DELETE FROM events WHERE is_test = true` or `WHERE user_id IN (...)`) on a Trino 467 MoR table does NOT remove the data — it writes **POSITION-DELETE files** that mark the deleted rows, and leaves the underlying **DATA files FULL-SIZE and LIVE** (still referenced by the CURRENT snapshot; the deletes are applied at read time). So your live row count drops but the bytes on MinIO do not. **`expire_snapshots` ALONE will NOT reclaim that space** — it only deletes files that NO live snapshot references, and those data files are still referenced by the current snapshot (they hold the surviving rows too). This is the OPPOSITE of the partition-aligned purge above (which IS metadata-only and IS reclaimed by `expire_snapshots` alone).
+
+```sql
+-- ✅ THE RECLAIM CHAIN for a row-level DELETE (Trino-only, no Spark needed):
+-- STEP 1 — rewrite the data files, physically dropping the deleted rows + clearing the position-deletes.
+--   EXECUTE optimize APPLIES + DROPS the position-delete files for every data file it rewrites (#12617/#24086).
+--   If the delete-bearing data files are already large, raise file_size_threshold ABOVE their size to force the rewrite.
+ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '512MB');
+-- STEP 2 — NOW the old (pre-optimize) full-size data files are unreferenced; expire_snapshots physically deletes them.
+ALTER TABLE iceberg.analytics.events EXECUTE expire_snapshots(retention_threshold => '7d');
+-- (optional STEP 3 — only sweeps FAILED-WRITE debris, NOT your deleted-row bytes:)
+-- ALTER TABLE iceberg.analytics.events EXECUTE remove_orphan_files(retention_threshold => '7d');
+```
+
+> **Inspect what's actually on disk** with the `$files` metadata table — `content = 0` is data files, `content = 1` is position-delete files (their presence confirms the row-level-MoR shape): `SELECT content, COUNT(*), SUM(file_size_in_bytes) FROM iceberg.analytics."events$files" GROUP BY content;`
+
+> **DO-NOT-WRITE (banned for the row-level-delete-didn't-free-space symptom):**
+>
+> | WRONG | Why | RIGHT |
+> |---|---|---|
+> | "Run `remove_orphan_files` to free the space from your deleted rows." | `remove_orphan_files` only removes files referenced by NO snapshot (failed-write debris). Your deleted-row bytes live in DATA files still referenced by the CURRENT snapshot — `remove_orphan_files` will NOT touch them, storage stays the same. | "`EXECUTE optimize` rewrites the data files (applying+dropping the position-deletes), THEN `expire_snapshots` reclaims the old files. `remove_orphan_files` is an optional supplement for failed-write leftovers only." |
+> | "`expire_snapshots` alone reclaims the space after a row-level DELETE." | TRUE only for partition-aligned / whole-table deletes (metadata-only — see § above). For a row-level MoR delete the data files are still LIVE in the current snapshot, so `expire_snapshots` frees little until `optimize` first rewrites them. | "Row-level: `optimize` FIRST (rewrite+apply deletes), then `expire_snapshots`. Partition-aligned/whole-table: `expire_snapshots` alone (the delete was already metadata-only)." |
+
 ### LEADING CANONICAL — clear / empty an Iceberg table in Trino 467: NO `TRUNCATE TABLE` (unsupported on the Iceberg connector); use `DELETE FROM tbl` (metadata-only) or `CREATE OR REPLACE TABLE`
 
 > **Keyword anchors:** TRUNCATE Iceberg Trino, TRUNCATE TABLE Iceberg, clear Iceberg table, empty an Iceberg table Trino, wipe a table before reload, reload staging table, DELETE FROM no WHERE Iceberg, whole table DELETE Iceberg, metadata-only delete Trino Iceberg, CREATE OR REPLACE TABLE Trino Iceberg, atomic table replace, clear all rows Iceberg.
