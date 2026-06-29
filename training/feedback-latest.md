@@ -1,172 +1,141 @@
-# Judge Feedback — iter1278
+# Judge Feedback — Iteration 1279
 
-**Overall**: 4 answers, average **4.4187 PASS** (Q1 4.4375 / Q2 4.875 / Q3 3.4375 / Q4 4.9375).
+**Overall**: 4 questions, average **4.797 STRONG PASS** (Q1 4.9375 / Q2 4.9375 / Q3 4.875 / Q4 4.4375).
 
-Drop from iter1277's 4.844 STRONG PASS is concentrated entirely in **Q3** (dbt_project.yml folder-level materialization). Q1/Q2/Q4 all STRONG PASS individually; Q3 has a real accuracy ding (bare `materialized:` vs required `+materialized:` prefix) and an honest findability hedge that reveals a genuine content gap. NEW SOFT WATCH on Q3 (FIX-A LIGHT warranted, scoped below). One imprecision SOFT WATCH on Q1 (Scheduled-vs-CPU framing as I/O-wait, recurring -0.5 Acc shave across iter1258/iter1273/iter1278 — pattern not regression).
-
----
-
-## Q1 — Scheduled vs CPU gap on 12-min JOIN (query-perf-basics, thinnest topic): **4.4375 STRONG PASS, thin-topic LIFT (+0.006)**
-
-**What landed correct.** Responder correctly frames the 600s Scheduled vs 20s CPU gap as "the 580s is WAITING not compute" + routes to the right diagnostic levers: (a) `physicalInputDataSize` per-operator metric for actual MinIO bytes; (b) Filter-above-TableScan + missing `constraint=` annotation = partition pruning broke; (c) `SHOW CREATE TABLE` to confirm `partitioning=ARRAY[...]`; (d) `ANALYZE iceberg.analytics.fct_events WITH (columns = ARRAY['event_date','account_id'])` to refresh CBO stats; (e) splitsCreated 10,000+ = small-files → `ALTER TABLE EXECUTE optimize(file_size_threshold => '256MB')`.
-
-**Verified facts**:
-- `physicalInputDataSize` per-operator metric — VALID per [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html) (fragment shows `Physical Input: 4.51MB` verbatim; PR #23874).
-- `ANALYZE table WITH (columns = ARRAY[...])` syntax — VALID via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): "You can specify a subset of columns to analyzed with the optional `columns` property" + example `ANALYZE table_name WITH (columns = ARRAY['col_1','col_2'])`.
-- `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` — VALID; documented form is `optimize(file_size_threshold => '128MB')` with default 100MB; raising to 256MB is a legitimate config (PR #24086 + iter1194 pin).
-- Filter-above-TableScan + missing-constraint diagnostic — matches iter1258-Q2 textbook signal for pruning-broke.
-
-**PRECISION DING — Scheduled-vs-CPU = I/O-wait interpretation is IMPRECISE (-0.5 Acc)**. Per [Medium "Query Plans — Trino"](https://medium.com/@simon.thelin90/query-plans-analyse-sql-performance-in-trino-97ac1e8f8044) + WebSearch results: the **precise I/O-wait metric is `Blocked` time**, specifically the `Blocked: Input` split (documented at the per-fragment line `Blocked 46.21s (Input: 23.06s, Output: 0.00ns)`). Scheduled time = on-thread time (CPU + scheduled-but-not-blocked waits); CPU time = pure compute. The Scheduled-CPU gap CAN signal blocked time but ALSO captures CPU-queue waits / lock contention / GC pauses — so it's a "warning indicator," not the canonical I/O-wait signal. The cleaner diagnostic route is: **"compute `Blocked: Input` on the stage's TableScan — that's the I/O-wait signal; the Scheduled-CPU delta is a coarser proxy."**
-
-iter1273 + iter1258 both framed Scheduled-vs-CPU as the primary signal and got identical -0.5 Acc shaves (scored 4.625 / 4.6875). Pattern is **established, not a regression** — Haiku consistently routes via Scheduled-CPU rather than Blocked-Input on this thinnest topic. NOT urgent enough to FIX-A on its own, but a LIGHT FIX-A candidate if it recurs once more under "is it I/O bottleneck?" framing.
-
-**Minor Clarity shave (-0.25)**: `splitsCreated` is informal naming — Trino EXPLAIN ANALYZE VERBOSE exposes split-related stats but `splitsCreated` is not the verbatim documented field name (see [trino discussions #17942](https://github.com/trinodb/trino/discussions/17942) on EXPLAIN ANALYZE VERBOSE doc gap). Concept (high split count → small-files → optimize) is correct, name is loose.
-
-**Scores**: Acc 4.5 / Clar 4.25 / Prac 4.75 / Compl 4.25.
-
-**Topic delta**: query-perf-basics 4.1639/43 → 4.1701/44 PASSED (+0.0062, margin +0.6701, REMAINS THINNEST REQUIRED TOPIC, lifts steadily across iter1258/iter1273/iter1276/iter1278).
-
-**NEW SOFT WATCH `iter1278-Q1 Scheduled-vs-CPU-as-I/O-wait imprecision: route to Blocked time explicitly`**: re-probe in 4-8 iters under varied "is it I/O bottleneck" framings; if recurs with same Scheduled-CPU-only routing and no mention of Blocked time, escalate to LIGHT FIX-A canonical at r28 (or r18 EXPLAIN ANALYZE diagnostic section) adding "the `Blocked: Input` metric is the canonical I/O-wait signal; Scheduled-CPU delta is a coarser proxy" + worked disambiguation.
+**Headline results**:
+1. **Q1 — iter1278 §6.7O `+materialized` FIX-A REACHED CLEANLY on 1st re-probe** → iter1278-Q3 dbt_project.yml folder-level materialization WATCH CLOSES POSITIVELY.
+2. **Q2 — `SUM(SUM(x)) OVER ()` percent-of-total is valid Trino 467** (nested-aggregate-window pattern over GROUP BY rows; standard window-over-grouped semantics).
+3. **Q3 — dbt seeds mechanics all docs-verified**; no defects.
+4. **Q4 — Trino datetime accuracy clean (SET TIME ZONE is a real Trino statement)**, but **minor completeness gap**: engineer explicitly asked "does NOW() work in Trino?" and responder never confirmed/denied. Trino 467 DOES have `now()` as a documented alias for `current_timestamp` (verified at trino.io/docs/467/functions/datetime.html). Per-instance one-off, NOT a resource defect.
 
 ---
 
-## Q2 — JSON per-day grouping in Trino: **4.875 STRONG PASS — all facts verified**
+## Q1 — dbt_project.yml folder-level `+materialized` (REACH-TEST of iter1278 §6.7O FIX-A)
 
-Responder's canonical:
+**Score: 5.0 / 4.75 / 5.0 / 5.0 = 4.9375**
+
+**Responder reached r27 §6.7O LEADING CANONICAL verbatim**:
+- (a) dbt_project.yml `models:` tree with `+materialized: view` / `+materialized: table` per folder + project default — exact-match shape per [docs.getdbt.com/reference/dbt_project.yml](https://docs.getdbt.com/reference/dbt_project.yml);
+- (b) **`+` prefix REQUIRED callout reproduced verbatim** ("every config key in dbt_project.yml MUST have a `+` prefix; without it dbt treats key as a folder name and silently ignores") — VERIFIED via WebFetch of dbt docs: "dbt demarcates between a folder name and a configuration by using a `+` prefix before the configuration name. The `+` prefix is used for configs _only_ and applies to `dbt_project.yml` under the corresponding resource key";
+- (c) **4-level precedence ladder correct**: in-file `config()` > schema.yml `config:` > dbt_project.yml folder-level > project default — VERIFIED at same docs URL: "the most specific configuration always takes precedence";
+- (d) Override answer (one marts model with in-file `{{ config(materialized='incremental', incremental_strategy='merge') }}`) cleanly demonstrates "in-file config always overrides folder default";
+- (e) Cited §6.7O.
+
+**Findability**: §6.7O LEADING CANONICAL keyword-magnet worked on 1st re-probe under different framing (engineer asked ~40 models in staging/intermediate/marts/ vs iter1278's incremental fct + table dim). No "not covered in resources" hedge this iter — exact inversion of iter1278's wrong "this specific configuration pattern is NOT covered" bail.
+
+**Pattern**: ~27th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern (matches iter1248 model-versions, iter1251 dbt-retry, iter1255 dbt-tags, iter1262 slim-CI-defer, iter1272 bloom-CREATE, iter1277 dbt-unit-tests-free-tier).
+
+**iter1278-Q3 `+materialized` §6.7O FIX-A reach-test WATCH → CLOSES POSITIVELY.**
+
+Minor Clar shave (-0.25): the "+ prefix required" callout could have included a half-line on WHY (disambiguation from subdirectory names) — engineer gets the WHAT cleanly but the mechanism is implicit.
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
+
+---
+
+## Q2 — percent-of-total via `SUM(SUM(mrr)) OVER ()` window-over-aggregate
+
+**Score: 5.0 / 4.75 / 5.0 / 5.0 = 4.9375**
+
+**Responder's canonical**:
 ```sql
-SELECT json_extract_scalar(properties, '$.plan') AS plan,
-       DATE(occurred_at) AS event_date,
-       COUNT(*) AS event_count
-FROM user_events
-GROUP BY 1, 2
+SELECT plan_name,
+       SUM(mrr) AS total_mrr,
+       ROUND(100.0 * SUM(mrr) / SUM(SUM(mrr)) OVER (), 2) AS pct_of_total_mrr
+FROM subscription_events
+GROUP BY plan_name
+ORDER BY total_mrr DESC;
 ```
 
-Plus the key disambiguation: `json_extract_scalar` returns VARCHAR (groupable directly, no CTE needed); `json_extract` returns Trino's `json` type (would type-error in GROUP BY); `CAST(json_extract_scalar AS INTEGER)` / `TRY_CAST` for numeric extraction. Correctly maps Postgres `->`/`->>` to Trino's json_extract / json_extract_scalar split (engineer asked for the Postgres parallel).
+**Mechanism explanation**:
+- Empty `OVER ()` = entire result set (no PARTITION, no ORDER) — CORRECT;
+- Inner `SUM(mrr)` is the regular GROUP BY aggregate (per-plan total);
+- Outer `SUM(...) OVER ()` is a window function that sums those per-plan totals into the grand total (one row per group, broadcast to every row);
+- `100.0 * ...` forces double-precision division (avoids integer truncation) — CORRECT;
+- `ROUND(..., 2)` valid Trino 2-arg round (decimal places);
+- "Cleaner than subquery" rationale (no self-join, single pass) — CORRECT.
 
-**VERIFIED** via WebFetch of [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html): json_extract_scalar verbatim "Like `json_extract()`, but returns the result value as a string (as opposed to being encoded as JSON)" → VARCHAR; json_extract "returns the result as a JSON string" → json type. Consistent with iter1277-Q3 verified canonical.
+**Validity check**: `SUM(SUM(x)) OVER ()` is a standard SQL nested-aggregate-window pattern — the inner aggregate consumes the rows pre-GROUP-BY (collapsed per-group by GROUP BY plan_name), the outer window function operates on the GROUP BY result row stream. This is the documented "percent of total" canonical and matches r07 percent-of-total CANONICAL referenced in iter1161/iter1162 history notes. Trino 467 implements ANSI window-over-aggregate cleanly — no parse error, no need for an explicit CTE.
 
-**Minor Clarity shave (-0.25)**: didn't surface that `DATE(occurred_at)` is partition-pruning-friendly when occurred_at is day-partitioned (via Trino's UnwrapCastInComparison rule per `reference_trino_unwrap_temporal_predicates` pin). **Minor Compl shave (-0.25)**: no NULL-on-missing-path note for events with no 'plan' key; no `json_value` SQL/JSON standard alternative.
+Minor Clar shave (-0.25): "window aggregate over grouped rows" mental model is dense for OLAP newcomers — a 1-line worked example showing the intermediate (per-plan total) step would ground the abstract. Engineer with SQL experience reaches it instantly.
 
-**Scores**: Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
-
----
-
-## Q3 — dbt_project.yml folder-level materialization + override precedence: **3.4375 PASS-but-WEAK, ACCURACY DING + CONTENT GAP**
-
-Engineer asked: (a) how to set default materialization for a whole FOLDER in dbt_project.yml + (b) does in-file `{{ config(materialized=...) }}` override folder-level or vice versa?
-
-Responder hedged: "this specific configuration pattern is NOT covered in the resources provided" + gave (from general dbt knowledge) a dbt_project.yml `models:` tree with **BARE `materialized: 'view'` / `materialized: 'table'` / `materialized: 'incremental'`** keys nested by folder; precedence "specific model config > folder config > parent folder config > project default"; in-file `{{ config(materialized='table') }}` OVERRIDES folder-level. Closed with "verify with official docs."
-
-### ACCURACY VERDICT — the `+` prefix IS REQUIRED
-
-**VERIFIED** via WebFetch of [docs.getdbt.com/reference/model-configs](https://docs.getdbt.com/reference/model-configs): canonical example shows `+materialized: view` (WITH `+` prefix) under nested folder keys:
-
-```yaml
-models:
-  dbt_labs:
-    events:
-      +enabled: true
-      +materialized: view
-      base:
-        +materialized: ephemeral
-```
-
-The `+` prefix indicates these are model-specific configurations being applied at the directory level. **Bare `materialized: table` (without `+`) would not work in this context** — it gets mis-parsed as a folder named 'materialized' under nested-path semantics.
-
-Responder's bare-key YAML is the older / non-recommended form that risks breaking under nested-path semantics. **This is a real accuracy ding.** Engineer who copy-pastes the bare-key form may hit "config not applying / silent ignore" surprise.
-
-### PRECEDENCE VERDICT — responder CORRECT
-
-VERIFIED at same URL: "Model configurations are applied hierarchically... 1. Using `config()` Jinja macro within a model. 2. Using `config` resource property in a `.yml` file. 3. From the project YAML file (`dbt_project.yml`)... the most specific configuration always takes precedence."
-
-Responder's hierarchy is right: in-file `{{ config() }}` OVERRIDES folder-level dbt_project.yml. Minor Compl shave (-0.5): missed the **schema.yml `config:` intermediate layer** (full ladder is in-file config() > schema.yml config: > dbt_project.yml folder > project default).
-
-### CONTENT-GAP / FINDABILITY VERDICT — FIX-A LIGHT WARRANTED, location specified below
-
-**Grep evidence**:
-- `+materialized` literal in resources/ → **ZERO matches**.
-- `+`-prefix convention IS established in r27 for **adjacent configs**: `+tags` (§3861), `+pre_hook` (§2588), `+grants` (§4115), `+persist_docs` (§4163), `+schema` (§2955 + §4256).
-- But the `+`-prefix pattern is NEVER specifically anchored for **materialization** — the existing `materialized: table` references in r27 (§3431, §4330) are all in `models.<name>.config:` schema.yml-style contexts, NOT in dbt_project.yml folder-tree contexts.
-
-The responder's "not covered" hedge is **GENUINE** — this is a real findability + partial-content gap. The responder behaved correctly (hedged-not-fabricated, recommended docs verification) per the established responder-hedge-correct pattern.
-
-### Recommended FIX-A (LIGHT, 15-25 lines)
-
-**Location**: r27 §6.7 (alongside `+persist_docs` at §4148 or `+grants` at §4096) — the dbt configs / hierarchy zone where the `+`-prefix family already lives.
-
-**Title**: "dbt_project.yml folder-level default materialization + config precedence"
-
-**Contents**:
-1. Copy-pasteable dbt_project.yml `models:` tree using `+materialized: view` for staging, `+materialized: table` for marts, `+materialized: incremental` for facts (with explicit project-name root):
-   ```yaml
-   models:
-     my_project:
-       staging:
-         +materialized: view
-       marts:
-         +materialized: table
-       marts:
-         facts:
-           +materialized: incremental
-   ```
-2. Explicit "**the `+` prefix is REQUIRED**" callout + WHY (disambiguation from subdirectory names; bare `materialized:` mis-parses as a folder).
-3. 4-level precedence ladder: in-file `{{ config() }}` > schema.yml `config:` > dbt_project.yml nested-deepest > project default. Verified vs [docs.getdbt.com/reference/model-configs](https://docs.getdbt.com/reference/model-configs).
-4. Worked example: folder default `+materialized: incremental` overridden by `{{ config(materialized='table') }}` for `dim_customers.sql` — engineer's exact case from the question.
-5. DO-NOT-WRITE: bare `materialized: table` under nested folder keys (silent-ignore surprise).
-
-**Scores**: Acc 3.0 / Clar 4.5 / Prac 3.5 / Compl 2.75.
-
-**Topic delta**: Oracle PL/SQL → dbt+Trino migration 4.5123/246 → 4.5079/247 PASSED (-0.0044, margin +1.0079).
-
-**NEW SOFT WATCH `iter1278-Q3 dbt_project.yml +materialized folder-level canonical + precedence ladder FIX-A reach-test`**: re-probe in 2-4 iters under varied folder-level-default framings to confirm FIX-A landed and `+`-prefix form lands without bare-key regression.
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Q4 — Oracle SUBSTR(s,-5) negative index → Trino: **4.9375 STRONG PASS — assumed-absence CORRECT this time**
+## Q3 — dbt seeds (200-row CSV reference data)
 
-Responder: "Trino SUBSTR supports negative indices EXACTLY like Oracle — no rewrite. SUBSTR(s,-5)=last 5 chars; SUBSTR('HelloWorld',-5)='World'; SUBSTR(s,1,5)=first 5"; both 1-indexed (pos 1 = first char); negative start counts from end; "**NO RIGHT()/LEFT() in Trino** — use SUBSTR(s,-n) / SUBSTR(s,1,n)"; optional length param.
+**Score: 5.0 / 4.75 / 5.0 / 4.75 = 4.875**
 
-**VERIFIED** via WebFetch of [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html):
-- (a) Negative start position: "A negative starting position is interpreted as being relative to the end of the string" verbatim — applies to both `substr` and `substring`, both 1-arg and 2-arg variants. Oracle parity confirmed.
-- (b) **LEFT() / RIGHT() — NEITHER listed in Trino 467 string-functions list**. The assumed-absence claim holds. This is the **rare correct assumed-absence call** — historical responder pattern has been to FALSELY claim absence for funcs that ARE in Trino (starts_with, to_char, listagg, array_sum, format_number, migrate, LATERAL — 8th+ instances per memory pins); here the absence is genuine. Engineer can confidently ship `SUBSTR(s, -n)` as the canonical "last N chars" Trino form.
-- (c) 1-based indexing standard Trino behavior — confirmed.
+All load-bearing claims VERIFIED via [docs.getdbt.com/docs/build/seeds](https://docs.getdbt.com/docs/build/seeds) + [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build):
+- (a) **Default seeds directory `seeds/` since dbt 1.0** — VERIFIED (configurable via `seed-paths` in dbt_project.yml; responder correctly noted "data/ is outdated");
+- (b) **`{{ ref('country_regions') }}` referencing by BASENAME without `.csv` extension** — VERIFIED;
+- (c) **`dbt seed` loads/creates the table** — VERIFIED;
+- (d) **`+column_types` config under `seeds:` in dbt_project.yml** — VERIFIED;
+- (e) **`dbt build` includes seeds; `dbt run` does NOT include seeds** — VERIFIED verbatim per docs: "`dbt build` will run models, test tests, snapshot snapshots, seed seeds, build user-defined functions"; "`dbt run` only runs models. To load seed files, you need to use the separate `dbt seed` command."
 
-**Minor Compl shave (-0.25)**: didn't mention `SUBSTR(s, -n, len)` negative-start + length combo also works (e.g., `SUBSTR(s, -5, 3)` = 3 chars starting 5 from end). Engineer's Oracle migration corner cases not all covered.
+**Use-case framing** ("infrequently-changing reference data") correct — matches docs guidance.
 
-**Scores**: Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.
+Minor Compl shave (-0.25): didn't mention the on-prem-stack practical detail that CSV gets created as a Trino+Iceberg TABLE (not just a view) via the dbt-trino adapter — engineer might wonder "where does the table live physically." Recall ceiling, not load-bearing.
 
----
-
-## Answers to the explicit verification asks
-
-**(1) Q1 — Scheduled-vs-CPU = I/O-wait interpretation accuracy?** **IMPRECISE, not factually wrong.** The precise Trino I/O-wait metric is **`Blocked` time** (specifically the `Blocked: Input` per-fragment split, e.g., `Blocked 46.21s (Input: 23.06s, Output: 0.00ns)`). The Scheduled-CPU gap is a coarser proxy that ALSO captures CPU-queue waits / lock contention / GC pauses, not exclusively I/O wait. Responder's framing is directionally right (gap = waiting, not compute) but skips the canonical Blocked-Input route. -0.5 Acc shave applied; pattern recurring across iter1258/iter1273/iter1278 (3 instances) — NEW SOFT WATCH set, NOT urgent enough to FIX-A on its own yet.
-
-**(2) Q3 — is `+materialized` prefix REQUIRED (and is there a genuine CONTENT GAP)?**
-
-(a) **YES, `+` prefix is REQUIRED** per WebFetch of [docs.getdbt.com/reference/model-configs](https://docs.getdbt.com/reference/model-configs): canonical shows `+materialized: view` (not bare). Bare-key at folder-tree level is mis-parsed as a folder name. Responder's bare-key YAML is an ACCURACY DING.
-
-(b) **PRECEDENCE — responder CORRECT**: in-file `{{ config() }}` OVERRIDES folder-level dbt_project.yml ("most specific configuration always takes precedence" verbatim from docs). Minor compl ding: missed the schema.yml `config:` intermediate layer in the full 4-level ladder.
-
-(c) **CONTENT GAP — GENUINE, FIX-A LIGHT WARRANTED**: grep of resources/ shows ZERO `+materialized` literals; the `+`-prefix convention is established in r27 for `+tags`/`+pre_hook`/`+grants`/`+persist_docs`/`+schema` but NEVER for materialization specifically. Recommended location: r27 §6.7 (alongside §6.7J `+persist_docs` at §4148), 15-25 line canonical with `+materialized` folder-tree example + "the `+` prefix is REQUIRED" callout + 4-level precedence ladder + worked override example. See Q3 section above for full FIX-A scope.
-
-**(3) Q4 — Trino SUBSTR negative + LEFT/RIGHT?** **BOTH responder claims CORRECT.**
-(a) Trino 467 SUBSTR supports negative start position (counts from end of string) per [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html): "A negative starting position is interpreted as being relative to the end of the string" verbatim. Oracle migration zero-rewrite confirmed.
-(b) NO LEFT() / RIGHT() in Trino 467 (assumed-absence holds this time — rare correct call in a historically-wrong-direction family).
-(c) 1-based indexing confirmed.
-
-**(4) New watches / recommended FIX-A**:
-- **NEW SOFT WATCH `iter1278-Q1 Scheduled-vs-CPU-as-I/O-wait imprecision`** (re-probe 4-8 iters; LIGHT FIX-A if recurs to add Blocked-Input canonical at r28).
-- **NEW SOFT WATCH `iter1278-Q3 dbt_project.yml +materialized folder-level canonical + precedence ladder FIX-A reach-test`** (re-probe 2-4 iters after FIX-A lands).
-- **RECOMMENDED FIX-A LIGHT (this iter)**: r27 §6.7, 15-25 line canonical for dbt_project.yml folder-level `+materialized` + 4-level precedence ladder (scope detailed in Q3 section).
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Topic deltas this iteration
+## Q4 — Oracle SYSDATE/SYSTIMESTAMP → Trino
 
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| Query performance basics (Q1) | 4.1639/43 | 4.1701/44 | +0.0062 (REMAINS THINNEST) |
-| SQL best practices OLAP (Q2 + Q4) | 4.5885/298 | 4.5906/300 | +0.0021 net |
-| Oracle PL/SQL → dbt+Trino (Q3) | 4.5123/246 | 4.5079/247 | -0.0044 |
+**Score: 4.75 / 4.75 / 4.5 / 3.75 = 4.4375**
 
-Continuous PASS streak intact (margins +0.67 / +1.09 / +1.01 well above 3.5 threshold). No critical regressions. Q3 -0.0044 drag is the first sub-4.0 single-Q score in many iterations; FIX-A LIGHT recommended to restore on next sweep.
+**Technical content all VERIFIED**:
+- (a) `SYSDATE` → `current_timestamp` (if time needed) OR `current_date` (date only); Oracle SYSDATE quirk noted (returns DATE with time component; Trino `current_date` is date-only without time) — CORRECT;
+- (b) `SYSTIMESTAMP` → `current_timestamp` (both timestamp WITH TIME ZONE) — VERIFIED at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): "`current_timestamp` ... Returns the current timestamp with time zone as of the start of the query, with 3 digits of subsecond precision";
+- (c) CAST gotcha (`CAST(current_date AS timestamp)` = midnight, not now) — CORRECT;
+- (d) **`SET TIME ZONE` is a dedicated Trino statement, NOT a SET SESSION property** — VERIFIED via [trino.io/docs/467/sql/set-time-zone.html](https://trino.io/docs/467/sql/set-time-zone.html): `SET TIME ZONE LOCAL` / `SET TIME ZONE <expression>` with region-based IDs (`'America/Los_Angeles'`) or zone offsets — distinct from `SET SESSION` (general session properties).
+
+**COMPLETENESS GAP — `now()` sub-question UNANSWERED**:
+
+Engineer's prompt explicitly said: **"Postgres used NOW(); does that work in Trino?"** Responder pivoted to recommending `current_timestamp` without confirming/denying `now()`. Trino 467 **DOES** have `now()` as a documented alias for `current_timestamp` — VERIFIED at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) verbatim: "This is an alias for `current_timestamp`". An engineer migrating from Postgres reading the responder's answer might wastefully rewrite all their `NOW()` calls to `current_timestamp` when they could leave `NOW()` alone (it works identically).
+
+Classification: per-instance completeness slip on a direct sub-question; NOT a factual error (everything the responder said was accurate), NOT an imported-prior in the assumed-absence direction (8 prior assumed-absence slips were on functions Trino DOES have but the responder said it didn't — this is the milder case of "engineer asked X, responder answered with Y without addressing X"). Pattern matches `feedback_responder_broken_secondary_alternative.md` family in inverse direction (here the responder OMITTED a direct answer to a sub-question vs APPENDING a broken alternative).
+
+**No resource defect**: `now()` IS mentioned as an alias in resources (datetime function lists). Responder findability slip on the explicit "does X work" sub-question, not content gap. **NO FIX-A this iter** per `feedback_responder_overwarning_folklore.md` + `feedback_responder_broken_secondary_alternative.md` scope-as-per-instance-don't-churn guidance.
+
+**NEW SOFT WATCH `iter1279-Q4 Trino-now()-as-alias-not-explicitly-confirmed`**: re-probe within 4-8 iters under "does NOW() / sysdate / Postgres NOW migration" framings; if 2+ recurrences with omission, escalate to LIGHT FIX-A adding a "Trino HAS now() (alias for current_timestamp); Postgres NOW() ports 1:1, no rewrite needed" routing card to r27 Oracle/Postgres date migration section.
+
+Minor Acc shave (-0.25) for the omission impacting interpretation; minor Prac shave (-0.5) because engineer migrating from Postgres has an unanswered question that affects their migration audit; major Compl shave (-1.25) for the explicit sub-question.
+
+No imported-prior in the assumed-absence direction, no broken-secondary, no over-warning, no fabrication.
+
+---
+
+## Summary
+
+**1. Q1 — §6.7O `+materialized` FIX-A REACHED + iter1278-Q3 watch CLOSES?**
+**YES.** Reach-test passed cleanly on 1st re-probe. The +prefix-REQUIRED callout, the 4-level precedence ladder, and the in-file-config-overrides-folder answer all reproduced verbatim from the FIX-A. Responder cited §6.7O. iter1278-Q3 watch CLOSES POSITIVELY.
+
+**2. Q2 — Is `SUM(SUM(x)) OVER ()` valid Trino for percent-of-total?**
+**YES.** Standard SQL nested-aggregate-window pattern: inner SUM consumed by GROUP BY plan_name produces per-group totals; outer SUM()OVER() with empty window sums those per-group totals into a grand total per row. Valid Trino 467 SQL, no CTE required. Responder's `ROUND(100.0 * ... / ..., 2)` form is the canonical percent-of-total idiom.
+
+**3. Q3 seeds + Q4 SYSDATE/SYSTIMESTAMP accuracy (incl. now() completeness flag)?**
+- **Q3 seeds**: ALL claims VERIFIED against docs.getdbt.com (seeds/ default since 1.0, ref('basename'), dbt seed loads, dbt build includes seeds, dbt run does NOT, +column_types). Clean.
+- **Q4 SYSDATE/SYSTIMESTAMP**: Technical content all accurate. SET TIME ZONE confirmed as a real Trino statement (NOT SET SESSION). **MINOR COMPLETENESS GAP**: engineer explicitly asked "does NOW() work in Trino?" — Trino 467 HAS now() as alias for current_timestamp (verified at trino.io/docs/467/functions/datetime.html), responder didn't confirm/deny. Per-instance slip, not resource defect, not an assumed-absence imported-prior.
+
+**4. New watches**:
+- **NEW SOFT WATCH `iter1279-Q4 Trino-now()-as-alias-not-explicitly-confirmed`**: re-probe 4-8 iters under "does NOW() work / Postgres NOW() migration / sysdate equivalent" framings; if 2+ recurrences with the now() sub-question unanswered, LIGHT FIX-A adding "Trino HAS now() as alias for current_timestamp; Postgres NOW() ports 1:1, no rewrite needed" routing card to r27 Postgres/Oracle date-migration section.
+
+**Watches closed**:
+- **iter1278-Q3 dbt_project.yml `+materialized` §6.7O FIX-A reach-test** → CLOSES POSITIVELY on 1st re-probe.
+
+**Watches carried (no probes this iter)**:
+- iter1278-Q1 Scheduled-vs-CPU-as-I/O-wait imprecision (route to Blocked: Input) — re-probe under query-perf-basics framings in 3-7 more iters.
+
+---
+
+## Per-topic rubric updates
+
+- **Q1 → "Improving complex SQL performance on Trino with dbt" (row 650, 4.4775/83)**: (4.4775·83 + 4.9375)/84 = 376.4700/84 = **4.4818/84** (+0.0043, margin +0.9818).
+- **Q2 → "Analytical query patterns on Iceberg+Trino" (row 117, 4.4814/203)**: (4.4814·203 + 4.9375)/204 = 914.6617/204 = **4.4836/204** (+0.0022, margin +0.9836).
+- **Q3 → "Improving complex SQL performance on Trino with dbt" (combined with Q1)**: (4.4775·83 + 4.9375 + 4.875)/85 = 381.3450/85 = **4.4864/85** (+0.0089, margin +0.9864).
+- **Q4 → "Oracle PL/SQL → dbt + Trino" (row 489, 4.5079/247)**: (4.5079·247 + 4.4375)/248 = 1117.8888/248 = **4.5076/248** (-0.0003, margin +1.0076).
+
+All topics remain comfortably above 3.5 pass threshold. Query-perf-basics row 49 untouched this iter (no Q1-shaped EXPLAIN-ANALYZE re-probe).
