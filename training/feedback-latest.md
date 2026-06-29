@@ -1,142 +1,167 @@
-# Iter 1264 — Judge Feedback
+# Judge Feedback — Iteration 1265
 
-**Iter average: 4.5625 PASS** (above 3.5 threshold by +1.0625).
-**Per-question:** Q1 4.875 / Q2 4.875 / Q3 3.5 / Q4 5.0.
-**Pattern:** iter1263 r10 §487 NULL-partition FIX-A REACHED CLEANLY on Q1 first re-probe; **one LIGHT FIX-A recommended** on r09 §476 hard_deletes block to add a dbt-trino-adapter-support hedge (Q3 over-confident answer to an engineer who EXPLICITLY asked "be precise whether the native feature works on dbt-trino").
+## Overall verdict
 
----
+**4.8438 STRONG PASS NO-OP** — all four answers verified accurate against authoritative sources; iter1264 r09 §476/§478 hard_deletes-dbt-trino-adapter-caveat LIGHT FIX-A REACHED CLEANLY on first re-probe; **WATCH CLOSES**. No new watches, no new FIX-A.
 
-## Q1 — Iceberg `WHERE region IS NULL` pruning on identity-partitioned column [4.875]
+| Q | Topic | Acc | Clar | Prac | Compl | Avg |
+|---|---|---|---|---|---|---|
+| Q1 hard_deletes RE-PROBE | dbt snapshots SCD2 | 5.0 | 4.5 | 5.0 | 4.75 | **4.8125** |
+| Q2 Iceberg time-travel | Iceberg table maintenance | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
+| Q3 SEQUENCE+UNNEST date-spine | Analytical query patterns Iceberg+Trino | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
+| Q4 ADD_MONTHS→date_add | Oracle PL/SQL→dbt+Trino migration | 4.5 | 4.75 | 5.0 | 5.0 | **4.8125** |
 
-**Dimensions:** Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 5.0
-
-**Status:** iter1263 r10 §487 NULL-partition FIX-A **REACHED CLEANLY on first re-probe**. WATCH CLOSES.
-
-The responder debunked the teammate's myth correctly and diagnosed the real cause:
-- "Iceberg puts ALL rows with NULL into ONE dedicated partition; `identity(NULL)=NULL` is a single partition tuple"
-- "`WHERE region IS NULL` DOES prune to the null partition (manifest `contains_null` flag, first-class prunable)"
-- "Slow because of DATA SKEW (65% region=NULL = majority), not pruning failure — reading the null partition ≈ reading 65% of the table"
-- Verification path: `SELECT partition, record_count FROM tbl$partitions` to confirm null partition holds the bulk
-- Fixes: (a) sentinel `'free'` backfill + sub-partition by day, (b) add `day(occurred_at)` second transform so IS NULL still prunes by date, (c) `EXECUTE optimize` if small-files, (d) accept that count(*) over the majority IS a large scan
-
-**Verified against:**
-- [Apache Iceberg Table Spec](https://iceberg.apache.org/spec/) — manifest list `contains_null` partition summary field IS real; identity-transform NULL stored as nullable union in partition struct; `null_value_counts` per-column in data_file metrics; verified the spec supports the responder's mental model.
-- r10 §487 NULL-values-on-a-partition-column canonical (iter1263 FIX-A) — responder cited it; the cross-ref to r18 §90 temporal-unwrap pruning is intact; the imported-prior Postgres/Oracle sargability defang IS in the canonical.
-
-**Minor Clar shave (−0.5):** "skew" terminology assumed; a one-sentence "the null partition LEGITIMATELY contains most of the table because free-tier is the majority — pruning works but reading 65% of the table is inherently slow" would zero-assumption it. Not load-bearing.
-
-**iter1263 Q1 NULL-partition-prune WATCH CLOSES.** Responder routed cleanly to the new r10 §487 canonical, debunked the teammate myth verbatim, diagnosed skew not pruning failure, gave four production-applicable fixes. No FIX-A.
+Iteration average **4.8438** — STRONG PASS band (>4.5).
 
 ---
 
-## Q2 — Oracle SUM(CASE WHEN x='starter' THEN 1 ELSE 0 END) → Trino [4.875]
+## Per-question detail
 
-**Dimensions:** Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.5
+### Q1 — dbt-trino hard_deletes RE-PROBE (4.8125, iter1264 WATCH CLOSES)
 
-The responder gave the correct cleanup:
-- `SUM(CASE WHEN plan_type='starter' THEN 1 ELSE 0 END) AS starter_count` works in Trino 467 (cross-dialect compatible)
-- Cleaner Trino native: `count_if(plan_type='starter') AS starter_count`
-- Both one-pass, no self-join
-- `count_if(x)→bigint` returns 0 when no matching rows (zero-group-safe)
+The iter1264 LIGHT FIX-A landed at r09 §476/§478 (adapter-caveat hedge + smoke-test prescription + reconciliation anti-join fallback) — this iter the responder lifted it cleanly:
 
-**Verified against:**
-- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) `count_if()` signature: "Returns the number of TRUE input values. This function is equivalent to `count(CASE WHEN x THEN 1 END)`." Both NULL and FALSE are ignored. **Confirms responder's claim verbatim.**
+- **"NOT supported on dbt-trino"** lead — the exact precision the engineer literally asked for. No more iter1264 over-confident "YES native works."
+- Smoke-test concrete prescription: tiny throwaway snapshot model, delete one source row, dbt snapshot, check whether dbt_valid_to gets stamped / dbt_is_deleted column appears.
+- Reconciliation macro fallback `UPDATE {{ this }} SET dbt_valid_to = current_timestamp WHERE dbt_valid_to IS NULL AND NOT EXISTS (SELECT 1 FROM source WHERE src.id = snap.id)` — valid Trino 467 Iceberg dialect (Iceberg connector natively supports UPDATE w/ correlated NOT EXISTS).
+- Correct disclosure that reconciliation-stamped deletion timestamp ≠ exact Oracle DELETE time (just the dbt run time).
 
-**Minor Compl shave (−0.5):** could have surfaced `count(*) FILTER (WHERE plan_type='starter')` as a third equivalent Trino 467 form (SQL standard, also one-pass). Recall ceiling, not load-bearing.
+**Verified this iter via WebFetch [docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes)**: supported adapter list is verbatim `dbt-postgres / dbt-bigquery / dbt-snowflake / dbt-redshift` — dbt-trino NOT listed. dbt 1.9+ requirement confirmed. Three values ignore/invalidate/new_record confirmed.
 
-No defect, no FIX-A. Clean Oracle→Trino canonical reach.
+**iter1264 r09 §476 hard_deletes-dbt-trino-adapter-caveat WATCH CLOSES on first re-probe** (29th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern). The reconcile-in-place placement landed at the exact spot the responder reaches when matching "does X dbt feature work on this stack" keywords.
+
+Reconciliation macro is technically valid (Trino 467 Iceberg connector data-management section lists UPDATE among supported write operations — verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)).
+
+Minor shaves:
+- Clar -0.5: dbt run-operation + Jinja `{{ this }}` syntax assumes intermediate dbt familiarity (not zero-knowledge).
+- Compl -0.25: didn't say "also try hard_deletes='invalidate' in the smoke-test — same adapter gate, same no-op result"; not load-bearing since the smoke-test result is identical.
+
+### Q2 — Iceberg snapshot history + time-travel + diff + rollback (4.875)
+
+Full snapshot-discover/time-travel/diff/rollback workflow canonical, all five load-bearing facts verified:
+
+1. `"fact_subscription_events$snapshots"` whole-token quote (split-quote parse-error correctly defanged).
+2. `FOR VERSION AS OF <bigint>` for snapshot_id; quoted-string form for branch/tag named-reference.
+3. `FOR TIMESTAMP AS OF TIMESTAMP '... UTC'` for wall-clock.
+4. `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` are disjoint — cannot be combined in same FROM clause.
+5. `CALL iceberg.system.rollback_to_snapshot('analytics', 'fact_subscription_events', <bigint>)` 3-positional CALL form (NOT the 469+ `ALTER TABLE EXECUTE rollback_to_snapshot` form per pinned `reference_trino_rollback_snapshot_form.md`).
+
+FULL OUTER JOIN pre vs post on natural key (user_id, subscription_date) + `IS DISTINCT FROM` filter to surface diverged rows is the textbook diff pattern.
+
+Verified via WebFetch [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) this iter: all five facts confirmed verbatim.
+
+Minor Clar shave (-0.25): "disjoint" set-theory framing slightly assumes; a one-sentence "you cannot write FOR VERSION AS OF 123 FOR TIMESTAMP AS OF ... in the same FROM" would zero-knowledge it. Workflow lands cleanly without it.
+
+### Q3 — SEQUENCE+UNNEST date-spine for DAU gap-day zero-fill (4.875)
+
+Pin-perfect canonical:
+
+```sql
+SELECT spine.day, COALESCE(d.distinct_users, 0) AS dau
+FROM UNNEST(SEQUENCE(DATE '2026-01-01', current_date, INTERVAL '1' DAY)) AS spine(day)
+LEFT JOIN (SELECT DATE(event_time) AS day, COUNT(DISTINCT user_id) AS distinct_users
+           FROM events WHERE event_time >= TIMESTAMP '2026-01-01 00:00:00'
+           GROUP BY DATE(event_time)) d
+  ON spine.day = d.day
+ORDER BY spine.day
+```
+
+All facts verified via WebFetch [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html):
+- SEQUENCE both bounds INCLUSIVE (Postgres generate_series excludes upper);
+- INTERVAL step accepted (`INTERVAL DAY TO SECOND` or `INTERVAL YEAR TO MONTH`);
+- Trino has NO generate_series — Postgres-only;
+- UNNEST array → rows with `AS spine(day)` alias.
+
+Integer-sequence alt (`UNNEST(SEQUENCE(0,29)) + date_add('day',n,...)`) presented as bonus for fixed-N offsets.
+
+Minor Compl shave (-0.25): didn't mention SEQUENCE default ~10000 element cap (a multi-year daily spine could brush it; ~6 months YTD is well under).
+
+### Q4 — Oracle ADD_MONTHS vs Trino date_add('month') end-of-month divergence (4.8125)
+
+All key facts correct, consistent with iter1243 Q4 ADD_MONTHS precedent (5.0):
+
+- `date_add('month', n, dt)` ≡ `dt + INTERVAL 'n' MONTH` in Trino (equivalent forms).
+- Both DIFFER from Oracle ADD_MONTHS on end-of-month: Oracle SNAPS last-day-in → last-day-out; Trino preserves day-number with clamp-on-overflow.
+- Walk-through verified: Feb 28 +1 → Oracle 2026-03-31 / Trino 2026-03-28 (silent mismatch); Jan 31 +1 → both 2026-02-28 (match coincidentally because Feb has no 31); Jan 15 +1 → both 2026-02-15 (mid-month, no edge).
+- Wrapper logic correct: `CASE WHEN dt = last_day_of_month(dt) THEN last_day_of_month(date_add('month', 12, dt)) ELSE date_add('month', 12, dt) END`.
+- `last_day_of_month()` IS native Trino 467; `end_of_month()` does NOT exist; ADD_MONTHS Oracle-only.
+- Bonus MONTHS_BETWEEN: `date_diff('month',a,b)` integer day-aware (per pinned `reference_trino_datediff_dayaware.md`); fractional approx via `date_diff('day',a,b)/31.0` matches Oracle's documented 31-day-month formula.
+
+Verified via WebFetch [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): ADD_MONTHS absent; `last_day_of_month(date)` present; example `timestamp '2012-10-31 01:00' + interval '1' month → 2012-11-30 01:00` confirms day-number-preserve-with-clamp (NOT Oracle end-of-month snap).
+
+Minor Acc shave (-0.5): the parenthetical "end_of_month() does NOT exist (Spark/BQ/Snowflake)" misattributes naming — Spark uses `last_day()`, BigQuery/Snowflake `LAST_DAY()`, only MSSQL has `EOMONTH()`. Non-load-bearing on cross-dialect aside; actionable Trino info `use last_day_of_month` is correct.
+
+Minor Compl shave (-0.25): didn't surface Feb 29 leap-year ADD_MONTHS edge (2024-02-29 +12mo → 2025-02-28 on both Trino and Oracle by clamp — coincidental match); engineer may have already seen this since they said "works for most cases."
 
 ---
 
-## Q3 — dbt snapshot timestamp strategy on Oracle customers / source HARD DELETE handling [3.5]
+## Status checklist (requested)
 
-**Dimensions:** Acc 3.5 / Clar 4.5 / Prac 3.0 / Compl 3.0
+### (1) Does the iter1264 hard_deletes-dbt-trino-adapter-caveat watch CLOSE?
 
-**THE KEY VERIFY:** The engineer EXPLICITLY asked "be precise whether the native feature works on dbt-trino." The responder gave a confident **"YES native works"** WITHOUT addressing the dbt-trino adapter caveat.
+**YES — CLOSES CLEANLY on first re-probe.**
 
-**What's mechanically correct (factual accuracy partial credit):**
-- `hard_deletes='new_record'` config replaces legacy `invalidate_hard_deletes=true` boolean in dbt 1.9+ — correct
-- Three values: `ignore` (default), `invalidate` (closes validity window, no marker), `new_record` (inserts deleted-marker row with `dbt_is_deleted='True'`) — verified verbatim at [docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes)
-- `dbt_is_deleted` is VARCHAR `'True'`/`'False'` not boolean — correct, verified at docs.getdbt.com
-- Deletion timestamp = when dbt OBSERVED missing not exact Oracle DELETE time — correct (snapshot-cadence-limited)
-- Pre-existing snapshot needs `--full-refresh` to add `dbt_is_deleted` column — correct
+The iter1264 LIGHT FIX-A (r09 §476/§478 dbt-trino-adapter-caveat hedge + smoke-test prescription + reconciliation anti-join fallback) REACHED this iter:
 
-**What's missing — the dbt-trino adapter-support hedge the engineer literally asked for:**
+- Responder no longer gives unqualified "YES native works" (the iter1264 over-confidence).
+- Explicit lead: "NOT supported on dbt-trino" — postgres/bigquery/snowflake/redshift only.
+- Smoke-test prescription concrete (throwaway snapshot, delete one row, dbt snapshot, observe).
+- Fallback macro provided (UPDATE snapshot SET dbt_valid_to ... NOT EXISTS source) — valid Trino 467 Iceberg dialect.
+- CHANGELOG silence cited.
 
-Verified this iter via **[docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes)** (WebFetched) + **[dbt-trino CHANGELOG.md](https://github.com/starburstdata/dbt-trino/blob/master/CHANGELOG.md)** (WebFetched) + WebSearch on GitHub issues:
+The fix landed at the EXACT spot the responder reached when matching "is X supported on dbt-trino" keywords. 29th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern.
 
-| Source | Verdict |
-|---|---|
-| docs.getdbt.com/reference/resource-configs/hard-deletes "Supported adapters" | Lists ONLY `dbt-postgres`, `dbt-bigquery`, `dbt-snowflake`, `dbt-redshift`. **dbt-trino is NOT in the list.** |
-| dbt-trino CHANGELOG (Starburst, current v1.10.2) | **NO mention** of `hard_deletes`, `invalidate_hard_deletes`, or snapshot hard-delete support. |
-| dbt-core issue #10235 (hard_deletes feature design), #11269 (bug check-strategy), #2819 (re-instate hard-deletes) | dbt-core issues; no dbt-trino-specific implementation issue/PR found. |
+### (2) Any errors
 
-**Verdict on the responder's confidence: OVER-CONFIDENT.** On a production stack that is explicitly dbt-trino (per `prod_info.md` Transformation row), and on an engineer who explicitly asked for precision on dbt-trino, an unqualified "YES native works" is wrong by completeness/practical-applicability — the engineer will ship this into their dbt-trino setup and potentially hit a silent-no-op or compile-time error.
+**No load-bearing errors.** Three minor shaves only:
 
-**The accurate answer must hedge:**
-> "dbt 1.9+ adds the `hard_deletes='new_record' | 'invalidate' | 'ignore'` config natively, BUT the docs.getdbt.com supported-adapters list enumerates only dbt-postgres / dbt-bigquery / dbt-snowflake / dbt-redshift. **dbt-trino is NOT in the listed adapters**, and the dbt-trino CHANGELOG (current v1.10.2) does not mention adding hard_deletes support. So: run a smoke test on your dbt-trino version first; if the config is silently ignored or errors, fall back to a reconciliation model — anti-join `SELECT id FROM source` against `SELECT id FROM snapshot WHERE dbt_valid_to IS NULL` and stamp `deleted_at` on the missing ids."
+- **Q1 Compl**: didn't explicitly call out that `invalidate` value behaves identically (same adapter gate); smoke-test outcome unchanged so not load-bearing.
+- **Q2 Clar**: "disjoint" set-theory framing slightly assumes vocabulary; a concrete "cannot combine both clauses in same FROM" sentence would zero-knowledge it.
+- **Q4 Acc**: parenthetical "(Spark/BQ/Snowflake)" misattributes which dialects use `end_of_month` (none of those three actually do — they use `last_day`/`LAST_DAY`; only MSSQL has `EOMONTH`). Cross-dialect-aside slip, not load-bearing for the asked Trino routing.
 
-**Resource-source check — RESOURCE DEFECT.** r09 §476 hard_deletes block (verified this iter, lines 476–514) covers the three-value table, the mechanics, the dbt 1.9+ requirement, the VARCHAR 'True'/'False' gotcha, and `--full-refresh` migration — but does **NOT** mention the dbt-trino adapter caveat. On a stack where dbt-trino is THE adapter, this is a load-bearing omission. The iter1260 judge flagged the same caveat as a "production-stack adapter-support nuance" but the iter1260 fix targeted r28/r27 incremental-routing findability (a different angle); r09's hard_deletes block was untouched.
+Q1 reconciliation macro (`UPDATE snapshot SET dbt_valid_to = current_timestamp WHERE ... AND NOT EXISTS (SELECT 1 FROM source ...)`) is **valid Trino 467 Iceberg dialect** — Iceberg connector natively supports UPDATE with WHERE+NOT EXISTS subquery per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) data-management section (verified this iter). No correction needed. (Note: Hive connector would gate this on ACID per pinned `reference_trino_hive_merge_delete_acid_gate.md`, but the stack is Iceberg per prod_info.md.)
 
-**This is the SECOND occurrence of the same gap under DIFFERENT framing** (iter1260 was the "incremental can't catch source-hard-deletes / how" framing where the responder didn't reach hard_deletes at all; this iter is the "is hard_deletes native + precise on dbt-trino" framing where the responder reaches the feature but skips the caveat). **LIGHT FIX-A warranted.**
+### (3) Any new watches / FIX-A
 
-**RECOMMENDED LIGHT FIX-A — r09 §476 hard_deletes block:** Add a "dbt-trino adapter caveat" hedge note inside the existing canonical, BEFORE the three-value table:
+**NONE.** No new watches, no new FIX-A required.
 
-> **dbt-trino adapter caveat — verify before relying.** The [docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes) "Supported adapters" section explicitly enumerates only **dbt-postgres / dbt-bigquery / dbt-snowflake / dbt-redshift** — **dbt-trino is not in the listed adapters**, and the [dbt-trino CHANGELOG](https://github.com/starburstdata/dbt-trino/blob/master/CHANGELOG.md) (as of v1.10.2) does not mention adding `hard_deletes` support. The legacy `invalidate_hard_deletes=true` boolean (dbt ≤1.8) may work via the default snapshot macro on dbt-trino, but is not guaranteed either. **On dbt-trino, run a smoke test on a tiny snapshot first** (drop a row from a 5-row source, run `dbt snapshot`, verify dbt_valid_to is stamped or a `dbt_is_deleted=True` row appears in the target). If the config is silently ignored or errors, **fall back to a reconciliation model**: anti-join `SELECT id FROM {{ source(...) }}` against `SELECT id FROM {{ ref('snap') }} WHERE dbt_valid_to IS NULL`, stamp `deleted_at = current_timestamp` on the missing IDs, and `UPDATE ... SET dbt_valid_to = deleted_at` (or insert a marker row mirroring the new_record shape).
-
-Watch label to track: `iter1264 Q3 hard_deletes-dbt-trino-adapter-support-hedge r09 §476 LIGHT FIX-A` — re-probe under "hard_deletes precise dbt-trino" / "does invalidate work on dbt-trino" / "GDPR delete handling dbt-trino" framings 4–8 iters.
-
----
-
-## Q4 — Oracle SUBSTR(product_code, 1, INSTR(product_code,'-')-1) → Trino [5.0]
-
-**Dimensions:** Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0
-
-The responder nailed every load-bearing fact:
-- `substr(product_code, 1, strpos(product_code,'-')-1)` works directly in arithmetic — correct
-- `strpos` returns 0 if not found (same as INSTR) — verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) verbatim "If not found, `0` is returned."
-- `substr` with length ≤ 0 returns EMPTY STRING `''` (safe, no error) — verified via raw [Trino 467 StringFunctions.java](https://raw.githubusercontent.com/trinodb/trino/467/core/trino-main/src/main/java/io/trino/operator/scalar/StringFunctions.java) source: `if (start == 0 || (length <= 0) || (utf8.length() == 0)) { return Slices.EMPTY_SLICE; }` — exact match
-- `substr(NULL, ...)` returns NULL — correct
-- Behavior table Oracle→Trino — clean
-- `split_part(product_code,'-',1)` as a cleaner cross-ref idiom — correct (returns the full string when delimiter not found, no `-1` arithmetic needed); the cross-ref is the right secondary
-
-Closes iter1257 Q4 strpos-arithmetic watch cleanly. No imported-prior slip, no broken-secondary, no over-warning. Clean 5.0.
+- Q1 closes the iter1264 watch on first re-probe — no follow-up needed.
+- Q2/Q3/Q4 are all clean canonical reaches; no resource defects surfaced.
+- Q4 parenthetical naming slip is a per-instance one-off (responder synthesis aside, not resource-sourced — r27/r23 datetime cross-engine sections teach `last_day_of_month` correctly without misattributing other engines).
+- Per `feedback_synthesis_ceiling_stop_churning.md` + `feedback_new_card_over_attracts_adjacent.md`: no churn on first-instance variances against already-correct resources.
 
 ---
 
 ## Topic score updates
 
-| Topic | Before | This iter contribution | After |
-|---|---|---|---|
-| Iceberg partition design for SaaS: strategies, small-files, compaction | 4.3992 / 66 | Q1 = 4.875 | **4.4063 / 67 PASSED** (+0.0071, margin +0.9063) |
-| Oracle PL/SQL procedure → dbt + Trino SQL migration | 4.4893 / 231 | Q2 = 4.875, Q4 = 5.0 | **4.4931 / 233 PASSED** (+0.0038, margin +0.9931) |
-| dbt snapshots SCD2 | 4.2211 / 28 | Q3 = 3.5 | **4.1962 / 29 PASSED** (−0.0249, margin +0.6962, THINNEST near-bottom passing topic) |
+| Topic | Prior | Post | Δ | Margin |
+|---|---|---|---|---|
+| dbt snapshots SCD2 | 4.1962 / 29 | **4.2168 / 30** | +0.0206 | +0.7168 |
+| Iceberg table maintenance | 4.4479 / 240 | **4.4497 / 241** | +0.0018 | +0.9497 |
+| Analytical query patterns on Iceberg+Trino | 4.5173 / 190 | **4.5192 / 191** | +0.0019 | +1.0192 |
+| Oracle PL/SQL → dbt + Trino migration | 4.4931 / 233 | **4.4945 / 234** | +0.0014 | +0.9945 |
 
-All required topics REMAIN PASSED.
-
----
-
-## Watch state
-
-**CLOSES this iter:**
-- `iter1263 Q1 Iceberg-NULL-partition-prune` — r10 §487 FIX-A REACHED CLEANLY on first re-probe; responder debunked the teammate myth verbatim + diagnosed skew + cited the canonical.
-- `iter1257 Q4 strpos-arithmetic` — this iter's Q4 is the textbook strpos-arithmetic + substr-negative-length canonical reach, with split_part cross-ref as the cleaner secondary.
-
-**NEW (this iter):**
-- `iter1264 Q3 hard_deletes-dbt-trino-adapter-support-hedge r09 §476 LIGHT FIX-A` — re-probe 4–8 iters under "hard_deletes precise dbt-trino" / "does invalidate work on dbt-trino" / "GDPR delete handling dbt-trino" framings. If 2+ recurrences post-FIX-A under different framings, escalate to BOLD callout at the head of the r09 §476 block.
-
-**Open watches (carry-forward):** iter1260 Q1 CDC-MERGE-multi-event-dedup; iter1258 Q3 SELECT-*-EXCEPT; iter1255 Q1 bloom-CREATE-syntax; iter1253 Q4 regexp_extract-2arg; iter1248 Q3 MATCH_RECOGNIZE-adjacency; iter1229 @v1-Spark; iter1230 EXISTS-overwarning; iter1215 strpos-3-arg CEILING.
+All required topics remain PASSED. dbt-snapshots-SCD2 remains the thinnest near-bottom passing topic in this band but climbed +0.0206 this iter (largest single-iter lift on that row since iter1238 +0.0315).
 
 ---
 
-## Recommendation
+## Open watches inventory
 
-**1 LIGHT FIX-A this iter** — surgical reconcile of r09 §476 hard_deletes canonical to add the dbt-trino-adapter-support hedge (verbatim block proposed above; insert BEFORE the three-value table, after the engineer-facing keyword anchors).
+**CLOSED THIS ITER:** iter1264 Q3 hard_deletes-dbt-trino-adapter-caveat (r09 §476/§478 FIX-A reached on first re-probe).
 
-Do NOT add another resource, do NOT touch the three-value mechanics table (which is correct), do NOT touch the `dbt_is_deleted` VARCHAR gotcha block (which is correct). Single hedge paragraph in the existing canonical, at the spot the responder reaches.
+**STILL OPEN** (carry forward to next iter):
+- iter1260 Q1 CDC-MERGE-multi-event-dedup
+- iter1258 Q3 SELECT-*-EXCEPT alternative-fabrication regression
+- iter1255 Q1 bloom-CREATE-TABLE-syntax slip
+- iter1253 Q4 regexp_extract-2-arg-returns-WHOLE-match misrecall
+- iter1248 Q3 MATCH_RECOGNIZE PATTERN-adjacency on funnel-with-intervening-events
+- iter1229 @v1-Spark
+- iter1215 strpos-3-arg (function-direction closing; sub-axis is worked-example arithmetic per-instance)
 
-The fix is surgical, doesn't risk over-attracting adjacent SCD-2 questions (no keyword-magnet new card), reconciles in-place (per pinned `feedback_reconcile_dont_append.md`), and answers the specific dbt-trino caveat the engineer asked for + the prod_info.md stack mandates. Should close on first re-probe (historical 1st-re-probe-CLOSE rate ~27+ consecutive iters).
+No watches escalated this iter. No new soft-watches added.
 
-**Pattern observation:** the responder is now CONSISTENTLY reaching the right native dbt feature (hard_deletes) — that's the iter1260 improvement direction. The remaining gap is the **dbt-trino adapter-support caveat the engineer literally asked for**. That's a content gap in r09, not a recall ceiling or over-warning folklore.
+---
 
-**No broken-secondary, no fabrication, no imported-prior, no over-warning this iter.** Clean iter outside of the Q3 dbt-trino-caveat omission.
+## Recommendation for next iter
+
+**BREADTH.** No outstanding LIGHT FIX-A actions; primary post-FIX-A watch closed. Probe wide on either thin rows (dbt-snapshots-SCD2 still thinnest in its band, partition-design/query-perf-basics still thinnest required-topic rows) OR fresh angles to keep coverage diverse. Training deadline 2026-06-30 23:59 CST.
