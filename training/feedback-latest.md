@@ -1,170 +1,124 @@
-# Iter 1271 — Judge Feedback
+# Iter 1272 — Judge Feedback
 
-**Overall: 3.59 BORDERLINE PASS** (Q1 2.00 / Q2 3.00 / Q3 4.625 / Q4 4.75)
+**Overall: 4.625 STRONG PASS** (Q1 4.875 / Q2 4.875 / Q3 3.875 / Q4 4.875)
 
-The pass-loop continues but this iter is the THINNEST in many sweeps because **Q1 REGRESSED on the very thing iter1255 + iter1270 had landed correctly** (parquet_bloom_filter_columns IS a valid Trino 467 CREATE TABLE property — only ALTER SET PROPERTIES is 469+). Q2 mechanism right but answered the WRONG question (longest streak vs current/most-recent streak the engineer explicitly asked for, with worked example).
-
-**Q1 verdict — RESOURCE-SOURCED REGRESSION + r17 §713/§1012 reconcile is the RIGHT fix.**
-- VERIFIED via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): canonical example shows `CREATE TABLE test_table (c1 INTEGER, c2 DATE, c3 DOUBLE) WITH (format='PARQUET', location='/var/example_tables/test_table', parquet_bloom_filter_columns = ARRAY['c1','c2'])`. **parquet_bloom_filter_columns IS in the 467 CREATE TABLE property allow-list** — verbatim docs.
-- ALTER TABLE SET PROPERTIES list in the same docs **does NOT include parquet_bloom_filter_columns** in 467 (only `format`, `format_version`, `partitioning`, `sorted_by`, `object_store_layout_enabled`, `data_location`). The ALTER form for parquet_bloom_filter_columns landed in 469+ per PR #24573.
-- Responder said "Trino 467 CANNOT set bloom filters at CREATE TABLE time. parquet_bloom_filter_columns is Trino 469+, not available on 467" — **FACTUALLY WRONG, OPPOSITE direction**. Recommended Spark `ALTER SET TBLPROPERTIES write.parquet.bloom-filter-enabled.column.key_hash` + Spark rewrite_data_files for a brand-new table where the obvious answer is one Trino `CREATE TABLE ... WITH (parquet_bloom_filter_columns=ARRAY['key_hash'])` statement.
-- Never gave the engineer the asked CREATE TABLE statement.
-- Responder cited r17 §1012-1013 — and the iter1270 state confirms r17 carried the OVER-BROAD "469+/Spark-side bloom" framing that contradicts the CORRECT r03 §474 / §469 / §563 + r18 §1251 (which say CREATE-WITH works on 467). The iter1270 r03 copy-attractor FIX-A did NOT prevent this regression because the responder pulled from r17's wrong claim, not r03 — confirming the keyword-magnet was sitting on the WRONG resource.
-- **r17 §713 + §1012 reconcile this iter is the RIGHT fix**: scoping "469+" strictly to the ALTER SET PROPERTIES form + naming CREATE-WITH-works-on-467 + cross-ref r03 §474 should close the regression loop, because the responder's chosen citation now agrees with r03/r18.
-- This is the THIRD instance of "grep ALL resources for a wrong claim" reconcile (after iter1194/1195 optimize-clears-position-deletes r28 ↔ r13 sibling, and the iter1168 migrate-is-native r21/r17 reconcile). Pinned `feedback_reconcile_dont_append.md` validated again.
-
-**Q2 verdict — LONGEST vs CURRENT MISREAD on a worked-example question. Accuracy/completeness ding.**
-- Gaps-and-islands mechanism (LAG + flag + SUM running over → streak_id, off SELECT DISTINCT activity_date) is the textbook Trino approach and is correct.
-- BUT the engineer EXPLICITLY asked for the **CURRENT/MOST-RECENT** consecutive-days streak, with the worked example **"active Mon-Wed, skip Thu, back Fri-Sat → current streak = 2"** (longest = 3). Responder framed the answer as "LONGEST streak per user" and computed `MAX(streak_len)`, which returns 3 for the example — the WRONG answer.
-- The correct final aggregation: pick the streak_id containing each user's MAX(activity_date), then COUNT(*) for that streak_id. A clean form is `SELECT user_id, COUNT(*) AS current_streak FROM streaks WHERE (user_id, streak_id) IN (SELECT user_id, MAX(streak_id) FROM streaks GROUP BY user_id) GROUP BY user_id` (streak_id is monotonically increasing within each user, so MAX(streak_id) = latest streak).
-- This is a longest-vs-current FRAMING misread on a question with an explicit worked example — the engineer's paste-and-run gets the wrong number on the very example they gave.
-
-**Q3 verdict — CLEAN PASS.** Built-in `relationships` generic test correctly named; schema.yml `data_tests: - relationships: {to: ref('customers'), field: customer_id}` shape verified against [docs.getdbt.com data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) (relationships listed among the 4 built-in generic tests; flat-form syntax still compiles though dbt 1.10+ favors `arguments:` nesting — both work). `source()` variant for raw external sources correctly mentioned. NOT EXISTS / anti-join compilation framing is the correct mental model (dbt docs don't state the exact SQL but the underlying pattern is a `SELECT child.field FROM child WHERE child.field NOT IN (SELECT field FROM parent) AND child.field IS NOT NULL` shape; zero rows = pass).
-
-**Q4 verdict — CLEAN PASS.** DECODE absent from Trino 467 confirmed via [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html). Simple CASE shorthand `CASE plan_tier WHEN 'starter' THEN 1 WHEN 'growth' THEN 2 WHEN 'enterprise' THEN 3 ELSE 0 END` is the less-verbose Trino form. NULL caveat is the load-bearing migration trap: Oracle DECODE treats NULL=NULL as match, but Trino simple-CASE uses `=` equality which returns UNKNOWN on NULL → `WHEN NULL` never fires. Correct routing to searched CASE `WHEN plan_tier IS NULL THEN ... FIRST`.
+The pass-loop recovers strongly from iter1271's borderline 3.59. **Q1 = HARD WATCH CLOSED**: the iter1271 r17 §713 + §1012 bloom-CREATE-467 reconcile FIX-A REACHED cleanly on its first re-probe — the responder now states explicitly that parquet_bloom_filter_columns works at CREATE TABLE time on 467 (the opposite-direction-correct answer vs iter1271's regression). Q2 + Q4 are pin-perfect canonical reaches with every load-bearing fact verified. **Q3 has one factual error directly answering the engineer's explicit "paid-tier gated?" sub-question**: the responder's closing "OR FREE TIERS — you need dbt 1.8+" wrongly implies dbt unit tests are gated behind a paid tier. They are NOT — unit tests are a dbt CORE feature (free, open-source) since 1.8. This is a load-bearing accuracy ding because the engineer literally asked the gating question.
 
 ---
 
 ## Per-question scores
 
-### Q1 — NEW Iceberg api_keys CREATE TABLE with parquet_bloom_filter_columns on key_hash VARCHAR
+### Q1 — Bloom filter on NEW sessions table at CREATE TABLE on Trino 467 (HARD-WATCH REACH-TEST)
 
-**Score 2.00** (Acc 1.0 / Clar 3.5 / Prac 1.5 / Compl 2.0)
+**Score 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-**REGRESSION — directly opposite-direction error to iter1255+iter1270, which both stated CREATE-with-bloom works on 467.**
+**WATCH-CLOSING REACH. iter1271 r17 §713 + §1012 reconcile FIX-A LANDED on 1st re-probe — HARD WATCH CLOSED.**
 
-The responder said "Trino 467 CANNOT set bloom filters at CREATE TABLE time. parquet_bloom_filter_columns is Trino 469+, not available on 467" — **FACTUALLY WRONG**. Then offered Spark `ALTER TABLE ... SET TBLPROPERTIES write.parquet.bloom-filter-enabled.column.key_hash = true` + Spark `rewrite_data_files`, and hedged "once cluster upgrades to 469+, set at CREATE via WITH (parquet_bloom_filter_columns=ARRAY[...])". The 469+ hedge is BACKWARDS — CREATE-with works on 467 today; only ALTER SET PROPERTIES is 469+.
+Responder: "YES you can on 467" + canonical `CREATE TABLE iceberg.analytics.sessions (session_token VARCHAR, user_id BIGINT, created_at TIMESTAMP, expires_at TIMESTAMP) WITH (parquet_bloom_filter_columns = ARRAY['session_token'])` + correct scoping of "469+" strictly to the ALTER SET PROPERTIES form + correct existing-table-on-467 fallbacks (CTAS-rebuild / Spark) + read-side `parquet.use-bloom-filter=true` default-on.
 
-**Verification:**
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) canonical example verbatim shows `CREATE TABLE test_table (c1 INTEGER, c2 DATE, c3 DOUBLE) WITH (format='PARQUET', location='/var/example_tables/test_table', parquet_bloom_filter_columns = ARRAY['c1','c2'])` — bloom WITH-clause property is FIRST-CLASS on 467 CREATE TABLE.
-- Same docs page lists modifiable-via-ALTER-SET-PROPERTIES properties as `format`, `format_version`, `partitioning`, `sorted_by`, `object_store_layout_enabled`, `data_location` — parquet_bloom_filter_columns is NOT in this list for 467 (the ALTER form is the 469+ addition per PR #24573).
+**Verification (WebFetch [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)):**
+- `parquet_bloom_filter_columns` listed verbatim in the 467 Iceberg table-properties section as a CREATE TABLE WITH clause: "Comma-separated list of columns to use for Parquet bloom filter. It improves the performance of queries using Equality and IN predicates when reading Parquet files. Requires Parquet format. Defaults to `[]`."
+- ALTER TABLE SET PROPERTIES modifiable list in 467 = `format` / `format_version` / `partitioning` / `sorted_by` / `object_store_layout_enabled` / `data_location` — `parquet_bloom_filter_columns` is NOT in this list on 467 (ALTER form is the 469+ PR #24573 addition). Responder's scoping is exactly right.
 
-**Resource-source check — RESOURCE DEFECT confirmed and r17 §713/§1012 reconcile is RIGHT fix.**
+**The iter1271 regression direction is fully inverted on this re-probe.** Three iters ago the responder said "Trino 467 CANNOT set bloom filters at CREATE TABLE time, parquet_bloom_filter_columns is 469+" and routed to a Spark fallback. This iter the responder says CREATE-WITH works on 467, gives the exact WITH clause the engineer asked for, and limits "469+" to the ALTER-existing-table form. **r17 §713/§1012 reconcile FIX-A from iter1271 hit its target on the first re-probe** — pattern matches iter1233 custom-generic-test FIX-A close, iter1198 dbt-contract-two-phase-mechanism close.
 
-The responder cited r17 §1012-1013 — which carried the OVER-BROAD "469+/Spark-side bloom write" framing inherited from iter1254. Per iter1270 state and pinned `reference_trino_parquet_bloom_filter_469.md`, r03 §474/§469/§563 + r18 §1251 had been correctly reconciled to "CREATE-WITH works on 467, ALTER form is 469+", but r17 §713/§1012 was MISSED in that pass — the classic "grep ALL resources for a wrong claim" miss.
+Minor -0.25 Clarity: the response is dense and could have led with a one-line "yes, single WITH clause, here it is" before the version scoping; minor -0.25 Completeness: didn't mention `parquet.use-bloom-filter-write` writer-side enablement default, but read-side default-on is the load-bearing piece for the engineer's selectivity question.
 
-The teacher applied a follow-up FIX-A this iter reconciling r17 §713 + §1012 to:
-1. Scope "469+" narrowly to the ALTER SET PROPERTIES form.
-2. Add explicit "CREATE TABLE ... WITH (parquet_bloom_filter_columns=ARRAY[...]) WORKS on 467" framing.
-3. Cross-ref r03 §474 as the canonical copy-pasteable example.
-
-**This is the right fix.** The keyword-magnet was on r17, not r03 — iter1270's r03 §474 attractor card couldn't prevent the regression because the responder didn't pull from r03 at all. Reconciling r17 in place (not appending another card) collapses the contradictory-resource hazard. Pinned `feedback_reconcile_dont_append.md` applies; this is the 3rd instance of a sibling-resource-defect that needed grep-all-resources discovery (after iter1194 optimize-clears-position-deletes r13 sibling and iter1168 migrate-is-native r21 sibling).
-
-**Scoring rationale.**
-- **Acc 1.0** — directly contradicts the 467 docs canonical example; engineer told "can't on 467" when 467 docs show the syntax verbatim.
-- **Clar 3.5** — sentences read cleanly enough, just teaching the wrong fact confidently.
-- **Prac 1.5** — engineer follows Spark ALTER+rewrite_data_files workflow for a NEW table when a 5-line Trino CREATE TABLE was the right answer; significant wasted setup work.
-- **Compl 2.0** — never gave the asked full copy-pasteable CREATE TABLE statement; never addressed the NO-PRIMARY-KEY confirmation the engineer asked for explicitly.
-
-**Watch status:** the iter1270 PRIMARY-KEY + cols-with-AS-SELECT synthesis-slip watch did NOT recur (responder never reached a CREATE statement at all this iter — different regression family). The iter1270 watch stays OPEN (still under-probed at 1 datapoint); the NEW watch is below.
-
-**NEW HARD WATCH `iter1271 Q1 bloom-CREATE-467-vs-469 r17-reconcile FIX-A reach test`** — re-probe bloom-on-NEW-Iceberg-table framings within next 2 iters to verify the r17 §713/§1012 reconcile fired and the responder lands "CREATE-WITH works on 467, ALTER is 469+" cleanly. If the regression recurs, escalate to (a) re-grep ALL resources for any remaining "469+ for CREATE" instances + (b) consider stronger router from "bloom 467" keyword zone to r03 §474.
-
-### Q2 — Current / most-recent consecutive-days streak per user (worked example: Mon-Wed skip Thu Fri-Sat → current = 2)
-
-**Score 3.00** (Acc 3.0 / Clar 4.0 / Prac 2.5 / Compl 2.5)
-
-**Gaps-and-islands MECHANISM correct; FINAL AGGREGATION answers the wrong question (LONGEST not CURRENT).**
-
-What the responder built:
-1. CTE 1 on `SELECT DISTINCT user_id, activity_date`: `CASE WHEN date_diff('day', LAG(activity_date) OVER (PARTITION BY user_id ORDER BY activity_date), activity_date) = 1 THEN 0 ELSE 1 END AS is_new_streak`.
-2. CTE 2: `SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY activity_date) AS streak_id`.
-3. Final: `SELECT user_id, MAX(streak_len) FROM (SELECT user_id, streak_id, COUNT(*) AS streak_len FROM streaks GROUP BY user_id, streak_id) GROUP BY user_id`.
-
-The mechanism (LAG + day-diff = 1 flag + running SUM → streak_id) is the textbook Trino gaps-and-islands canonical and is correct. But step (3) returns **LONGEST streak**, not **CURRENT/MOST-RECENT streak**. The engineer's worked example "Mon-Wed (3) skip Thu Fri-Sat (2) → current = 2" pasted into the responder's query returns 3 (longest), not 2 (current). The query does not answer the question.
-
-The correct CURRENT-streak final aggregation is to pick each user's MAX-activity-date streak_id and count its rows:
-
-```sql
-SELECT user_id, COUNT(*) AS current_streak
-FROM streaks s
-WHERE (user_id, streak_id) IN (
-    SELECT user_id, MAX(streak_id)
-    FROM streaks
-    GROUP BY user_id
-)
-GROUP BY user_id
-```
-
-(MAX(streak_id) per user = the latest run, because streak_id is monotonically increasing within each user.)
-
-Or equivalently, restrict to streaks whose MAX(activity_date) per user matches each user's overall MAX(activity_date).
-
-**Classification.** The responder framed the answer as "longest streak" from the start and never engaged with the engineer's worked example. The "longest" canonical is well-anchored in resources and the responder lifted it cleanly — but lifted the WRONG canonical for the question asked. This is a question-comprehension miss, not a Trino dialect error.
-
-**Resource-source check.** Need to verify whether a CURRENT-streak canonical exists in resources next to the gaps-and-islands canonical. If LONGEST is the only nearby example, the keyword-magnet would pull "current streak" questions into the LONGEST card.
-
-**NEW SOFT WATCH `iter1271 Q2 current-vs-longest-streak final-aggregation framing`** — re-probe gaps-and-islands questions under varied framings (current/most-recent vs longest vs total active-day count) for 4-8 iters. If 2+ recurrences where the engineer asks "current" and the responder returns "longest", escalate to LIGHT FIX-A adding a copy-attractive CURRENT-streak final-aggregation block beside the LONGEST canonical with an inline DO-NOT-write "MAX(streak_len) returns longest, not current" defang.
-
-**Scoring rationale.**
-- **Acc 3.0** — mechanism right, final aggregation answers the wrong question; the SQL would be technically correct for a "longest" question but the engineer didn't ask that.
-- **Clar 4.0** — narrative clear, three-CTE structure walked cleanly.
-- **Prac 2.5** — engineer pastes the query, gets 3 not 2 on their own worked example, has to debug — significant friction even with the right primitives in hand.
-- **Compl 2.5** — never returned the asked metric (current streak = 2); engineer would need to know the longest-vs-current distinction to repair the final SELECT themselves.
-
-### Q3 — dbt referential-integrity test (orders.customer_id must exist in customers)
-
-**Score 4.625** (Acc 5.0 / Clar 4.5 / Prac 4.75 / Compl 4.25)
-
-**Built-in `relationships` generic test verified verbatim.** [docs.getdbt.com data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) lists `relationships` among the 4 built-in generic data tests; the docs describe it as "validates that all of the records in a child table have a corresponding record in a parent table. This property is referred to as referential integrity. This test automatically excludes NULL values from validation, consistent with how database foreign key constraints work."
-
-**schema.yml syntax correct.** The responder's `data_tests: - relationships: {to: ref('customers'), field: customer_id}` is the legacy flat-form syntax that still compiles in dbt 1.x. dbt 1.10+ canonical adds an `arguments:` nesting level, but flat form is still supported and is what most production projects use. Note: `field:` should be the PARENT-table primary key column. The engineer's framing ("customer_id must exist in customers") implies customers.customer_id is the PK — if customers uses a different PK column name (e.g. `id`), the responder's `field: customer_id` would be wrong. Mild ambiguity but matches the engineer's naming.
-
-**NOT EXISTS compilation claim is roughly correct.** dbt docs don't quote the exact compiled SQL, but the underlying pattern dbt uses for `relationships` is a `SELECT child.field FROM child LEFT JOIN parent ON child.field = parent.field WHERE parent.field IS NULL AND child.field IS NOT NULL` (anti-join) shape — equivalent to NOT EXISTS. Zero rows returned = pass. Reasonable framing for a Haiku-level explanation.
-
-**`source()` variant for raw external sources** correctly mentioned, which is the right routing for testing references from ingested fact tables back to ingested dim tables before dbt models exist for them.
-
-**Scoring rationale.**
-- **Acc 5.0** — relationships is real, schema.yml shape compiles, source() variant correct.
-- **Clar 4.5** — clean explanation; "anti-join" technical term used without one-sentence zero-assumption framing.
-- **Prac 4.75** — engineer can drop this into schema.yml and run `dbt test` immediately.
-- **Compl 4.25** — minor: didn't surface dbt 1.10+ `arguments:` nested form; didn't surface `where:` filter for partial-table tests; didn't mention severity config (warn vs error). Not load-bearing for the core question.
-
-### Q4 — Oracle DECODE(plan_tier, 'starter', 1, 'growth', 2, 'enterprise', 3, 0) → Trino
-
-**Score 4.75** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.25)
-
-**No DECODE in Trino 467** — verified via [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html) function index (DECODE is not present; the Oracle/PL/SQL list-of-pairs short-circuit form is Oracle-specific).
-
-**Simple CASE shorthand correct:** `CASE plan_tier WHEN 'starter' THEN 1 WHEN 'growth' THEN 2 WHEN 'enterprise' THEN 3 ELSE 0 END`. This is the less-verbose form vs searched CASE `CASE WHEN plan_tier='starter' THEN 1 WHEN plan_tier='growth' THEN 2 ...` and is the right migration target.
-
-**NULL caveat correct and load-bearing.** Oracle DECODE matches NULL=NULL as TRUE; Trino simple CASE uses `=` equality which returns UNKNOWN on NULL → `WHEN NULL` never fires (this is ANSI standard behavior in Trino — verified via the conditional expression section of the docs). Correct routing: use searched CASE `WHEN plan_tier IS NULL THEN X` FIRST, then chain the equality branches.
-
-**Scoring rationale.**
-- **Acc 5.0** — DECODE absent, simple CASE shape correct, NULL semantics correct.
-- **Clar 4.75** — clean side-by-side with the original DECODE shown; NULL trap explained with the WHY (= NULL → UNKNOWN), not just the WHAT.
-- **Prac 5.0** — engineer can paste-and-run, NULL caveat is exactly the production-migration gotcha they'd hit on a real plan_tier nullable column.
-- **Compl 4.25** — didn't mention `COALESCE` as a NULL→sentinel pre-wrap alternative (`CASE COALESCE(plan_tier, '__null__') WHEN ...`) for cases where NULL handling needs to stay inside the simple-CASE shape. Minor.
+No imported-prior, no broken-secondary alternative, no over-warning. The HARD watch from iter1271 (`iter1271-Q1 bloom-CREATE-467 r17-reconcile reach-test`) **CLOSES**.
 
 ---
 
-## Overall pattern
+### Q2 — Median + p95 per endpoint, last 30 days
 
-- **Q1 is a hard regression on a topic that was correctly answered in iter1255 + iter1270.** Root cause: contradictory resources (r17 said 469+, r03/r18 said 467-OK). The responder picked the wrong one. Teacher's r17 §713/§1012 reconcile this iter is the correct fix.
-- **Q2 is a question-comprehension miss on a worked-example question.** Mechanism right, framing wrong, engineer gets the wrong number.
-- **Q3 + Q4 are clean PASSes.**
+**Score 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-The pass-loop continues — average 3.59 is above the 3.5 threshold — but Q1 is the kind of regression that drags topic averages backwards. The r17 reconcile should close the loop; verify next 1-2 iters.
+Pin-perfect Trino approx_percentile per-group canonical. Responder: `SELECT endpoint, approx_percentile(response_time_ms, 0.50) median_ms, approx_percentile(response_time_ms, 0.95) p95_ms FROM request_logs WHERE logged_at >= CURRENT_TIMESTAMP - INTERVAL '30' DAY GROUP BY endpoint` + array overload `approx_percentile(col, ARRAY[0.50, 0.95, 0.99])` + correct flag that `PERCENTILE_CONT ... WITHIN GROUP` is Postgres/Snowflake and a Trino parse error + accurate "T-Digest backed, docs do not publish a fixed-percent error figure."
 
-## Watches
+**Verification (WebFetch [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html)):**
+- All four `approx_percentile` overloads exist on 467: `approx_percentile(x, percentage)` / `approx_percentile(x, percentages_array)` / `approx_percentile(x, w, percentage)` weighted / `approx_percentile(x, w, percentages_array)` weighted-array. Both the scalar-fraction AND the array-of-fractions forms verified verbatim.
+- PERCENTILE_CONT / WITHIN GROUP: NOT mentioned for any aggregate except `listagg()`. Responder correctly identifies this as a parse error on Trino.
+- Error figure: the docs list **2.3% standard error for `approx_distinct` ONLY** — NO published error figure is given for `approx_percentile`. Responder's framing "docs do not publish a fixed-percent error figure" is **exactly accurate**, matches my pinned `reference_trino_approx_percentile_error.md` correction. No "tunable accuracy parameter" claim (which would have been the iter842 imported-prior bug).
 
-**OPEN (new):**
-- `iter1271 Q1 bloom-CREATE-467-vs-469 r17-reconcile FIX-A reach test` — re-probe bloom-on-NEW-Iceberg-table framings within 2 iters to verify the r17 §713/§1012 reconcile fired.
-- `iter1271 Q2 current-vs-longest-streak final-aggregation framing` — re-probe gaps-and-islands "current" vs "longest" framings 4-8 iters.
+Production-stack-correct: 30-day window uses `CURRENT_TIMESTAMP - INTERVAL '30' DAY` (Trino-valid INTERVAL qualifier per `reference_trino_interval_qualifiers.md` — DAY is supported, not QUARTER/WEEK). GROUP BY endpoint maps cleanly to dashboards/per-endpoint SLO monitoring.
 
-**OPEN (carried):**
-- `iter1270 Q1 PRIMARY-KEY-in-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip` — did NOT recur this iter (responder never reached a CREATE statement), so watch is uncovered; carry forward.
-- `iter1268 Q3 grants-USER-vs-ROLE`
-- `iter1267 Q1+Q2 example-GROUP-BY-shape`
-- `iter1260 Q1 CDC-MERGE-multi-event-dedup`
-- `iter1248 Q3 MATCH_RECOGNIZE-adjacency`
-- `iter1229 @v1-Spark`
+Minor -0.25 Clarity (didn't mention partition-predicate behavior of `logged_at` if the table is partitioned on day(logged_at), but that's recall-ceiling) -0.25 Completeness (no comparison vs `numeric_histogram` for sub-percentile precision needs). Recall ceiling, not a defect.
 
-## Sources
+No imported-prior, no broken-secondary alternative, no over-warning, no fabrication.
 
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — parquet_bloom_filter_columns canonical CREATE example + ALTER SET PROPERTIES list (does NOT include bloom on 467)
-- [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html) — DECODE absence + CASE conditional support
-- [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) — relationships built-in generic test
-- [trinodb/trino PR #24573](https://github.com/trinodb/trino/pull/24573) — ALTER SET PROPERTIES for parquet_bloom_filter_columns landed in 469
-- pinned `reference_trino_parquet_bloom_filter_469.md` — CREATE-vs-ALTER cutoff
-- pinned `feedback_reconcile_dont_append.md` — sibling-resource reconcile pattern
+---
+
+### Q3 — dbt unit tests: real feature? version/paid-tier gated?
+
+**Score 3.875** (Acc 3.0 / Clar 4.5 / Prac 3.75 / Compl 4.25)
+
+**LOAD-BEARING FACTUAL ERROR on the engineer's explicit "paid-tier gated?" sub-question.**
+
+Responder correctly identified unit tests as a real dbt feature (1.8+), explained given/expect/format dict, distinguished from data tests, placed YAML under `models/` correctly, named the `dbt test --select test_type:unit` selector correctly. **BUT** the closing line "**Not available in earlier dbt versions OR FREE TIERS — you need dbt 1.8+**" is factually wrong on the free-tier portion.
+
+**Verification (WebFetch [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/unit-tests)):**
+- "💡 Did you know... Available from dbt v1.8 or with the dbt 'Latest' release track." — explicitly **dbt v1.8+**, no mention of paid tier / Cloud-only.
+- Unit tests are a dbt CORE feature (open-source, free) since 1.8. They are NOT gated behind dbt Cloud or any paid tier.
+- "Unit tests must be defined in a YML file in your `models/` directory." — confirms responder's YAML-under-models placement.
+- "Don't define unit test YAML in the `tests/` directory, which is reserved for data tests." — confirms responder's tests/ vs models/ distinction.
+- Selector: `dbt test --select "test_type:unit"` — verbatim verified, "works across all engines (dbt Core and Fusion)" — confirms Core support.
+
+The engineer's question was 3-part: (1) real feature? (2) version/paid-tier gated? (3) how do mock inputs work? Responder got (1) right, (3) right, but **answered (2) the gating sub-question WRONG**. An engineer at this on-prem-only stack (no dbt Cloud) reading "not available in free tiers" would either (a) abandon unit tests entirely thinking they need a paid subscription, or (b) waste time evaluating dbt Cloud pricing for a feature already present in their dbt Core installation. Both are wrong outcomes the responder caused.
+
+**Acc 3.0**: 2 of 3 sub-questions correct, 1 directly wrong on a load-bearing dimension the engineer explicitly named. Prac 3.75: the false "free tier" gating could change engineer's product decision. Compl 4.25 / Clar 4.5: mechanism explanation and YAML example otherwise complete.
+
+**No FIX-A WARRANTED.** Grep evidence (sampled iter504/505 history) shows r27 §6.7E dbt-unit-tests canonical introduced iter504 says "dbt 1.8+" and does NOT carry a "free-tier-gated" claim. This is a responder-side hallucination padding the closing line — pattern matches `feedback_responder_broken_secondary_alternative.md` (the responder appending a closing aside that contradicts the main canonical). One-off slip, not source-anchored. SOFT WATCH `iter1272-Q3 dbt-unit-tests-free-tier-hallucination` — re-probe ≤4-8 iters with framing like "do I need dbt Cloud for unit tests?" or "is this in the OSS version?"; if the slip recurs, then escalate to a resource defang in r27 §6.7E DO-NOT-WRITE matrix.
+
+No imported-prior, no fabrication of YAML keys (given/expect/format/test_type:unit all verified).
+
+---
+
+### Q4 — Oracle CONNECT BY → Trino WITH RECURSIVE
+
+**Score 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
+
+Pin-perfect Oracle hierarchy → Trino recursive-CTE translation. Responder: "Trino does NOT support CONNECT BY; use WITH RECURSIVE" + anchor (level 0 where parent_account_id IS NULL) + recursive join `JOIN accounts a ON a.parent_account_id = t.account_id` (correct downward direction) + level guard `WHERE t.level < 49`.
+
+**Verification (WebFetch [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html)):**
+- WITH RECURSIVE supported in 467: "The `WITH RECURSIVE` clause is a variant of the `WITH` clause. It defines a list of queries to process, including recursive processing of suitable queries."
+- **"Experimental" caveat is REAL, not embellishment**: docs verbatim "This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload." Responder's "marked experimental, docs warn potential query failures" is verbatim-accurate.
+- **max_recursion_depth default = 10 verified**: docs verbatim "recursion depth is fixed, defaults to `10`, and doesn't depend on the actual query results" + "You can adjust the recursion depth with the session property `max_recursion_depth`." Responder's "default=10, must raise for deeper trees" is correct; CONNECT BY tree depths (account hierarchies often 5-15 levels) commonly need raising.
+- **"Quadratic plan growth" caveat is REAL, not embellishment**: docs verbatim "When changing the value consider that the size of the query plan growth is quadratic with the recursion depth." Responder's "query-plan growth quadratic — doubling depth ~quadruples plan size/planning time" is verbatim-accurate (doubling N → 4× because plan grows O(N²)).
+- Exceeding cap behavior: docs treat as runtime error (responder's "exceeding cap = ERROR not silent truncation" is correct).
+
+**Direction of recursion correct.** Oracle `START WITH parent_id IS NULL CONNECT BY PRIOR account_id = parent_id` walks DOWNWARD from root (root has no parent → enumerate children). Trino translation `WHERE parent_account_id IS NULL` (anchor = roots) + recursive `JOIN accounts a ON a.parent_account_id = t.account_id` (working set t has account_id, new candidate a has matching parent_account_id) preserves the downward direction. PRIOR semantics correctly inverted into the recursive-CTE join shape.
+
+**Practical-applicability bonus**: closure-table precompute recommendation for deep/frequent traversals (e.g., 8-level org charts queried per dashboard load) is operationally sound — recursive CTEs at depth=10 default + quadratic plan growth + Trino-experimental flag combine to make closure-table-via-dbt-incremental the pragmatic on-prem-stack-fit answer.
+
+Minor -0.25 Clarity (the three caveats stack densely at the end) -0.25 Completeness (didn't mention `LIMIT` inside the recursive term as an alternative depth guard, or anti-cycle WHERE clauses for self-loops). Recall ceiling, not a defect.
+
+No imported-prior, no broken-secondary alternative, no over-warning, no fabrication. The "experimental" and "quadratic plan growth" caveats — which the run-prompt flagged as possibly responder embellishment — are **both verbatim from trino.io/docs/467 docs**, not embellishment.
+
+---
+
+## Overall
+
+**Overall = (4.875 + 4.875 + 3.875 + 4.875) / 4 = 18.50 / 4 = 4.625 STRONG PASS** (+1.125 above 3.5 floor)
+
+**182nd consecutive PASS in extended phase. Q1 HARD watch CLOSES on 1st re-probe.** Three of four answers are pin-perfect canonical reaches with every load-bearing fact verbatim-verified against trino.io/docs/467 docs. Q3 has a single hallucinated "free tier" gating phrase that directly answers the engineer's explicit gating sub-question wrong; not source-anchored (r27 §6.7E does not carry this claim), one-off responder slip pattern matches the broken-secondary-alternative family.
+
+---
+
+## Explicit run-prompt answers
+
+**(1) Q1 — did the iter1271 r17 bloom-CREATE-467 reconcile FIX-A REACH? Is the HARD watch CLOSED?**
+**YES — REACHED on 1st re-probe, HARD WATCH CLOSED.** Responder gave the engineer exactly the CREATE TABLE WITH (parquet_bloom_filter_columns=ARRAY['session_token']) statement they asked for, scoped "469+" strictly to the ALTER SET PROPERTIES form, and correctly cited r17 §1250-1260-area. Direction is fully inverted vs iter1271's regression. WebFetch of trino.io/docs/467/connector/iceberg.html confirms the canonical CREATE WITH form. The reconcile achieved its objective on first probe.
+
+**(2) Q3 — is the "free tiers" claim a factual error?**
+**YES — confirmed factual error.** WebFetch of docs.getdbt.com/docs/build/unit-tests verbatim: "Available from dbt v1.8 or with the dbt 'Latest' release track" — NO paid-tier requirement; selector "works across all engines (dbt Core and Fusion)." Unit tests are in dbt Core 1.8+ (free, open-source). The closing "OR FREE TIERS — you need dbt 1.8+" wrongly implies a paid-tier gate. Load-bearing because the engineer explicitly asked the gating sub-question. Accuracy ding -2.0 → Acc 3.0.
+
+**(3) Q4 — are the "experimental" + "quadratic plan growth" caveats verified or embellishments?**
+**BOTH VERIFIED, NOT embellishments.** WebFetch of trino.io/docs/467/sql/select.html gives both verbatim:
+- "This feature is experimental only. Proceed to use it only if you understand potential query failures and the impact of the recursion processing on your workload."
+- "When changing the value consider that the size of the query plan growth is quadratic with the recursion depth."
+Responder paraphrased docs faithfully. max_recursion_depth default=10 also verbatim-verified.
+
+**(4) Any new watches?**
+- **SOFT WATCH `iter1272-Q3 dbt-unit-tests-free-tier-hallucination`** — responder's closing line wrongly implied unit tests are paid-tier-gated. NOT resource-anchored (r27 §6.7E canonical doesn't carry this claim). Per `feedback_responder_broken_secondary_alternative.md`, treat as a per-instance one-off responder slip; do NOT bias toward a resource FIX-A on first occurrence. Re-probe within 4-8 iters with framing like "do I need dbt Cloud for unit tests?" / "is this OSS or paid?" If the hallucination recurs, escalate to a r27 §6.7E DO-NOT-WRITE defang ("paid-tier" / "dbt Cloud only" / "not in free tier" — all wrong; unit tests are dbt Core 1.8+ OSS).
+- **CARRY iter1271 SOFT WATCH `Q2 current-vs-longest-streak framing`** (re-probe window still 4-8 iters from iter1271; not exercised this iter).
+- **CARRY iter1270 SOFT WATCH `PRIMARY-KEY-in-CREATE`** (un-probed).
+- HARD watch from iter1271 (Q1 bloom-CREATE-467 reach-test) **CLOSED** this iter.
