@@ -3830,7 +3830,12 @@ ORDER BY query_count DESC
 LIMIT 20;
 ```
 
-For per-tenant **bytes scanned**, this runtime table does not help — `system.runtime.queries` exposes no I/O-bytes column. Use the HTTP event listener path (with the verified `physicalInputBytes` field, documented immediately below) and aggregate from your `iceberg.analytics.tenant_query_costs` table instead.
+For **bytes scanned** and **CPU per query**, the `system.runtime.queries` table alone does not help — `queries` exposes no I/O-bytes or CPU column. **BUT that does NOT mean "system tables can't show bytes/CPU" — the SIBLING table `system.runtime.tasks` HAS `physical_input_bytes` (bytes read from storage) and `split_cpu_time_ms` (CPU).** Which path you use depends on the goal:
+
+- **Admin PERF-TRIAGE — "which query is hammering the cluster / burned the most CPU / scanned the most data right now or in the last few minutes?"** → JOIN `system.runtime.queries` to `system.runtime.tasks` on `query_id` and aggregate `SUM(t.split_cpu_time_ms)` (CPU) + `SUM(t.physical_input_bytes)` (bytes scanned) per query. **This is the canonical live recipe — see [r18 §"Finding expensive queries on Trino 467"](18-query-performance-regression.md) and [r16 §"most expensive single Trino queries"](16-cost-considerations.md).** (Both system tables are an in-memory ~15-min ring buffer, admin-only.)
+- **Durable per-tenant CHARGEBACK — monthly cost rollups that must survive coordinator restarts / >15-min windows** → the HTTP event listener path (the verified `physicalInputBytes` field, documented immediately below), aggregated from your `iceberg.analytics.tenant_query_costs` table.
+
+> **❌ DO-NOT-WRITE: "Trino's system tables have no bytes-scanned/CPU column, so you must use the event listener to find heavy queries."** FALSE — that's true only of `system.runtime.queries`; `system.runtime.tasks.physical_input_bytes` + `split_cpu_time_ms` (JOINed on `query_id`) give per-query bytes + CPU live. The event listener is for DURABLE chargeback, not because the live recipe doesn't exist.
 
 **Query cost fields in the event payload (verified against the Trino `QueryStatistics` SPI source):**
 - `statistics.wallTime` — wall-clock duration of the query (total real time)
