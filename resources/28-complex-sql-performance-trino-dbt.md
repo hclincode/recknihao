@@ -772,7 +772,18 @@ Resist the urge to make 5 changes at once. After each change, re-EXPLAIN, then E
 
 ## 2. Correlated subqueries — the migration slowness champion
 
-Correlated subqueries are the SQL shape that most often slows a migrated Oracle query to a crawl on Trino. They look harmless in source, and they sometimes work fine (decorrelation succeeded), and sometimes catastrophically (decorrelation failed). Both shapes are common; you can't tell which by reading the SQL.
+Correlated subqueries are the SQL shape that most often slows a migrated Oracle query to a crawl on Trino. They look harmless in source, and they sometimes work fine (decorrelation succeeded), and sometimes catastrophically (decorrelation failed).
+
+> **WHICH-X ROUTER — do NOT blanket-rewrite every correlated subquery; the SHAPE decides (read this BEFORE telling anyone "correlated subqueries are slow in Trino, rewrite them all").** *Keyword anchors: is EXISTS slow in Trino, DBA says rewrite correlated subquery, does Trino run EXISTS once per row, should I rewrite EXISTS as a join, correlated subquery nested loop O(N×M), EXISTS vs IN vs JOIN Trino, when is a correlated subquery actually slow.*
+>
+> | Your correlated subquery is… | Trino 467 behavior | Action |
+> |---|---|---|
+> | A **SIMPLE EQUALITY** correlation — `WHERE EXISTS (SELECT 1 FROM b WHERE b.k = a.k [AND b.col = <literal>])`, or the matching `IN (SELECT k FROM b WHERE ...)` | **RELIABLY DECORRELATES to a `SemiJoin`** (PR [#1415](https://github.com/trinodb/trino/pull/1415)) — runs as a hash semi-join, NOT a per-row nested loop. EXISTS, `IN`, and an explicit `JOIN ... DISTINCT` all compile to the **same** SemiJoin plan. | **LEAVE IT ALONE.** A blanket "rewrite all correlated subqueries" rule is a NON-Trino import (Oracle/Postgres row-engine habit) for this shape. The DBA is wrong *for the simple equality EXISTS*. Optionally rewrite to `IN`/`JOIN` for style, but it is NOT a perf fix — identical plan. |
+> | An **aggregate** correlation (`SELECT MAX(o2.amt) FROM o2 WHERE o2.cust = o.cust AND o2.ts < o.ts`), a **non-equality** correlation (`<`, `>`, `BETWEEN`, `!=`), a correlated **LIMIT/TopN**, `NOT EXISTS` (separate LeftJoin+Agg slow path, [#21859](https://github.com/trinodb/trino/issues/21859)), or **complex** multi-column / nested outer-references | Decorrelation **MAY fail** → EXPLAIN shows `CorrelatedJoin` = an O(N×M) nested loop in worker memory. THIS is the genuine "slowness champion." | **REWRITE** — to a window function (the per-row-max/prev-value shape → `MAX(...) OVER (PARTITION BY ... ORDER BY ...)`), or an explicit aggregated `JOIN`. EXPLAIN-verify the `CorrelatedJoin` is gone. |
+>
+> **The decision tool, not folklore:** `EXPLAIN` the query and grep the plan — `SemiJoin`/`Join` = decorrelated (fast, leave it); `CorrelatedJoin` = nested-loop (rewrite it). Don't pre-emptively rewrite a simple equality EXISTS that already plans as a SemiJoin. See the §2.4 EXISTS→IN/JOIN conversion table (which notes EXISTS already converts to SemiJoin) and the §711 myth-row.
+
+The aggregate/non-equality shapes below are the ones that catastrophically fail — that's what §2.1–2.5 work through.
 
 ### 2.1 The pattern that causes the problem
 
