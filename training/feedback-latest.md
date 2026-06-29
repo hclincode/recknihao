@@ -1,144 +1,136 @@
-# Judge Feedback — iter1276
+# Judge Feedback — iter1277
 
-**Overall**: 4 answers, average **4.78 STRONG PASS** (Q1 4.875 / Q2 4.9375 / Q3 4.625 / Q4 4.6875). Carried SOFT watch iter1271-Q2 (current-vs-longest streak) **CLOSES POSITIVELY** — responder now correctly returns the CURRENT (most-recent) streak, not the LONGEST. Q1 thinnest-topic lift on columnar projection EXPLAIN-ANALYZE-Input-bytes diagnostic. No new defects, no new watches.
+**Overall**: 4 answers, average **4.844 STRONG PASS** (Q1 4.8125 / Q2 4.75 / Q3 4.9375 / Q4 4.875). BOTH carried SOFT watches **CLOSE POSITIVELY**:
+- iter1272-Q3 (dbt-unit-tests free-tier hallucination) → CLOSES on direct re-probe; responder now explicitly says "FREE in dbt Core, no dbt Cloud, no paid tier, 1.8+."
+- iter1270-Q1 (PRIMARY-KEY-in-CREATE Trino parse-error defang) → CLOSES on direct re-probe; responder correctly identifies PRIMARY KEY + UNIQUE as parse-errors in Trino 467 CREATE TABLE, NOT NULL accepted, and provides a clean DDL example.
+
+No new defects, no new watches. Continuous PASS streak intact.
 
 ---
 
-## Q1 — Wide-table columnar projection (80 cols, SELECT 3 vs SELECT *): **4.875 STRONG PASS — thinnest-topic LIFT, mechanism + diagnostic both verified**
+## Q1 — dbt unit tests on free Core (RE-PROBE of iter1272-Q3): **4.8125 STRONG PASS — iter1272-Q3 SOFT WATCH CLOSES POSITIVELY**
 
-Engineer's mental model gap was "20s vs 4 min on identical row count makes no sense in row-store thinking." Responder routed cleanly through the Parquet columnar mechanism and gave an EXPLAIN-ANALYZE recipe to confirm projection I/O is the cause.
+**Direct correction of the prior hallucination.** Engineer's explicit gating sub-question: "free Core or paid plan?" Responder leads with "YES — available FREE in dbt Core, no dbt Cloud needed. Requires dbt 1.8+. NOT a paid feature; built into dbt Core since 1.8." This is the exact inversion of iter1272-Q3's wrong closing line ("not available in earlier dbt versions OR FREE TIERS"). Watch closes on 1st re-probe.
 
-**Load-bearing facts verified**:
-- Parquet stores each column as separate **column chunks** within row groups — engine reads only the column chunks for projected columns. Verified via Parquet format docs + Iceberg connector docs.
-- Cost dominated by **bytes read from MinIO + decompression**, ~proportional to columns projected, NOT row count — verified principle of column-oriented storage; this is exactly the property that beats Postgres-style row-store on wide-table analytics.
-- Iceberg metadata flow (manifest → data files → only-selected column byte-ranges) — correct.
-- **Parquet row group ~128MB default** — verified via [trinodb/trino#28250](https://github.com/trinodb/trino/issues/28250) discussing `write.parquet.row-group-size-bytes` 128MB default (Iceberg native table property + Trino session property `parquet_writer_block_size`).
-- **EXPLAIN ANALYZE Input/Physical Input line** — verified at [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html): fragment shows `Input: 1500000 rows (18.17MB) ... Physical Input: 4.51MB`. Both rows identical, **physicalInputDataSize** is the byte-count differentiator. Matches pinned `reference_trino_unwrap_temporal_predicates` adjacent prior-art and iter1258 Q1 verification.
+**Load-bearing facts verified at [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/unit-tests)**:
+- Verbatim: "Available from dbt v1.8 or with the dbt 'Latest' release track" — NO paid-tier mention, NO Cloud-only gating.
+- Unit tests are a dbt **CORE** feature (open-source, free, self-hostable) — selector `dbt test --select "test_type:unit"` works across all engines (dbt Core and Fusion).
+- Mechanism (`unit_tests:` YAML in `models/`, `given` block with `ref(...)` input rows, `expect` block with expected output rows, runs **before materialization** during `dbt build`) — all correct.
+- `dbt build` fails on bad logic before any data move — engineer's stated need (catch transformation bugs in CI without warehouse writes) is met by the OSS CLI alone.
 
-Diagnostic recipe (run EXPLAIN ANALYZE both queries, compare Physical Input line — rows match, bytes differ) is the textbook confirmation flow for projection-I/O vs other-cause.
+Production-stack-aligned (on-prem k8s, no Cloud account needed). Cites r27 §6.7E.
 
-Minor Clar shave (-0.25, didn't explicitly call out that `SELECT *` materializes ALL 80 column chunks even if many are then discarded — "wasteful" framing is implied but the wide-table SaaS engineer benefits from the explicit "no column-elimination after row materialization" mental model). Minor Compl shave (-0.25, no mention of column-chunk **dictionary/RLE compression** being asymmetric across columns — high-cardinality VARCHAR columns dominate bytes vs INT/BOOL — explains why the ratio can be much more skewed than 3/80; nice-to-have, not load-bearing).
+Minor Clar shave (-0.25): didn't explicitly distinguish unit tests from data tests (data tests check post-build production data; unit tests check transformation logic with mocked inputs) — beginner could conflate the two; iter1272-Q3 history shows this distinction was made then, missing here. Minor Compl shave (-0.25): no mention of `format: dict | csv | sql` for the given/expect rows, no mention of `--vars` parameter passing or `overrides:` for macros (nice-to-have, not load-bearing).
 
 No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
-Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
+Acc 5.0 / Clar 4.75 / Prac 4.75 / Compl 4.75.
 
 ---
 
-## Q2 — CURRENT consecutive-login streak (RE-PROBE of iter1271-Q2): **4.9375 STRONG PASS — iter1271-Q2 SOFT WATCH CLOSES POSITIVELY**
+## Q2 — Trino Iceberg CREATE TABLE constraints (RE-PROBE of iter1270-Q1): **4.75 STRONG PASS — iter1270-Q1 SOFT WATCH CLOSES POSITIVELY (dbt-contract YAML detail is acceptable, NOT a trap)**
 
-The iter1271-Q2 failure mode was: responder built the gaps-and-islands mechanism correctly but the FINAL aggregation returned `MAX(streak_len) per user` = LONGEST-ever streak, not the CURRENT (most-recent) streak. The engineer's worked example explicitly distinguished current=1 (last=Jun 25, prior=Jun 20) from any longer historical streak.
+**Core constraint matrix is exactly right.** Responder correctly classifies all three Postgres constraints against Trino 467 + dbt-trino:
+- **NOT NULL** — accepted in `CREATE TABLE` + enforced by Iceberg at write time. CORRECT.
+- **PRIMARY KEY** — NOT supported, bare CREATE TABLE with it throws PARSE ERROR. CORRECT.
+- **UNIQUE** — same as PRIMARY KEY (parse error). CORRECT.
 
-**This iter, responder returns CURRENT — not LONGEST — by a correct mechanism**:
+**Verified at [trino.io/docs/467/sql/create-table.html](https://trino.io/docs/467/sql/create-table.html)**: grammar synopsis verbatim `{ column_name data_type [ NOT NULL ] [ COMMENT comment ] [ WITH ( property_name = expression [, ...] ) ] | LIKE existing_table_name }` — NOT NULL is the ONLY column constraint in the production; PRIMARY KEY / UNIQUE / FOREIGN KEY / CHECK / CONSTRAINT productions are entirely absent from the grammar.
 
-1. `is_new_streak` CTE flags streak starts via `LAG(login_date) IS NULL OR date_diff('day', LAG, login_date) != 1`.
-2. `streaks` CTE: `SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY login_date)` = monotonically increasing `streak_id` per user.
-3. `per_streak` CTE: `COUNT(*) AS current_streak_length, MAX(login_date) AS latest_login GROUP BY user_id, streak_id`.
-4. **Final filter**: `WHERE latest_login = (SELECT MAX(login_date) FROM streaks s WHERE s.user_id = per_streak.user_id)` — selects the per-user MOST-RECENT streak (the one whose final day equals the user's overall last login).
-
-This is mathematically correct: the most-recent streak is the one containing each user's overall max login_date — equivalently, the run with the highest streak_id (since streak_id is monotonic in login_date per user). The correlated-subquery filter form works (no per-row mutation, the subquery is per-user MAX = constant per outer row).
-
-**Day-aware `date_diff('day', a, b) = b - a`** is correct Trino 467 per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) — returns days between two dates as bigint. Correct arg order so `=1` catches consecutive-day pairs.
-
-**Gotcha noted**: "build over full history, do NOT pre-filter by date" — this is the standard streak-construction trap (pre-filtering breaks the LAG chain and gives always-zero or wrong-shape streaks per pinned `feedback_synthesis_ceiling_stop_churning.md` family). Surfacing it explicitly is a clarity win.
-
-**Iter1271-Q2 SOFT WATCH `current-vs-longest-streak final-aggregation framing` — CLOSES POSITIVELY** on 1st re-probe. No MAX(streak_len) misroute, no LONGEST-vs-CURRENT confusion. The opposite-direction correction shape — responder now disambiguates "current streak ending on overall max(login_date)" from "longest historical streak."
-
-Minor Clar shave (-0.25, the final correlated subquery is dense for an OLAP newcomer; an equivalent join-to-MAX-table or QUALIFY-style top-row pattern would read more cleanly, though the correlated form is unambiguously correct).
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
-
-Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 5.0.
-
----
-
-## Q3 — dbt macros for shared WHERE-clause filter: **4.625 STRONG PASS — mechanism correct, "Oops wrong include" detour is a minor clarity ding**
-
-**Load-bearing facts verified** at [docs.getdbt.com/docs/build/jinja-macros](https://docs.getdbt.com/docs/build/jinja-macros):
-- `macros/` directory convention (configurable via `macro-paths` in `dbt_project.yml`) — correct.
-- `{% macro macro_name(arg1, arg2=default_value) %} ... {% endmacro %}` definition syntax — verbatim correct.
-- `{{ macro_name(args) }}` call syntax — correct.
-- **Compile-time expansion**: docs verbatim "macro expansion happens at compile time"; compiled SQL lands in `target/compiled/` — correct.
-- INTERVAL `'{{ days }}' DAY` interpolation produces valid Trino syntax `INTERVAL '90' DAY` (Trino 467 INTERVAL qualifier DAY is supported per pinned `reference_trino_interval_qualifiers.md`).
-- Default-arg form `{% macro last_n_days(column_name, days=90) %}` — supported per dbt Jinja macro spec.
-- Edit-one-file → all 15 models pick up next dbt run — correct (compile-time substitution means next build sees new value).
-
-The PRIMARY answer the engineer needs (file location, macro syntax, call site syntax, default-arg pattern, compile-time mental model) is all correct.
-
-**THE DING**: responder included a deliberate WRONG-then-corrected detour:
+**DDL example is paste-and-run valid Trino 467**:
 ```
-WHERE {% include 'macros/date_filters.sql' %}  -- Oops, wrong include — see below
+CREATE TABLE iceberg.analytics.customers (
+  customer_id BIGINT NOT NULL,
+  email VARCHAR NOT NULL,
+  plan VARCHAR
+) WITH (partitioning = ARRAY['bucket(customer_id, 16)'])
 ```
-followed by the correct `{{ last_n_days('occurred_at', 90) }}` form.
+- `bucket(customer_id, 16)` column-first form — verified Trino dialect (pinned `reference_trino_bucket_arg_order.md`), NOT Spark's count-first `bucket(16, customer_id)`.
+- NO PRIMARY KEY, NO UNIQUE — won't trip iter1270-Q1's `mismatched input 'PRIMARY'` parse error.
+- NOT NULL on the two NOT-NULL Postgres columns preserved.
 
-This is the `feedback_responder_broken_secondary_alternative.md` family pattern — Haiku appending a self-labeled broken alternative to demonstrate contrast. It's at least SELF-LABELED ("Oops, wrong include") and the canonical form follows immediately, so the engineer arrives at the right answer. But for a beginner who scans top-to-bottom and copy-pastes the first thing, the broken `{% include %}` line is noise. The "Oops" framing reduces the harm but doesn't fully neutralize the broken-secondary habit.
+**dbt-contract YAML portion is ACCEPTABLE, not a trap** (the area I flagged for verification): Responder shows `contract.enforced: true` + `columns:` with `constraints: [- type: not_null, - type: primary_key, - type: unique]` and frames the latter two as "DEFINABLE in YAML only / harmless / use for documentation" + appends `data_tests:` `unique`/`not_null` for actual enforcement.
 
-Per pinned `feedback_responder_broken_secondary_alternative.md`: scope per-instance one-off slip, NOT a resource defect (no single resource fix addresses the responder's padding-with-self-corrected-wrong-example pattern). **No FIX-A**, no new watch.
+**Verified at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)** verbatim: "The `dbt-trino` adapter supports model contracts. Currently, only constraints with `type` as `not_null` are supported." Combined with the general dbt constraints page ([docs.getdbt.com/reference/resource-properties/constraints](https://docs.getdbt.com/reference/resource-properties/constraints)) verbatim: "`warn_unsupported: False` to skip warning on constraints that aren't supported by this data platform, and therefore **won't be included in templated DDL**." → unsupported constraints are SKIPPED FROM DDL (dbt never sends `PRIMARY KEY (id)` to Trino, so no parse error) and dbt emits a build warning by default.
 
-Minor Clar shave (-1.0, the "Oops" detour). Minor Prac shave (-0.25, doesn't surface `{{ var('lookback_days', 90) }}` as an even-simpler alternative for a single numeric parameter; the macro is still the right answer for a re-usable WHERE clause but `var()` is the lighter-weight pattern when only the number changes and the column is uniform). Minor Compl shave (-0.25, no mention of `--vars '{lookback_days: 60}'` CLI override or `dbt_project.yml` `vars:` block for environment-level overrides; recall ceiling).
+This matches the existing rubric canonical for the `dbt model contracts` row: "dbt-trino not_null runtime-enforced via Iceberg column constraint, primary_key/unique/foreign_key definable-but-not-enforced." Responder's framing is consistent with this canonical; declaring `- type: primary_key` / `- type: unique` under `contract.enforced: true` does NOT fail the build — dbt skips them from DDL (build proceeds, warning logged) and the engineer's actual enforcement comes from the appended `data_tests` block (the responder DID include this).
 
-No imported-prior, no over-warning, no fabrication.
+Minor Compl shave (-0.5): didn't explicitly call out (a) dbt emits a `warn_unsupported` warning when declaring primary_key/unique on dbt-trino, (b) the `warn_unsupported: False` knob to silence the warning, (c) explicit "primary_key/unique declared here = pure documentation; only `data_tests` enforce." The appended `data_tests: unique` + `data_tests: not_null` correctly IS the enforcement path, but the relationship between "definable constraint in contract" and "enforcing data_test" could be stated more crisply. Recall-ceiling shave, not a defect.
 
-Acc 5.0 / Clar 4.0 / Prac 4.75 / Compl 4.75.
+iter1270-Q1 SOFT WATCH (PRIMARY-KEY-in-Trino-CREATE-TABLE synthesis slip) CLOSES POSITIVELY — responder gave the exact CREATE TABLE statement the engineer asked for, kept PRIMARY KEY/UNIQUE OUT of the DDL, and routed them correctly to the dbt-contract YAML + data_tests layer.
 
----
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r27 §6.7C.
 
-## Q4 — Oracle MONTHS_BETWEEN / ADD_MONTHS → Trino: **4.6875 STRONG PASS — wrapper Oracle-correct, fractional approximation acceptable with bounded drift**
-
-**Load-bearing facts verified**:
-
-**(a) ADD_MONTHS clamp rule + last_day_of_month wrapper:**
-- Oracle ADD_MONTHS clamp rule verified verbatim at [docs.oracle.com ADD_MONTHS](https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlrf/ADD_MONTHS.html): "If date is the last day of the month or if the resulting month has fewer days than the day component of date, then the result is the last day of the resulting month."
-- **2026 is NON-leap** (2026 / 4 = 506.5, not integer) → Feb has 28 days → Feb 28 2026 IS month-end. Responder's example `ADD_MONTHS(DATE '2026-02-28', 1) → 2026-03-31` is **correct** (Feb 28 = last day → clamp to last day of March).
-- Naive `date_add('month', 1, DATE '2026-02-28')` in Trino → `2026-03-28` (preserves day-of-month) — correct, no Oracle clamp.
-- **`last_day_of_month(x) → date`** is a REAL Trino 467 function — verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html).
-- Wrapper `CASE WHEN d = last_day_of_month(d) THEN last_day_of_month(date_add('month', n, d)) ELSE date_add('month', n, d) END`:
-  - Input IS last-day-of-month → clamps result to last-day-of-target-month ✓
-  - Input NOT last-day, target has fewer days (e.g., Jan 30 + 1mo → Feb): relies on Trino's `date_add('month',...)` default behavior of clamping invalid days down to the target-month last day. Standard Trino behavior (Java-Time–based ZonedDateTime arithmetic clamps invalid day-of-month).
-  - Net: wrapper replicates Oracle ADD_MONTHS behavior for both rule branches under standard Trino month-arithmetic. **Oracle-correct**.
-
-**(b) MONTHS_BETWEEN integer form + arg order:**
-- `date_diff(unit, timestamp1, timestamp2) = timestamp2 - timestamp1` per pinned `reference_trino_datediff_dayaware.md` — DAY-AWARE complete-months semantics (drops fractional), `date_diff('month', '2024-01-15', '2024-02-14') = 0` (haven't reached Feb 15 yet), `date_diff('month', '2024-01-15', '2024-02-15') = 1`.
-- Oracle `MONTHS_BETWEEN(d1, d2) = d1 - d2`. So `MONTHS_BETWEEN(current_date, hire_date) → date_diff('month', hire_date, current_date)` — **arg order correct** (responder flips d1/d2 correctly).
-
-**(c) Fractional MONTHS_BETWEEN fallback `date_diff('day', start, end) / 31.0`:**
-- This is the documented Oracle "31-day-month" approximation idiom (per iter1269-Q4 prior verification at [docs.oracle.com MONTHS_BETWEEN](https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlrf/MONTHS_BETWEEN.html): "Otherwise Oracle Database calculates the fractional portion of the result based on a 31-day month").
-- **For within-1-month spans**: `total_days / 31` MATCHES Oracle's piecewise formula `month_diff - 1 + (31 - day(d2) + day(d1))/31` exactly. Example: Jan 15 → Feb 14 = 30/31 ≈ 0.9677, Oracle formula = 1 - 1 + (31 - 15 + 14)/31 = 30/31 ≈ 0.9677. Match.
-- **For multi-month spans**: drifts up to ~1/31 from Oracle's piecewise formula. Example: Jan 15 → Mar 1 — `total_days / 31` = 45/31 ≈ 1.452; Oracle: month_diff=2, day(d1)>day(d2), formula ~ 1.548. Drift ~0.1 months on a 1.5-month span (~6%).
-- **Verdict**: acceptable approximation for most accrual/proration reporting (matches Oracle exactly within a single month, bounded drift on multi-month spans, drift converges to 0 as span → integer month boundaries). Responder correctly **hedges** "use only if proration NEEDS the fraction" and offers integer date_diff as primary — steering engineer to the exact-Oracle integer form when fractional isn't required.
-- **Minor accuracy caveat NOT FLAGGED**: responder didn't explicitly surface that the day/31 approximation has bounded drift on multi-month spans (quarterly aggregates could see ~3% disagreement with Oracle). Same gap as iter1269-Q4 (where the topic was also accepted as STRONG PASS with -0.25 compl shave for the same reason).
-
-Production-stack-correct (Trino 467 + dbt; wrapper offered as a dbt macro is the right reuse pattern for 5-10 call sites).
-
-Minor Clar shave (-0.5, the wrapper CASE expression density — a beginner OLAP engineer may not immediately see why `d = last_day_of_month(d)` is the Oracle-rule's first branch; a 1-line "this catches inputs that are already month-end → clamp result similarly" preamble would help). Minor Compl shave (-0.5, didn't surface (i) the bounded-drift caveat on multi-month spans for day/31 approximation; (ii) `date_add('quarter', n, d)` / `date_add('year', n, d)` are NOT subject to the Oracle clamp ambiguity since Oracle has separate ADD_MONTHS-only quirk; (iii) `last_day_of_month()` works on TIMESTAMP too if input column is timestamped). Recall ceiling.
-
-No imported-prior, no broken-secondary (the wrapper is the load-bearing answer, not a secondary alternative), no over-warning, no fabrication.
-
-Acc 5.0 / Clar 4.5 / Prac 4.75 / Compl 4.5.
+Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5.
 
 ---
 
-## Summary table
+## Q3 — JSON extraction for GROUP BY: **4.9375 STRONG PASS — clean canonical, all facts verified**
 
-| Q | Topic | Score | Notes |
-|---|---|---|---|
-| Q1 | Query performance basics (columnar projection / EXPLAIN ANALYZE Physical Input) | 4.875 | Thinnest-topic lift; mechanism + diagnostic both verified |
-| Q2 | Analytical query patterns (CURRENT consecutive-day streak) | 4.9375 | **iter1271-Q2 SOFT WATCH CLOSES POSITIVELY**; responder now returns CURRENT not LONGEST |
-| Q3 | Improving complex SQL perf on Trino with dbt (dbt macros) | 4.625 | Mechanism correct; "Oops wrong include" detour is per-instance broken-secondary slip (NO FIX-A) |
-| Q4 | Oracle PL/SQL → dbt+Trino (MONTHS_BETWEEN/ADD_MONTHS) | 4.6875 | last_day_of_month wrapper Oracle-correct; day/31 fractional approximation acceptable with bounded drift |
+Responder routed cleanly to `json_extract_scalar(payload, '$.plan')` with the right return-type and groupability framing.
 
-## Watches closed this iter
+**Load-bearing facts verified at [trino.io/docs/467/functions/json.html](https://trino.io/docs/467/functions/json.html)**:
+- `json_extract_scalar(json, json_path)` returns **VARCHAR** (string). Verbatim: "Like `json_extract()`, but returns the result value as a string (as opposed to being encoded as JSON)."
+- `json_extract(json, json_path)` returns the **json type** (NOT VARCHAR; not directly comparable/groupable in many shapes — engine-level json equality is restricted).
+- VARCHAR is fully usable in `GROUP BY` — standard SQL groupable type.
+- The disambiguation responder draws (json_extract for navigating nested structures, json_extract_scalar for terminal values to filter/aggregate/group) is the documented best practice.
 
-- **`iter1271-Q2 current-vs-longest-streak final-aggregation framing`** — **CLOSES POSITIVELY** on first re-probe under explicit CURRENT/MOST-RECENT framing with worked example. Responder mechanism: per-user MAX(login_date) correlated filter to isolate the most-recent streak. No MAX(streak_len) misroute. Opposite-direction correction confirmed.
+Example `WHERE json_extract_scalar(payload, '$.plan') IS NOT NULL GROUP BY json_extract_scalar(payload, '$.plan')` is paste-and-run valid Trino 467 SQL.
 
-## No new watches
+Minor Compl shave (-0.25): didn't surface (a) `json_value` (SQL/JSON standard, Trino 467 also supports it, returns scalar with type coercion options), (b) NULL behavior when the path doesn't exist (`json_extract_scalar` returns NULL silently — handy but worth noting for data-quality work), (c) `cast(json_extract_scalar(...) AS BIGINT)` pattern for numeric JSON fields. Nice-to-haves, not load-bearing for the engineer's stated need (extract string + GROUP BY).
 
-No new defects. Q3 "Oops wrong include" detour is per-pinned `feedback_responder_broken_secondary_alternative.md` — per-instance one-off, no resource fix appropriate. Q4 day/31 drift is the same accepted approximation as iter1269-Q4 (carry implicitly, no escalation).
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r27 §4.4B.
 
-## Recommendation to teacher
+Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.
 
-**NO-OP.** Carried SOFT watch closes; no new defects; thinnest topic lifts steadily. Continue breadth probing.
+---
 
-**Carry watches (un-probed this iter)**: iter1272-Q3 unit-test-free-tier hallucination / iter1270-Q1 PRIMARY-KEY-in-Trino-CREATE-TABLE synthesis slip / iter1268-Q3 dbt grants service-account=USER-vs-ROLE branching / iter1267 Q1+Q2 example-SQL GROUP-BY-shape synthesis slip.
+## Q4 — Oracle NVL2 → Trino: **4.875 STRONG PASS — clean rewrite, exact semantics preserved**
 
-**Thinnest required topic** still query-perf-basics at ~4.16 (+ this iter's 4.875 lift). Q1 4.875 raises it slightly; remains comfortably above 3.5 threshold but the lowest of all PASSED topics.
+Responder correctly states Trino has NO NVL2 and provides the exact `CASE WHEN col IS NOT NULL THEN 'active' ELSE 'inactive' END` rewrite.
+
+**Load-bearing facts verified at [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html)**:
+- NVL2 is NOT in the conditional-functions list (supported: CASE, IF, COALESCE, NULLIF, TRY — NO NVL/NVL2 entries). 9th instance of correctly-identified Oracle-prior absence in Trino (matches reference_trino_to_char_exists pattern but in the correct "absent" direction).
+- `CASE WHEN col IS NOT NULL THEN a ELSE b END` is the textbook 2-branch NVL2 equivalent with identical 3-valued-logic NULL semantics: col IS NULL → ELSE branch; col IS NOT NULL → THEN branch; no UNKNOWN case (IS NOT NULL never returns UNKNOWN, only TRUE/FALSE).
+- The warning "never write `col = NULL`" (would return UNKNOWN, filter both branches to ELSE) is correct and the textbook NULL-comparison trap.
+
+Production-stack-aligned (Oracle migration is a known SaaS-engineer-pain-point covered by r27 + r28).
+
+Minor Clar shave (-0.125): could have given a one-line worked example like `SELECT user_id, CASE WHEN deleted_at IS NOT NULL THEN 'active' ELSE 'inactive' END AS status FROM users` to ground the abstract rewrite. Recall-ceiling, not a defect.
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r27 §4.1.
+
+Acc 5.0 / Clar 5.0 / Prac 4.75 / Compl 4.75.
+
+---
+
+## Watch ledger
+
+- **iter1272-Q3 dbt-unit-tests-free-tier-hallucination**: CLOSES POSITIVELY (1st re-probe).
+- **iter1270-Q1 PRIMARY-KEY-in-Trino-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip**: CLOSES POSITIVELY (1st re-probe under direct-DDL-constraints framing — responder gave the exact CREATE TABLE the engineer asked for, no PRIMARY KEY in DDL, no AS-SELECT mix).
+- Carried HARD/SOFT watches from earlier iters: NONE outstanding.
+
+## Pattern check
+
+- No imported-prior errors. No assumed-absence slip (Q4 NVL2-absence is correct).
+- No broken-secondary appendage on any of the four.
+- No over-warning folklore.
+- No production-stack mismatch.
+- No fabrication.
+
+This is the 26th-27th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern (now extended to FIX-A-absent-watches that resolve from clarity on direct re-probe). Continuous PASS loop intact.
+
+---
+
+## Topic score updates (this iter)
+
+- Q1 → **Improving complex SQL performance on Trino with dbt** row: 4.4734/82 → (366.8188 + 4.8125)/83 = 371.6313/83 = **4.4775/83 PASSED** (+0.0041, margin +0.9775).
+- Q2 → **dbt model contracts** row: 4.4615/17 → (75.8455 + 4.75)/18 = 80.5955/18 = **4.4775/18 PASSED** (+0.016, margin +0.9775).
+- Q3 → **SQL query best practices for OLAP** row: 4.5873/297 → (1362.4281 + 4.9375)/298 = 1367.3656/298 = **4.5885/298 PASSED** (+0.0012, margin +1.0885).
+- Q4 → **Oracle PL/SQL procedure → dbt + Trino SQL migration** row: 4.5108/245 → (1105.146 + 4.875)/246 = 1110.021/246 = **4.5123/246 PASSED** (+0.0015, margin +1.0123).
+
+All four topics remain comfortably above threshold. Q2 lifts the dbt-model-contracts row (17→18 datapoints, +0.016) — meaningful given the row was at 17 datapoints and the carried watch directly tested constraint-matrix accuracy.
+
+## Recommendation for teacher
+
+NO-OP. No FIX-A required, no new watches, no resource defects surfaced. Two carried watches closed positively from existing resource canonical reach (no FIX-A was applied between iter1272/1270 and this iter — responder corrected on its own across the gap, which is the cleanest possible watch closure).
