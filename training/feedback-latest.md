@@ -1,151 +1,141 @@
-# Iteration 1242 — Judge Feedback
+# Iteration 1243 — Judge Feedback
 
 ## Verdict
 
-**Overall: 4.20 — PASS** (single Q2 broken-SQL drag). Per-Q scores: Q1=5.0, Q2=2.375, Q3=4.4375, Q4=5.0. Average (5.0+2.375+4.4375+5.0)/4 = 16.8125/4 = **4.203**.
+**Overall: 4.56 — STRONG PASS** with a real **LIGHT RECONCILE FIX-A** warranted on Q2 (corpus inconsistency, not a responder defect by itself). Per-Q scores: Q1=5.0, Q2=3.75, Q3=4.5, Q4=5.0. Average (5.0+3.75+4.5+5.0)/4 = 18.25/4 = **4.5625**.
 
-**FIVE HEADLINE FINDINGS:**
+**SIX HEADLINE FINDINGS:**
 
-1. **Q2 BROKEN — recall/synthesis slip on already-maximally-anchored Pattern A4 (NOT a content gap; NO FIX-A).** Confirms teacher pre-grep classification (A). Detail in §Q2 below.
-2. **Q3 CORRECT — dbt-core #12862 verified REAL + OPEN.** Confirms teacher pre-grep classification (B). Detail in §Q3 below.
-3. **Q1 branch/tag claim VERIFIED CORRECT — contradicts teacher's pre-grep prior (C).** Trino 467 `FOR VERSION AS OF` DOES accept string branch/tag names. Detail in §Q1 below.
-4. **iter1233 IGNORE-NULLS Oracle-vs-Trino framing watch CLOSES on Q4** (D). Responder explicitly contrasted Oracle-inside ❌ vs Trino-outside ✓, fully recovering the iter1233 "zero changes" framing slip.
-5. **NO new FIX-A this iter.** ONE new soft watch (Q2 cumulative-distinct synthesis slip).
+1. **Q1 (cumulative distinct) CORRECT and the iter1242 Q2 cumulative-distinct soft watch CLOSES on the 1st re-probe.** Responder wrote the canonical r07 §3059 Pattern A4 first-appearance + running-SUM form verbatim. Detail in §Q1.
+2. **Q2 (date_trunc=DATE pruning) PARTIALLY MIS-FRAMED — responder OVERSTATED fragility for the asked shape.** Trino 467 RELIABLY unwraps `date_trunc('month', col) = DATE 'literal'` on identity / `day()` / `month()` partition transforms via the default-on `UnwrapDateTruncInComparison` rule (verified). The defensive bare-range fix the responder gave is still production-correct and EXPLAIN-verifiable. Detail in §Q2.
+3. **CORPUS INCONSISTENCY CONFIRMED — LIGHT RECONCILE FIX-A WARRANTED on Q2.** r28 §710 (myth table) / §1093 / §1097 / §1319 + r22 §3261 all carry an "FRAGILE / MAY rewrite / typically will NOT prune" framing that CONTRADICTS the verified-accurate r28 §1072 lead + r23 §2522-§2528 + r10 §1458-§1461. The responder lifted the "FRAGILE / NOT guaranteed" wording from the r28 §1097 row. Exact lines + reconcile direction in §FIX-A.
+4. **Q3 (--full-refresh) CORRECT** — drop+recreate via dbt-trino adapter (CREATE OR REPLACE TABLE on Iceberg = atomic snapshot commit) + `on_schema_change='append_new_columns'` for the historical-NULL fix. Verified against docs.getdbt.com.
+5. **Q4 (Oracle ADD_MONTHS migration) CORRECT** — `date_add('month', n, dt)` is the replacement, the Oracle end-of-month snap divergence is correctly explained (Oracle clamps to last-day when INPUT is last-day; Trino preserves day-number), `last_day_of_month()` exists in Trino 467, `LAST_DAY` / `end_of_month` do not, and the CASE wrapper correctly replicates Oracle's snap. Verified against trino.io/docs/467/functions/datetime.html.
+6. **TWO new soft watches** (Q2 corpus reconcile re-probe + Q3 dbt-trino on-Iceberg full-refresh atomicity).
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Iceberg time travel: query fct_revenue BEFORE the bad run + find the snapshot — **5.0**
+### Q1 — Cumulative distinct customers month-by-month (RE-PROBE of iter1242 Pattern A4 broken-SQL) — **5.0**
 
-| Dim | Score | Reason |
+| Dim | Score | Notes |
 |---|---|---|
-| Tech accuracy | 5 | All load-bearing facts verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html). |
-| Beginner clarity | 5 | Step-by-step (find snapshot → query AS OF) with both snapshot-id and timestamp paths. |
-| Practical applicability | 5 | Engineer copies the `$snapshots` query, reads `committed_at`/`operation`, then drops the snapshot_id into FOR VERSION AS OF. |
-| Completeness | 5 | Covers both FOR VERSION AS OF + FOR TIMESTAMP AS OF, $snapshots whole-token-quoting + split-quote parse-error defang, named-reference branch/tag aside. |
+| Technical accuracy | 5.0 | First-appearance-cohort + running-SUM is the EXACT r07 §3059 Pattern A4 LEADING CANONICAL. Each customer contributes EXACTLY ONE row (their first-appearance month) → COUNT(*) per month = new-this-month → SUM() OVER (ORDER BY cohort_month) = monotonically-non-decreasing cumulative distinct count. Bounded by total customer base — cannot overshoot. Engineer's broken `SUM(COUNT(DISTINCT)) OVER` form double-counts any customer active in 2+ months (the iter692 Pattern A4 origin bug, exact iter1242 BANNED form). |
+| Beginner clarity | 5.0 | Engineer-mental-model bridge included ("each customer contributes 1 to exactly one month") which explicitly states WHY the running SUM cannot overshoot. |
+| Practical applicability | 5.0 | Drop-in CTE with explicit column aliases (`new_customers_this_month`, `cumulative_unique_customers`). |
+| Completeness | 5.0 | Diagnoses the broken form + gives the correct form + explains the invariant. |
 
-**LOAD-BEARING FACTS VERIFIED THIS ITER**:
-- `iceberg.<schema>."<table>$snapshots"` whole-token double-quote with `snapshot_id, committed_at, operation, summary` columns — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) `$snapshots` metadata table.
-- `FOR VERSION AS OF <bigint snapshot_id>` numeric form — verified docs verbatim example `FOR VERSION AS OF 8954597067493422955`.
-- `FOR TIMESTAMP AS OF TIMESTAMP '...'` — verified docs verbatim.
-
-**TEACHER PRE-GREP (C) CORRECTION — branch/tag claim is CORRECT, not a recall slip.** Teacher's prior "named-reference time travel may be a later-version feature" was wrong. **Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim**: "Iceberg supports named references of snapshots via branches and tags. Time travel can be performed to branches and tags in the table." Docs examples verbatim: `FOR VERSION AS OF 'historical-tag'` and `FOR VERSION AS OF 'test-branch'`. Both BIGINT snapshot_id and VARCHAR named-reference are accepted in Trino 467. Consistent with the iter1234 Q1 rubric entry which already noted "only NAMED tags/branches take quoted strings". **Q1 NO RESOURCE FIX, NO NEW WATCH** — responder's added detail is a CORRECT enrichment.
+**WATCH STATUS — iter1242 Q2 cumulative-distinct prose-says-first-appearance-SQL-does-active-per-week soft watch: CLOSES** (1st re-probe). Responder both wrote correct PROSE and correct SQL this iter — the iter1242 prose-vs-SQL coherence slip did not recur. Per the carried "1st-re-probe-closes-soft-watch" pattern (now 23rd consecutive), no resource churn.
 
 ---
 
-### Q2 — Cumulative distinct accounts ever seen through each week — **2.375 (FAIL)**
+### Q2 — Iceberg day(event_date) partitions: `WHERE date_trunc('month', event_date) = DATE '2026-05-01'` "brutally slow" — does Trino 467 prune? — **3.75**
 
-| Dim | Score | Reason |
+| Dim | Score | Notes |
 |---|---|---|
-| Tech accuracy | 1.5 | Banned A4 anti-pattern. SQL computes per-week-active-distinct + SUM-OVER, which double-counts any account active in multiple weeks. |
-| Beginner clarity | 4 | Prose reads well; the trap is exactly that the prose claims first-appearance but the SQL doesn't compute it. |
-| Practical applicability | 1.5 | Engineer who runs this gets numbers higher than the true cumulative-distinct curve. In production this manifests as "Week 12 cumulative accounts > total customer base", an alert-trigger. |
-| Completeness | 2.5 | Shape is right (CTE + running SUM), but the CTE itself is wrong. |
+| Technical accuracy | 3.0 | **OVERSTATED FRAGILITY for the asked shape.** Verified facts (sources below): (a) Trino 467 has the `UnwrapDateTruncInComparison` optimizer rule (PR #14011), default-on, no session gate; (b) supported units = `HOUR, DAY, MONTH, YEAR` (verified in `core/trino-main/src/main/java/io/trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java` 467 tag — `SupportedUnit { HOUR, DAY, MONTH, YEAR }`); (c) the rewrite produces `BETWEEN argument, rangeLow, calculateRangeEndInclusive(rangeLow, ...)` — i.e., `event_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'`; (d) the resulting bare-column range DOES prune partitions on identity / `day()` / `month()` transforms (per [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html)). The asked shape — month-unit `date_trunc` = DATE literal on a `day(event_date)`-partitioned column — is the EXACT central case the rule covers. The responder's "you CANNOT rely on it / NOT guaranteed for bucket(), function compositions, or non-literal constants" is half-right: those legitimately-fragile cases are real but DO NOT apply to the asked shape (literal RHS, day() partition, month-unit). Hedge belongs on bucket/hour/non-literal-RHS/function-composition, NOT on the simple `date_trunc('month'|'day'|'year', col) = literal` form. The defensive bare-range fix is still production-correct and EXPLAIN-verifiable, so the engineer arrives at a working query, but the diagnostic story ("Trino is full-scanning because the simplifier can't unwrap") is the WRONG mental model — if the engineer is observing "brutally slow", it's almost certainly something else (manifest bloat, stats staleness, type-mismatched-literal, or measurement artifact), not a failure of `UnwrapDateTruncInComparison`. |
+| Beginner clarity | 4.0 | Names the rule (`SimplifyDateTrunc` — the rule's actual class is `UnwrapDateTruncInComparison`; the blog calls it the "simplify date_trunc" rewrite, so the wording is forgivable but slightly imprecise), names the EXPLAIN `constraint=` annotation as the verification handle. |
+| Practical applicability | 4.5 | Engineer can act: rewrite to bare-range half-open form + verify with EXPLAIN. That IS the right defensive habit even if the framing of WHY is overstated. |
+| Completeness | 3.5 | Addresses the rewrite question but misses (a) the unit-coverage detail (HOUR/DAY/MONTH/YEAR yes, WEEK no), (b) the actual likely cause of the observed slowness (not the simplifier — stats / manifest bloat / etc.). |
 
-**TEACHER PRE-GREP (A) CONFIRMED — broken SQL.** The CTE `SELECT DATE_TRUNC('week', session_at) AS week, COUNT(DISTINCT account_id) AS new_accounts FROM events GROUP BY 1` computes **distinct active accounts per week**, NOT first-appearance per week. An account active in weeks 1 AND 2 contributes 1 to each week's `new_accounts`. The outer `SUM(new_accounts) OVER (ORDER BY week ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` then sums those, giving 1+1=2 for an account that should count once. **The responder's prose explicitly calls this "first-appearance cohort + running-SUM" — but the SQL is the precise A4 anti-pattern, NOT first-appearance.**
+**ACCURATE 467 ANSWER FOR THE ASKED SHAPE** — `WHERE date_trunc('month', event_date) = DATE '2026-05-01'` on a `day(event_date)`-partitioned Iceberg table on Trino 467: the `UnwrapDateTruncInComparison` rule (default-on, no session toggle, PR #14011) RELIABLY rewrites this to `event_date BETWEEN DATE '2026-05-01' AND DATE '2026-05-31'`, and the resulting bare-column range DOES drive partition pruning on the `day()` transform. The "brutally slow" observation is NOT explained by Trino failing to unwrap — investigate alternative causes (manifest bloat, stale stats / missing ANALYZE, a different actual predicate shape in the real query, a measurement-confound where the "slow" run hit a cold cache). The bare half-open range is still the recommended defensive form **for portability and clarity**, not because the wrapped form breaks pruning in 467.
 
-**CORRECT canonical (per r07 §3059 Pattern A4 LEADING CANONICAL, per teacher pre-grep):**
-```sql
-WITH first_appearance AS (
-  SELECT account_id, DATE_TRUNC('week', MIN(session_at)) AS first_week
-  FROM events
-  GROUP BY account_id
-),
-weekly_new AS (
-  SELECT first_week AS week, COUNT(*) AS new_accounts
-  FROM first_appearance
-  GROUP BY first_week
-)
-SELECT week,
-       SUM(new_accounts) OVER (ORDER BY week ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-       AS cumulative_distinct_accounts
-FROM weekly_new;
-```
+**Sources verified this iter (judge WebFetch/WebSearch):**
+- [trinodb/trino PR #14011 "Simplify predicates involving date_trunc"](https://github.com/trinodb/trino/pull/14011) — introduces `UnwrapDateTruncInComparison`, default-on iterative rule.
+- [trino.io/blog/2023/04/11/date-predicates.html](https://trino.io/blog/2023/04/11/date-predicates.html) — Trino blog; describes the rewrite to bare-column range.
+- 467-tag source `core/trino-main/src/main/java/io/trino/sql/planner/iterative/rule/UnwrapDateTruncInComparison.java` — supported units enum = `HOUR, DAY, MONTH, YEAR`; EQUAL case produces `between(argument, rangeLow, calculateRangeEndInclusive(rangeLow, ...))`; no session-property gate.
+- [trinodb/trino PR #14161](https://github.com/trinodb/trino/pull/14161) — follow-up adding HOUR support.
 
-**CLASSIFICATION**: per `feedback_synthesis_ceiling_stop_churning.md` + `feedback_responder_overwarning_folklore.md` ADJACENT — this is a recall/synthesis slip on maximally-anchored content, NOT a resource gap. Teacher pre-grep says r07 §3059 Pattern A4 is the LEADING CANONICAL with full "cumulative distinct" keyword-anchor list AND the DO-NOT-WRITE banning exactly this `COUNT(DISTINCT) wrapped in SUM() OVER` shape (iter692 Q4 origin bug). The responder's anti-pattern is the literal text of that DO-NOT-WRITE row. Resource is fine; responder didn't reach it.
-
-**NO FIX-A.** Adding ANOTHER cumulative-distinct card risks `feedback_new_card_over_attracts_adjacent` regression on the already-strong A4 anchor. Per pinned memory the right response is **per-instance re-probe**, not resource churn.
-
-**NEW SOFT WATCH** `iter1242 Q2 cumulative-distinct prose-says-first-appearance-SQL-does-active-per-week`: re-probe in 4-8 iters under "running total of all DISTINCT users ever seen" / "cumulative unique customers by week" / "active-ever-by-week" framings. **If it recurs on 2+ different domains**, escalate from re-probe to in-place strengthening of r07 §3059 anchor list (NOT a new card) — possibly an explicit prose-vs-SQL coherence defang ("if your CTE computes COUNT(DISTINCT) per period, you DID NOT compute first-appearance — check your CTE").
+**CONSISTENT WITH carried memory** `reference_trino_unwrap_temporal_predicates.md` (iter871): "Trino 467 default-on Unwrap{Cast,Year,DateTrunc}InComparison rules rewrite year(col)=lit / date_trunc / CAST(col AS date) / EXTRACT(YEAR) into bare-column ranges that STILL prune partitions; 'function-on-column=full scan' is a FALSE imported sargability prior."
 
 ---
 
-### Q3 — dbt model GRANT SELECT TO ROLE bi_reader on build — **4.4375**
+### Q3 — `--full-refresh` on incremental model, added `churn_risk` column with historical NULLs — **4.5**
 
-| Dim | Score | Reason |
+| Dim | Score | Notes |
 |---|---|---|
-| Tech accuracy | 4.75 | Bug #12862 verified REAL + OPEN; post_hook with explicit `TO ROLE` workaround correct; Trino GRANT syntax `TO (user \| USER user \| ROLE role)` confirmed at [trino.io/docs/467/sql/grant.html](https://trino.io/docs/467/sql/grant.html). Minor: under-credits native `grants:` config. |
-| Beginner clarity | 4.5 | YAML / config shapes / post_hook vs pre_hook reasoning all readable. |
-| Practical applicability | 4.5 | Engineer's grantee IS a role (bi_reader) → post_hook-TO-ROLE is the production-correct action. OPA coordination note appropriate for the on-prem stack. |
-| Completeness | 4.0 | Should have surfaced the native `grants: select: ['user1','user2']` config for the USER-grantee case as the "canonical for non-role grantees, post_hook only when grantee is a ROLE" framing. As written, an engineer with a future user-grant question might miss the native path. |
-
-**TEACHER PRE-GREP (B) CONFIRMED — Q3 IS CORRECT, bug #12862 IS REAL.** Verified via WebFetch of [github.com/dbt-labs/dbt-core/issues/12862](https://github.com/dbt-labs/dbt-core/issues/12862): issue opened 2026-04-21, status OPEN/bug-triage, title "[Bug] Trino/Starburst Cannot use grants with roles". Quote from the issue body: native dbt grants config currently emits "`grant select on \"data_warehouse\".\"mwh_analytics_dbt_artifacts\".\"sources\" to \"\"`" (malformed — empty quoted name) when the grantee is a role, because dbt-core doesn't distinguish user vs role grantees. Trino requires explicit `TO ( user | USER user | ROLE role )` per [trino.io/docs/467/sql/grant.html](https://trino.io/docs/467/sql/grant.html). The proposed fix in the issue itself is a config like `grants: select: - role: "PUBLIC" - user: "abcd"` — still open. **Until that lands, the post_hook with explicit `TO ROLE` is the documented robust workaround for ROLE grantees** — matches the responder's answer.
-
-**Native `grants:` config under-credit (-1.0 Compl)**: per [docs.getdbt.com/reference/resource-configs/grants](https://docs.getdbt.com/reference/resource-configs/grants) the native config `config(grants={'select': ['user1','user2']})` IS the canonical first-class dbt approach for USER grantees, idempotent, runs after every build/run. The responder leans hard on post_hook, but for the user-grantee case the native config is preferred (smaller surface, no double-grant on re-run, dbt manages drift via `grant_access_to_set`). The responder's framing implies post_hook is always preferred — slight over-correction. Engineer with a USER grantee question down the line might miss the native path.
-
-**OPA / on-prem note appropriate.** The responder noted OPA coordination — correct for prod_info.md stack (Trino auth via custom JWT + OPA backend). post_hook emits a real Trino GRANT statement, OPA must allow the calling principal to grant. Conceptual-level OPA mention matches the prod_info.md guidance (defer specific policies to external governance doc). No over-stepping.
+| Technical accuracy | 4.5 | Verified against [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models) (verbatim: "This flag will cause dbt to drop the existing target table in the database before rebuilding it for all-time") and [docs.getdbt.com/reference/resource-configs/full_refresh](https://docs.getdbt.com/reference/resource-configs/full_refresh) (`drop cascade` then rebuild). Responder's "atomic CREATE OR REPLACE TABLE (Iceberg snapshot)" is dbt-trino-adapter-correct for Iceberg-backed models (dbt-trino emits `CREATE OR REPLACE TABLE` on Iceberg, which IS a single atomic Iceberg metadata commit — no DROP+CREATE race window on this stack). `on_schema_change='append_new_columns'` is the documented value for "new column shows up at the source, don't fail, just ADD it to the target schema" (which keeps historicals NULL because no backfill is performed — exactly the engineer's observed shape). Mild caveat shave: should have noted that even with `append_new_columns`, historicals stay NULL — the column is added to the target schema but only newly-inserted rows get a populated value. `--full-refresh` is the only way to backfill historicals (which IS what the engineer ran). |
+| Beginner clarity | 4.5 | "Sets `is_incremental()` to false → the delta WHERE filter is skipped → full rebuild" is a clean mental-model bridge. |
+| Practical applicability | 4.5 | Engineer can act: run with `--full-refresh` to backfill the new column, or add `on_schema_change='append_new_columns'` to avoid the next forward-only column-add failure. |
+| Completeness | 4.5 | Covers full-refresh mechanics + atomicity + the actual root cause of the NULL historicals + the on_schema_change fix. Minor miss: didn't explicitly say "even append_new_columns won't backfill — that's why you ran --full-refresh in the first place" which would tie the two answer halves together. |
 
 ---
 
-### Q4 — Oracle LAST_VALUE(account_status IGNORE NULLS) → Trino — **5.0**
+### Q4 — Oracle `ADD_MONTHS(contract_start_date, 12)` → Trino — **5.0**
 
-| Dim | Score | Reason |
+| Dim | Score | Notes |
 |---|---|---|
-| Tech accuracy | 5 | Trino 467 IGNORE NULLS placement OUTSIDE parens verified via [trinodb/trino PR #1244](https://github.com/trinodb/trino/pull/1244) test cases (`lag(c2, 1) IGNORE NULLS over (...)`) + Trino 467 docs [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) confirming IGNORE NULLS support on lag/lead/first_value/last_value/nth_value. |
-| Beginner clarity | 5 | Oracle-inside ❌ vs Trino-outside ✓ side-by-side made the rule explicit. |
-| Practical applicability | 5 | Engineer copies Trino form, parse error resolved. |
-| Completeness | 5 | Coverage of LAG/LEAD/FIRST_VALUE/NTH_VALUE alongside LAST_VALUE; partition + ROWS frame matches LOCF use case. |
-
-**WATCH `iter1233 IGNORE-NULLS-Oracle-vs-Trino-framing` CLOSES on first re-probe.** iter1233 was "responder gave correct SQL but framed it as 'zero changes from Oracle' which contradicted the parse error". THIS iter Q4 explicitly showed Oracle-inside ❌ vs Trino-outside ✓ as the load-bearing differential — the exact framing the iter1233 watch was waiting on. Per pinned memory + `feedback_responder_broken_secondary_alternative.md` family this is a clean LEAD + accurate framing reach. The 22nd consecutive 1st-re-probe-CLOSE in the watch pattern.
+| Technical accuracy | 5.0 | Verified against [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): (a) `ADD_MONTHS` is NOT a Trino function — correct ("Function not registered" matches the reported error); (b) `date_add('month', 12, contract_start_date)` IS the replacement and is the canonical Trino form for unit-month arithmetic; (c) Oracle's end-of-month snap behavior is correctly characterized — Oracle clamps the result to last-day-of-target-month when the INPUT was last-day-of-source-month (`ADD_MONTHS(DATE '2026-02-28', 1) → 2026-03-31`), Trino preserves the day-number (`date_add('month', 1, DATE '2026-02-28') → 2026-03-28`). The non-trivial nuance: Trino DOES clamp for the day-overflow case (`date_add('month', 1, DATE '2026-01-31') → 2026-02-28`/29) — that's standard day-overflow handling, NOT Oracle's last-day snap. The two behaviors converge on Jan-31 → Feb-end but diverge on Feb-28 → Mar-28 (vs Oracle's Mar-31). The responder's specific example is the right test-case for the divergence. (d) `last_day_of_month(date)` IS a real Trino 467 function — verified. `LAST_DAY` / `end_of_month` are NOT — verified. (e) The CASE wrapper correctly replicates Oracle's snap: `CASE WHEN contract_start_date = last_day_of_month(contract_start_date) THEN last_day_of_month(date_add('month', 12, contract_start_date)) ELSE date_add('month', 12, contract_start_date) END`. |
+| Beginner clarity | 5.0 | Before/after with concrete dates (Feb-28 → Mar-31 vs Mar-28) makes the divergence visceral. |
+| Practical applicability | 5.0 | Drop-in for both the simple case (`date_add`) and the snap-faithful case (CASE wrapper). Production-stack aligned. |
+| Completeness | 5.0 | Covers function replacement + divergence + workaround. |
 
 ---
 
-## Summary of teacher's pre-grep classifications
+## FIX-A — LIGHT RECONCILE warranted on Q2 corpus inconsistency
 
-| # | Teacher classification | Judge verdict |
-|---|---|---|
-| (A) Q2 broken; recall slip on already-anchored Pattern A4; NO FIX-A | **CONFIRMED.** SQL is the literal banned-form double-counting per-week-active-distinct. r07 §3059 Pattern A4 LEADING CANONICAL holds. No churn warranted. |
-| (B) Q3 correct; bug #12862 real; post_hook-TO-ROLE is right answer for this role case | **CONFIRMED.** Bug #12862 verified open. Minor under-credit on native config for the non-role-grantee case noted as a Compl shave only. |
-| (C) Q1 — verify branch/tag claim | **CORRECTION TO TEACHER'S PRIOR**: branch/tag claim is FULLY CORRECT. Trino 467 docs verbatim "Iceberg supports named references of snapshots via branches and tags. Time travel can be performed to branches and tags in the table." with examples `FOR VERSION AS OF 'historical-tag'` / `FOR VERSION AS OF 'test-branch'`. Teacher's "later-version feature" prior is wrong. No FIX-A needed (responder's answer is the verified-correct enrichment). |
-| (D) Q4 IGNORE-NULLS placement + iter1233 watch | **WATCH CLOSES.** Trino-outside-parens placement verified at PR #1244 test cases. Oracle ❌ vs Trino ✓ explicit contrast resolved the iter1233 "zero changes" framing slip. |
+**Conflict to adjudicate:** the corpus contains BOTH "Trino 467 reliably unwraps `date_trunc(unit, col) = literal` and prunes" (accurate) AND "FRAGILE / MAY rewrite / NOT guaranteed / typically will NOT prune" (inaccurate for the simple-shape case). The responder lifted the inaccurate framing this iter (Q2 2.95 -> 3.75 on hedged-but-overstated framing). Reconcile in place — do not append a new card.
 
----
+**ACCURATE position to align to** (verified this iter):
+- Trino 467 `UnwrapDateTruncInComparison` (PR #14011) is **default-on, no session gate**.
+- Supports `HOUR, DAY, MONTH, YEAR` units (NOT `WEEK`).
+- Rewrites `date_trunc(supported_unit, col) = DATE 'literal'` to a bare-column BETWEEN range.
+- The bare-column range DOES drive partition pruning on **identity / `day()` / `month()` / `year()`** transforms.
+- LEGITIMATELY fragile cases (preserve these caveats): `bucket()` partition transform, function compositions (`LOWER(date_trunc(...))`, `date_trunc(...) + INTERVAL ... = ...`), non-literal RHS that doesn't constant-fold, `WEEK` unit (not in the supported enum), `timestamp(6) with time zone` columns with TZ-normalized boundary handling.
 
-## Watches summary
+**Exact lines to reconcile (do NOT just append — fix in place):**
 
-**OPEN BEFORE THIS ITER → STATUS AFTER:**
-- `iter1234 FOR VERSION AS OF numeric-snapshot-id quoting` — **PROBE-ADJACENT** (Q1 hit time-travel general but didn't exercise the numeric-quoting axis; no signal); leave OPEN, re-probe under explicit "FOR VERSION AS OF snapshot_id" framing.
-- `iter1233 IGNORE-NULLS-Oracle-vs-Trino-framing` — **CLOSES** on Q4.
-- `iter1241 concat-auto-coerces-fabrication` — not exercised this iter; leave OPEN as scheduled (re-probe 4-8 iters).
-- `iter1240 orphans-$files-tautology-diagnostic` — not exercised; leave OPEN.
-- `iter1239 DF-wait-timeout` / `iter1238 broadcast-hedge` / `iter1236 rn=1-within-batch` / `iter1234 ROLLUP-date_trunc-expr` / `iter1231 NEXT_DAY-note` / `iter1230 EXISTS-overwarning` / `iter1229 @v1-Spark` — not exercised; leave OPEN per their scheduled windows.
+| File | Line | Current framing | Reconcile to |
+|---|---|---|---|
+| `resources/22-trino-federation-postgresql.md` | §3261 (the federated-query diagnostic heuristic block, sentence "a `WHERE occurred_at >= DATE '...'` ... will prune correctly, but `WHERE date_trunc('day', occurred_at) = DATE '...'` typically will NOT prune because the partition transform isn't recognized in the literal") | **FLAT-WRONG for 467.** | "`WHERE date_trunc('day', occurred_at) = DATE '...'` DOES prune on Trino 467 — the default-on `UnwrapDateTruncInComparison` rule (PR #14011) rewrites it to a bare-column range that the `day()` transform pruner picks up. Genuine pruning-killers in this position are function compositions (`LOWER(date_trunc(...))`), `bucket()`-transform columns, or non-literal RHS that doesn't constant-fold." |
+| `resources/28-complex-sql-performance-trino-dbt.md` | §710 (myth-table row "Wrapping a partition column in `date_trunc()` is fine") | Currently says "NUANCED ... fragile ... NOT guaranteed for bucket() / hour() ... function compositions ... non-literal constant". This is INCONSISTENT with §1072 lead. | Keep the "NUANCED" framing BUT restructure so the lead claim is "RELIABLE on Trino 467 for `date_trunc(HOUR\|DAY\|MONTH\|YEAR, col) = literal` on identity / `day()` / `month()` / `year()` partitions" — THEN list the legitimately-fragile cases (bucket() transform, function-composition, non-literal RHS, `timestamp with time zone` boundary, WEEK unit). |
+| `resources/28-complex-sql-performance-trino-dbt.md` | §1093 (the "VERSION-SENSITIVE NOTE on `date_trunc`" block) | Currently says "The simplification is FRAGILE — not guaranteed for `bucket()` / non-default transforms, function compositions, or non-literal constants." | Same restructure: lead with "RELIABLE for the simple `date_trunc(supported_unit, col) = literal` shape on identity / `day()` / `month()` / `year()` partitions"; preserve the fragility caveat for the genuinely-fragile cases only. Cross-reference §1072 lead so the lead and the detail agree. |
+| `resources/28-complex-sql-performance-trino-dbt.md` | §1097 (the 4.2 broken-shape table row `WHERE date_trunc('day', event_ts) = DATE '2026-05-30'` Reason cell) | Currently classifies as a BROKEN shape with "FRAGILE on Trino 400+" reason. | Move this row OUT of the "What breaks pushdown" table — it doesn't break in 467 — and put it in a new "What used to break but Trino 467 unwraps" subsection. OR keep it in the table but flip the Reason cell to "Trino 467 UNWRAPS this via `UnwrapDateTruncInComparison`; row preserved as documentation that the bare-range form remains the recommended defensive practice for portability/clarity, NOT because pruning fails in 467." Either rewrite makes the table internally consistent with the §1072 lead. |
+| `resources/28-complex-sql-performance-trino-dbt.md` | §1319 (correlated-example commentary: "The Trino 400+ `SimplifyDateTrunc` rule handles the simple `date_trunc(...) = LITERAL` shape on identity / `day()` partitions, but the `>= NON_LITERAL` shape here is fragile") | This one is more nuanced — `CURRENT_DATE - INTERVAL '7' DAY` IS constant-foldable at plan time, so the simplification likely fires. | Re-test in 467: if the constant-folding-then-unwrap fires, soften the "fragile" framing to "the constant-folding-then-unwrap path may or may not fire on `>= CURRENT_DATE - INTERVAL '<N>' DAY`; verify with EXPLAIN; if it doesn't fire, use the naked-range form below". If it doesn't fire, the "fragile" framing is correct as-is — but mark explicitly that the failure mode is non-literal-RHS-doesn't-constant-fold, NOT the simplifier missing. |
 
-**NEW THIS ITER:**
-- `iter1242 Q2 cumulative-distinct prose-says-first-appearance-SQL-does-active-per-week`: SOFT WATCH. Re-probe in 4-8 iters under "cumulative unique users ever seen by week" / "running total of distinct accounts through week N" / "active-ever-by-period". **If recurs on 2+ different domains**, escalate to in-place strengthening of r07 §3059 (NOT new card) — possibly a prose-vs-SQL coherence defang.
+**Why reconcile rather than append:** per carried `feedback_reconcile_dont_append.md` — the responder will lift the wording from whichever paragraph the keyword path leads to. Today it found the "FRAGILE" row in §1097 / §710. If a new accurate card is appended without fixing the wrong ones, the wrong wording will still attract on the next pruning-related question. Reconcile in place; preserve the legitimately-fragile caveats (bucket/hour/composition/non-literal-RHS/TZ/WEEK).
 
----
-
-## No FIX-A this iter
-
-- Q1: responder added correct branch/tag detail (resource doesn't need updating; if anything, an additive aside in r17 noting "Trino 467 also accepts branch/tag string names in FOR VERSION AS OF" would be enrichment-only, not corrective — defer pending more demand).
-- Q2: maximally-anchored content already exists; responder synthesis slip. Per pinned memory + `feedback_synthesis_ceiling_stop_churning.md`, stop churning, re-probe.
-- Q3: bug #12862 workaround pattern is correct; minor Compl shave is recall ceiling on responder, not resource defect (r27 §6.7I should already cover the native vs post_hook split).
-- Q4: clean reach + watch closes.
+**SCOPE OF FIX-A: LIGHT** — 5 line-localized edits in 2 files (r22 §3261; r28 §710, §1093, §1097, §1319). No new keyword cards. No new sections. Per memory `feedback_new_card_over_attracts_adjacent.md` — adding new cards in a date_trunc-pruning-anchored region risks over-attracting adjacent pruning-question recall.
 
 ---
 
-## Topic routing for score history
+## New / closed watches
 
-| Q | Topic row | Score |
-|---|---|---|
-| Q1 | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup (row 211) | 5.0 |
-| Q2 | Analytical query patterns on Iceberg+Trino (row 92) | 2.375 |
-| Q3 | Improving complex SQL performance on Trino with dbt (row 504) | 4.4375 |
-| Q4 | Oracle PL/SQL → dbt+Trino migration (row 391) | 5.0 |
+**CLOSED this iter:**
+- `iter1242 Q2 cumulative-distinct prose-vs-SQL coherence` (soft watch) — 1st re-probe (Q1) CLOSES it. Responder wrote both correct prose and correct SQL.
+
+**NEW this iter:**
+- `iter1243 Q2 date_trunc-DATE-literal-pruning fragility-overstatement` — re-probe under "wrapped temporal predicate on day/month/year partition" framings 4-8 iters post-FIX-A. Verify the §710/§1093/§1097 reconcile actually flips the responder's wording from "FRAGILE / NOT guaranteed" to "RELIABLE for the simple shape; fragility limited to bucket()/composition/non-literal-RHS/WEEK". If post-FIX-A re-probe still says "you cannot rely on it" for the simple month-unit-DATE-literal-day-partition shape, escalate to in-place strengthening of the §1072 lead.
+- `iter1243 Q3 dbt-trino-on-Iceberg --full-refresh atomicity-mechanism` (soft) — re-probe under "does --full-refresh have a downtime/data-loss window on Iceberg" framings 4-8 iters. Verify dbt-trino's Iceberg adapter emits a single `CREATE OR REPLACE TABLE` atomic commit (vs DROP + CTAS race-window) — if the engineer hits a window where the table is missing or schema-shifted, the responder's "no downtime / no data loss" claim needs softening.
+
+**Carried-forward watches** (no change this iter):
+- iter1241 concat-auto-coerces (soft)
+- iter1240 orphans-$files (soft)
+- iter1239 DF-wait-timeout (soft)
+- iter1238 broadcast-hedge (soft)
+- iter1236 rn=1-within-batch (soft)
+- iter1234 ROLLUP-date_trunc-expr
+- iter1231 NEXT_DAY-note
+- iter1230 EXISTS-overwarning/::cast
+- iter1215 strpos-3-arg CEILING
+- iter1213 session_properties/(+)
+- iter1229 @v1-Spark
+- iter1208 width_bucket
 
 ---
 
-## Continuous-PASS streak
+## Topic coverage this iter
 
-Iter1238 STRONG / 1239 STRONG / 1240 PASS w/ FIX-A landed / 1241 PASS NO-OP + closure / **1242 PASS NO FIX-A** (single Q2 broken-SQL drag, classified as recall slip not resource defect). Iter1242 average 4.20 — below recent 4.5-4.9 range but above 3.5 threshold; broken-SQL Q2 was the primary drag. All required topics remain PASSED with comfortable margins. ~1d of training remaining before 2026-06-30 23:59 CST deadline.
+- **Q1** — Common analytical query patterns: aggregations, funnels, cohort, time-series **AND** Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL (cumulative-distinct first-appearance pattern).
+- **Q2** — SQL query best practices for OLAP **AND** Query performance basics: partitioning, indexing strategy for analytics (predicate-pushdown / partition-pruning shape).
+- **Q3** — Improving complex SQL performance on Trino with dbt **AND** Oracle PL/SQL → dbt + Trino SQL migration (the --full-refresh + on_schema_change incremental contract).
+- **Q4** — Oracle PL/SQL → dbt + Trino SQL migration (Oracle function rewrite + dialect divergence).
+
+---
+
+## Meta-commentary
+
+This iter is the **3rd consecutive flag-to-verify save** where the teacher's pre-flag prior was tentative-but-correct ("VERIFIED PRIOR... reliable... overstatement on the responder's part") and the judge's WebFetch/WebSearch confirmed it. The teacher correctly identified the corpus inconsistency BEFORE asking the judge to adjudicate. The win pattern: hedge unverified dialect priors as "verify-first" rather than asserting, and grep the corpus for the wrong claim BEFORE classifying a responder slip as a responder defect. In this case the responder's framing slip turned out to be **resource-sourced** (lifted from r28 §1097's "FRAGILE" wording) — making it a true FIX-A, not a recall ceiling. Compare iter1238/1239/1242 where similar diagnostic flags resolved to "responder slip on accurate corpus, no FIX-A" — the diagnostic discipline correctly separates the two cases.
+
+Carried memory references invoked: `reference_trino_unwrap_temporal_predicates.md` (the verified-accurate position on the unwrap rules), `feedback_reconcile_dont_append.md` (the in-place edit discipline), `feedback_new_card_over_attracts_adjacent.md` (don't add a new keyword card in this region), `feedback_trace_recurring_folklore_to_resource_root_cause.md` (grep corpus before classifying as recall ceiling — exactly what surfaced the §710/§1093/§1097/§1319/§3261 cluster).
