@@ -124,7 +124,7 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 >
 > | DO NOT write this | What is wrong | The right answer |
 > |---|---|---|
-> | `SELECT * FROM system.runtime.queries WHERE catalog = 'iceberg' ORDER BY peak_memory_bytes DESC` | The `catalog` column does NOT exist on `system.runtime.queries` (see Trino 467 schema below). The `peak_memory_bytes` column does NOT exist there either. Both are confidently-invented column names. | To find queries that touched a catalog, search the SQL text: `WHERE query LIKE '%iceberg.%' AND state = 'FINISHED'`. For peak memory, scrape JMX MBeans `trino.execution:name=QueryManager` or the persisted event-listener `QueryCompletedEvent`. |
+> | `SELECT * FROM system.runtime.queries WHERE catalog = 'iceberg' ORDER BY peak_memory_bytes DESC` | The `catalog` column does NOT exist on `system.runtime.queries` (see Trino 467 schema below). The `peak_memory_bytes` column does NOT exist there either. Both are confidently-invented column names. | To find queries that touched a catalog, search the SQL text: `WHERE query LIKE '%iceberg.%' AND state = 'FINISHED'`. For peak memory, scrape JMX MBeans `trino.execution:name=QueryManager` or the persisted event-listener `QueryCompletedEvent`. **For per-query CPU + bytes scanned (the "which query is hammering the cluster / scanned the most data" question), DON'T stop here — there IS a live recipe: see §"Finding expensive queries on Trino 467" below, which JOINs `system.runtime.queries` to `system.runtime.tasks` on `query_id` (`tasks.split_cpu_time_ms` + `tasks.physical_input_bytes`).** |
 > | `EXPLAIN PLAN FOR <query>` | This is **Oracle/Postgres syntax**, not Trino. Trino does NOT accept `PLAN FOR`. | `EXPLAIN <query>` (defaults to DISTRIBUTED), or `EXPLAIN (TYPE DISTRIBUTED) <query>`, or `EXPLAIN (TYPE IO) <query>`. See [trino.io/docs/current/sql/explain.html](https://trino.io/docs/current/sql/explain.html). |
 > | `ANALYZE TABLE iceberg.analytics.user_events` | The `TABLE` keyword is **Spark/Hive dialect**. Trino's parser rejects it. | Bare `ANALYZE iceberg.analytics.user_events` — no `TABLE` keyword. See resource 24-trino-cbo-analyze.md §4 leading canonical statement. |
 > | `CALL iceberg.system.rewrite_data_files(...)` pasted into the Trino query console | `CALL iceberg.system.*` is **Spark SQL only**; Trino rejects with parse error. Trino's equivalent is `ALTER TABLE ... EXECUTE`. | For compaction on Trino 467: `ALTER TABLE <t> EXECUTE optimize(file_size_threshold => '512MB')`. For procedures Trino lacks (rewrite-all=true, z-order, MoR delete cleanup, rewrite_manifests on 467), run via Spark — see resource 17 §"Trino EXECUTE vs Spark CALL" disambiguation matrix. |
@@ -404,6 +404,26 @@ A query that runs every 30 seconds for a live dashboard is 2,880 queries per day
 ## Finding expensive queries on Trino 467 (verified SQL recipes)
 
 > **READ THIS FIRST if your question is a CLUSTER-TRIAGE narrative (you may not know the table names):** "the cluster / Trino is **sluggish / slow during business hours** and I want to find out **which queries are hammering it / eating all the resources** before throwing more hardware at it"; "how do I see **what's running right now** / **which queries are running the longest** / **which queries are reading the most data**"; "**top resource-consuming** / heaviest / most-expensive queries"; "find the query that's pegging CPU / scanning the most bytes"; "which user/source/dashboard is generating the heavy load". **The answer is the `system.runtime.queries` JOIN `system.runtime.tasks` recipes in THIS section (and the mirror in r16 §"most expensive single Trino queries").** These are the live in-memory system tables — do NOT hedge or say "Trino has no way to see running queries." Note the table is EPHEMERAL (~15-min ring buffer, evicts past `query.min-expire-age` / `query.max-history`); for windows longer than ~15 min use the event listener (see the ephemeral-tables section below).
+
+> **⭐ THE RECIPE (copy this first — per-query CPU + bytes scanned from the LIVE system tables, no event listener needed).** YES, Trino's own system tables give you per-query CPU and bytes-scanned: `system.runtime.queries` (SQL text + identity, one row per query) JOINed to `system.runtime.tasks` (the per-task metrics) on `query_id`. `tasks.split_cpu_time_ms` = CPU, `tasks.physical_input_bytes` = bytes scanned from storage. You MUST join the two — `queries` alone has neither column (that is NOT a reason to fall back to the event listener).
+>
+> ```sql
+> -- Top 20 heaviest recent queries: bytes scanned + CPU, straight from the live system tables.
+> SELECT
+>   q.query_id,
+>   q."user",                               -- "user" is reserved — MUST be double-quoted
+>   q.source,                               -- the client/tenant tag, if set via X-Trino-Source
+>   SUM(t.physical_input_bytes) / 1e9  AS gb_scanned,   -- bytes scanned from MinIO/S3
+>   SUM(t.split_cpu_time_ms) / 1000.0  AS cpu_sec,      -- total CPU across all tasks
+>   q.query
+> FROM system.runtime.queries q
+> JOIN system.runtime.tasks t ON q.query_id = t.query_id
+> WHERE q.state = 'RUNNING'                 -- or state = 'FINISHED' for the just-completed window
+> GROUP BY q.query_id, q."user", q.source, q.query
+> ORDER BY gb_scanned DESC                   -- swap to cpu_sec DESC to rank by CPU instead
+> LIMIT 20;
+> ```
+> Both tables are an admin-only in-memory ~15-min ring buffer (evicts past `query.min-expire-age` / `query.max-history`); for windows beyond that, the event listener is the durable path. Full column references + more recipes are below.
 
 Before tuning anything, you need to know which queries are actually costing you the most CPU and I/O. Trino 467 exposes per-query telemetry through two system tables that you must JOIN together to get a useful view. The schema is strict — using the wrong column names is the single most common mistake in these recipes.
 
