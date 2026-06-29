@@ -3848,6 +3848,18 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 
 > **Keyword anchors:** dbt select comma vs space, dbt tag AND OR, dbt intersection union selector, dbt build multiple tags BOTH, dbt --select set operators, dbt graph operators +model model+. Verified at [docs.getdbt.com/reference/node-selection/set-operators](https://docs.getdbt.com/reference/node-selection/set-operators) and [docs.getdbt.com/reference/node-selection/graph-operators](https://docs.getdbt.com/reference/node-selection/graph-operators).
 
+**WHERE you DEFINE a tag (three locations, all valid) — and what `tag:X` actually selects.** *Keyword anchors: where do I put dbt tags, dbt tag config block vs schema.yml, dbt_project.yml +tags, tag models for hourly vs nightly schedule, does tag:critical run only tagged or the whole DAG, dbt run subset by tag.*
+
+| Define a tag in… | Syntax | Scope |
+|---|---|---|
+| the model `.sql` file | `{{ config(tags=['critical', 'hourly']) }}` | that one model |
+| `schema.yml` (per-model) | `models:`<br>`  - name: my_model`<br>`    config:`<br>`      tags: ['critical']` | that one model |
+| `dbt_project.yml` (folder-scoped, applies to all models in the path) | `models:`<br>`  my_project:`<br>`    marts:`<br>`      +tags: ['critical']` | every model under `models/marts/` |
+
+> **`dbt build --select tag:critical` selects ONLY the tagged nodes — it does NOT auto-pull their upstream dependencies and does NOT run the whole DAG.** (dbt selection is restrictive by default — [docs.getdbt.com/reference/node-selection/syntax](https://docs.getdbt.com/reference/node-selection/syntax).) So tagging your 10 critical models and running `dbt build --select tag:critical` on the hourly cron runs exactly those 10 (the other ~30 nightly models do NOT run). Add graph operators only if you WANT relatives: `+tag:critical` = tagged nodes **+ all upstream parents**; `tag:critical+` = tagged nodes **+ all downstream children**; `@tag:critical` = both directions. **Caveat:** with the bare `tag:critical`, if a critical model `ref()`s a non-critical upstream that the hourly run does NOT rebuild, the critical model reads that upstream's LAST-built (nightly) data — usually fine for "near-real-time off a slow source," but if you need fresh upstreams too, tag them critical as well or use `+tag:critical`.
+
+> **DO-NOT-WRITE:** *"`dbt build --select tag:critical` pulls in the upstream `ref()` dependencies and runs the full DAG needed for those models."* **FALSE** — `--select` is restrictive: `tag:critical` runs ONLY the tagged nodes. Upstream parents run ONLY if you prepend `+` (`+tag:critical`). The whole-DAG-rebuild fear is unfounded.
+
 **The single rule you MUST memorize — comma vs space have OPPOSITE semantics:**
 
 | Form | Operator | Semantics | Example | Selects |
