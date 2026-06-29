@@ -4226,6 +4226,58 @@ Keep `schema: analytics` in all three `profiles.yml` targets; the macro derives 
 
 ---
 
+### 6.7N LEADING CANONICAL — dbt MODEL VERSIONS — serve `v1` and `v2` of one model at once so consumers migrate on their own schedule
+
+> **READ THIS FIRST if your question contains any of these keywords:** `dbt model versioning`, `dbt model versions`, `serve two versions of a model`, `v1 and v2 of the same model`, `breaking change to a model consumers depend on`, `add/rename columns without breaking downstream`, `backward-compatible model change`, `let consumers migrate on their own schedule`, `model contract + version`, `latest_version`, `ref with version`, `ref('model', v=2)`, `deprecate an old model version`, `two teams consume the same model different schemas`. Verified at [docs.getdbt.com/docs/collaborate/govern/model-versions](https://docs.getdbt.com/docs/collaborate/govern/model-versions) on 2026-06-29.
+
+**Yes — dbt model versions work on dbt-core + the dbt-trino adapter** (the feature is core/adapter-agnostic — it's pure relation naming + ref resolution, no special warehouse capability). Introduced in **dbt-core 1.6**. It is the native answer to "I need to add 3 columns and rename 2 on `fct_user_activity`, but the DS team's notebooks can't update for weeks."
+
+**What dbt physically creates.** Each version is a SEPARATE relation (table or view, per the model's `materialized`) named `<model>_v<N>` — e.g. `fct_user_activity_v1` and `fct_user_activity_v2` — EXCEPT the version flagged `latest_version`, which ALSO gets an **unsuffixed alias** (`fct_user_activity`) pointing at it. So a bare `SELECT * FROM analytics.fct_user_activity` always hits the latest; pinned consumers read `fct_user_activity_v1` explicitly. (Override the per-version relation name with `defined_in:` or a per-version `config: alias:` if you need a non-default physical name.)
+
+**Minimum setup.** Two version SQL files + one YAML block.
+
+```
+models/marts/fct_user_activity_v1.sql      -- the OLD logic (DS team still on this)
+models/marts/fct_user_activity_v2.sql      -- the NEW logic (3 added cols, 2 renamed)
+models/marts/fct_user_activity.yml
+```
+
+```yaml
+# fct_user_activity.yml
+models:
+  - name: fct_user_activity
+    latest_version: 2          # v2 is "latest" → also materialized as the unsuffixed fct_user_activity
+    config:
+      materialized: table
+      contract: { enforced: true }   # optional but recommended — pin each version's column shape (see §6.7C)
+    versions:
+      - v: 2                   # picks up fct_user_activity_v2.sql by convention
+        columns: [ ... ]       # v2's column list (defines/enforces its schema when contract enforced)
+      - v: 1                   # picks up fct_user_activity_v1.sql
+        # defined_in: fct_user_activity_legacy   # ← use ONLY if the v1 file is NOT named fct_user_activity_v1.sql
+        columns: [ ... ]
+```
+
+**How consumers pin a version** — the `ref()` gets a `version` (alias `v`) arg:
+
+```sql
+SELECT * FROM {{ ref('fct_user_activity', version=1) }}   -- DS team: pinned to v1
+SELECT * FROM {{ ref('fct_user_activity', v=2) }}         -- new dashboard: explicit v2
+SELECT * FROM {{ ref('fct_user_activity') }}              -- unpinned → resolves to latest_version (v2)
+```
+
+**Build / deprecate workflow.** `dbt run` builds ALL live versions (both `_v1` and `_v2` tables exist simultaneously — that's the whole point). Select one with `dbt run --select fct_user_activity.v1`. When DS finishes migrating, set `deprecation_date:` on v1 (dbt warns on use), then delete `fct_user_activity_v1.sql` + its YAML entry and `dbt run` drops the stale relation.
+
+| DO NOT | Why |
+|---|---|
+| Hand-roll two separately-named models (`fct_user_activity_old` / `fct_user_activity_new`) with copy-pasted refs | Loses the `latest_version` unsuffixed alias + `ref(..., v=N)` resolution + the deprecation lifecycle; you re-implement (worse) what versions give natively. |
+| Assume versioning needs a special Trino/Iceberg feature | It does NOT — it's pure dbt relation-naming + ref resolution; works on dbt-core + dbt-trino like any other adapter. |
+| Confuse model VERSIONS with model CONTRACTS (§6.7C) | Different features. A **contract** enforces ONE model's column shape at build time; **versions** serve MULTIPLE shapes concurrently. They COMPOSE (contract each version) but are orthogonal. |
+
+> **Cross-references:** §6.7C (contracts — pin each version's columns), §6.7H2 (exposures — declare which BI/ML consumers depend on which version), [docs.getdbt.com/docs/collaborate/govern/model-versions](https://docs.getdbt.com/docs/collaborate/govern/model-versions).
+
+---
+
 ## 7. Cutover checklist (the non-obvious gotchas)
 
 Once your models compile and run, before you turn off Oracle:
