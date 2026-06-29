@@ -1,113 +1,141 @@
-# Iteration 1252 — Judge Feedback
+# Iteration 1253 — Judge Feedback
 
 ## Verdict
 
-**Overall: 4.875 — STRONG PASS NO-OP. TWO open watches CLOSE cleanly: `iter1246 OOM-session-prop-direction` (Q3) and `iter1213 (+)-mnemonic` (Q4). One minor secondary-terminology slip on Q2 (`SemiJoin` vs `anti-join`) — per-instance broken-secondary, NO FIX-A.** Per-Q scores: Q1=4.9375, Q2=4.8125, Q3=4.8125, Q4=4.9375. Average (4.9375 + 4.8125 + 4.8125 + 4.9375) / 4 = **4.875**.
+**Overall: 4.359 PASS — Q4 LOAD-BEARING REGRESSION (regexp_extract 2-arg returns-group-1 misclaim) drags an otherwise clean iter. Q3 closes the iter1249 dbt-snapshot recall-variance soft watch cleanly. ONE NEW SOFT WATCH on Q4 regexp_extract recall slip (resource r23 §3454 already correct + defang in place; NO FIX-A on first instance per stop-churning discipline).**
 
-All four answers landed pin-perfect on load-bearing facts. The Q2 "SemiJoin operator" aside is a textbook per-instance broken-secondary-alternative (per `feedback_responder_broken_secondary_alternative.md`) — the lead (NULL trap real + NOT EXISTS / LEFT JOIN-IS NULL fixes) is correct; only the trailing performance-equivalence aside used loose terminology. No resource defect.
+Per-Q scores: Q1=5.0, Q2=4.375, Q3=4.8125, Q4=3.25. Average (5.0 + 4.375 + 4.8125 + 3.25) / 4 = **4.359**.
+
+Q4 is the load-bearing miss this iter: the responder's lead claim "regexp_extract(string, pattern) [2-arg] returns the first capture group (group 1) by default" is FACTUALLY WRONG and directly contradicts (a) the Trino 467 docs, (b) the explicit canonical block in r23 §3454, AND (c) the responder's own correct iter1250 answer. Engineer who copies the lead `regexp_extract(ref_code, 'account:(\d+)')` literally gets `'account:4892'` not `'4892'`. The 3-arg form examples later in the same answer are correct, so a careful reader self-corrects — but the LEAD is the part most likely to be copy-pasted first.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — Diagnose Iceberg file bloat on `raw_events` (hourly dbt incremental merges, 3x slower after 4 months though data only +20%); Trino SQL against `raw_events$files` to see file counts/sizes by content type; interpret + fix?
+### Q1 — Rename `cust_id` to `customer_id` on a live Iceberg `orders` table (8mo Parquet, views + dbt models reference cust_id); `ALTER TABLE ... RENAME COLUMN`: rewrites Parquet or metadata-only? Old queries break immediately or grace period?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | All facts VERIFIED. (a) `$files` metadata table confirmed real at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter): "Type of content stored in the file. The supported content types in Iceberg are: `DATA(0), POSITION_DELETES(1), EQUALITY_DELETES(2)`" — VERBATIM matches the responder's `CASE content WHEN 0 'DATA' WHEN 1 'POSITION_DELETES' WHEN 2 'EQUALITY_DELETES' END`. (b) `file_size_in_bytes` column confirmed verbatim ("The data file size"). (c) Iceberg `FileContent` enum integer IDs verified at [apache/iceberg FileContent.java](https://github.com/apache/iceberg/blob/main/api/src/main/java/org/apache/iceberg/FileContent.java): `DATA(0), POSITION_DELETES(1), EQUALITY_DELETES(2)` — responder's mapping is correct on all three. (d) Hourly-merge MoR delete-file accumulation diagnostic (many tiny POSITION_DELETES files >10% of DATA count, <10KB) is the correct symptom; planner-reconcile cost scales with delete-file count per [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617). (e) Fix chain: `EXECUTE optimize(file_size_threshold => '128MB')` rewrites data + applies+drops position-deletes per `reference_trino_optimize_clears_position_deletes` pinned memory (PR #23801); `expire_snapshots(retention_threshold => '7d')` drops now-unreferenced files per docs verbatim "removes all snapshots and all related metadata and data files". (f) Optional Spark `rewrite_position_delete_files` correctly framed as supplemental. Strong improvement over iter1240's broken self-referencing IN-subquery diagnostic — this iter's GROUP BY content with COUNT/AVG/SUM is the textbook diagnostic shape. |
-| Beginner clarity | 4.75 | Clear CASE-named-codes mapping (engineer doesn't have to memorize 0/1/2); explicit interpretation thresholds (">10% of data count, <10KB" as the bloat signal); mental model "hourly merges accumulate delete files the planner reconciles, O(N) slower" bridges the symptom-to-mechanism gap. |
-| Practical applicability | 5.0 | Copy-paste-ready diagnostic SQL with content-code translation; copy-paste-ready fix chain (`EXECUTE optimize` → `EXECUTE expire_snapshots`); `file_size_threshold => '128MB'` tuning detail; optional Spark step framed correctly as supplemental not required. Engineer arrives at working diagnostic + fix first try. |
-| Completeness | 5.0 | All three sub-questions covered: (1) diagnostic SQL against `raw_events$files`; (2) interpretation of the result (delete-file bloat from hourly merges); (3) fix sequence (optimize → expire_snapshots). |
+| Technical accuracy | 5.0 | All facts VERIFIED. (a) Iceberg tracks columns by **integer field IDs not names** — verified via WebSearch against Apache Iceberg evolution docs: "Iceberg identifies columns by unique integer IDs, not by names or positions. When Iceberg reads a data file, it matches columns by ID, not by name or position." (b) RENAME is metadata-only — confirmed in Iceberg spec / evolution: "Renaming a column changes the name in the metadata but the ID stays the same — existing data files still map correctly." (c) Trino 467 connector docs at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) state "Iceberg supports schema evolution, with safe column add, drop, reorder, and rename operations" (the safety guarantee). (d) No data file rewrite, no historical Parquet rewrite, atomic. (e) Old `cust_id` queries break **immediately** with `Column 'cust_id' cannot be resolved` — there is no grace period because the field-ID→name mapping is atomically updated on commit; the old name is no longer present in the table schema. CORRECT. |
+| Beginner clarity | 5.0 | "Field ID not name" mental model bridges the metadata-only vs file-rewrite question directly; explicit "no grace period — atomic" eliminates the engineer's worry about timing/coordination. Three migration patterns (A/B/C) clearly differentiated. |
+| Practical applicability | 5.0 | Three production-grade rollout patterns: (A) atomic rename in one PR updating all refs (works for tight code ownership); (B) expand/contract (ADD new col → backfill UPDATE → migrate readers → DROP old) for loosely-coupled consumers; (C) bridging view `CREATE VIEW orders_compat AS SELECT *, customer_id AS cust_id FROM orders` for legacy BI clients that can't redeploy. Engineer has a real menu, not just "rename it." |
+| Completeness | 5.0 | All three sub-questions answered: (1) rewrites Parquet or metadata-only → metadata-only; (2) immediate or grace period → immediate, atomic; (3) implicit "what do I do about consumers" answered via the three patterns. |
 
-**Average: (5.0 + 4.75 + 5.0 + 5.0) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
-
-### Q2 — Customers signed up last 6 months but NEVER ordered. Oracle `WHERE customer_id NOT IN (SELECT customer_id FROM orders ...)`. Coworker says NOT IN silently returns zero rows on a single NULL + is broken. True in Trino? Correct way?
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.5 | **Core trap + fixes CORRECT; secondary "SemiJoin" terminology aside is IMPRECISE.** (a) NOT IN + NULL → UNKNOWN under 3-valued logic → zero rows: VERIFIED — true in Trino (and Postgres/MySQL/BigQuery/Oracle). Per [Trino comparison docs](https://trino.io/docs/current/functions/comparison.html) "any comparison involving a NULL produces NULL" and [logical operators docs](https://trino.io/docs/current/functions/logical.html) showing the 3-VL truth tables. (b) NOT EXISTS fix CORRECT: `NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)` is the canonical NULL-safe replacement — NOT EXISTS uses 2-VL row-existence semantics (each correlated row produces TRUE or FALSE, NULL never appears). (c) LEFT JOIN + `WHERE orders.customer_id IS NULL` fix CORRECT: anti-join via outer join + null-test is also NULL-safe. (d) `signed_up_at >= CURRENT_DATE - INTERVAL '6' MONTH` filter syntax correct (per `reference_trino_interval_qualifiers` MONTH is a valid INTERVAL qualifier). **(e) MINOR TERMINOLOGY DING (-0.5)**: "Both compile to the same efficient SemiJoin operator" is IMPRECISE. Per [Trino SemiJoinNode](https://github.com/trinodb/trino/wiki/Plan-nodes) source: SemiJoinNode represents positive semi-join (EXISTS/IN) where the operator "projects onto each row from source a boolean which says whether the key matched in the hash table". NOT EXISTS / NOT IN / LEFT JOIN-IS-NULL decorrelate to **anti-join** semantics (the negative form), not the positive semi-join. Trino's planner does have rules like "Semi-Join (IN) Decorrelation" and the SemiJoinNode CAN be flagged with anti-semantics, but the colloquial "SemiJoin operator" label without the anti-prefix is loose. NOT a load-bearing failure for the engineer's working query (the fixes ARE both efficient and the planner does decorrelate both into the same equivalent anti-join shape); just imprecise plan terminology in a per-instance "for completeness" appendage. Per `feedback_responder_broken_secondary_alternative.md`, scope as per-instance one-off NOT a resource defect — no FIX-A. |
-| Beginner clarity | 4.75 | Clear 3-valued-logic explanation; explicit "even one NULL" framing; both fix forms shown side-by-side; the engineer's existing INTERVAL filter is correctly preserved. |
-| Practical applicability | 5.0 | Copy-paste-ready NOT EXISTS form; copy-paste-ready LEFT JOIN-IS NULL alternative; engineer's Oracle query is mechanically rewritten in two equivalent NULL-safe shapes; the coworker's claim is correctly affirmed not deflected. |
-| Completeness | 5.0 | All three sub-questions answered: (1) is the trap real in Trino → yes; (2) why → 3-VL UNKNOWN never matches WHERE; (3) correct way → NOT EXISTS or LEFT JOIN-IS NULL with the 6-month filter preserved. |
-
-**Average: (4.5 + 4.75 + 5.0 + 5.0) / 4 = 19.25/4 = 4.8125 → STRONG PASS.**
-
-**Q2 SemiJoin-vs-antijoin terminology verdict**: The responder's "Both compile to the same efficient SemiJoin operator" is IMPRECISE — NOT EXISTS / NOT IN / LEFT JOIN-IS NULL are anti-joins, not semi-joins. Trino's plan terminology distinguishes positive semi-join (EXISTS/IN → SemiJoinNode produces TRUE) from anti-join (NOT EXISTS / NOT IN → produces FALSE/NULL). Both forms ARE efficient and decorrelate to equivalent shapes, so the engineer's practical takeaway (both fixes are fast) is unaffected. Minor per-instance broken-secondary aside, no resource defect, no FIX-A.
-
-### Q3 — [iter1246 OOM-session-prop watch RE-PROBE] dbt models hit Trino memory limits; `SET SESSION query_max_memory='10GB'` works in CLI but dbt doesn't set it; putting `SET SESSION` atop the model SQL errored. dbt way to set Trino session properties per-model or globally?
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 4.75 | **Mechanism CORRECT; global form under-hedged but reached.** (a) `pre_hook="SET SESSION query_max_memory = '10GB'"` in model config: VERIFIED at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) (WebFetched this iter): "to temporarily adjust these session properties for a specific dbt model or group of models, you can use a dbt hook... `{{ config(pre_hook=\"set session query_max_run_time='10m'\") }}`" — responder's syntax matches docs verbatim (modulo property name; engineer's `query_max_memory` IS a valid Trino session property — user confirmed it works in CLI, so cluster `query.max-memory` ceiling allows it). (b) **pre_hook same-connection mechanism CORRECT**: pre_hook runs in the SAME database session as the model query (the connection is held by dbt-trino's adapter), so `SET SESSION` persists for the subsequent SELECT/CREATE — this is the load-bearing mechanism the engineer needed. The error from putting bare `SET SESSION` atop the model SQL is because dbt wraps the model body in a single `CREATE TABLE AS SELECT` and dbt-trino sends only the SELECT to Trino (the `SET SESSION` statement would have to be a separately-issued statement on the same connection — exactly what pre_hook does). (c) Bare `SET SESSION` in model SQL erroring: CORRECT — dbt's compiled model is a single SQL statement (CTAS/MERGE/INSERT depending on materialization), not a multi-statement script. (d) **Global form HEDGED but reached**: "set in profiles.yml IF your dbt-trino adapter supports profile-level session properties, OR a global pre_hook macro" — the "IF" is UNDER-CONFIDENT. `session_properties:` IS a documented native dbt-trino profile.yml field (verified at the same trino-configs doc: "The standard way to define session properties is with the `session_properties` field of your `profiles.yml`. This ensures that all dbt connections use these settings by default." with example `session_properties: query_max_run_time: '10m'`). Minor hedge ding (-0.25); the engineer can still find it by following the responder's hint. |
-| Beginner clarity | 4.75 | Clear "per-model vs global" routing; explicit explanation of WHY bare `SET SESSION` atop model SQL errors (single-statement wrap); engineer's symptom-to-fix path is direct. |
-| Practical applicability | 5.0 | Copy-paste-ready per-model `pre_hook` config; mental model of "pre_hook runs before main query in the same connection" answers the "does it persist?" worry directly. The "OR global pre_hook macro" fallback works even if `session_properties:` profile field is missed. |
-| Completeness | 4.75 | Per-model fully covered. Global form mentioned but hedged ("IF adapter supports it"); could have stated more confidently with example `session_properties:` block. Minor compl shave (-0.25). |
-
-**Average: (4.75 + 4.75 + 5.0 + 4.75) / 4 = 19.25/4 = 4.8125 → STRONG PASS.**
-
-**iter1246 OOM-session-prop-direction watch status**: **CLOSES CLEANLY.** The engineer CONFIRMED in the question prompt that `SET SESSION query_max_memory='10GB'` works in their CLI (so the cluster `query.max-memory` ceiling supports 10GB — no direction error this iter, no "session property bumped above cluster cap" inversion). The responder's answer is on the correct mechanical question (dbt application surface), not the direction-of-bound question. iter1246 OOM-session-prop-direction was about the cluster-cap-vs-session-cap direction; this iter the direction is not asked + not in error. Watch resolved cleanly without resource churn.
-
-### Q4 — [iter1213 (+)-mnemonic watch RE-PROBE] Oracle `(+)` outer join (`a.department_id = b.id(+)`); parse error in Trino. What does `(+)` mean (which side preserved/null-padded)? Trino equivalent + mechanical rewrite rule?
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | All facts VERIFIED. (a) `(+)` is Oracle-proprietary outer-join shorthand, NOT in ANSI SQL, parse error in Trino: CORRECT per [Oracle Joins docs](https://docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm) + Oracle Optimizer blog. (b) **MECHANICAL RULE CORRECT** per [Oracle Optimizer blog "Outerjoins in Oracle"](https://blogs.oracle.com/optimizer/outerjoins-in-oracle) + [Oracle docs](https://docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm): "the (+) marker is placed on the column(s) from the table that is optional (the side that may fail to match)... The table without the (+) operator is the preserved table whose non-joining rows will be retained." Responder's wording "the table WITH (+) is null-padded (outer side); the table WITHOUT (+) is preserved/kept fully" matches the docs semantics verbatim. (c) `a.col = b.col(+)` → LEFT JOIN (keep a, null-pad b): CORRECT — (+) is on b's side so b is optional, a is preserved → LEFT JOIN a TO b. (d) `a.col(+) = b.col` → RIGHT JOIN: CORRECT — (+) on a's side so a is optional, b is preserved → can express as RIGHT JOIN a-to-b OR equivalently LEFT JOIN b-to-a. (e) Before/after example: `FROM departments d, managers m WHERE d.manager_id = m.manager_id(+)` → `departments d LEFT JOIN managers m ON d.manager_id = m.manager_id` — m has (+) so m is optional, d is preserved → LEFT JOIN d-to-m. CORRECT. (f) Trino supports `LEFT/RIGHT/FULL OUTER JOIN` natively per [Trino SELECT docs](https://trino.io/docs/467/sql/select.html). |
-| Beginner clarity | 4.75 | Mnemonic "(+) marks the NULL-padded/optional side, preserved side has NO (+)" is the canonical learn-once-remember-always rule; both directions shown (a.x=b.y(+) AND a.x(+)=b.y) eliminating ambiguity; worked before/after example with concrete table names (departments/managers). |
-| Practical applicability | 5.0 | Copy-paste-ready mechanical rewrite rule; concrete before/after that the engineer can apply line-by-line to migrated Oracle queries; LEFT JOIN form lands on the most common Oracle-(+) pattern (the (+) usually appears on the smaller "lookup" table to preserve all rows from the main table). |
-| Completeness | 5.0 | All three sub-questions answered: (1) what (+) means → null-padded/optional side; (2) Trino equivalent → LEFT/RIGHT OUTER JOIN; (3) mechanical rewrite rule → "table with (+) becomes the right side of LEFT JOIN" with worked example. |
-
-**Average: (5.0 + 4.75 + 5.0 + 5.0) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
-
-**iter1213 (+)-mnemonic watch status**: **CLOSES CLEANLY.** Responder named the canonical mechanical rule both directions (`a.x = b.y(+)` → LEFT, `a.x(+) = b.y` → RIGHT) with explicit "table WITH (+) is null-padded, table WITHOUT (+) is preserved" mnemonic; worked example with named tables (departments/managers); both Oracle source and Trino target syntax shown verbatim. Engineer can mechanically rewrite migrated Oracle (+) queries first try. Watch closes 27th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern.
+**Average: 5.0 — STRONG PASS.**
 
 ---
 
-## Watch status
+### Q2 — First-order cohort (customers whose FIRST order fell in each calendar month, AVG first-order value, GROUP BY first-order month). Oracle MIN(order_date) per customer + join back + filter `order_date = min`. Translate to Trino or cleaner way?
 
-| Watch | Open since | Status this iter | Reasoning |
-|---|---|---|---|
-| `iter1246 OOM-session-prop-direction` | iter1246 | **CLOSES CLEANLY** | This iter's Q3 was on the dbt-application-surface question (pre_hook vs profile.yml session_properties), not the cluster-cap-vs-session-cap direction. Engineer confirmed CLI works (so cluster ceiling supports 10GB). Responder correctly named pre_hook + hedged on profile session_properties; no direction inversion. |
-| `iter1213 (+)-mnemonic` | iter1213 | **CLOSES CLEANLY** | Responder named the canonical mechanical rule verbatim ("table WITH (+) null-padded, table WITHOUT (+) preserved"), both directions, worked before/after example. iter1213 mnemonic-gap fully closed. |
-
-### No new watches opened this iteration.
-
-The Q2 SemiJoin-vs-antijoin terminology slip is a per-instance broken-secondary-alternative (per pinned `feedback_responder_broken_secondary_alternative.md`) — recall ceiling, NO resource fix, scope as one-off not a defect family.
-
-The Q3 hedge on `session_properties:` profile field is under-confidence on a documented feature, but the responder still pointed the engineer at the right place; no resource defect (resources may benefit from a more confident leading canonical, but per the new-card-over-attracts-adjacent caution, churning on this isn't warranted at 4.875 average and a CLOSING watch).
-
----
-
-## Other open watches (untouched this iter, status carried)
-
-| Watch | Open since | Status |
+| Dimension | Score | Reasoning |
 |---|---|---|
-| `iter1249 Q3 dbt-snapshot-recall-variance` | iter1249 | SOFT — untouched. |
-| `iter1248 Q1 opener-coherence` | iter1248 | Untouched. |
-| `iter1248 Q3 MATCH_RECOGNIZE-adjacency` | iter1248 | Untouched. |
-| `iter1241 concat-auto-coerces` | iter1241 | Untouched. |
-| `iter1239 DF-wait-timeout` | iter1239 | Untouched. |
-| `iter1238 broadcast-hedge` | iter1238 | Untouched. |
-| `iter1236 rn=1-within-batch` | iter1236 | Untouched. |
-| `iter1230 EXISTS-overwarning/::cast` | iter1230 | Untouched. |
-| `iter1215 strpos-3-arg CEILING` | iter1215 | Untouched. |
-| `iter1229 @v1-Spark` | iter1229 | Untouched. |
-| `iter1201 dbt --full-refresh mechanism on incremental` | iter1201 | Untouched. |
+| Technical accuracy | 4.5 | SQL is valid Trino 467: `WITH first_orders AS (SELECT customer_id, MIN(order_date) AS first_order_date FROM orders GROUP BY customer_id), cohort_orders AS (SELECT DATE_TRUNC('month', fo.first_order_date) AS cohort_month, o.order_value, o.order_id FROM first_orders fo JOIN orders o ON fo.customer_id=o.customer_id AND o.order_date=fo.first_order_date) SELECT cohort_month, AVG(order_value), COUNT(*) FROM cohort_orders GROUP BY cohort_month`. `DATE_TRUNC('month', ...)` verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html); `MIN(date) GROUP BY` standard. **MINOR CORRECTNESS DING (-0.5)**: the JOIN `ON o.order_date = fo.first_order_date` **double-counts a customer who placed 2+ orders on their first day** — `COUNT(*)` then counts that customer twice, `AVG(order_value)` is weighted by their multiple same-day orders. For a true first-order-per-customer COUNT/AVG, the deterministic form is `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date, order_id) = 1` (picks one row per customer, ties broken by order_id). NOT a Trino dialect error — the SQL is valid and **is** a faithful translation of the Oracle MIN+JOIN pattern (which has the same flaw). Engineer's results will be correct if same-day-tie is rare; will skew if same-day duplicate orders are common (e.g. multi-cart checkout, refund-then-rebuy on day 1). |
+| Beginner clarity | 4.5 | Clear two-CTE structure: `first_orders` (per-customer MIN) → `cohort_orders` (join back to get first-day rows) → final GROUP BY. Engineer can read it left-to-right. `DATE_TRUNC('month', ...)` is the standard cohort-bucketing idiom; the `AS cohort_month` aliasing makes the output column self-documenting. |
+| Practical applicability | 4.5 | Copy-paste-ready Trino 467 SQL. Engineer's Oracle mental model translates directly without restructuring. Engineer who runs this gets correct results for the typical SaaS shape (most customers place their first order at a distinct timestamp). |
+| Completeness | 4.0 | **(-1.0) Missed the cleaner ROW_NUMBER form + same-day-tie discussion.** The question explicitly asked "Translate to Trino OR cleaner way?" — responder gave the translation only, did not offer ROW_NUMBER as the cleaner-alternative answer or flag the same-day-tie idempotency gap. A complete answer would have appended: "If a customer can place multiple orders on day 1 (e.g. multi-cart checkout), the JOIN form double-counts that customer. Cleaner alternative: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date, order_id) AS rn` in a subquery + `WHERE rn = 1` picks exactly one first-order row per customer deterministically." Not load-bearing for the engineer's stated Oracle pattern (which the engineer chose) — but the "cleaner way?" prompt was the door for this and the responder didn't walk through it. |
 
-(iter1213 session_properties/(+) split into two halves; the (+) half closes this iter; the session_properties half was implicitly covered via iter1246-style framing this iter — both Q3 and Q4 forms now have at least one CLOSE-quality probe.)
+**Average: (4.5 + 4.5 + 4.5 + 4.0) / 4 = 17.5/4 = 4.375 → PASS.**
 
 ---
 
-## Summary
+### Q3 — [iter1249 dbt-snapshot recall-variance watch RE-PROBE] dbt snapshot `strategy: check` with `check_cols: [plan_tier]`, source also has `updated_at`. Must `updated_at` be configured, or does `check` compare VALUES regardless of timestamps? Does `check` query both snapshot + source each run? check vs timestamp?
 
-- **Q1 STRONG PASS** — `$files` content-codes + file_size_in_bytes diagnostic verified verbatim at trino.io/docs/467/connector/iceberg.html + iceberg FileContent.java; full fix chain (`EXECUTE optimize(file_size_threshold)` → `EXECUTE expire_snapshots(retention_threshold)`) correctly sequenced.
-- **Q2 STRONG PASS** — NOT IN + NULL trap correctly affirmed; NOT EXISTS and LEFT JOIN-IS NULL fixes both correct; minor "SemiJoin" terminology slip on the per-instance performance-aside (decorrelates to ANTI-JOIN not SemiJoin) — per-instance broken-secondary, no resource defect.
-- **Q3 STRONG PASS — iter1246 OOM-session-prop watch CLOSES.** `pre_hook="SET SESSION ..."` per-model mechanism verified verbatim at docs.getdbt.com/reference/resource-configs/trino-configs; bare `SET SESSION` in model SQL erroring correctly explained; global form via `session_properties:` profile.yml field reached but under-hedged.
-- **Q4 STRONG PASS — iter1213 (+)-mnemonic watch CLOSES.** Mechanical rule "table WITH (+) is null-padded; table WITHOUT (+) is preserved" verbatim from Oracle docs; both directions covered; worked before/after example.
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 4.75 | All load-bearing facts CORRECT. (a) **`check` strategy compares column VALUES** — verified at [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots) verbatim: "The `check` strategy is useful for tables which do not have a reliable `updated_at` column. This strategy works by comparing a list of columns between their current and historical values. If any of these columns have changed, then dbt will invalidate the old record and record the new one." (b) **`updated_at` not required for `check`** — verified at the same docs verbatim: "When using the `check` strategy, dbt tracks changes by comparing values in `check_cols`. By default, dbt uses the timestamp to update `dbt_updated_at`, `dbt_valid_from` and `dbt_valid_to` fields. Optionally you can set an `updated_at` column." (c) **dbt queries both snapshot + source on every run** — implied by docs ("On subsequent runs: dbt will check which records have changed"); responder correctly identified row-by-row diff mechanic. (d) `check_cols=['col list']` vs `check_cols='all'` correctly distinguished (verified at [docs.getdbt.com/reference/resource-configs/check_cols](https://docs.getdbt.com/reference/resource-configs/check_cols): list of column names + `all` bare string). (e) timestamp-vs-check routing correct ("timestamp when source has reliable last-modified, check when no reliable timestamp"). **Minor compl shave (-0.25)**: didn't surface the nuance that `updated_at` IS **optionally** configurable WITH `check` strategy (when set, it's used to populate `dbt_valid_from`/`dbt_valid_to` from the source column instead of run-time `current_timestamp`). Per docs: "If `updated_at` is configured, the `check` strategy uses this column instead, as with the timestamp strategy. If `updated_at` value is null, dbt defaults to using the current timestamp." Not load-bearing for the engineer's question ("must I configure it?" — the answer is NO, optional, and responder correctly said NO). |
+| Beginner clarity | 5.0 | Clear "row-value comparison NOT timestamps" framing addresses the engineer's mental gap directly; explicit "Do NOT need `updated_at` in `check_cols`" answers the literal yes/no question; check-vs-timestamp side-by-side contrast eliminates the routing confusion. |
+| Practical applicability | 5.0 | Copy-paste-ready `{% snapshot %}` block with `target_schema`, `unique_key='account_id'`, `strategy='check'`, `check_cols=['plan_tier']`. Engineer drops it into models/snapshots/ and runs `dbt snapshot` first try. The `check_cols=['col list']` vs `check_cols='all'` distinction prevents the bare-string vs list quoting bug. |
+| Completeness | 4.5 | Answers all three sub-questions (must configure updated_at? value-comparison? both-tables-query-each-run?) + bonus check-vs-timestamp routing + `'all'` mode mention. (-0.5) Could have surfaced the optional `updated_at` with `check` nuance (uses source-column timestamp for dbt_valid_from instead of run-time) — peripheral but useful for SCD-2 audit-trail completeness. |
 
-**Iteration verdict: 4.875 STRONG PASS NO-OP. TWO watches CLOSE (iter1246 OOM-session-prop-direction; iter1213 (+)-mnemonic). No FIX-A. No new watches.**
+**Average: (4.75 + 5.0 + 5.0 + 4.5) / 4 = 19.25/4 = 4.8125 → STRONG PASS.**
 
-**Topics scored this iter** (per rubric assignment):
-- Q1 → Iceberg table maintenance ($files content-code diagnostic + EXECUTE optimize / expire_snapshots fix chain)
-- Q2 → SQL query best practices for OLAP (NOT IN NULL trap + NOT EXISTS / LEFT JOIN-IS NULL NULL-safe replacements)
-- Q3 → Improving complex SQL performance on Trino with dbt (dbt-trino pre_hook + session_properties profile.yml for Trino session-property control)
-- Q4 → Oracle PL/SQL → dbt + Trino SQL migration (Oracle (+) outer join → Trino LEFT/RIGHT OUTER JOIN mechanical rewrite)
+**iter1249 dbt-snapshot recall-variance watch status: CLOSES CLEANLY on first re-probe.** iter1249 the responder BAILED on a dbt snapshot question despite r09 having the canonical content (similar to the iter1237 outright bail that was fixed by adding the 5th materialization row + bolded routing note). This iter the responder REACHED r09 / r-snapshots, produced the correct canonical answer with config block + check-vs-timestamp contrast + check_cols list-vs-'all' distinction. No "resources don't cover dbt snapshots" misroute. The iter1237 r27 §3.1 5th-snapshot-row FIX-A + r09 §SCD anchors are holding across multiple re-probes (iter1238 Q2 5.0, iter1224 Q3 4.6875, iter1201 Q1 5.0, iter1200 Q3 5.0, iter1187 Q4 4.875, iter1158 Q1 5.0, now iter1253 Q3 4.8125). Watch resolved cleanly without resource churn.
+
+---
+
+### Q4 — Oracle `REGEXP_SUBSTR(ref_code, 'account:(\d+)', 1, 1, NULL, 1)` extracts group 1 → `'4892'` from `'account:4892'`. Trino `regexp_extract` capture-group support + argument order?
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 2.5 | **LOAD-BEARING ERROR.** Responder claimed: *"`regexp_extract(string, pattern)` — returns the FIRST capture group (group 1) BY DEFAULT"* with lead example `regexp_extract(ref_code, 'account:(\d+)')` commented `→ '4892'`. **THIS IS FACTUALLY WRONG.** VERIFIED at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) (WebFetched this iter, verbatim): *"`regexp_extract(string, pattern) → varchar` — Returns the first substring matched by the regular expression `pattern` in `string`."* The 2-arg form returns the **ENTIRE MATCH (group 0)**, NOT capture group 1. So `regexp_extract('account:4892', 'account:(\d+)')` returns `'account:4892'` (the whole matched substring), NOT `'4892'`. To get `'4892'` the engineer MUST use the 3-arg form: `regexp_extract('account:4892', 'account:(\d+)', 1)`. The 3-arg examples later in the responder's answer ARE correct (multi-group `regexp_extract('order-12345-premium', '([a-z]+)-(\d+)-(\w+)', 2)` → `'12345'`) and the 1-indexed framing is correct — but the LEAD claim ("returns group 1 by default") + lead example with the wrong commented output is the load-bearing failure, AND directly contradicts the engineer's stated Oracle Q (where `REGEXP_SUBSTR(..., 1, 1, NULL, 1)` returns `'4892'` because the 6th `subexpr` arg is explicitly `1`). The Trino equivalent of Oracle's explicit `subexpr=1` is the 3-arg form, NOT the 2-arg form. **(-2.5)** factual error on the lead. |
+| Beginner clarity | 4.0 | Well-structured: lead example, 3-arg form, multi-group examples, regexp_replace cross-ref ($1 vs \1). The structure is engineer-friendly. The clarity score is held up by the structure DESPITE the wrong factual content of the lead — a careful reader who reads to the end and sees the 3-arg examples returning `'12345'` from group 2 may notice the inconsistency and self-correct. |
+| Practical applicability | 2.5 | Engineer copies the LEAD form `regexp_extract(ref_code, 'account:(\d+)')`, runs it, gets `'account:4892'` (not `'4892'`), is confused for a few minutes, then either re-reads and finds the 3-arg examples or hits the docs. The 3-arg examples ARE copy-paste-ready and correct, so engineer can recover within a few minutes — but the lead form they tried FIRST is broken for their stated use case. **(-2.5)** for the broken lead. |
+| Completeness | 3.5 | 3-arg form correctly covered; multi-group examples correct; 1-indexed framing correct; `regexp_replace $1 vs \1` cross-ref helpful. (-1.5) for the wrong 2-arg-returns-group-1 default claim that contradicts the engineer's Oracle baseline (Oracle's `REGEXP_SUBSTR` with explicit `subexpr=1` is the 3-arg-form equivalent, not a default). |
+
+**Average: (2.5 + 4.0 + 2.5 + 3.5) / 4 = 12.5/4 = 3.125 → INDIVIDUAL FAIL (below 3.5 threshold).**
+
+**Q4 regexp_extract 2-arg-returns-WHOLE-match verdict + responder-slip-vs-resource-defect + FIX-A?:**
+
+- **Verdict — WHOLE MATCH (group 0), NOT group 1.** VERIFIED at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) verbatim: `regexp_extract(string, pattern) → varchar` "Returns the first substring matched by the regular expression `pattern` in `string`." For a capture group you MUST use the 3-arg form `regexp_extract(string, pattern, group) → varchar`.
+
+- **Classification — RESPONDER SLIP, NOT resource defect.** GREPped `regexp_extract` across resources/. r23 §3454-3486 has an EXPLICIT canonical block:
+  - LEADING RULE comment: *"RULE: to extract a CAPTURE GROUP (the value INSIDE the parentheses), you MUST pass the group index: `regexp_extract(s, pattern, 1)`. The 2-arg form `regexp_extract(s, pattern)` returns the WHOLE match — a pattern WITH parentheses STILL returns the whole match unless you add `, 1`."*
+  - DO-NOT-COPY defang block at §3475: `❌ regexp_extract(log_message, 'action=(\S+)') -- returns 'action=login' (the WHOLE match), NOT 'login' — you forgot the , 1 group index — DO NOT COPY`
+  - Semantics section §3484 quotes Trino docs verbatim: *"`regexp_extract(string, pattern) → varchar` — returns the **FIRST substring matched** by `pattern` (NULL if no match)."*
+  - r27 §1004 row: `REGEXP_SUBSTR(s, pattern) → regexp_extract(s, pattern) — Renamed. Both 1-indexed group access via 3rd arg.` — note "group access via 3RD arg," NOT "group 1 by default."
+  
+  Resources are CONSISTENT and CORRECT. The responder lifted the SHAPE of the defang's ❌ example (`regexp_extract(log_message, 'account:(\d+)')` form) but FLIPPED THE COMMENTED RESULT from "WHOLE match `action=login`" to "capture group `4892`" — exactly the `feedback_defang_donotwrite_snippets.md` backfire pattern (negative example reproduced as positive recommendation, with the inverted commented output).
+
+- **iter1250 same-family answer was CORRECT** (per context note: "no 3rd arg → full match"). Recall-variance, not a structural responder defect.
+
+- **FIX-A decision: NO FIX-A on first instance.** Per `feedback_synthesis_ceiling_stop_churning.md` discipline (one-instance variance against a resource already correct + already defanged): do NOT churn the canonical or strengthen the defang on a single slip. The r23 §3454 leading-RULE + §3475 ❌ defang + §3484 verbatim docs quote is already as explicit as it can be. Strengthening the defang risks the `feedback_defang_donotwrite_snippets.md` backfire pattern getting worse (more wrong-example bait surface). 
+
+- **SOFT WATCH ONLY**: `iter1253 Q4 regexp_extract 2-arg-returns-WHOLE-match misrecall (lead-example flip; r23 §3454 + defang already correct)`. Re-probe in 4-8 iters under similar Oracle `REGEXP_SUBSTR` → Trino `regexp_extract` framings (especially Oracle's explicit-subexpr arg = N variants). If recurs across phrasings, consider promoting the r23 §3454 RULE block higher in the file or adding a new top-of-r07 dialect-myth routing card; on first instance, watch only.
+
+---
+
+## Topics touched / rubric updates
+
+| Topic | Prior avg | Q | Score | New avg | Δ |
+|---|---|---|---|---|---|
+| Iceberg table maintenance | 4.4418 / 237 | Q1 | 5.0 | 4.4441 / 238 | +0.0023 |
+| Analytical query patterns on Iceberg+Trino | 4.5223 / 181 | Q2 | 4.375 | 4.5215 / 182 | −0.0008 |
+| dbt snapshots SCD2 | 4.2117 / 26 | Q3 | 4.8125 | 4.2339 / 27 | +0.0222 |
+| Oracle PL/SQL → dbt + Trino migration | 4.4832 / 221 | Q4 | 3.25 | 4.4776 / 222 | −0.0056 |
+
+All required topics REMAIN PASSED with healthy margins (thinnest still Query-performance-basics at 4.2040/33; Oracle-migration at 4.4776/222 absorbs the Q4 drag without falling below threshold).
+
+---
+
+## Source-verified outcomes this iter
+
+- **Q1**: Iceberg field-ID schema-evolution rename semantics + Trino 467 metadata-only ALTER TABLE behavior all verified against trino.io/docs/467/connector/iceberg.html + Apache Iceberg evolution docs / spec.
+- **Q2**: Trino 467 SQL form valid (DATE_TRUNC, MIN+JOIN); same-day-tie completeness gap is a faithful Oracle translation flaw, not a Trino dialect error.
+- **Q3**: dbt snapshot `check` strategy semantics (value-comparison not timestamps; `updated_at` optional; queries both snapshot + source each run) VERIFIED against docs.getdbt.com/docs/build/snapshots + docs.getdbt.com/reference/resource-configs/check_cols.
+- **Q4**: Trino 467 `regexp_extract` 2-arg returns WHOLE match (group 0), NOT group 1; 3-arg form returns specified capture group. VERIFIED verbatim against trino.io/docs/467/functions/regexp.html.
+
+---
+
+## Recommendation
+
+**NO-OP on resources** (no FIX-A this iter). Commit rubric+feedback only.
+
+The Q4 slip is a recall-variance responder failure against a resource (r23 §3454-3486 + r27 §1004) that is already correct AND already defanged with an explicit ❌ DO-NOT-COPY block + leading RULE comment + verbatim-docs semantics section. Per `feedback_synthesis_ceiling_stop_churning.md` discipline, do NOT churn the defang on first instance. Per `feedback_defang_donotwrite_snippets.md`, the negative-example flip is a known backfire mode; strengthening the defang risks making the bait worse.
+
+The Q2 completeness shave (same-day-tie not flagged) is per-instance broken-secondary territory (per `feedback_responder_broken_secondary_alternative.md`) — engineer asked "translate or cleaner way" and the responder gave only the translation, missing the cleaner ROW_NUMBER alternative. Not a resource defect.
+
+## Watches
+
+### NEW soft watches (this iter)
+
+- **iter1253 Q4 regexp_extract 2-arg-returns-WHOLE-match misrecall** — responder claimed "2-arg returns group 1 by default" + LEAD example `regexp_extract('account:4892', 'account:(\d+)')` commented `→ '4892'` (correct output: `'account:4892'`). r23 §3454-3486 RULE block + ❌ defang + verbatim-docs quote ALL correct; recall-variance not resource defect. iter1250 same-family answer was correct. Re-probe in 4-8 iters under Oracle `REGEXP_SUBSTR` → Trino `regexp_extract` framings (especially with explicit Oracle `subexpr` arg). NO FIX-A on first instance.
+
+- **iter1253 Q2 first-order cohort same-day-tie not flagged** (very soft) — responder gave faithful Oracle MIN+JOIN translation without flagging the same-day-tie double-count or offering ROW_NUMBER() OVER PARTITION BY = 1 alternative. Engineer's results correct in the typical case; skews if multi-cart-per-day is common. Per-instance broken-secondary, NO FIX-A. Re-probe under "first-event-per-entity / first-order cohort / first-session-per-user" framings 6-10 iters.
+
+### Watches CLOSING this iter
+
+- **iter1249 Q3 dbt-snapshot recall-variance** → **CLOSES CLEANLY**. iter1249 the responder bailed on a dbt snapshot question despite r09 having canonical content; this iter the responder reached r09 + answered Q3 (`strategy='check'` check_cols values-not-timestamps + config block + check-vs-timestamp routing) correctly. The iter1237 r27 §3.1 5th-snapshot-row FIX-A + r09 §SCD anchors holding across multiple re-probes (iter1238/1224/1201/1200/1187/1158/1253 all clean canonical reaches).
+
+### Open watches (carry-forward, not probed this iter)
+
+iter1248 Q1 opener-coherence; iter1248 Q3 MATCH_RECOGNIZE-adjacency; iter1241 concat-auto-coerces; iter1239 DF-wait-timeout; iter1238 broadcast-hedge; iter1236 rn=1-within-batch; iter1230 EXISTS-overwarning/::cast; iter1215 strpos-3-arg CEILING; iter1229 @v1-Spark; iter1223 r27 packages.yml dbt deps install; iter1223 r23 §2221 Oracle-matches-Trino-GREATEST-NULL slip; iter1222 CAST-DECIMAL-money + TRY_CAST-dirty-staging; iter1219 CoW-MoR + format-%08d; iter1221 quarterly-window-vs-transform; iter1210 r27 §663 :: cast operator slip; iter1208 dbt exposures selector direction.
+
+---
+
+## Pattern observation
+
+After a strong 6-iter streak (iter1247-1252 all reached or watch-closed, no FIX-A churn), iter1253 introduces a real Q4 LOAD-BEARING SLIP — the first per-question individual FAIL (Q4 < 3.5) in a long stretch. The overall iter (4.359) still passes comfortably, and topic averages all remain PASSED. The slip is recall-variance against a resource that is already correct and already defanged; per stop-churning + defang-backfire discipline, NO FIX-A is warranted on first instance.
+
+The Q3 dbt-snapshot reach + correct canonical-fill is the structural positive signal: the iter1237 r27 §3.1 5th-snapshot-row + r09 §SCD anchors are durably routing dbt-snapshot questions across many phrasings (7 consecutive clean reaches since the FIX-A landed). 
+
+Training is in the closing window (deadline 2026-06-30 23:59 CST; ~2 days remaining). Continued breadth probing recommended over reactive fixes; let the iter1253 Q4 watch run 4-8 iters before any resource action.
