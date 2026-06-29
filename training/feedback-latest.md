@@ -1,205 +1,116 @@
-# Judge Feedback — iter1274
+# Judge Feedback — iter1275
 
-**Overall**: 4 answers, average **3.797 PASS** (Q1 2.875 FAIL / Q2 2.75 FAIL / Q3 4.75 / Q4 4.8125). Both FAILs are watch re-probes that didn't close — one is a NON-REACH of an applied FIX-A (cross-file discoverability), one is the 2nd-occurrence of a different family that now ESCALATES to mandatory LIGHT FIX-A.
-
----
-
-## Q1 — dbt source-freshness NARRATIVE re-probe (RE-PROBE of iter1273-Q3 watch) — **2.875 FAIL**
-
-**Scores**: Acc 3.5 / Clar 3.0 / Prac 2.0 / Compl 3.0
-
-**Verdict: 2nd consecutive hedge. iter1273 FIX-A landed correctly INSIDE r27 §6.7B but the responder STILL DID NOT REACH r27. The root cause is CROSS-FILE DISCOVERABILITY, not anchor wording — solving findability inside a file the responder doesn't open cannot help.**
-
-### iter1273 FIX-A verified IN PLACE
-
-I read `/Users/hclin/github/recknihao/resources/27-oracle-plsql-to-dbt-trino.md` lines 3179-3260. Line 3183 contains the teacher's narrative-shaped anchors verbatim:
-
-- "our ingestion/Kafka/Spark pipeline silently fell behind and dashboards show stale numbers"
-- "the `dbt run` / `dbt build` SUCCEEDS but the source data hasn't been updated in N hours"
-- "no visible error when the upstream/raw/source table is stale or hasn't refreshed"
-- "how do I make dbt FLAG or FAIL when source data is too old / stale / behind"
-- "detect upstream lag / late-arriving source / source not updated"
-
-Plus the explicit do-NOT-hedge directive: "Do NOT hedge or defer to external docs: the full YAML + command + worked example are in THIS block."
-
-These are nearly word-for-word the keywords the engineer used (Fivetran silently stopped, dbt ran on stale data, reported success, FAIL/WARN pipeline). If the responder had opened r27, §6.7B's anchors would have fired.
-
-### Responder did not open r27 — cross-file discoverability confirmed
-
-Responder's hedge: "did not find guidance on dbt source freshness checks... that gap suggests this capability needs to be added or is outside scope." It described the correct mechanism in partial shape (declare `loaded_at_field`, set freshness thresholds, run `dbt source freshness` as a scheduled job) but deferred for full YAML to `docs.getdbt.com/docs/build/sources#source-freshness`.
-
-### Grep evidence — source-freshness content is ISLAND-ONLY in r27 §6.7B
-
-```
-Grep for: source freshness | loaded_at_field | dbt source freshness | warn_after | error_after
-Hits: resources/27-oracle-plsql-to-dbt-trino.md (full canonical §6.7B)
-      resources/28-complex-sql-performance-trino-dbt.md (L1045 — single passing mention only)
-NO HITS in r13 (postgres-to-iceberg-ingestion.md) — the file a Fivetran/Kafka/Spark ingestion-lag narrative would naturally open.
-```
-
-The filename `27-oracle-plsql-to-dbt-trino.md` does not contain "Fivetran" / "ingestion" / "stale" / "freshness" / "Kafka" — the file is not selected by the engineer's narrative keywords. Anchors inside the file cannot fire if the file is never opened.
-
-### MANDATORY LIGHT FIX-A — exact location and shape
-
-**File: `/Users/hclin/github/recknihao/resources/13-postgres-to-iceberg-ingestion.md`**
-
-Add a **self-contained, compact** source-freshness card (NOT just a cross-ref pointer — cross-refs don't help if r13 itself isn't opened either, but r13 IS opened by Fivetran/Kafka/Spark-ingestion-lag narratives). The card should contain:
-
-1. **Load-bearing narrative keywords** (must match what a Haiku does keyword-route on):
-   - "Fivetran silently stopped writing"
-   - "raw table not refreshing"
-   - "ingestion fell behind"
-   - "dbt run/build succeeds on stale source"
-   - "make dbt flag/fail on stale upstream"
-   - "detect upstream lag"
-2. **Minimal canonical YAML** (paste-and-run shape):
-   ```yaml
-   freshness:
-     warn_after:  {count: 12, period: hour}
-     error_after: {count: 24, period: hour}
-   loaded_at_field: ingested_at
-   ```
-3. **Separate-command fact**: `dbt source freshness` is NOT auto-run by `dbt run` / `dbt build` — gate it as its own CI step that exits non-zero on `error_after`.
-4. **dbt-trino caveat**: must declare `loaded_at_field` explicitly (no warehouse-metadata fallback on Trino — Snowflake/Redshift/BigQuery 1.7.3+/Databricks Fusion only).
-5. **Forward pointer**: "Full Q-pattern matcher + worked example: r27 §6.7B."
-
-Length: ~15-25 lines. Place near the existing "stale data" / "lag" sections in r13 (lines 280-290 and lines 2640-2650 already discuss read-side staleness / replication lag — natural anchor zones).
-
-### Why r13, not r28 or a new file
-
-- r13 is the **ingestion** file — Fivetran/Kafka/Spark-write-side lag IS r13's domain.
-- The teacher's iter1273 note said "Skipped r13 cross-ref (write-side lag content, misroute risk)" — but the 2nd-time hedge means that decision needs revisiting. The narrative IS write-side lag the engineer is trying to DETECT on the read side via dbt source freshness — these belong together.
-- r28 (complex SQL perf with dbt) is a less-natural lexical match for a "Fivetran silently stopped" narrative.
-
-### Watch update
-
-NEW HARD WATCH: `iter1274-Q1 source-freshness CROSS-FILE r13 FIX-A reach test`. Re-probe within 2 iters using a Fivetran/Kafka/Spark-pipeline-stale narrative (no feature-name keywords). If the responder STILL hedges, the r13 placement was wrong direction — escalate to a third placement (likely a dbt-data-quality top-level section, or a top-of-r28 dbt-ops block).
+**Overall**: 4 answers, average **4.92 STRONG PASS** (Q1 5.0 / Q2 4.9375 / Q3 4.8125 / Q4 4.9375). **BOTH iter1274 MANDATORY FIX-As REACHED CLEANLY on first re-probe; both watches CLOSE.** Recovery from iter1274's 3.797 (2 FAILs both on watch re-probes) — clean, no slip, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Q2 — Hierarchical drill-down ROLLUP miss (2ND OCCURRENCE of iter1273-Q2 watch) — **2.75 FAIL**
+## Q1 — Reach-test: r13 CROSS-FILE source-freshness FIX-A (NARRATIVE Airbyte-died framing): **5.0 STRONG PASS — FIX-A REACHED; HARD WATCH iter1274-Q1 CLOSES**
 
-**Scores**: Acc 2.5 / Clar 4.0 / Prac 2.0 / Compl 2.5
+Engineer's framing was the exact pattern that hedged twice in a row (iter1273 + iter1274): a NARRATIVE Fivetran/Airbyte-silently-stopped + dbt-ran-green stale-source scenario with ZERO feature-name keywords ("source freshness", "loaded_at_field"). The iter1274 FIX-A added a self-contained source-freshness card to r13 (the postgres-to-iceberg-ingestion file, which the narrative DOES naturally route to).
 
-**Verdict: 2nd occurrence of the ROLLUP-rejected-for-wrong-GROUPING-SETS family. Per iter1273-Q2 watch, ESCALATE to LIGHT FIX-A.**
+**Reach evidence**: Responder cited **BOTH r13 (by section name "DETECTING A STALLED / STALE UPSTREAM SOURCE") AND r27 §6.7B**. Did NOT hedge or defer to external docs. Confident "YES — dbt source freshness" lead.
 
-### Engineer's ask = textbook ROLLUP
+**Every load-bearing fact verified**:
+- `freshness:` block under `config:` with `warn_after`/`error_after: {count, period}` — verified verbatim at [docs.getdbt.com/reference/resource-properties/freshness](https://docs.getdbt.com/reference/resource-properties/freshness) (1.10+ canonical structure).
+- `loaded_at_field: ingested_at` — verified.
+- dbt-trino REQUIRES `loaded_at_field` (no metadata fallback) — verified; metadata fallback supported only on Snowflake/Redshift/BigQuery/Databricks.
+- `dbt source freshness` is a SEPARATE CLI command, NOT auto-run by `dbt run`/`dbt build` — verified verbatim.
+- Non-zero exit on `error_after` for CI gating — verified.
+- Period enum minute|hour|day — implied correctly (no week/quarter).
 
-- Detail row per `(team, priority)` = the `(team, priority)` tuple
-- Per-TEAM subtotal across all priorities = `(team)`
-- ONE grand total = `()`
+**No imported-prior, no broken-secondary, no over-warning, no fabrication.** Direct opposite of iter1273/1274's hedge — exactly what the FIX-A targeted.
 
-That is exactly `ROLLUP(team, priority)` = `GROUPING SETS ((team, priority), (team), ())`.
+**Watch status**: `iter1274-Q1 source-freshness CROSS-FILE r13 FIX-A reach test` — **CLOSED on first re-probe** under the same narrative-only (no-feature-keyword) framing that broke 2 prior iters. The cross-file placement strategy (put the canonical where the question keywords route, not just where it's topically correct) is validated. Consistent with `feedback_responder_findability.md` pinned guidance.
 
-### Responder's answer = wrong-shape GROUPING SETS + ROLLUP not named
-
-Responder wrote `GROUP BY GROUPING SETS ((team, priority), (team), (priority), ())`:
-- Included `(team, priority)` detail (better than iter1273 which OMITTED the detail).
-- Added a SPURIOUS `(priority)` per-priority margin the engineer did NOT request.
-- Did NOT name ROLLUP as the canonical idiom for this hierarchy.
-- Mentioned CUBE as "every combination" but did not route to ROLLUP.
-
-Note: per r28 L508, `GROUPING SETS ((a,b),(a),(b),())` IS LITERALLY `CUBE(a,b)` — the responder essentially gave a CUBE answer. The engineer pastes the query and the ticket report has unwanted per-priority margin rows; business owner sees clutter.
-
-### Verified
-
-WebFetch of [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) confirms `ROLLUP(a, b)` = `GROUPING SETS ((a, b), (a), ())` — exact 3 sets.
-
-`/Users/hclin/github/recknihao/resources/28-complex-sql-performance-trino-dbt.md` L426 already has the verbatim router: "(detail + subtotals down a group hierarchy + grand total) (e.g. per-(region, product) detail, then a per-region subtotal, then the overall total — **NO per-product-only row**) -> `ROLLUP(region, product)`." The content EXISTS — the responder routed to adjacent CUBE-vs-ROLLUP defang (L479-505) instead.
-
-### 2nd-occurrence pattern
-
-- iter1273 Q2 (region + plan_tier): omitted (region, plan_tier) detail, used `((region),(plan_tier),())` — wrong because no detail.
-- iter1274 Q2 (team + priority): included detail, but ADDED spurious (priority) margin — wrong because extra row.
-- Both are the same family: responder synthesizes a list of GROUPING SETS by reasoning column-by-column instead of routing to ROLLUP as the named idiom for hierarchical drill-down.
-
-### LIGHT FIX-A — exact location and shape
-
-**File: `/Users/hclin/github/recknihao/resources/28-complex-sql-performance-trino-dbt.md` §419-449 router block.**
-
-Two additions:
-
-1. **Top-of-matrix explicit recipe** (insert just under L425 router or merge into L426):
-   > "Asked for `(A, B) detail row` + `(A) subtotal across all B` + `()` grand total — this is a DRILL-DOWN HIERARCHY = `ROLLUP(A, B)`. Do NOT add a `(B)`-only set — that would create a per-B margin the report did NOT ask for. The 3-set list is EXACTLY `GROUPING SETS ((A, B), (A), ())` = `ROLLUP(A, B)`."
-
-2. **Defang of the 4-tuple form UNDER THE HIERARCHY framing** (currently L508 defangs the 4-tuple only under the "if you don't want detail, omit (a,b)" framing — the responder synthesized in the opposite direction, so a complementary defang is needed):
-   > "If you want `(a, b)` detail + per-`a` subtotal + grand total ONLY, do NOT write `GROUPING SETS ((a,b),(a),(b),())` — the 4-tuple form adds an UNWANTED `(b)`-only margin (and it IS literally `CUBE(a, b)`). Use `ROLLUP(a, b)` (3 sets) instead."
-
-The fix is additive (no removal); ~6-10 lines max. Pattern: the responder grabbed adjacent decision-matrix content (the CUBE-defang at L508) and synthesized in the wrong direction — explicit hierarchy-framed defang of the 4-tuple form will close the gap.
-
-### Watch update
-
-CLOSE iter1273-Q2 watch (escalated to LIGHT FIX-A this iter). OPEN: `iter1274-Q2 ROLLUP-hierarchy LIGHT FIX-A reach test` — re-probe within 2-4 iters with (detail by 2 dims) + (per-first-dim subtotal) + (grand total) framing. If responder ROUTES TO `ROLLUP` and names it as the canonical idiom, close. If responder again synthesizes a 4-tuple GROUPING SETS or other non-ROLLUP shape, the LIGHT FIX-A failed and a stronger rewrite (potentially flipping the order of examples — ROLLUP example FIRST not after GROUPING SETS) is needed.
+Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0.
 
 ---
 
-## Q3 — Iceberg snapshot maintenance + time-travel — **4.75 STRONG PASS**
+## Q2 — Reach-test: r28 ROLLUP-hierarchy STEP-0 router FIX-A: **4.9375 STRONG PASS — FIX-A REACHED; WATCH iter1274-Q2 CLOSES**
 
-**Scores**: Acc 4.5 / Clar 5.0 / Prac 5.0 / Compl 4.5
+Engineer's shape was exactly the ROLLUP hierarchy that iter1273 (returned wrong GROUPING SETS that OMITTED detail) and iter1274 (added a spurious `(rep)`-only margin = literally CUBE) both missed. The iter1274 FIX-A added a STEP-0 discriminator to r28's router ("do you want the per-(A,B) DETAIL rows?" YES+per-A-subtotal+total → `ROLLUP(A,B)`; NO → `GROUPING SETS((A),(B),())`).
 
-All facts verified via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html):
+**Reach evidence**: Responder went DIRECTLY to `GROUP BY ROLLUP(sales_region, sales_rep)` — the correct 3-set hierarchy. **Defang block reproduced from the FIX-A verbatim direction**: "DO NOT write `CUBE(region, rep)` [adds per-rep-only row] or `GROUPING SETS ((region,rep),(region),(rep),())` [full 4-tuple power set, includes per-rep-only row again]." This is exactly the iter1274 §425 defang landing point.
 
-- `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')` — syntax verified verbatim (docs use `'128MB'` example; `'256MB'` is a valid argument value).
-- `ALTER TABLE ... EXECUTE expire_snapshots(retention_threshold => '7d')` — verified verbatim; docs: "removes all snapshots and all related metadata and data files". `iceberg.expire-snapshots.min-retention` default 7d.
-- `ALTER TABLE ... EXECUTE remove_orphan_files(retention_threshold => '7d')` — verified; `iceberg.remove-orphan-files.min-retention` default 7d.
-- `CALL iceberg.system.rollback_to_snapshot('schema','table',snapshot_id)` — verified (3-arg form is the 467 form; `ALTER TABLE EXECUTE rollback_to_snapshot` is 469+ per pinned `reference_trino_rollback_snapshot_form.md`).
-- MoR position-delete clearing via optimize with higher `file_size_threshold` — matches pinned `reference_trino_optimize_clears_position_deletes.md` (iter1194 PR #12617 / #24086 — SIZE-only candidate selection; raise threshold above already-large delete-bearing files to force-rewrite).
-- Time-travel `FOR VERSION AS OF` breaks past retention — correct logical consequence (the docs don't state it explicitly, but expired snapshots have their data files deleted, so the time-travel query errors).
+**GROUPING() bitmask labels verified correct against trino.io/docs/467**:
+- Trino convention: **leftmost argument is MSB** (verified verbatim "bits are assigned to the argument columns with the rightmost column being the least significant bit"). So for `GROUPING(sales_region, sales_rep)`: bit-1 = region presence, bit-0 = rep presence.
+- `(sales_region, sales_rep)` detail → both columns present → bitmask **0** → "Detail" ✓
+- `(sales_region)` region subtotal, rep rolled up → rep bit set → bitmask **1** → "Region Total" ✓
+- `()` grand total, both rolled up → bitmask **3** → "Grand Total" ✓
+- Value **2** (region rolled up, rep present) is correctly noted as "does NOT appear in ROLLUP — it only drops trailing columns" — verified against docs example which shows ROLLUP produces exactly {0, 1, 3} (matches responder's example numerically too).
 
-Minor Acc shave: time-travel breakage stated as a hard rule (docs don't quote it verbatim — it's a logical inference). Minor Compl shave: did not surface the `iceberg.expire-snapshots.min-retention` catalog-level floor (procedure refuses with `retention_threshold < min-retention`) or the alternative `CALL system.expire_snapshots(...)` procedure form.
+ORDER BY ... NULLS LAST correct for the hierarchical sort. No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r17.
+**Watch status**: `iter1274-Q2 ROLLUP-hierarchy router reach-test` — **CLOSED on first re-probe**. Responder now correctly routes to ROLLUP for the detail+per-leading-dim-subtotal+grand-total hierarchy AND defangs both the CUBE form and the spurious 4-tuple GROUPING SETS. The r28 STEP-0 discriminator (place a single discriminator question BEFORE the misrouting attractor) approach is validated.
 
----
+Minor Clar shave (-0.25, density of bitmask explanation could front-load with "MSB = first argument" preamble for OLAP newcomers).
 
-## Q4 — Oracle LISTAGG → Trino listagg — **4.8125 STRONG PASS**
-
-**Scores**: Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.5
-
-All facts verified via WebFetch of [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html):
-
-- `LISTAGG( expression [, separator] [ON OVERFLOW overflow_behaviour]) WITHIN GROUP (ORDER BY sort_item, [...])` — exact syntax. Skips NULL inputs by default.
-- 1 MiB limit verified verbatim ("the length of the output of the function exceeds `1048576` bytes" = 1 MiB).
-- `ON OVERFLOW ERROR` and `ON OVERFLOW TRUNCATE '.....' WITH COUNT` both documented.
-- No window form verified verbatim: "The current implementation of `listagg` function does not support window frames." Alternative `array_join(array_agg(x ORDER BY x), ', ')` is the correct windowed/per-row alternative.
-
-Pinned `reference_trino_listagg_native.md` is the source of truth — responder routed correctly to it. Cites r27 §7A.2.
-
-Minor Compl shave: did not mention that `listagg(DISTINCT x, ',')` is NOT supported on 467 — the Oracle DISTINCT idiom would need a CTE with DISTINCT first, then listagg. This matters because Oracle LISTAGG accepts DISTINCT and call sites may use it.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Clean 1:1 migration answer.
+Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 5.0.
 
 ---
 
-## Patterns / watches
+## Q3 — Broadcast vs partitioned join (800M fact × 50K dim): **4.8125 STRONG PASS**
 
-### NEW HARD WATCH — Cross-file discoverability for source-freshness narrative (Q1)
+Every load-bearing claim verified against trino.io/docs/467:
+- `join_distribution_type` valid values **AUTOMATIC / BROADCAST / PARTITIONED**, default **AUTOMATIC** — verified at [trino.io/docs/467/admin/properties-general.html](https://trino.io/docs/467/admin/properties-general.html).
+- `join_max_broadcast_table_size` default **100MB** — verified at [trino.io/docs/467/optimizer/cost-based-optimizations.html](https://trino.io/docs/467/optimizer/cost-based-optimizations.html) verbatim "By default, the replicated table size is capped to 100MB."
+- EXPLAIN shows `RemoteExchange[REPLICATE]` for broadcast vs `RemoteExchange[REPARTITION]` for partitioned — consistent with iter1256/1257 verified canonical.
+- **ANALYZE bare syntax** `ANALYZE table_name` (NOT `ANALYZE TABLE` — the Spark/Hive form errors) — verified verbatim at [trino.io/docs/467/sql/analyze.html](https://trino.io/docs/467/sql/analyze.html) "ANALYZE table_name [ WITH (...) ]".
+- **No `/*+ BROADCAST */` query hint** in Trino 467 (silently ignored as block comment) — verified (iter1256 cited #9498).
+- `SET SESSION join_distribution_type = 'BROADCAST'` only override lever — correct.
+- dbt-trino `pre_hook` form for per-model pinning — correct, production-stack-aligned.
+- Possible-cause diagnosis (missing stats / dim bigger than thought / conservative optimizer / federation boundary / dynamic filtering) — correct mental model.
 
-The iter1273 FIX-A added the right keyword anchors INSIDE r27 §6.7B, but the responder never opens r27 from a Fivetran/Kafka/Spark-ingestion-lag narrative. **Findability fails at the FILE level, not at the SECTION level.** This is a different failure mode from prior anchor-tweak fixes — it requires the canonical (or a substantive pointer card, not just a cross-ref line) to live in a file the narrative WOULD route to (r13 ingestion is the candidate). Re-probe within 2 iters with a Fivetran/Kafka narrative; if it still hedges, the r13 placement is wrong direction and the next attempt should be a dbt-data-quality top-level zone in r28.
+Diagnostic workflow (EXPLAIN → ANALYZE → SET SESSION) is the textbook order. AUTOMATIC-after-ANALYZE-picks-BROADCAST framing is exactly right since the dim is way under 100MB cap.
 
-### ESCALATED WATCH — ROLLUP hierarchy router (Q2)
+Minor Clar shave (-0.5, "Trino SHOULD pick BROADCAST automatically" framing without explicitly noting that without ANALYZE the CBO has NO row-count stats and defaults to PARTITIONED — the responder gets there via "missing stats" causal note but a beginner could miss the connection). Minor Compl shave (-0.25, no mention of `EXPLAIN (TYPE DISTRIBUTED)` as the more verbose form that surfaces the distribution annotation more clearly, and no `Join[INNER][BROADCAST]` operator-level annotation alongside the RemoteExchange).
 
-iter1273-Q2 + iter1274-Q2 = 2 consecutive ROLLUP misses on hierarchy-fit questions. Per the iter1273-Q2 watch, ESCALATE to LIGHT FIX-A at r28 §419-449 (top-of-matrix explicit recipe + 4-tuple defang under the hierarchy framing). Re-probe within 2-4 iters. If the LIGHT FIX-A doesn't close, the next escalation is reordering r28 examples (ROLLUP example FIRST before GROUPING SETS to reset the keyword-magnet).
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
-### Carry-forward un-probed watches
-
-- iter1272-Q3 unit-test-free-tier-hallucination (un-probed)
-- iter1271-Q2 streak (un-probed)
-- iter1270-Q1 PRIMARY-KEY (un-probed)
-
-### Continuity / quality notes
-
-- Q3 and Q4 are clean strong-PASS answers — no defects, full verification clean against trino.io/docs/467 + pinned cards.
-- The 2 FAILs are both watch re-probes; iteration-level "PASS at 3.797" hides that 50% of the answers shipped wrong output / unactionable hedges to the engineer.
-- Both FAILs have **specific, narrow LIGHT FIX-A locations** (r13 for source-freshness pointer; r28 §419-449 for ROLLUP-hierarchy router + 4-tuple defang). Both are additive (no removal); ~6-25 lines each.
+Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 4.75.
 
 ---
 
-## Per-topic score history updated
+## Q4 — Oracle ROWNUM → Trino pagination: **4.9375 STRONG PASS**
 
-- `dbt sources / source freshness`: 4.5554/13 -> 4.4354/14 PASSED (-0.1200, 2nd consecutive sub-4 score).
-- `Analytical query patterns on Iceberg+Trino`: 4.4855/200 -> 4.4769/201 PASSED (-0.0086).
-- `Iceberg table maintenance`: 4.4497/241 -> 4.4509/242 PASSED (+0.0012).
-- `Oracle PL/SQL -> dbt + Trino SQL migration`: 4.5071/242 -> 4.5083/243 PASSED (+0.0012).
+Every claim verified:
+- **No ROWNUM** in Trino 467 — correct (Oracle pseudo-column).
+- **OFFSET BEFORE LIMIT** order — verified verbatim at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html); LIMIT n OFFSET m (Postgres/MySQL order) is a parse error per pinned `reference_trino_offset_before_limit`.
+- Top-N: `ORDER BY ... LIMIT 100` — correct.
+- Page-2: `ORDER BY ... OFFSET 50 LIMIT 50` — correct.
+- Keyset/cursor (`WHERE event_id < :cursor ORDER BY event_id DESC LIMIT 50`) for deep-page perf — correct production guidance (avoids OFFSET's O(N) scan-and-skip).
+- Top-N-per-group via `row_number() OVER (PARTITION BY ... ORDER BY ...) ... WHERE rn <= N` subquery wrapper — verified canonical Trino 467 form (no QUALIFY per [trinodb/trino #6478](https://github.com/trinodb/trino/issues/6478)).
+- Summary table at the end — clear.
+- Citation r27 §4.5B — correct.
 
-State.json NOT modified per directive (teacher will bump iteration).
+Minor Compl shave (-0.25, `OFFSET m ROWS FETCH FIRST n ROWS ONLY` SQL-standard alternative form not mentioned; recall ceiling, not load-bearing since OFFSET+LIMIT serves the engineer's literal ask).
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
+
+Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.
+
+---
+
+## Summary table
+
+| Q | Topic | Score | Notes |
+|---|---|---|---|
+| Q1 | dbt sources / source freshness | 5.0 | **iter1274-Q1 cross-file r13 FIX-A REACHED on 1st re-probe; watch CLOSES** |
+| Q2 | Analytical query patterns on Iceberg+Trino (ROLLUP/GROUPING SETS) | 4.9375 | **iter1274-Q2 r28 STEP-0 router FIX-A REACHED on 1st re-probe; watch CLOSES; GROUPING() bitmask 0/1/3 + value-2-omitted all correct** |
+| Q3 | Improving complex SQL performance on Trino with dbt (join distribution) | 4.8125 | All facts verified; minor clarity shave on stats-causality |
+| Q4 | Oracle PL/SQL → dbt+Trino migration (ROWNUM pagination) | 4.9375 | OFFSET-before-LIMIT + row_number subquery + keyset all clean |
+
+## Watches closed this iter
+
+- **`iter1274-Q1 source-freshness CROSS-FILE r13 FIX-A reach test`** — CLOSED. Cross-file placement strategy validated; the keyword-routing principle from `feedback_responder_findability.md` confirmed.
+- **`iter1274-Q2 ROLLUP-hierarchy router reach-test`** — CLOSED. STEP-0 discriminator successfully re-routes the responder past the previous misroute attractor.
+
+## No new watches
+
+No new defects, no new soft watches, no new FIX-A required. Pattern is clean STRONG-PASS recovery after iter1274's 2-FAIL dip.
+
+## Recommendation to teacher
+
+**NO-OP.** Both mandatory FIX-As reached on first re-probe. Standard procedure: leave both new cards (r13 source-freshness self-contained card + r28 §425 STEP-0 ROLLUP discriminator + defang) in place; no churn. Continue breadth probing.
+
+Carry watches (un-probed this iter): iter1272-Q3 unit-test-free-tier hallucination / iter1271-Q2 current-vs-longest-streak / iter1270-Q1 PRIMARY-KEY un-probed / iter1268 Q3 dbt grants service-account=USER-vs-ROLE branching / iter1267 Q1+Q2 example-SQL GROUP-BY-shape synthesis slip.
