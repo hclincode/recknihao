@@ -4185,6 +4185,69 @@ If your schema.yml `description:` doesn't show up under `SHOW COLUMNS` or in the
 
 ---
 
+### 6.7O LEADING CANONICAL — dbt FOLDER-LEVEL `+materialized` in `dbt_project.yml` (set a default materialization for a whole directory, and the config-precedence ladder)
+
+> **Keyword anchors:** set default materialization for a folder, dbt_project.yml materialized, folder-level materialization, configure materialized for a whole directory, stop putting config(materialized) in every model, +materialized, default materialization per folder, does model config override dbt_project.yml, dbt config precedence / override order, set all models in marts to table, materialize a folder as view/table/incremental.
+
+**The fact (verified at [docs.getdbt.com/reference/model-configs](https://docs.getdbt.com/reference/model-configs)):** you do NOT need a `{{ config(materialized=...) }}` in every model. Set a default materialization for an entire directory under the `models:` key in `dbt_project.yml`, keyed by your project name then the folder path. **Configs set in `dbt_project.yml` MUST use the `+` PREFIX (`+materialized:`)** — the leading `+` is what marks the key as a CONFIG rather than another subdirectory name. A bare `materialized:` nested under a folder key is mis-parsed as a path component (a model folder literally named "materialized") and the default silently does NOT apply.
+
+```yaml
+# dbt_project.yml — folder-level materialization defaults (note the + on every config key)
+models:
+  my_project:                 # <- your project name (matches `name:` at the top of dbt_project.yml)
+    +materialized: view       # project-wide default: everything is a view unless overridden below
+    staging:
+      +materialized: view     # models/staging/**  -> view
+    marts:
+      +materialized: table    # models/marts/**     -> table
+      facts:
+        +materialized: incremental          # models/marts/facts/** -> incremental
+        +incremental_strategy: merge        # sibling config keys also take the + prefix
+```
+
+**Precedence ladder — MOST-SPECIFIC WINS (verified at [docs.getdbt.com/reference/configs-and-properties](https://docs.getdbt.com/reference/configs-and-properties)).** From highest priority (wins) to lowest:
+
+1. **In-file `{{ config(materialized='...') }}`** at the top of the model `.sql` — beats everything.
+2. **`config:` block in a `schema.yml`** / properties file for that model.
+3. **`dbt_project.yml` folder-level `+materialized:`** — the DEEPER (more specific) folder path wins over a shallower one (`marts/facts` beats `marts` beats project-root).
+4. **Project-wide default** (the `+materialized:` directly under your project name).
+
+So an in-file `{{ config(materialized='table') }}` **OVERRIDES** the folder-level `dbt_project.yml` setting — never the other way around.
+
+**Worked answer for the incremental-fact + full-refresh-dimension case:** put the folder defaults in `dbt_project.yml`, and only override the one model that differs:
+
+```yaml
+# dbt_project.yml
+models:
+  my_project:
+    facts:
+      +materialized: incremental
+      +incremental_strategy: merge
+    dimensions:
+      +materialized: table        # dim_customers (~500k rows) full-rebuilds as a table
+```
+
+```sql
+-- models/dimensions/dim_customers.sql
+-- No config() needed — it inherits +materialized: table from the dimensions/ folder.
+-- (If you DID add {{ config(materialized='table') }} here it would override the folder default — harmless but redundant.)
+SELECT ...
+```
+
+> **❌ DO NOT WRITE a bare config key under a folder in `dbt_project.yml`** — it is NOT applied (parsed as a phantom subdirectory name):
+> ```yaml
+> # ❌ WRONG — missing the + prefix; dbt treats `materialized` as a folder name, default never applies:
+> models:
+>   my_project:
+>     marts:
+>       materialized: table        # <-- BROKEN: needs +materialized: table
+> ```
+> The `+` prefix is required for EVERY config key in `dbt_project.yml` (`+materialized`, `+incremental_strategy`, `+tags`, `+schema`, `+persist_docs`, `+grants` …). In-file `{{ config(...) }}` and `schema.yml` `config:` blocks do NOT use the `+` (it's only the `dbt_project.yml` path-nested form that needs it).
+
+**Cross-references:** §3 (materialization choice: view / table / incremental / ephemeral — WHICH to pick). §6.7J (`+persist_docs` — same `+`-prefix `dbt_project.yml` shape). §6.7F (`+tags` folder-level). §6.7N (model versions).
+
+---
+
 ### 6.7L LEADING CANONICAL — dbt `query-comment` (auto-attach the dbt MODEL NAME to every query → visible in Trino's QUERY HISTORY)
 
 > **Keyword anchors:** which dbt model generated this query, tag queries with the dbt model name, dbt model in Trino query history, attribute Trino queries to dbt models, embed metadata in query text, query tagging dbt, SYS_CONTEXT-style query stamping, find the dbt model behind a slow query in the Web UI, dbt query-comment, query_comment JSON.
