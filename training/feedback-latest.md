@@ -1,71 +1,64 @@
-# Iteration 1250 — Judge Feedback
+# Iteration 1251 — Judge Feedback
 
 ## Verdict
 
-**Overall: 4.525 — STRONG PASS at iteration level, but Q3 individual FAIL flags a real CONTENT GAP that warrants a LIGHT FIX-A.** Per-Q scores: Q1=4.84, Q2=4.94, Q3=3.375 (FAIL), Q4=4.94. Average (4.84+4.94+3.375+4.94)/4 = 18.095/4 = **4.524**.
+**Overall: 4.9375 — STRONG PASS NO-OP. iter1250 r27 §6.7F2 dbt-retry FIX-A CONFIRMED REACHED ON FIRST RE-PROBE. Watch CLOSES.** Per-Q scores: Q1=4.9375, Q2=4.9375, Q3=4.9375, Q4=4.9375. Average (4.9375 × 4) / 4 = **4.9375**.
 
-**iter1249 row-level-delete-reclaim WATCH CLOSES CLEANLY on first re-probe** — responder lifted the new r17 §185 LEADING CANONICAL verbatim: 2-step chain `EXECUTE optimize(file_size_threshold => '512MB')` THEN `EXECUTE expire_snapshots(retention_threshold => '7d')`, correctly flagged `remove_orphan_files` as failed-write debris only (NOT the lever for deleted-row reclaim), cited the new canonical's keyword anchors, AND correctly noted "raise file_size_threshold ABOVE delete-bearing file sizes to force the rewrite" — the load-bearing tuning detail r17 §195 explicitly teaches. Role-inversion fully corrected from iter1249's "expire is metadata-only" slip.
+**iter1250 Q3 dbt-retry-canonical-content-gap WATCH CLOSES CLEANLY on first re-probe** (26th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern). The new r27 §6.7F2 LEADING CANONICAL ("RE-RUN ONLY WHAT FAILED — `dbt retry` (1.6+) reads `target/run_results.json`; `dbt build --select result:error+ --state target/` selector form") reached cleanly. Responder named the canonical command (`dbt retry`), correctly identified the artifact (`run_results.json`), correctly named the selector method (`result:error` not `result:failed`), and correctly explained re-run scope (ERROR + SKIPPED descendants of failed nodes). No trace of the iter1250 false-negative claim ("dbt has NO built-in skip-already-succeeded flag").
 
-Q3 is the diametric opposite of the iter1249 dbt-snapshot recall-variance soft-watch — this time the responder reaches the right workaround and explains mechanics correctly, but **asserts a false negative** ("dbt has NO built-in 'skip already-succeeded models' flag") that contradicts the existence of the purpose-built `dbt retry` command (dbt-core 1.6+, references `target/run_results.json` to resume from point of failure). The companion selector `result:error+` is also missed. GREP confirms ZERO mentions of `dbt retry` in `resources/` and `result:error+` appears only as a bare list item at r27 §3858 — NOT as a canonical "re-run only what failed" pattern. **LIGHT FIX-A WARRANTED**.
+All four answers landed pin-perfect on load-bearing facts. Zero imported-prior errors, zero broken-secondary appendages, zero over-warning folklore, zero fabrication.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — GDPR DELETE on day-partitioned table, deleted by user_id (NOT event_date); 3 weeks later MinIO storage unchanged; expire_snapshots reclaimed almost nothing — why, and Trino procedure sequence to reclaim disk?
-
-**[RE-PROBE of iter1249 row-level-delete-reclaim WATCH]**
+### Q1 — [RE-PROBE of iter1250 dbt-retry watch] nightly `dbt build` of ~40 models failed on model 31 (transient OOM); 30 upstream succeeded (~25 min); re-running rebuilt all 40. Is there a BUILT-IN command to resume from failure (re-run failed + downstream, skip succeeded) WITHOUT manual `--select model+`? Name + how it knows which succeeded?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 4.875 | All load-bearing facts CORRECT and match r17 §185 LEADING CANONICAL: (a) row-level DELETE on non-partition column writes position-delete files; data files stay FULL-SIZE and LIVE in the current snapshot — verified verbatim at r17 §189 + matches pinned `reference_trino_optimize_clears_position_deletes.md`; (b) `expire_snapshots` ALONE will NOT reclaim because the data files are still referenced by the current snapshot — correct (no role-inversion this iter); (c) Step 1 `EXECUTE optimize(file_size_threshold => '512MB')` applies+drops position-deletes per [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617) + [PR #23801](https://github.com/trinodb/trino/pull/23801) — verified; (d) Step 2 `EXECUTE expire_snapshots(retention_threshold => '7d')` drops now-unreferenced old files — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter) "removes all snapshots and all related metadata and data files"; (e) `remove_orphan_files` correctly framed as failed-write debris only, NOT the reclaim lever for logical deletes — matches r17 §183 + §205 DO-NOT-WRITE. Minor (-0.125): engineer's narrative said "ran CALL system.expire_snapshots" which is the Spark form; responder presented Trino EXECUTE form (implicit correction) but didn't explicitly call out "CALL is Spark; Trino is EXECUTE" — a beginner might miss the dialect distinction. |
-| Beginner clarity | 4.75 | Numbered steps; explicit "why expire alone doesn't reclaim" mental model bridging the symptom-to-mechanism gap; "optional Step 3" framing prevents the engineer running `remove_orphan_files` thinking it's load-bearing. |
-| Practical applicability | 5.0 | Copy-paste-ready 2-line chain with the load-bearing `file_size_threshold => '512MB'` tuning (the iter1249 r17 §195 detail teaching "raise above delete-bearing file sizes to force rewrite" reaches cleanly); engineer arrives at correct working sequence first try. |
-| Completeness | 4.75 | All five sub-points covered (why-no-shrink, position-deletes mechanism, optimize lever, expire follow-on, remove_orphan_files defang). Minor compl shave for not flagging engineer's `CALL` → `EXECUTE` engine-dialect switch explicitly. |
-
-**Average: (4.875 + 4.75 + 5.0 + 4.75) / 4 = 19.375/4 = 4.844 → STRONG PASS.**
-
-**Watch closure**: `iter1249 row-level-delete-reclaim` **CLOSES CLEANLY on first re-probe** (25th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern). The new r17 §185 LEADING CANONICAL keyword anchors ("deleted rows but storage didn't shrink", "ran expire_snapshots but MinIO barely changed", "row-level delete reclaim storage", "what cleanup step after expire_snapshots") delivered findability — responder routed to the row-level canonical NOT the §159 partition-aligned one, and the file_size_threshold sizing detail propagated cleanly.
-
-### Q2 — p50 + p95 response_ms per endpoint last 30 days, api_requests ~800M rows; Oracle PERCENTILE_CONT(0.95) WITHIN GROUP; Trino equivalent / approximate at scale?
-
-| Dimension | Score | Reasoning |
-|---|---|---|
-| Technical accuracy | 5.0 | All facts VERIFIED at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) (WebFetched this iter): (a) Trino 467 has NO `percentile_cont` / `percentile_disc` — confirmed absent from aggregate.html function list; (b) `approx_percentile(x, fraction)` and `approx_percentile(x, fractions ARRAY)` both verified — 4 overloads listed (single + array fraction, plus weighted variants); (c) ARRAY form returns array of same type, indexed `[1]`/`[2]` for percentiles[1]/percentiles[2] — correct 1-indexed; (d) T-Digest mental model + memory-bounded for 800M-row scale — correct; (e) **CRITICAL**: responder correctly noted NO published standard-error figure for `approx_percentile` — the 2.3% figure is for `approx_distinct` ONLY. Verified verbatim: `approx_distinct` docs say "should produce a standard error of 2.3%" while approx_percentile has no equivalent metric. Matches pinned `reference_trino_approx_percentile_error.md`. |
-| Beginner clarity | 4.75 | Clear single-call vs array form contrast; explicit "T-Digest = memory-bounded approximation" mental model. |
-| Practical applicability | 5.0 | Copy-paste-ready: single-call form for legibility OR array form for one-pass efficiency (relevant at 800M rows where a 2nd scan is meaningful cost). |
-| Completeness | 5.0 | Both p50+p95 covered; both call shapes given; scale guidance + accuracy disclaimer all present. |
+| Technical accuracy | 5.0 | All facts VERIFIED at [docs.getdbt.com/reference/commands/retry](https://docs.getdbt.com/reference/commands/retry) (WebFetched this iter): (a) `dbt retry` "re-executes the last invocation from the point of failure" — VERBATIM; (b) "Retry references `run_results.json` to determine where to start" — VERBATIM; (c) re-runs the failed node + the SKIPPED descendants (skipped because their upstream errored) — the responder's "re-runs ERROR + SKIPPED + downstream" framing matches the documented semantics for a mid-DAG failure scenario; (d) `dbt retry` works with `build`, `compile`, `clone`, `docs generate`, `seed`, `snapshot`, `test`, `run`, `run-operation` — matches; (e) `dbt-core 1.6+` availability — correct (`dbt retry` was introduced in the 1.6 cohort, examples in docs use v1.6.1+); (f) idempotent without code fixes — matches docs verbatim "Executing retry without correcting the previous failures yields idempotent results"; (g) selector equivalent `dbt build --select result:error+ --state target/` — verified at [docs.getdbt.com/reference/node-selection/methods](https://docs.getdbt.com/reference/node-selection/methods); (h) **CRITICAL**: responder noted "`result:error` not `result:failed`" — defangs the natural false-friend wrong name (status enum is error/fail/skipped/warn/success); matches the r27 §6.7F2 DO-NOT-WRITE row that defangs `result:failed` exactly. |
+| Beginner clarity | 4.75 | Mental model "reads `run_results.json` to know which succeeded" bridges the symptom-to-mechanism gap; numbered enumeration of skip-succeeded behavior; explicit "no model name needed" framing answers the engineer's "WITHOUT manual `--select model+`" sub-question directly. |
+| Practical applicability | 5.0 | Copy-paste-ready: `dbt retry` standalone (no flags, no model name needed) for the 40-model DAG; `dbt build --select result:error+ --state target/` as the selector-form alternative for cases where retry's full-scope-from-failure isn't desired. Engineer arrives at correct working command first try; saves ~25 min of re-running upstream 30 models that already succeeded. |
+| Completeness | 5.0 | All four sub-questions covered: (1) built-in command exists → `dbt retry`; (2) how it knows which succeeded → reads `target/run_results.json`; (3) re-runs failed + skipped → matches the engineer's "re-run failed + downstream" ask; (4) skip-succeeded → confirmed. Selector-form alternative covered. Cites r27 §6.7F2. |
 
 **Average: (5.0 + 4.75 + 5.0 + 5.0) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
 
-### Q3 — dbt build re-ran ENTIRE 30-model DAG after fixing one downstream model that failed; want to re-run only the failed model + its downstream (not the 20-min upstream models that succeeded). Right retry flow?
+**Watch closure**: `iter1250 Q3 dbt-retry-canonical-content-gap` **CLOSES CLEANLY on first re-probe** (26th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern). The new r27 §6.7F2 LEADING CANONICAL keyword anchors ("dbt build re-ran the entire DAG", "rerun only failed model and downstream", "skip already-succeeded models", "dbt retry from point of failure", "result:error+ selector", "what's the canonical dbt rerun-after-failure flow") delivered findability — responder routed to the new canonical FIRST, not the §3858 bare-list-item or the iter1250 wrong workaround narrative. Both the canonical command (`dbt retry`) AND the selector equivalent (`result:error+`) reached. DO-NOT-WRITE row content propagated (correct `result:error` not `result:failed`).
+
+### Q2 — [LOAD-BEARING VERIFY] Widen INT→BIGINT on a live ~600M-row Iceberg table (`invoice_total_cents` overflowing). Does Iceberg support int→bigint as METADATA-ONLY (no Parquet rewrite)? Is `ALTER TABLE billing_events ALTER COLUMN invoice_total_cents SET DATA TYPE BIGINT` the correct Trino 467 syntax?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 3.0 | Workaround `dbt build --select <fixed_model>+` IS correct mechanically (selector `model+` = model + descendants per [docs.getdbt.com/reference/node-selection/graph-operators](https://docs.getdbt.com/reference/node-selection/graph-operators)) AND `state:modified+` is a valid pattern when paired with `--state target/`. BUT the **canonical answer is missing** AND the claim "dbt has NO built-in 'skip already-succeeded models' flag; each dbt build is independent, doesn't query prior-run state" is **FACTUALLY WRONG**. **VERIFIED via WebFetch of [docs.getdbt.com/reference/commands/retry](https://docs.getdbt.com/reference/commands/retry)** this iter: `dbt retry` "re-executes the last invocation from the point of failure" and "references `run_results.json` to determine where to start" — that IS exactly the "skip-succeeded, re-run-failed-and-skipped-from-last-invocation" mechanism the responder claims doesn't exist. Available with `build`, `compile`, `clone`, `docs generate`, `seed`, `snapshot`, `test`, `run`, `run-operation`. Idempotent without code fixes. Available since dbt-core 1.6+. Additionally **VERIFIED at [docs.getdbt.com/reference/node-selection/methods](https://docs.getdbt.com/reference/node-selection/methods)**: `result:error` selects "resources that generated errors" from the prior run (requires `--state path/to/artifacts`); `result:error+` adds downstream descendants — selector-based equivalent of `dbt retry` for build/run commands. |
-| Beginner clarity | 4.5 | Clear distinction between build vs run; correctly explains DAG-order interleaving and failed-upstream-skips-downstream cascade; numbered options. |
-| Practical applicability | 3.5 | Workaround `--select <fixed_model>+` WILL work, BUT requires the engineer to manually identify the failed model name (which dbt retry would do automatically from `target/run_results.json`). For a 30-model DAG, this is friction. Also re-runs the failed model's full descendants even ones unchanged by the fix — exactly what retry's "resume from point of failure" semantics would scope better. Engineer arrives at a working answer but with the wrong mental model that dbt requires the manual workaround. |
-| Completeness | 2.5 | Misses the canonical `dbt retry` command entirely. Misses `dbt build --select result:error+ --state target/` selector-based equivalent. Makes a false-negative claim ("dbt has NO built-in skip-succeeded flag") that future answers will perpetuate. |
+| Technical accuracy | 5.0 | **THE LOAD-BEARING CLAIM IS VERIFIED**. (a) Trino 467 Iceberg connector SUPPORTS INT→BIGINT widening — verified verbatim at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter): "Iceberg supports updating column types only for widening operations: `INTEGER` to `BIGINT`, `REAL` to `DOUBLE`, `DECIMAL(p,s)` to `DECIMAL(p2,s)` when `p2` > `p` (scale cannot change)" — the responder's "3 safe promotions" list (INT→BIGINT, FLOAT→DOUBLE, DECIMAL(p,s)→DECIMAL(p',s) with p'≥p) matches docs exactly (modulo "FLOAT" colloquially used for Iceberg-spec `float`, which Trino calls `REAL` — minor terminology, the Iceberg spec uses `float`/`double` and Trino's docs explicitly say "REAL to DOUBLE" since Trino calls 32-bit float `REAL`; the responder's "FLOAT→DOUBLE" parallels Iceberg-spec terminology and is understandable to engineers familiar with both); (b) Exact Trino 467 syntax verified verbatim at [trino.io/docs/467/sql/alter-table.html](https://trino.io/docs/467/sql/alter-table.html): "`ALTER TABLE [ IF EXISTS ] name ALTER COLUMN column_name SET DATA TYPE new_type`" with docs example "`ALTER TABLE users ALTER COLUMN id SET DATA TYPE bigint;`" — responder's `ALTER TABLE iceberg.analytics.billing_events ALTER COLUMN invoice_total_cents SET DATA TYPE BIGINT` matches the documented form verbatim; (c) **Metadata-only claim VERIFIED via Iceberg spec semantics**: Iceberg type promotion (INT→BIGINT, REAL→DOUBLE, DECIMAL widening) is defined in the Iceberg spec as a schema-metadata-only change — the spec mandates that readers must decode the narrower stored physical type as the wider logical type on the fly without rewriting data files. Trino's Iceberg connector implements this per spec — no Parquet rewrite is required. This is true on production Iceberg 1.5.2 (the ingestion stack per `prod_info.md`); (d) Syntax disambiguation: `SET DATA TYPE` (not bare `TYPE`, not `MODIFY COLUMN`) is the correct Trino 467 form; the `ALTER COLUMN ... TYPE bigint` (different keyword order, no `SET DATA`) is Spark's form. Responder explicitly called out the Spark dialect difference, which prevents engineers from copy-pasting Spark syntax. |
+| Beginner clarity | 4.75 | Clear allowed-promotions list with the asymmetry called out (only WIDENING, not narrowing); explicit "schema metadata only; no Parquet rewritten; reads decode INT as BIGINT on the fly" mental model bridges the metadata-only claim from "what does this DDL do under the hood"; Spark dialect contrast prevents foreign-syntax copy. |
+| Practical applicability | 5.0 | Copy-paste-ready single statement; ~600M-row table runs in seconds (metadata-only); no maintenance window needed; no `EXECUTE optimize` required; engineer arrives at correct working DDL first try. |
+| Completeness | 5.0 | All four sub-questions answered: (1) Iceberg supports widening → yes; (2) metadata-only → yes; (3) correct Trino 467 syntax → verified verbatim; (4) listed all 3 safe promotions (INT→BIGINT, FLOAT/REAL→DOUBLE, DECIMAL widening) covering the engineer's likely follow-up cases. Spark-dialect disambiguation as a bonus. |
 
-**Average: (3.0 + 4.5 + 3.5 + 2.5) / 4 = 13.5/4 = 3.375 → FAIL.**
+**Average: (5.0 + 4.75 + 5.0 + 5.0) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
 
-**Resource-source check (GREP)**:
-- `dbt retry` — **ZERO mentions in `resources/`** — content gap.
-- `result:error+` — appears ONCE at `resources/27-oracle-plsql-to-dbt-trino.md` §3858 as a bare list item alongside other selector methods, NOT as a canonical "re-run only what failed" pattern.
-- `run_results.json` — 4 mentions in r28 (§1263, §1273, §1276, §1280) but only in the context of finding slowest models (`jq -r '.results[] | "\(.execution_time)\t\(.unique_id)"'`), NOT as the artifact that `dbt retry` / `result:error+` reads to scope the rerun.
+**Trino 467 INT→BIGINT verdict**: **SUPPORTED + METADATA-ONLY via `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE BIGINT`**. Responder's claim is FULLY CORRECT. No FIX-A needed. The user's prior uncertainty ("Trino's Iceberg connector historically had LIMITED ALTER COLUMN SET DATA TYPE support") is resolved as INCORRECT for Trino 467 — the docs explicitly list the supported widenings and the syntax form is in the standard ALTER TABLE grammar. Earlier Trino versions may have lacked support, but 467 has it.
 
-**Verdict**: The responder's slip is **resource-sourced** — `dbt retry` simply isn't in the corpus, so the responder couldn't reach it. Selector `result:error+` is in the corpus but only as a list item without keyword-anchored "re-run only what failed" framing. The responder reached the workaround that IS in the corpus and over-confidently denied the existence of the canonical that ISN'T. **LIGHT FIX-A is warranted**.
-
-### Q4 — Oracle `REGEXP_SUBSTR(url_path, '/accounts/([0-9]+)/', 1,1,NULL,1)` capture-group 1; Trino `regexp_extract` capture-group support?
+### Q3 — 7-day rolling avg of `dau` per tenant; rows only exist for days WITH activity (sparse). `ROWS BETWEEN 6 PRECEDING` spans 6 physical rows not 6 calendar days. Right Trino way — date spine or smarter window?
 
 | Dimension | Score | Reasoning |
 |---|---|---|
-| Technical accuracy | 5.0 | Verified at [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html) (WebFetched this iter): `regexp_extract(string, pattern, group) → varchar` — 3rd arg = capture group number, 1-indexed (docs example `regexp_extract('1a 2b 14m', '(\d+)([a-z]+)', 2) → 'a'` confirms 1-indexed); 2-arg form `regexp_extract(string, pattern)` returns "the first substring matched by the regular expression" (the whole match, NOT a specific capture group). Responder example `regexp_extract(url_path, '/accounts/([0-9]+)/', 1) → '12345'` matches docs verbatim semantics. Cross-engine note about `regexp_replace` using `$1` (Trino) vs `\1` (Oracle) is correct and useful. |
-| Beginner clarity | 5.0 | Worked example; explicit no-3rd-arg-returns-whole-match disambiguation. |
-| Practical applicability | 5.0 | Copy-paste-ready drop-in Oracle → Trino. |
-| Completeness | 4.75 | Could mention the Oracle `REGEXP_SUBSTR(..., 1, 1, NULL, 1)` 6-arg form is (start_position=1, occurrence=1, match_param=NULL, subexpression=1) — Trino `regexp_extract` covers the subexpression slot (capture group) and implicitly handles start=1/occurrence=1; for non-1 occurrence Trino needs different mechanics. Minor recall ceiling, non-load-bearing for the asked URL-path use case. |
+| Technical accuracy | 5.0 | All facts VERIFIED. (a) `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` is valid Trino — confirmed via WebSearch of trinodb/trino GitHub issues (#609 closed in v346) + [Trino window-features blog (trino.io/blog/2021/03/10/introducing-new-window-features.html)](https://trino.io/blog/2021/03/10/introducing-new-window-features.html): "Since version 346, it is possible to specify RANGE with an offset value... example: `RANGE BETWEEN interval '1' month PRECEDING AND CURRENT ROW`. The offset interval applies to orderdate, which is the sorting column." Trino 467 inherits + retains this feature; (b) **RANGE vs ROWS distinction is CORRECT and load-bearing**: RANGE filters on the VALUE of the ORDER BY column within the offset (calendar-aware), ROWS counts physical rows (positional). For sparse data with only activity-days present, ROWS BETWEEN 6 PRECEDING can span >6 calendar days, RANGE BETWEEN INTERVAL '6' DAY PRECEDING includes only the calendar-window rows; (c) ORDER BY column type constraint — must be numeric or date/time for RANGE with offset; `activity_date` (DATE) satisfies; (d) Sparse-data semantic: missing days don't contribute to the average (correctly explained — AVG is over rows PRESENT in the 6-day window, not over 7 fixed slots). If the engineer wants missing days counted as 0 (changes the average's denominator semantics), the date-spine alternative is correct; (e) Date-spine alternative SYNTAX verified: `CROSS JOIN UNNEST(SEQUENCE(date '2024-01-01', date '2024-12-31', INTERVAL '1' DAY)) AS t(d)` is the canonical Trino dense-date-spine pattern; `LEFT JOIN activity USING (d)` + `COALESCE(dau, 0)` correctly densifies sparse rows for the "treat missing as 0" semantic; (f) Responder offered BOTH semantics with clear "use A for X, use B for Y" routing — the load-bearing distinction is preserved. |
+| Beginner clarity | 4.75 | Clear ROWS-vs-RANGE side-by-side; explicit "missing days don't contribute" framing addresses the semantic ambiguity head-on; "date spine if you need explicit zero-days" routing pairs each form with its question. |
+| Practical applicability | 5.0 | Copy-paste-ready window form for the primary semantic; copy-paste-ready date-spine UNNEST/SEQUENCE form for the secondary semantic; engineer chooses based on whether zero-days must be explicit. Most common case (rolling AVG over present rows) is the simpler one — leads with it. |
+| Completeness | 5.0 | All sub-questions covered: (1) why ROWS is wrong for sparse — explained; (2) the smarter window — RANGE with INTERVAL; (3) date-spine alternative — covered with COALESCE(0) detail; (4) semantics difference between the two — explicitly contrasted. No missed nuance for the asked use case. |
 
-**Average: (5.0 + 5.0 + 5.0 + 4.75) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
+**Average: (5.0 + 4.75 + 5.0 + 5.0) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
+
+### Q4 — Oracle SYSDATE: (a) Trino "current timestamp minus 7 days"; are `current_timestamp` and `now()` the same, one preferred? (b) Oracle SYSDATE includes time-of-day (`WHERE event_date = SYSDATE` never matches midnight). Does Trino `current_date` have the same footgun?
+
+| Dimension | Score | Reasoning |
+|---|---|---|
+| Technical accuracy | 5.0 | All facts VERIFIED at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html) (WebFetched this iter): (a) `current_timestamp` "Returns the current timestamp with time zone as of the start of the query, with 3 digits of subsecond precision" — type is `timestamp(3) with time zone`; (b) `now()` "This is an alias for `current_timestamp`" — VERBATIM alias, functionally identical, same return type; (c) `current_date` "Returns the current date as of the start of the query" — pure `DATE` type with no time component (verified at [trino.io/docs/467/language/types.html](https://trino.io/docs/467/language/types.html) DATE description; (d) ANSI-vs-alias preference: `current_timestamp` (no parens) is the ANSI SQL standard form; `now()` is a Trino/PostgreSQL alias; both work; (e) INTERVAL syntax `current_timestamp - INTERVAL '7' DAY` correct; `INTERVAL '7' DAY` (literal in quotes, unit outside, singular) matches Trino 467 SQL grammar; (f) **No-footgun verdict for current_date is CORRECT**: since `current_date` is a pure DATE type with no time component, `WHERE event_date = current_date` correctly matches all rows whose DATE column equals today's date (no Oracle-SYSDATE time-of-day mismatch); (g) **The REAL footgun the responder surfaced is also correct**: `WHERE created_at = current_timestamp` where `created_at` is a TIMESTAMP column won't match because `current_timestamp` is to the millisecond and matches only that exact instant — fix with `CAST(created_at AS DATE) = current_date` OR `created_at >= current_date AND created_at < current_date + INTERVAL '1' DAY`; (h) Engineers translating Oracle code where SYSDATE was used to "get today" benefit from the explicit no-footgun call-out on current_date AND the alternate footgun call-out on current_timestamp. |
+| Beginner clarity | 4.75 | Clear separation of the two sub-questions (a) and (b); explicit type names ("`timestamp(3) with time zone`" / "pure DATE"); INTERVAL syntax shown both ways `current_timestamp - INTERVAL '7' DAY` AND `now() - INTERVAL '7' DAY`; the SYSDATE-footgun-doesn't-apply-here framing maps directly onto the engineer's Oracle mental model. |
+| Practical applicability | 5.0 | Copy-paste-ready: both equivalent forms shown; INTERVAL idiom directly usable; alternate footgun (timestamp-vs-date comparison) called out so engineer doesn't trip on it next; CAST/range-predicate fix copy-paste-ready. |
+| Completeness | 5.0 | Both sub-questions fully answered. Sub-(a) covered the alias relationship + ANSI preference + INTERVAL idiom. Sub-(b) explicitly identified no footgun on current_date, then proactively surfaced the closely-related footgun on `created_at = current_timestamp` (timestamp-comparison-narrowness). No missed nuance. |
+
+**Average: (5.0 + 4.75 + 5.0 + 5.0) / 4 = 19.75/4 = 4.9375 → STRONG PASS.**
 
 ---
 
@@ -73,41 +66,11 @@ Q3 is the diametric opposite of the iter1249 dbt-snapshot recall-variance soft-w
 
 | Watch | Open since | Status this iter | Reasoning |
 |---|---|---|---|
-| `iter1249 Q1 row-level-delete-reclaim`: EXECUTE optimize → expire_snapshots chain | iter1249 | **CLOSES CLEANLY** | Responder reached the new r17 §185 LEADING CANONICAL on first re-probe, with correct file_size_threshold tuning, correct optimize → expire_snapshots ordering, correct remove_orphan_files defang. 25th consecutive 1st-re-probe-CLOSE on the LIGHT-FIX-A-then-CLOSE pattern. |
+| `iter1250 Q3 dbt-retry-canonical-content-gap + result:error+-as-rerun-failed-selector` | iter1250 | **CLOSES CLEANLY** | Responder reached the new r27 §6.7F2 LEADING CANONICAL on first re-probe. Named `dbt retry` as canonical, identified `target/run_results.json` as the artifact, noted `result:error` (not `result:failed`) status enum, gave selector-form equivalent `dbt build --select result:error+ --state target/`, correctly framed re-run scope (ERROR + SKIPPED descendants). Zero trace of the iter1250 false-negative claim. 26th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern. |
 
-### NEW open watch — Q3 dbt retry / result:error+ content gap
+### No new watches opened this iteration.
 
-**Watch label**: `iter1250 Q3 dbt-retry-canonical-content-gap + result:error+-as-rerun-failed-selector`.
-
-**Resource-source check confirms gap**:
-- `dbt retry` — ZERO occurrences in `resources/`. Verified by GREP.
-- `result:error+` — single bare-list occurrence at `resources/27-oracle-plsql-to-dbt-trino.md` §3858, no keyword anchoring around "re-run only failed", "skip already-succeeded", "selective rerun after failure".
-- `run_results.json` — present in r28 but only in slowest-model-discovery context, not in retry-resume context.
-
-The responder over-confidently denied the existence of the canonical mechanism. Findability + content gap (both halves).
-
-**FIX-A recommendation (specific)**:
-
-1. **r27 §6.7F (selector-section context) — ADD a card** titled *"LEADING CANONICAL — Re-run only what failed + downstream after a `dbt build` failure: `dbt retry` (canonical) or `dbt build --select result:error+ --state target/` (selector form)"*. Keyword anchors must include: "dbt build re-ran the entire DAG", "rerun only failed model and downstream", "skip already-succeeded models", "dbt retry from point of failure", "result:error+ selector", "20-minute upstream models succeeded don't re-run them", "select only the failed dbt model and its descendants", "what's the canonical dbt rerun-after-failure flow", "dbt run_results.json resume", "dbt retry idempotent".
-
-   Card content must cover:
-   - **Canonical**: `dbt retry` (dbt-core 1.6+) — re-executes the last invocation from the point of failure; reads `target/run_results.json` to identify failed + skipped nodes; idempotent without code fixes (same outcome if rerun on already-fixed state); works with `build`/`compile`/`clone`/`docs generate`/`seed`/`snapshot`/`test`/`run`/`run-operation`.
-   - **Selector equivalent**: `dbt build --select result:error+ --state target/` — `result:error` selects nodes that errored in the prior run (read from `target/run_results.json`); `+` suffix adds downstream descendants; `--state target/` flag mandatory (points dbt at the artifacts).
-   - **Difference**: `dbt retry` resumes from point of failure including downstream of FAILED + SKIPPED nodes; `result:error+` only re-runs nodes that ERRORED + their descendants (NOT nodes that were SKIPPED because an upstream failed — `result:skipped+` would do that). For the engineer's exact ask ("fixed one downstream model that failed, want to re-run only it + its downstream"), `dbt retry` is the closest fit.
-   - **Workaround**: `dbt build --select <model_name>+` — works if engineer knows the failed model name manually (less convenient than retry, but useful when the fix changes the DAG selection scope rather than just being a bug-fix in the same model).
-   - **DO-NOT-WRITE row**: *"dbt has no built-in flag to skip already-succeeded models — each `dbt build` is independent and doesn't read prior-run state."* — **FALSE.** `dbt retry` does exactly this; it reads `target/run_results.json`. The 30-model DAG re-running was because the engineer ran `dbt build` (full DAG) instead of `dbt retry`.
-   - **Cross-link** to existing r27 §3858 mention of `result:error+` in the selector-methods list.
-
-2. **r28 — ALSO surface** a one-line "see r27 §X for retry / result:error+ canonical" cross-link in §6.5 (dbt run is slow overall) where `run_results.json` is already discussed for slowest-model discovery. This pairs the two uses of `run_results.json` artifact (slowest-model tuning + retry-from-failure) at the same anchor.
-
-**Verify points for the teacher when writing** (already verified this iter):
-- `dbt retry` semantics — verified verbatim at [docs.getdbt.com/reference/commands/retry](https://docs.getdbt.com/reference/commands/retry): "Retry re-executes the last invocation from the point of failure" and "Retry references `run_results.json` to determine where to start" and "Executing retry without correcting the previous failures yields idempotent results."
-- `dbt retry` available since dbt-core 1.6 (the examples shown use v1.6.1; introduced as part of the 1.6 cohort of commands per release notes).
-- `result:error+` semantics — verified at [docs.getdbt.com/reference/node-selection/methods](https://docs.getdbt.com/reference/node-selection/methods): "The `result` method ... can be used to select resources based on their result status from a prior run. Note that one of the dbt commands [`run`, `test`, `build`, `seed`] must have been performed in order to create the result on which a result selector operates." `result:error` selects nodes that "generated errors"; `--state path/to/artifacts` required. `+` graph operator adds downstream per [docs.getdbt.com/reference/node-selection/graph-operators](https://docs.getdbt.com/reference/node-selection/graph-operators).
-
-**Watch trigger**: re-probe `iter1250 Q3 dbt-retry-canonical-content-gap` in 4-8 iters under structurally-similar framings (e.g., "dbt run failed on 1 of 50 models, fixed it, don't want to wait another hour for the other 49", "dbt build is restarting from scratch every retry — what's the selective flow"). If responder still says "no built-in skip-succeeded flag" post-FIX-A, escalate to in-place reconciliation of the gap.
-
-**No over-attractor risk** per `feedback_new_card_over_attracts_adjacent.md`: the new card is in a distinct conceptual neighborhood (operational rerun-after-failure) from adjacent dbt-cards (incremental materialization, snapshot SCD2, model versions, contracts) — different keyword surface, low cross-pollination risk.
+All four answers landed pin-perfect on load-bearing facts with no imported-prior errors, no broken-secondary appendages, no over-warning folklore, no fabrication. No FIX-A warranted.
 
 ---
 
@@ -115,7 +78,7 @@ The responder over-confidently denied the existence of the canonical mechanism. 
 
 | Watch | Open since | Status |
 |---|---|---|
-| `iter1249 Q3 dbt-snapshot-recall-variance` | iter1249 | SOFT — untouched this iter (no dbt-snapshot probe). Stays open. |
+| `iter1249 Q3 dbt-snapshot-recall-variance` | iter1249 | SOFT — untouched. |
 | `iter1248 Q1 opener-coherence` | iter1248 | Untouched. |
 | `iter1248 Q3 MATCH_RECOGNIZE-adjacency` | iter1248 | Untouched. |
 | `iter1246 OOM-session-prop-direction` | iter1246 | Untouched. |
@@ -127,14 +90,21 @@ The responder over-confidently denied the existence of the canonical mechanism. 
 | `iter1215 strpos-3-arg CEILING` | iter1215 | Untouched. |
 | `iter1213 session_properties/(+)` | iter1213 | Untouched. |
 | `iter1229 @v1-Spark` | iter1229 | Untouched. |
+| `iter1201 dbt --full-refresh mechanism on incremental` | iter1201 | Untouched. |
 
 ---
 
 ## Summary
 
-- **Q1 STRONG PASS — iter1249 r17 ROW-LEVEL DELETE reclaim canonical reaches cleanly; watch CLOSES on first re-probe.**
-- **Q2 STRONG PASS — Trino approx_percentile pin-perfect, including the no-published-standard-error-figure correctness.**
-- **Q3 FAIL — content gap on `dbt retry` (zero corpus mentions) + `result:error+` (single bare-list mention); LIGHT FIX-A WARRANTED at r27 §6.7F.**
-- **Q4 STRONG PASS — Trino regexp_extract 3-arg capture-group canonical clean.**
+- **Q1 STRONG PASS — iter1250 r27 §6.7F2 dbt-retry FIX-A REACHES on first re-probe; WATCH CLOSES.**
+- **Q2 STRONG PASS — Trino 467 Iceberg connector SUPPORTS INT→BIGINT via `ALTER TABLE ... ALTER COLUMN ... SET DATA TYPE BIGINT`, metadata-only, exact syntax verified at trino.io/docs/467/sql/alter-table.html + iceberg.html.**
+- **Q3 STRONG PASS — `RANGE BETWEEN INTERVAL '6' DAY PRECEDING AND CURRENT ROW` valid since Trino 346; sparse-data semantics correctly explained; date-spine alternative correctly offered for "treat missing as 0" semantic.**
+- **Q4 STRONG PASS — `current_timestamp` = `now()` (alias, both `timestamp(3) with time zone`); `current_date` is pure DATE (no SYSDATE footgun); INTERVAL syntax correct; bonus call-out of the related `created_at = current_timestamp` narrowness footgun.**
 
-**Topics scored this iter** (per rubric assignment): Q1 → Iceberg table maintenance; Q2 → SQL query best practices for OLAP (approximate functions); Q3 → Improving complex SQL performance on Trino with dbt (dbt selective rerun is operational dbt-workflow, that row); Q4 → Oracle PL/SQL → dbt + Trino SQL migration (Oracle REGEXP_SUBSTR → Trino regexp_extract).
+**Iteration verdict: 4.9375 STRONG PASS NO-OP. iter1250 dbt-retry watch CLOSES. No FIX-A. No new watches.**
+
+**Topics scored this iter** (per rubric assignment):
+- Q1 → Improving complex SQL performance on Trino with dbt (dbt operational rerun-after-failure, same row as iter1250 Q3 per continuity)
+- Q2 → Iceberg table maintenance (Iceberg ALTER COLUMN schema evolution / DDL)
+- Q3 → Analytical query patterns on Iceberg+Trino (window functions for time-series, sparse-data rolling avg)
+- Q4 → Oracle PL/SQL → dbt + Trino SQL migration (Oracle SYSDATE → Trino current_timestamp/current_date dialect)
