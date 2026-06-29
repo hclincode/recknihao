@@ -3870,6 +3870,37 @@ Per [docs.getdbt.com/docs/build/unit-tests](https://docs.getdbt.com/docs/build/u
 
 ---
 
+### 6.7F2 LEADING CANONICAL — RE-RUN ONLY WHAT FAILED (after a `dbt build`/`dbt run` failure) — `dbt retry` (NOT a full-DAG rebuild)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `dbt re-ran the whole DAG after one model failed`, `re-run only the failed model and downstream`, `don't re-run models that already succeeded`, `dbt retry`, `resume dbt run from failure`, `rerun failed dbt models`, `dbt skipped models after a failure`, `re-run failed and skipped nodes`, `fixed one model don't rebuild the 20-minute upstream`, `dbt rerun after error`, `result:error selector`, `retry flow dbt`, `continue dbt run where it left off`. Verified at [docs.getdbt.com/reference/commands/retry](https://docs.getdbt.com/reference/commands/retry) + [docs.getdbt.com/reference/node-selection/methods#the-result-method](https://docs.getdbt.com/reference/node-selection/methods) on 2026-06-29.
+
+**Yes — dbt HAS a built-in "skip the already-succeeded models" mechanism.** A plain re-run of `dbt build` DOES rebuild the entire selected DAG (it does not auto-skip succeeded nodes), so to re-run ONLY the failed model + everything downstream of it, use one of these:
+
+```bash
+# ✅ CANONICAL — dbt retry (dbt-core 1.6+): re-executes the LAST invocation from the point of failure.
+#    Reads target/run_results.json, re-runs the ERROR/SKIPPED nodes (and their downstream) ONLY,
+#    and leaves the already-SUCCESS upstream models untouched. No need to name the failed model.
+dbt retry
+
+# ✅ SELECTOR equivalent — rerun the errored nodes + their downstream, from the prior run's results:
+dbt build --select "result:error+" --state target/
+#   result:error  = nodes that errored last run;  result:fail = data tests that failed;
+#   result:skipped = nodes skipped because an upstream failed.  The trailing + adds downstream children.
+#   --state points at the dir holding the prior run_results.json (usually target/).
+```
+
+`dbt retry` is the cleanest: it needs no manual model name and automatically resumes from exactly where the run died. The `--select <model>+` form (name the fixed model + downstream) also works but requires you to know/track the failed model name and won't pick up sibling failures.
+
+| DO NOT write | Why it's wrong |
+|---|---|
+| "dbt has NO built-in way to skip already-succeeded models; every `dbt build` is independent and re-runs the whole DAG." | **FALSE.** `dbt retry` (1.6+) re-runs ONLY the failed + skipped nodes from the last invocation (via `target/run_results.json`); `dbt build --select result:error+ --state target/` is the selector equivalent. The full-DAG rebuild only happens if you re-issue a plain `dbt build` without retry/`result:` selection. |
+| `dbt build --select result:failed+` | The result statuses are `result:error`, `result:fail`, `result:skipped`, `result:warn`, `result:success` — there is no `result:failed`. Use `result:error+` (run-time errors) and/or `result:fail+` (failed data tests). |
+| `dbt retry --select my_model` | `dbt retry` takes NO `--select` — it always resumes the WHOLE prior failed invocation from its run_results.json. To scope a rerun, use `dbt build --select result:error+` instead. |
+
+> **Cross-references:** §6.7F (the `--select` graph/set operators that `result:error+` composes with); [resource 28 § run_results.json](28-complex-sql-performance-trino-dbt.md) (the same `target/run_results.json` that `dbt retry` reads is the file you `jq` for per-model `execution_time` to find slow models). The `--state target/` flag here reuses the prior run's artifacts, distinct from `state:modified` (which diffs against a DEFERRED manifest for slim CI).
+
+---
+
 ### 6.7G LEADING CANONICAL — dbt `var()` for per-run configurable values (NOT `{% set %}`)
 
 > **Keyword anchors:** dbt var configurable, dbt vars block dbt_project.yml, dbt run --vars override, parameterize dbt model lookback days, var vs set dbt, var default value, dbt variable from CLI, change dbt model parameter without code change. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/var](https://docs.getdbt.com/reference/dbt-jinja-functions/var) and [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables).
