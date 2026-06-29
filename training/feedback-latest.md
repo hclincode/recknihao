@@ -1,8 +1,8 @@
-# Iteration 1258 — Judge Feedback
+# Iteration 1259 — Judge Feedback
 
 ## Verdict
 
-**Overall: 4.219 PASS — Q1+Q2 LIFT the thinnest required topic (query-perf-basics) +0.026 across two correct EXPLAIN-ANALYZE / EXPLAIN-DISTRIBUTED probes; Q3 SELECT * EXCEPT FABRICATION = responder recall-variance regression (resources already correct + heavily defanged, NO FIX-A); Q4 sign() existence correctly AFFIRMED with minor truncate over-generalization in unrequested adjacent-function list.** Q1 (4.6875) physicalInputDataSize on TableScan = MinIO I/O metric + per-fragment CPU-vs-Scheduled ratio for CPU-vs-I/O-bound — both verified against [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html). Q2 (4.625) EXPLAIN (TYPE DISTRIBUTED) constraint-annotation on TableScan + Filter-above-scan pruning-broke diagnostic + physicalInputDataSize-relative-to-column-count projection check + naked-range fix. Q3 (3.125) PRIMARY ROW_NUMBER()=1 CTE is correct + idiomatic — but the responder fabricated `SELECT * EXCEPT(rn)` as "Trino syntax" in the secondary "more concise dbt form" alternative, **directly contradicting** (a) resources r23 §3368 + r27 §2003 which already heavily defang it AND (b) the responder's OWN iter1255 Q3 answer which correctly said "NO SELECT * EXCEPT in Trino." Q4 (4.4375) `sign()` existence correctly affirmed (good — not assumed-absence; pinned `reference_trino_to_char_exists.md`/`reference_trino_listagg_native.md` family); minor shave on tangential "truncate works exactly like Oracle" over-generalization (Trino 467 truncate is 1-arg only, no Oracle TRUNC(n,d)).
+**Overall: 4.859 STRONG PASS NO-OP — all four answers correct, no broken-secondary appendages, no FIX-A, no new watches.** Q1 (4.875) `$snapshots` metadata-table query + `CALL iceberg.system.rollback_to_snapshot('schema','table',id)` positional 3-arg form with the 469+ ALTER-EXECUTE defang correctly stated. Q2 (4.875) `WHERE a.product_id < b.product_id` canonical-ordering dedup for pair-wise self-join + `COUNT(DISTINCT order_id)` correctly framed. Q3 (4.8125) dbt-seeds setup correct on all four mechanical points (seeds/ CSV, `+column_types`, `dbt seed`/`dbt build`, `ref()`) + seed-vs-model functional contrast + when-to-choose guidance. Q4 (4.875) `NVL → COALESCE` direct 1:1, both-null→NULL parity correct, Trino strict-typing caveat correct, AND the Oracle-`''`-is-NULL vs Trino-`''`-is-empty-string caveat with `COALESCE(NULLIF(col,''),'X')` idiom is the LOAD-BEARING nuance for a 400-query bulk find-replace and the responder nailed it. Recent broken-secondary cluster (iter1258 Q3 `SELECT * EXCEPT(rn)` / iter1255 Q3 `INSERT OVERWRITE` / iter1257 Q4 `strpos`-arithmetic / iter1253 Q4 `regexp_extract` 2-arg) did **NOT** recur — no invalid "for completeness" appendage in any of the 4 answers.
 
 ---
 
@@ -10,175 +10,136 @@
 
 | Topic | Before | After | Δ | Notes |
 |---|---|---|---|---|
-| Query performance basics (THINNEST required) | 4.1697/36 | **4.1953/38** | +0.0256 | Q1+Q2 both correct EXPLAIN-ANALYZE / EXPLAIN-DISTRIBUTED probes; margin lifted +0.026 — modest but real on the load-bearing thinnest topic. Still THINNEST going into iter1259 but trending up. |
-| Analytical query patterns on Iceberg+Trino | 4.5158/184 | 4.5083/185 | -0.0075 | Q3 dedup ROW_NUMBER (primary correct, fabricated secondary). Topic margin +1.0083, very comfortable. |
-| Oracle PL/SQL → dbt+Trino migration | 4.4781/224 | 4.4779/225 | -0.00009 | Q4 sign() existence correctly affirmed. Topic margin +0.9779, stable. |
+| Iceberg table maintenance (Q1 rollback) | 4.4441/238 | **4.4459/239** | +0.0018 | `$snapshots` metadata table + `CALL iceberg.system.rollback_to_snapshot` 467-native form correctly affirmed + 469+ ALTER EXECUTE defang. Margin +0.9459. |
+| Analytical query patterns on Iceberg+Trino (Q2 basket pair-wise self-join) | 4.5083/185 | **4.5103/186** | +0.0020 | `WHERE a < b` canonical-ordering pair-dedup textbook fix + `COUNT(DISTINCT order_id)` correct. Margin +1.0103. |
+| Oracle PL/SQL → dbt+Trino migration (Q3 seeds + Q4 NVL→COALESCE) | 4.4779/225 | **4.4811/227** | +0.0032 | Two clean Qs: dbt-seeds setup ALL FOUR mechanical points correct + the LOAD-BEARING Oracle-`''`-is-NULL caveat with `NULLIF` idiom for the 400-query bulk find-replace. Margin +0.9811. |
 
 ---
 
 ## Per-question detail
 
-### Q1 — EXPLAIN ANALYZE wall of text / ONE metric to ctrl-F for MinIO I/O + ONE for CPU
+### Q1 — Accidental full-table overwrite recovery / `$snapshots` + Trino 467 rollback EXACT form
 
-**Score: 4.6875** (Acc 4.75 / Clar 4.5 / Prac 5.0 / Compl 4.5)
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-**Strong, well-routed query-perf answer.** Responder named both metrics correctly:
+**Both halves verified against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) (WebFetched this iter):**
 
-- **MinIO I/O bottleneck → `physicalInputDataSize` on the TableScan operator** (actual bytes read from storage, distinct from `inputDataSize` which is logical post-decompression / decoding). VERIFIED via WebFetch of [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html): example fragment shows `Physical Input: 4.51MB`. Metric documented per [trinodb/trino PR #23874](https://github.com/trinodb/trino/pull/23874).
-- **CPU bottleneck → per-fragment `CPU` vs `Scheduled` time ratio**:
-  - `CPU ≈ Scheduled` → CPU-bound (workers actually running, add parallelism)
-  - `Scheduled >> CPU` → workers blocked (typically I/O wait or upstream-fragment-waiting; correlates with the I/O metric above)
-  VERIFIED via WebFetch: fragment header lists "CPU: 22.58ms, Scheduled: 96.72ms" — the documented per-fragment metric pair.
-- **Routing**: "find the fragment dominating total query time, then read its CPU/Scheduled split to know which lever to pull next" — exactly the right localize-the-culprit playbook.
+**(a) `$snapshots` metadata table** — VERIFIED VERBATIM: "The `$snapshots` table provides a detailed view of snapshots of the Iceberg table. The following columns are available: `committed_at` (TIMESTAMP(3) WITH TIME ZONE), `snapshot_id` (BIGINT), `parent_id` (BIGINT), `operation` (VARCHAR), `manifest_list` (VARCHAR), `summary` (map(VARCHAR, VARCHAR))." Responder's `SELECT snapshot_id, committed_at, operation, summary FROM iceberg.analytics."events$snapshots" ORDER BY committed_at DESC` is a correct subset of the documented columns; the double-quote `"events$snapshots"` is the right identifier form (required because `$` is not a bare-identifier char in Trino). The `summary.total-records` hint to spot the bad run (small row count vs prior ~180M) is a real practical signal — Iceberg's standard summary keys include `total-records`, `total-data-files`, `added-records`, `deleted-records`. Engineer can directly ctrl-F to the snapshot before the bad commit timestamp and pick its `snapshot_id` for rollback.
 
-**Minor Acc shave (-0.25):** Trino docs hedge "the relative cost of the plan nodes is based on wall time, which may or may not be correlated to CPU time" — responder framed the ratio as a clean binary, but on a real 7-8 minute query the engineer is well past noise floors (small queries, GC pauses) so the heuristic holds in practice.
+**(b) Rollback EXACT form** — VERIFIED VERBATIM: "`CALL example.system.rollback_to_snapshot('testdb', 'customer_orders', 8954597067493422955)`". The Trino 467 doc shows the 3-positional-arg CALL form (schema VARCHAR, table VARCHAR, snapshot_id BIGINT) is THE documented form. The doc does NOT mention `ALTER TABLE ... EXECUTE rollback_to_snapshot` — that's 469+ per pinned `reference_trino_rollback_snapshot_form.md`. Responder correctly:
+- Used the positional 3-arg shape: `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', 4823511203987654321)`
+- Defanged the ALTER TABLE EXECUTE form as 469+
+- Noted metadata-only + atomic (correct — Iceberg rollback is a metadata pointer flip, no data movement)
 
-**Verified against:**
-- [trino.io/docs/467/sql/explain-analyze.html](https://trino.io/docs/467/sql/explain-analyze.html) — Physical Input + CPU/Scheduled per-fragment metrics
-- [trinodb/trino PR #23874](https://github.com/trinodb/trino/pull/23874) — physicalInputDataSize at operator level
+**No broken-secondary**, no over-warning, no assumed-absence. Cites the verified 467 form precisely.
 
-**Lifts thinnest topic +0.014 on this Q alone.**
+**Minor Compl shave (-0.25):** could have explicitly mentioned that the failed dbt-run snapshot will still exist post-rollback (the bad commit becomes orphaned but recoverable via re-rollback or `expire_snapshots` cleanup), and that downstream consumers see the prior state immediately (atomic commit, no client-cache invalidation needed). Engineer gets there but the post-rollback state isn't spelled out.
 
 ---
 
-### Q2 — 60-col fct_events day-partitioned / 3-col SELECT + WHERE event_date>='2026-05-01' 3+ min / verify projection + partition pruning + fix
+### Q2 — Basket analysis pair-dedup / canonical-ordering fix
 
-**Score: 4.625** (Acc 4.5 / Clar 4.5 / Prac 5.0 / Compl 4.5)
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-**Strong diagnostic loop.** Responder gave the full ctrl-F-and-fix recipe:
+**Textbook canonical-ordering pair-dedup.** Responder gave the exact correct fix: replace `WHERE a.product_id != b.product_id` (which still produces (A,B) and (B,A) duplicates) with `WHERE a.product_id < b.product_id` (which enforces a single canonical orientation per unordered pair, so each pair appears exactly once). Full query:
 
-1. **`EXPLAIN (TYPE DISTRIBUTED)`** and inspect the TableScan node layout.
-2. **Partition-pruning check**: `constraint = day(event_date) >= DATE '2026-05-01'` annotation INSIDE the TableScan = pruning fired (Iceberg connector shows the partition-transform-aware predicate in the TableScan constraint). Conversely, a `Filter` node ABOVE the TableScan with the predicate AND no constraint on the scan = pruning broke (predicate didn't reach connector). Verified via [trinodb/trino #9309](https://github.com/trinodb/trino/issues/9309) + [#19266](https://github.com/trinodb/trino/issues/19266) (pruning fires via `Constraint.summary` TupleDomain, not opaque `Constraint.predicate`). The Filter-above-scan diagnostic is canonical.
-3. **Projection check**: on a 60-col table reading 3 cols, `physicalInputDataSize` should be ~5% of full-row weight; if close to (rows × full-row-bytes), projection broke. (Reasonable heuristic; the more canonical check is reading the TableScan `layout = [...]` line listing only the 3 projected columns — responder missed that direct read but the heuristic gets engineer there.)
-4. **Naked-range fix**: `event_date >= DATE '2026-05-01' AND event_date < DATE '2026-06-01'` on the raw column with no function-wrap (CAST, year(), date_trunc — though Unwrap{Cast,Year,DateTrunc}InComparison rules per pinned `reference_trino_unwrap_temporal_predicates.md` handle the temporal ones; bare-column form is still safest).
-
-**Minor Acc shave (-0.5):** the constraint annotation form was given as `day(event_date)>=DATE '2026-05-01'` — partition-transform display is plausible but the actual TupleDomain rendering varies (`event_date:date IN [[2026-05-01..2026-06-01]]` is also common). Mental model is right; exact string match might not appear verbatim — engineer needs to recognize the partition-transform predicate in either rendering.
-
-**Verified against:**
-- [trino.io/docs/467/sql/explain.html](https://trino.io/docs/467/sql/explain.html) — EXPLAIN (TYPE DISTRIBUTED) form
-- [trinodb/trino #9309](https://github.com/trinodb/trino/issues/9309) — Iceberg partition pruning via Constraint.summary
-- [trinodb/trino #19266](https://github.com/trinodb/trino/issues/19266) — partition-transform pushdown
-- pinned `reference_trino_unwrap_temporal_predicates.md` — function-wrap unwrap rules
-
-**Lifts thinnest topic +0.012 on this Q. Combined Q1+Q2 lift = +0.026.**
-
----
-
-### Q3 — Dedup keep latest per (user_id, session_id) by started_at DESC on 800M user_sessions / Oracle ROW_NUMBER works in Trino + more efficient?
-
-**Score: 3.125** (Acc 2.5 / Clar 3.5 / Prac 2.5 / Compl 4.0)
-
-**PRIMARY correct + FABRICATED secondary alternative.** This is a **responder recall-variance regression** on already-maximally-defanged resource content, NOT a resource defect.
-
-**What landed correct (primary):**
 ```sql
-WITH ranked AS (
-  SELECT *,
-         ROW_NUMBER() OVER (PARTITION BY user_id, session_id ORDER BY started_at DESC) AS rn
-  FROM user_sessions
-)
-SELECT * FROM ranked WHERE rn = 1
+SELECT a.product_id AS product_a, b.product_id AS product_b,
+       COUNT(DISTINCT a.order_id) AS orders_containing_both
+FROM order_items a
+JOIN order_items b ON a.order_id = b.order_id
+WHERE a.product_id < b.product_id
+GROUP BY a.product_id, b.product_id
+ORDER BY orders_containing_both DESC
 ```
-Works directly in Trino 467 (lowercase keyword optional, same semantics as Oracle), parallelizes across the PARTITION BY. Standard / idiomatic.
 
-**THE PROBLEM (Acc -2.5 / Prac -2.0):** responder appended a "more concise dbt form" alternative:
-```sql
-SELECT * EXCEPT(rn) FROM (... rn ...) WHERE rn = 1
-```
-and CLAIMED `SELECT * EXCEPT(rn)` is **"Trino syntax to drop the rn column from output."**
+The `<` vs `!=` distinction is the canonical solved problem in SQL combinatorics: with `!=` and N items per order, you get N×(N-1) ordered pairs; with `<` you get N×(N-1)/2 unordered pairs — exactly what "for every PAIR" semantically requires. `COUNT(DISTINCT order_id)` is correct (an order with both products contributes 1 to the pair regardless of how many quantity rows; if `(order_id, product_id)` is already unique in `order_items`, plain `COUNT(*)` would also be correct, but `COUNT(DISTINCT order_id)` is the safer default that doesn't depend on the schema's uniqueness assumption).
 
-**FABRICATION** — VERIFIED via WebFetch of [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): SELECT supports only `*`, `relation.*`, `row_expression.*`; `EXCEPT` in Trino is the set operator only (rows-difference, not column-projection). Multiple OPEN feature requests confirm absence:
-- [trinodb/trino #23532](https://github.com/trinodb/trino/issues/23532) — Support select * exclude(...) like BigQuery/DuckDB/Snowflake
-- [trinodb/trino #26402](https://github.com/trinodb/trino/issues/26402) — Feature Request: Support SELECT * EXCEPT
-- [trinodb/trino #26969](https://github.com/trinodb/trino/issues/26969) — Support SELECT * EXCEPT / EXCLUDE
+No broken-secondary alternative, no fabrication. Clean answer.
 
-All unresolved. Engineer copying the secondary form gets a parse error.
-
-**CRITICAL — this directly CONTRADICTS:**
-1. **Resources which ALREADY defang it heavily** (grep-verified):
-   - `resources/27-oracle-plsql-to-dbt-trino.md` L2003: "DO NOT write `SELECT * EXCEPT (rn)` — that BigQuery/Databricks projection is..."
-   - `resources/23-sql-best-practices-olap.md` L3368: table row "**`SELECT * EXCEPT (col1, col2)`** (column-exclusion projection) | BigQuery, Databricks, ClickHouse | **NOT supported.** Parse error. Open feature request [trinodb/trino #26969]"
-2. **The responder's OWN iter1255 Q3 answer** which correctly said "Trino 467 has NO SELECT * EXCEPT (rn) — that's BigQuery/Databricks."
-
-**CLASSIFICATION**: responder recall-variance regression on already-maximally-defanged content. Resources are correct + dual-defanged (migration row + SQL-best-practices row). **NO FIX-A.** Per `feedback_responder_broken_secondary_alternative.md` family (iter936/943/948/950/954/1013/1019/1020 — primary correct, "for completeness" alternative invented/broken; per-instance one-off, NOT a resource defect — no single resource fix for responder padding).
-
-**NEW WATCH `iter1258 Q3 SELECT * EXCEPT alternative-fabrication regression`**: re-probe under varied framings — "dedup ROW_NUMBER + drop the rn column" / "Oracle QUALIFY equivalent in Trino" / "BigQuery-flavored column-exclusion request" / "rewrite that drops the rank helper column" — within 4-8 iters. If 2+ recurrences after iter1255 correct precedent AND dual-resource defang, escalate to LIGHT FIX-A: add a copy-attractive enumerated-column variant `SELECT user_id, session_id, started_at, <other_cols> FROM ranked WHERE rn=1` next to the dedup card so the copy-attractive default doesn't reach for `*`.
-
-**Verified against:**
-- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — wildcard variants documented, no EXCEPT/EXCLUDE
-- [trinodb/trino #26969](https://github.com/trinodb/trino/issues/26969) — open feature request
-- resources/27 L2003 + resources/23 L3368 — already-correct defangs
+**Minor Compl shave (-0.25):** the self-join is O(N²) per order in the worst case — on very wide orders (50+ items per order) the explosion can be material. Responder didn't mention the `LATERAL` / `CROSS JOIN UNNEST(transform(...))` alternative for pre-exploding pair sets within the same order, nor the optional `HAVING COUNT(...) >= K` support threshold to focus on frequent pairs only. Engineer gets a working query; doesn't get scale/filtering nuance.
 
 ---
 
-### Q4 — Oracle SIGN(current_value - previous_value) → +1/0/-1; does Trino 467 have SIGN() or rewrite to CASE?
+### Q3 — dbt seeds vs warehouse table for 200-row country lookup
 
-**Score: 4.4375** (Acc 4.0 / Clar 4.75 / Prac 4.5 / Compl 4.5)
+**Score: 4.8125** (Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-**Core EXISTS-affirmation correct.** Responder: "Trino 467 HAS `sign()` — `sign(current_value - previous_value)` returns -1/0/+1, lowercase, Oracle-compatible. Your 30 queries migrate as-is (just lowercase SIGN→sign)."
+**All four mechanical points VERIFIED against [docs.getdbt.com/docs/build/seeds](https://docs.getdbt.com/docs/build/seeds) (WebFetched this iter):**
 
-**VERIFIED via WebFetch of [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html)**: `sign(x)` returns "the signum function of x" — 0 for zero, 1 for positive, -1 for negative; for floating-point also returns -0/NaN/infinity correspondingly. Oracle-compatible return shape — engineer's 30-query bulk rename works.
+1. **`seeds/` directory** — VERIFIED VERBATIM: "Seeds are CSV files in your dbt project (typically in your `seeds` directory), that dbt can load into your data warehouse using the `dbt seed` command." Customizable via `seed-paths: ["custom_seeds"]` in `dbt_project.yml`.
+2. **`+column_types`** — VERIFIED VERBATIM: "You can also explicitly set a datatype using the `column_types` configuration like so" with example `seeds: jaffle_shop: warehouse_locations: +column_types: zipcode: varchar(5)`. Responder's framing as "optional `+column_types` in `dbt_project.yml`" is correct (without it, dbt infers from CSV content).
+3. **`dbt seed`** (or `dbt build`) — VERIFIED VERBATIM: "Use the `dbt seed` command." The responder's "or `dbt build`" is also correct: `dbt build` runs seeds + models + snapshots + tests + sources in dependency order, so it loads seeds as part of the expanded build. Both are valid; `dbt seed` is the precise command for seeds-only.
+4. **`ref()` reference** — VERIFIED VERBATIM: "Seeds can be referenced in downstream models the same way as referencing models — by using the `ref` function." `{{ ref('countries') }}` is the correct call shape.
 
-**GOOD — not assumed-absence**: per pinned `reference_trino_listagg_native.md` / `reference_trino_to_char_exists.md` / `reference_trino_lateral_exists.md` / `reference_trino_starts_with_ends_with.md` family — most foreign-looking funcs ARE in Trino 467; responder correctly affirmed existence rather than guessing absence, which is the systemic responder failure mode the pinned references guard against.
+**Load semantics**: VERIFIED VERBATIM: "When you typically run dbt seed, dbt truncates the existing table and reinserts the data." Responder's "truncate+reload" is exact.
 
-**MINOR Acc shave (-0.5)**: responder appended an adjacent-functions list "abs/ceil/floor/round/truncate work exactly like Oracle" — **`truncate` is NOT exactly like Oracle TRUNC(n,d) on Trino 467** per pinned iter1240 reference:
-- Trino 467 `truncate(x)` is **1-arg only** (rounds toward zero to integer)
-- NO 2-arg `truncate(n, d)` form like Oracle `TRUNC(price, 2)`
-- 30-query bulk rename hitting any `TRUNC(price, 2)` form WILL break; workaround: `round(price * power(10, 2)) / power(10, 2)` or `CAST(price * 100 AS BIGINT) / 100.0`
+**Functional contrast (seed vs warehouse model/table)** correct on all axes:
+- Storage: seed is CSV-in-git (versioned, peer-reviewable in PR) vs Iceberg table (warehouse-side data)
+- Use case: small (<~1MB), static, rarely-changing, hand-maintained lookups vs large/frequently-changing/externally-sourced
+- Update workflow: edit CSV + commit + `dbt seed` (or merge PR triggering CI) vs writing INSERT/MERGE SQL or updating an external source
+- Load command: `dbt seed` vs a model `dbt run`
 
-Verified via same WebFetch: "truncate(x) → double, Returns x rounded to integer by dropping digits after decimal point" — no 2-arg overload. truncate was NOT the asked function (sign was), so the over-generalization is tangential — engineer's primary sign() bulk rename works as advertised, but the unrequested adjacent-list framing would silently miss the TRUNC(n,d) cases if the engineer took it at face value during the broader sweep.
+**When-to-choose**: country code → country/region at 200 rows hand-maintained = textbook seed use case (small, static, lookup, audit-via-git). Responder correctly recommended seed for this scenario. The "external or frequently-changing → model/source" guidance correctly flags the alternative.
 
-**Classification**: responder broken-secondary-alternative family (same pattern as Q3 above — primary correct, unrequested "for completeness" assertion slips). NO FIX-A (pinned `reference_trino_cast_to_integer_rounds.md` already documents the truncate semantics + r27 covers Oracle TRUNC migration). Same `feedback_responder_broken_secondary_alternative.md` family — per-instance one-off re-probe, no resource churn.
+**Minor Acc shave (-0.25):** responder mentioned the ~1MB practical size threshold for seeds — dbt docs explicitly warn seeds aren't intended for large files: "If you have larger raw data that you want to load into your data warehouse, it's best to use a tool designed for that purpose, such as a workflow orchestrator like Airflow." The exact threshold isn't fixed at 1MB in the docs (it's a community convention; the docs frame it qualitatively as "small files of business-relevant data"), but the framing is directionally correct and the 200-row country lookup is well within any reasonable cutoff.
 
-**Verified against:**
-- [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) — sign(x) + truncate(x) (1-arg only)
-- pinned `reference_trino_cast_to_integer_rounds.md` — truncate semantics
-- pinned `reference_trino_to_char_exists.md` — assumed-absence guard (foreign-looking funcs ARE in Trino)
+**Minor Compl shave (-0.25):** could have mentioned `dbt seed --full-refresh` (drops + recreates the table — required when changing column types via `+column_types` since plain `dbt seed` truncates+inserts and may fail on schema mismatch) and the `quote_columns` setting for column names with reserved keywords. Engineer's 200-row country lookup likely doesn't hit either, but a complete answer for a migrating engineer would include these gotchas.
 
-**SOFT WATCH `iter1258 Q4 truncate-1-arg-only over-generalization in unrequested adjacent-list`**: re-probe under "Oracle TRUNC(price, 2) decimal-truncation migrate to Trino" within 4-8 iters; if the engineer asks about TRUNC(n,d) directly, responder MUST route to the round(x * 10^d) / 10^d workaround.
-
----
-
-## Watches summary going into iter1259
-
-**NEW watches opened this iter:**
-- `iter1258 Q3 SELECT * EXCEPT alternative-fabrication regression` — responder regressed from correct iter1255 answer; resources already dual-defanged (r23 L3368 + r27 L2003); NO FIX-A. Re-probe within 4-8 iters under varied "drop rn column / column-exclusion" framings; 2+ recurrences → LIGHT FIX-A on copy-attractive enumerated-column variant.
-- `iter1258 Q4 truncate-1-arg-only over-generalization (unrequested adjacent-list)` — soft watch; sign() core answer correct; re-probe on direct TRUNC(price, 2) migration question within 4-8 iters.
-
-**Watches closed:** none this iter (Q1+Q2 were breadth probes for the thin topic, no specific watch closure).
-
-**Watches still OPEN going into iter1259:**
-- iter1258 Q3 SELECT * EXCEPT (NEW)
-- iter1258 Q4 truncate-1-arg-only (NEW, soft)
-- iter1257 Q4 strpos-arithmetic (soft)
-- iter1255 Q1 bloom-CREATE-syntax
-- iter1255 Q3 INSERT-OVERWRITE-broken-secondary
-- iter1253 Q4 regexp_extract-2arg
-- iter1248 Q3 MATCH_RECOGNIZE-adjacency
-- iter1241 concat-auto-coerces
-- iter1236 rn=1-within-batch
-- iter1215 strpos-3-arg (soft arithmetic only now)
-- iter1229 @v1-Spark
+No broken-secondary, no fabrication, no over-warning. Clean dbt-seeds canonical.
 
 ---
 
-## Explicit answers to the verification-block questions
+### Q4 — Oracle NVL → Trino COALESCE bulk find-replace / empty-string-NULL caveat
 
-**(1) Did Q1+Q2 lift the thin query-perf-basics topic? Were they strong/correct?**
-**YES, both were strong + correct + lifted +0.026 net.** Q1 (4.6875) named physicalInputDataSize on TableScan as the MinIO-I/O metric + per-fragment CPU/Scheduled ratio as the CPU-bottleneck localizer — both verified against the trino.io 467 EXPLAIN ANALYZE doc. Q2 (4.625) gave the full EXPLAIN-DISTRIBUTED constraint-annotation + Filter-above-scan + naked-range-fix diagnostic loop. Topic 4.1697/36 → 4.1953/38, margin +0.6953 above pass threshold. STILL THINNEST required topic but trending up; recommend further breadth probes on partition design / file layout / Iceberg compaction next sweep to continue lifting.
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-**(2) Q3 SELECT * EXCEPT fabrication = responder-slip-no-FIX-A (resources already correct + defanged)?**
-**CONFIRMED.** Grep-verified: `resources/23-sql-best-practices-olap.md` L3368 has the **exact** "NOT supported. Parse error. Open feature request #26969" defang in a cross-engine SQL-divergence table row; `resources/27-oracle-plsql-to-dbt-trino.md` L2003 has the "DO NOT write `SELECT * EXCEPT (rn)` — that BigQuery/Databricks projection is..." DO-NOT-WRITE block. Resources are correct + dual-defanged in the EXACT two rows the responder should have routed to. The responder's iter1255 Q3 answer correctly affirmed the absence. Iter1258 is recall-variance regression — same content, contradicted itself on a re-probe. Classification: per-instance responder slip (broken-secondary-alternative family per `feedback_responder_broken_secondary_alternative.md`), NO FIX-A. NEW WATCH opened for 4-8-iter re-probe under varied "drop rn column" / "BigQuery-flavored exclusion" / "Oracle QUALIFY equivalent" framings.
+**This is the LOAD-BEARING question for a 400-query bulk find-replace and the responder nailed the critical nuance.** Direct map `NVL(col, default) → COALESCE(col, default)` is correct (COALESCE is ANSI-standard, NVL is Oracle-only). Three load-bearing edges, all correct:
 
-**(3) New watches:**
-- NEW: `iter1258 Q3 SELECT * EXCEPT alternative-fabrication regression` (4-8 iter re-probe; LIGHT FIX-A escalation only on 2+ recurrences)
-- NEW (soft): `iter1258 Q4 truncate-1-arg-only over-generalization in unrequested adjacent-list` (re-probe on direct TRUNC(price, 2) migration Q)
+1. **Both-null parity**: `COALESCE(NULL, NULL) = NULL` matches Oracle `NVL(NULL, NULL) = NULL` — correct. COALESCE returns NULL iff all args are NULL (per SQL standard); for the 2-arg NVL→COALESCE case the semantics are identical when both inputs are NULL.
+
+2. **Type coercion**: Trino is stricter than Oracle on type matching. `COALESCE(varchar_col, 0)` will fail in Trino with a type mismatch ("All COALESCE operands must be the same type") unless you `CAST(0 AS VARCHAR)`. Oracle implicitly coerces. **This is a real find-replace landmine** — responder correctly flagged it. The fix `COALESCE(col, CAST(default AS VARCHAR))` (or matching the column type) is the right remediation.
+
+3. **Oracle `''` is NULL vs Trino `''` is empty-string** — **THIS IS THE LOAD-BEARING CAVEAT** for a 400-query sweep. Oracle treats the empty string `''` as NULL (a well-known Oracle quirk that diverges from ANSI SQL). Trino treats `''` as a legitimate zero-length VARCHAR. Concrete impact:
+   - Oracle: `NVL('', 'X')` returns `'X'` (because `''` is NULL in Oracle, NVL substitutes the default)
+   - Trino: `COALESCE('', 'X')` returns `''` (because `''` is a real non-NULL empty string, COALESCE returns the first non-NULL)
+   - **Diverges silently**: same syntax, different result. The 400-query find-replace would convert correctly mechanically but ANY query relying on `NVL(col, 'default')` where `col` might contain `''` (often the case when col was loaded from CSV/external source) gets a behavior change.
+   - **Fix idiom `COALESCE(NULLIF(col, ''), 'X')`** — verified correct: `NULLIF(col, '')` returns NULL when col is `''` (otherwise returns col); then COALESCE substitutes the default. This faithfully replicates Oracle's `NVL` behavior on the empty-string edge.
+
+The responder explicitly told the engineer to audit (not blindly bulk-replace) queries that mix empty-string and NULL — exactly the right framing for a 400-query bulk sweep. The `NULLIF` idiom is the standard portable solution.
+
+**Verified against**:
+- Oracle empty-string-NULL: well-documented Oracle quirk ([docs.oracle.com/cd/B19306_01/server.102/b14200/sql_elements005.htm](https://docs.oracle.com/cd/B19306_01/server.102/b14200/sql_elements005.htm) — "Oracle Database currently treats a character value with a length of zero as null").
+- Trino COALESCE / NULLIF semantics: per [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) — COALESCE returns first non-NULL arg; NULLIF(a,b) returns NULL if a=b else a.
+
+No broken-secondary, no fabrication, no over-warning. **The critical engineering nuance for the question is exactly captured.**
+
+**Minor Compl shave (-0.25):** could have mentioned the Oracle `NVL2(col, val_if_not_null, val_if_null)` 3-arg variant (different from NVL — should be rewritten as `CASE WHEN col IS NULL THEN val_if_null ELSE val_if_not_null END` since Trino has no NVL2). If the engineer's 400 queries are mixed NVL/NVL2 the bulk find-replace `NVL(→COALESCE(` won't catch NVL2 lines. Minor — the question was strictly 2-arg NVL.
 
 ---
 
-## Iteration arithmetic
+## Broken-secondary check — NEGATIVE this iter
 
-Per-question scores: Q1=4.6875 / Q2=4.625 / Q3=3.125 / Q4=4.4375
-**Iter1258 average: 4.219 PASS** (above 3.5 floor by +0.719; below recent strong-pass band 4.7-4.95 owing to Q3 regression).
+The recent broken-secondary cluster (iter1258 Q3 `SELECT * EXCEPT(rn)` / iter1257 Q4 `strpos`-arithmetic / iter1255 Q3 `INSERT OVERWRITE` / iter1253 Q4 `regexp_extract` 2-arg / iter1248 Q3 `MATCH_RECOGNIZE` adjacency / iter1020 `regexp_extract` comma / iter1019 `TABLESAMPLE` after WHERE / iter1013 ORDER-BY-ungrouped / iter954 `to_char` wrong codes / iter950 nested-aggregate `max_by` / iter948 price-suffix menu / iter943 PERCENTILE_CONT / iter936 window-in-GROUP-BY) did **NOT** recur in any of Q1–Q4. Each answer is tightly scoped to the question without an invalid "for completeness" appendage. Per `feedback_responder_broken_secondary_alternative.md` this remains a per-instance recall-variance pattern; clean iteration confirms it isn't a deterministic regression.
 
-All required topics remain PASSED. Query-perf-basics lifted +0.026 (the goal of this iter), still thinnest at 4.1953/38, margin +0.6953. Recommend continued breadth probes on query-perf-basics + partition design next sweep to widen the margin further.
+---
+
+## FIX-A / Watch decisions
+
+**NO FIX-A this iter.** All four answers correct, no resource defects exposed, no contradictions with pinned references.
+
+**NO new watches.** Existing watches (iter1258 Q3 SELECT-*-EXCEPT, iter1258 Q4 truncate-1arg-overgen, iter1257 Q4 strpos-arithmetic, iter1255 Q1 bloom-CREATE-syntax, iter1255 Q3 INSERT-OVERWRITE-broken-secondary, iter1253 Q4 regexp_extract-2arg, iter1248 Q3 MATCH_RECOGNIZE-adjacency, iter1241 concat-auto-coerces, iter1236 rn=1-within-batch, iter1229 @v1-Spark) remain open; none re-probed this iter.
+
+---
+
+## Overall scoring
+
+| Q | Topic | Acc | Clar | Prac | Compl | Avg |
+|---|---|---|---|---|---|---|
+| Q1 | Iceberg table maintenance (rollback) | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
+| Q2 | Analytical query patterns (basket pair-dedup) | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
+| Q3 | Oracle migration (dbt seeds) | 4.75 | 4.75 | 5.0 | 4.75 | **4.8125** |
+| Q4 | Oracle migration (NVL→COALESCE + empty-string caveat) | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
+| **Overall** | | | | | | **4.859** |
+
+**Verdict: STRONG PASS NO-OP.** Continue breadth probing. Training deadline 2026-06-30 23:59 CST.
