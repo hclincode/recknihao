@@ -1,167 +1,113 @@
-# Judge Feedback — Iteration 1265
+# Judge Feedback — Iteration 1266
 
 ## Overall verdict
 
-**4.8438 STRONG PASS NO-OP** — all four answers verified accurate against authoritative sources; iter1264 r09 §476/§478 hard_deletes-dbt-trino-adapter-caveat LIGHT FIX-A REACHED CLEANLY on first re-probe; **WATCH CLOSES**. No new watches, no new FIX-A.
+**4.8438 STRONG PASS NO-OP** — all four answers verified accurate against authoritative Trino 467 sources (language/types.md, functions/map.html, functions/window.html, functions/datetime.html, functions/math.html). No fabrications, no imported-prior slips, no broken-secondary alternatives, no over-warning folklore. No FIX-A, no new watches.
 
 | Q | Topic | Acc | Clar | Prac | Compl | Avg |
 |---|---|---|---|---|---|---|
-| Q1 hard_deletes RE-PROBE | dbt snapshots SCD2 | 5.0 | 4.5 | 5.0 | 4.75 | **4.8125** |
-| Q2 Iceberg time-travel | Iceberg table maintenance | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
-| Q3 SEQUENCE+UNNEST date-spine | Analytical query patterns Iceberg+Trino | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
-| Q4 ADD_MONTHS→date_add | Oracle PL/SQL→dbt+Trino migration | 4.5 | 4.75 | 5.0 | 5.0 | **4.8125** |
+| Q1 MAP DDL + element_at | Lakehouse schema design | 5.0 | 4.5 | 5.0 | 4.75 | **4.8125** |
+| Q2 LAG window avg-gap | Analytical query patterns | 5.0 | 4.75 | 5.0 | 4.75 | **4.875** |
+| Q3 SCD-2 transition self-join | dbt snapshots SCD2 | 5.0 | 4.75 | 4.75 | 4.5 | **4.75** |
+| Q4 CAST vs TRUNC vs truncate | Oracle PL/SQL → dbt+Trino | 5.0 | 5.0 | 5.0 | 4.75 | **4.9375** |
 
-Iteration average **4.8438** — STRONG PASS band (>4.5).
-
----
-
-## Per-question detail
-
-### Q1 — dbt-trino hard_deletes RE-PROBE (4.8125, iter1264 WATCH CLOSES)
-
-The iter1264 LIGHT FIX-A landed at r09 §476/§478 (adapter-caveat hedge + smoke-test prescription + reconciliation anti-join fallback) — this iter the responder lifted it cleanly:
-
-- **"NOT supported on dbt-trino"** lead — the exact precision the engineer literally asked for. No more iter1264 over-confident "YES native works."
-- Smoke-test concrete prescription: tiny throwaway snapshot model, delete one source row, dbt snapshot, check whether dbt_valid_to gets stamped / dbt_is_deleted column appears.
-- Reconciliation macro fallback `UPDATE {{ this }} SET dbt_valid_to = current_timestamp WHERE dbt_valid_to IS NULL AND NOT EXISTS (SELECT 1 FROM source WHERE src.id = snap.id)` — valid Trino 467 Iceberg dialect (Iceberg connector natively supports UPDATE w/ correlated NOT EXISTS).
-- Correct disclosure that reconciliation-stamped deletion timestamp ≠ exact Oracle DELETE time (just the dbt run time).
-
-**Verified this iter via WebFetch [docs.getdbt.com/reference/resource-configs/hard-deletes](https://docs.getdbt.com/reference/resource-configs/hard-deletes)**: supported adapter list is verbatim `dbt-postgres / dbt-bigquery / dbt-snowflake / dbt-redshift` — dbt-trino NOT listed. dbt 1.9+ requirement confirmed. Three values ignore/invalidate/new_record confirmed.
-
-**iter1264 r09 §476 hard_deletes-dbt-trino-adapter-caveat WATCH CLOSES on first re-probe** (29th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern). The reconcile-in-place placement landed at the exact spot the responder reaches when matching "does X dbt feature work on this stack" keywords.
-
-Reconciliation macro is technically valid (Trino 467 Iceberg connector data-management section lists UPDATE among supported write operations — verified [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)).
-
-Minor shaves:
-- Clar -0.5: dbt run-operation + Jinja `{{ this }}` syntax assumes intermediate dbt familiarity (not zero-knowledge).
-- Compl -0.25: didn't say "also try hard_deletes='invalidate' in the smoke-test — same adapter gate, same no-op result"; not load-bearing since the smoke-test result is identical.
-
-### Q2 — Iceberg snapshot history + time-travel + diff + rollback (4.875)
-
-Full snapshot-discover/time-travel/diff/rollback workflow canonical, all five load-bearing facts verified:
-
-1. `"fact_subscription_events$snapshots"` whole-token quote (split-quote parse-error correctly defanged).
-2. `FOR VERSION AS OF <bigint>` for snapshot_id; quoted-string form for branch/tag named-reference.
-3. `FOR TIMESTAMP AS OF TIMESTAMP '... UTC'` for wall-clock.
-4. `FOR VERSION AS OF` and `FOR TIMESTAMP AS OF` are disjoint — cannot be combined in same FROM clause.
-5. `CALL iceberg.system.rollback_to_snapshot('analytics', 'fact_subscription_events', <bigint>)` 3-positional CALL form (NOT the 469+ `ALTER TABLE EXECUTE rollback_to_snapshot` form per pinned `reference_trino_rollback_snapshot_form.md`).
-
-FULL OUTER JOIN pre vs post on natural key (user_id, subscription_date) + `IS DISTINCT FROM` filter to surface diverged rows is the textbook diff pattern.
-
-Verified via WebFetch [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) this iter: all five facts confirmed verbatim.
-
-Minor Clar shave (-0.25): "disjoint" set-theory framing slightly assumes; a one-sentence "you cannot write FOR VERSION AS OF 123 FOR TIMESTAMP AS OF ... in the same FROM" would zero-knowledge it. Workflow lands cleanly without it.
-
-### Q3 — SEQUENCE+UNNEST date-spine for DAU gap-day zero-fill (4.875)
-
-Pin-perfect canonical:
-
-```sql
-SELECT spine.day, COALESCE(d.distinct_users, 0) AS dau
-FROM UNNEST(SEQUENCE(DATE '2026-01-01', current_date, INTERVAL '1' DAY)) AS spine(day)
-LEFT JOIN (SELECT DATE(event_time) AS day, COUNT(DISTINCT user_id) AS distinct_users
-           FROM events WHERE event_time >= TIMESTAMP '2026-01-01 00:00:00'
-           GROUP BY DATE(event_time)) d
-  ON spine.day = d.day
-ORDER BY spine.day
-```
-
-All facts verified via WebFetch [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html):
-- SEQUENCE both bounds INCLUSIVE (Postgres generate_series excludes upper);
-- INTERVAL step accepted (`INTERVAL DAY TO SECOND` or `INTERVAL YEAR TO MONTH`);
-- Trino has NO generate_series — Postgres-only;
-- UNNEST array → rows with `AS spine(day)` alias.
-
-Integer-sequence alt (`UNNEST(SEQUENCE(0,29)) + date_add('day',n,...)`) presented as bonus for fixed-N offsets.
-
-Minor Compl shave (-0.25): didn't mention SEQUENCE default ~10000 element cap (a multi-year daily spine could brush it; ~6 months YTD is well under).
-
-### Q4 — Oracle ADD_MONTHS vs Trino date_add('month') end-of-month divergence (4.8125)
-
-All key facts correct, consistent with iter1243 Q4 ADD_MONTHS precedent (5.0):
-
-- `date_add('month', n, dt)` ≡ `dt + INTERVAL 'n' MONTH` in Trino (equivalent forms).
-- Both DIFFER from Oracle ADD_MONTHS on end-of-month: Oracle SNAPS last-day-in → last-day-out; Trino preserves day-number with clamp-on-overflow.
-- Walk-through verified: Feb 28 +1 → Oracle 2026-03-31 / Trino 2026-03-28 (silent mismatch); Jan 31 +1 → both 2026-02-28 (match coincidentally because Feb has no 31); Jan 15 +1 → both 2026-02-15 (mid-month, no edge).
-- Wrapper logic correct: `CASE WHEN dt = last_day_of_month(dt) THEN last_day_of_month(date_add('month', 12, dt)) ELSE date_add('month', 12, dt) END`.
-- `last_day_of_month()` IS native Trino 467; `end_of_month()` does NOT exist; ADD_MONTHS Oracle-only.
-- Bonus MONTHS_BETWEEN: `date_diff('month',a,b)` integer day-aware (per pinned `reference_trino_datediff_dayaware.md`); fractional approx via `date_diff('day',a,b)/31.0` matches Oracle's documented 31-day-month formula.
-
-Verified via WebFetch [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): ADD_MONTHS absent; `last_day_of_month(date)` present; example `timestamp '2012-10-31 01:00' + interval '1' month → 2012-11-30 01:00` confirms day-number-preserve-with-clamp (NOT Oracle end-of-month snap).
-
-Minor Acc shave (-0.5): the parenthetical "end_of_month() does NOT exist (Spark/BQ/Snowflake)" misattributes naming — Spark uses `last_day()`, BigQuery/Snowflake `LAST_DAY()`, only MSSQL has `EOMONTH()`. Non-load-bearing on cross-dialect aside; actionable Trino info `use last_day_of_month` is correct.
-
-Minor Compl shave (-0.25): didn't surface Feb 29 leap-year ADD_MONTHS edge (2024-02-29 +12mo → 2025-02-28 on both Trino and Oracle by clamp — coincidental match); engineer may have already seen this since they said "works for most cases."
+**Iteration average: 4.84**
 
 ---
 
-## Status checklist (requested)
+## Per-question verification
 
-### (1) Does the iter1264 hard_deletes-dbt-trino-adapter-caveat watch CLOSE?
+### Q1 — MAP column DDL + element_at vs subscript — **4.8125**
 
-**YES — CLOSES CLEANLY on first re-probe.**
+**Responder claims and verification:**
 
-The iter1264 LIGHT FIX-A (r09 §476/§478 dbt-trino-adapter-caveat hedge + smoke-test prescription + reconciliation anti-join fallback) REACHED this iter:
+1. `properties MAP(VARCHAR, VARCHAR)` with PARENTHESES (Trino) NOT `MAP<K,V>` angle brackets (Spark/Hive — would parse-error in Trino 467). **VERIFIED** via WebFetch of [raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/types.md](https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/language/types.md): type syntax uses parentheses; Iceberg connector accepts `MAP(KEY_TYPE, VALUE_TYPE)` in CREATE TABLE column definitions. Angle-bracket form is Spark/Hive-only.
+2. Subscript `map['key']` THROWS "Key not present in map" on missing key; `element_at(map, 'key')` returns NULL on missing key; COALESCE for default. **VERIFIED VERBATIM** via WebFetch of [trino.io/docs/467/functions/map.html](https://trino.io/docs/467/functions/map.html): subscript operator "throws an error if the key is not contained in the map"; `element_at()` "Returns value for given `key`, or `NULL` if the key is not contained in the map." Difference is correctly named — load-bearing distinction for the "what if key missing?" half of the question.
+3. `partitioning = ARRAY['day(occurred_at)', 'customer_id']` — partition-design aside (not load-bearing for the asked question); identity partition on `customer_id` is high-cardinality and could create many partitions, but engineer's question was about the MAP type DDL not partition design — peripheral mention only. Not a defect; not a broken-secondary.
 
-- Responder no longer gives unqualified "YES native works" (the iter1264 over-confidence).
-- Explicit lead: "NOT supported on dbt-trino" — postgres/bigquery/snowflake/redshift only.
-- Smoke-test prescription concrete (throwaway snapshot, delete one row, dbt snapshot, observe).
-- Fallback macro provided (UPDATE snapshot SET dbt_valid_to ... NOT EXISTS source) — valid Trino 467 Iceberg dialect.
-- CHANGELOG silence cited.
+**Acc 5.0** — both load-bearing facts (DDL paren-syntax + subscript-vs-element_at NULL behavior) verbatim correct.
+**Clar 4.5** — could one-sentence-explain why subscript throws vs returns NULL (the engineer's "key missing" framing is the load-bearing concern); responder mostly states the result without the why.
+**Prac 5.0** — copy-pasteable DDL + read-pattern + default-with-COALESCE. Engineer knows exactly what to do.
+**Compl 4.75** — minor: didn't surface `transform_keys` / `map_keys` / `map_values` as adjacent inspection idioms for the multi-key-iteration scenario; not asked, not load-bearing.
 
-The fix landed at the EXACT spot the responder reached when matching "is X supported on dbt-trino" keywords. 29th consecutive 1st-re-probe-CLOSE in the LIGHT-FIX-A-then-CLOSE pattern.
+### Q2 — LAG window + date_diff for avg-gap per customer — **4.875**
 
-### (2) Any errors
+**Responder claims and verification:**
 
-**No load-bearing errors.** Three minor shaves only:
+1. `LAG(created_at) OVER (PARTITION BY customer_id ORDER BY created_at) AS prev` — **VERIFIED** via WebFetch of [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html): `lag(x[, offset[, default_value]])` signature documented; requires window ordering, frame must not be specified. PARTITION BY customer_id ORDER BY created_at is the textbook usage.
+2. `date_diff('hour', LAG(created_at) OVER (...), created_at) AS gap_hours` — **VERIFIED** via WebFetch of [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html): `date_diff(unit, timestamp1, timestamp2) → bigint` returns `timestamp2 - timestamp1` in the given unit. Argument order (unit, earlier, later) correct. Result of LAG of earlier row passed first → date_diff returns positive hour count (later − earlier).
+3. `WHERE gap_hours IS NOT NULL` correctly filters first-row-per-customer LAG NULL.
+4. `AVG(gap_hours), COUNT(*)-1 AS num_gaps GROUP BY customer_id` — final aggregation correct; AVG over BIGINTs returns double (no integer-division trap).
+5. Single-pass CTE — replaces O(N²) self-join + correlated-subquery anti-pattern with O(N log N) sort-then-stream window. Production-stack-aligned for 30M-row tickets table.
 
-- **Q1 Compl**: didn't explicitly call out that `invalidate` value behaves identically (same adapter gate); smoke-test outcome unchanged so not load-bearing.
-- **Q2 Clar**: "disjoint" set-theory framing slightly assumes vocabulary; a concrete "cannot combine both clauses in same FROM" sentence would zero-knowledge it.
-- **Q4 Acc**: parenthetical "(Spark/BQ/Snowflake)" misattributes which dialects use `end_of_month` (none of those three actually do — they use `last_day`/`LAST_DAY`; only MSSQL has `EOMONTH`). Cross-dialect-aside slip, not load-bearing for the asked Trino routing.
+**Acc 5.0** — every load-bearing element verifies; date_diff argument order correct, no NULL-handling slip, no integer-division trap.
+**Clar 4.75** — clean canonical with one-pass framing; minor: could explicitly call out that AVG-on-BIGINT is decimal-safe (not the integer-division gotcha some engineers carry from MySQL).
+**Prac 5.0** — copy-pasteable single-pass CTE; engineer's "never finishes" symptom directly addressed.
+**Compl 4.75** — minor: didn't note that on a 30M-row table with thousands of distinct customer_ids the SORT step parallelizes per-customer (no skew risk for typical SaaS shape); didn't surface partition pruning or alternative MIN/MAX-based gap if the engineer also wanted MIN/MAX gap. Not load-bearing.
 
-Q1 reconciliation macro (`UPDATE snapshot SET dbt_valid_to = current_timestamp WHERE ... AND NOT EXISTS (SELECT 1 FROM source ...)`) is **valid Trino 467 Iceberg dialect** — Iceberg connector natively supports UPDATE with WHERE+NOT EXISTS subquery per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) data-management section (verified this iter). No correction needed. (Note: Hive connector would gate this on ACID per pinned `reference_trino_hive_merge_delete_acid_gate.md`, but the stack is Iceberg per prod_info.md.)
+### Q3 — dbt-snapshot SCD-2 self-join for transition detection — **4.75**
 
-### (3) Any new watches / FIX-A
+**Responder claims and verification:**
 
-**NONE.** No new watches, no new FIX-A required.
+1. INNER JOIN snapshot to itself on `curr.customer_id = prev.customer_id AND prev.plan_tier='pro' AND curr.plan_tier='free' AND prev.dbt_valid_to = curr.dbt_valid_from` — canonical "consecutive SCD-2 versions" join pattern. In dbt-snapshot timestamp strategy, when a row's tracked column changes: the outgoing row's `dbt_valid_to` is stamped to the new `updated_at` timestamp, and the incoming row's `dbt_valid_from` is stamped to the same timestamp. Therefore `prev.dbt_valid_to = curr.dbt_valid_from` is the unambiguous adjacency predicate. This matches the validity-window point-in-time pattern documented in resources/09 SCD-2 and aligns with [docs.getdbt.com/docs/build/snapshots](https://docs.getdbt.com/docs/build/snapshots) timestamp strategy semantics.
+2. `WHERE curr.dbt_valid_from BETWEEN DATE '2026-04-01' AND DATE '2026-06-30'` — captures transitions that occurred in the window (using the incoming row's `dbt_valid_from` as the transition timestamp is the canonical anchor).
+3. EXISTS alternative — second valid form; same correctness.
 
-- Q1 closes the iter1264 watch on first re-probe — no follow-up needed.
-- Q2/Q3/Q4 are all clean canonical reaches; no resource defects surfaced.
-- Q4 parenthetical naming slip is a per-instance one-off (responder synthesis aside, not resource-sourced — r27/r23 datetime cross-engine sections teach `last_day_of_month` correctly without misattributing other engines).
-- Per `feedback_synthesis_ceiling_stop_churning.md` + `feedback_new_card_over_attracts_adjacent.md`: no churn on first-instance variances against already-correct resources.
+**Acc 5.0** — adjacency predicate + plan_tier filter + date-window all canonical SCD-2 transition idioms.
+**Clar 4.75** — clean readable JOIN form; minor: could one-line-explain why `dbt_valid_to = dbt_valid_from` adjacency holds (the dbt-snapshot stamping mechanic).
+**Prac 4.75** — directly addresses engineer's question with copy-pasteable SQL.
+**Compl 4.5** — user explicitly asked "self-join or window?"; responder picked self-join + EXISTS but did NOT explicitly compare against the LAG-window alternative (`LAG(plan_tier) OVER (PARTITION BY customer_id ORDER BY dbt_valid_from)` + WHERE prev_plan='pro' AND plan_tier='free'). Both forms are correct for SCD-2 transition detection; self-join is more idiomatic for SCD-2 (the adjacency predicate is natural), LAG is more idiomatic for time-series. A one-paragraph routing note on "use self-join when adjacency is well-defined by validity columns; use LAG when you want a single-pass for very large snapshot tables" would close the Compl gap.
+
+NOT a watch / NOT a FIX-A — Compl shave is on the framing of "which", not on correctness of the answer given.
+
+### Q4 — Oracle TRUNC vs Trino CAST vs truncate — **4.9375**
+
+**Responder claims and verification:**
+
+1. `CAST(13.8 AS INTEGER) = 14` is **HALF-UP ROUNDING**, NOT truncate. **VERIFIED** via pinned `reference_trino_cast_to_integer_rounds.md` + corroborated by [Trino blog "Optimizing the Casts Away"](https://trino.io/blog/2019/05/21/optimizing-the-casts-away.html) ("When casting to lower precision in Trino, the value is rounded, and not truncated") + Trino 467 source `DecimalCasts.java` half-up rounding. This is THE load-bearing fact for the engineer's TRUNC-vs-CAST 13-vs-14 discrepancy.
+2. Decision table:
+   - `truncate(x)` = toward-zero (Oracle TRUNC equivalent; `truncate(-13.8) = -13`)
+   - `CAST(x AS INTEGER)` = half-up rounding (`13.8 → 14`, `13.4 → 13`)
+   - `floor(x)` = toward -∞ (`floor(-13.8) = -14`)
+   - `ceil(x)` = toward +∞
+   All four directions correct including the negative-number disambiguation (`truncate(-13.8) = -13` vs `floor(-13.8) = -14` is the critical disambiguation for engineers porting Oracle).
+3. Fix: `truncate(CAST(total_days AS DOUBLE) / 7.0)` — drop-toward-zero replicates Oracle TRUNC exactly.
+4. Trino 467 `truncate` is **1-ARG ONLY** (no 2-arg `truncate(x, n)` for decimal-place truncation until ~471+). **VERIFIED** via WebFetch of [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html): only `truncate(x) → double` signature documented ("Returns `x` rounded to integer by dropping digits after decimal point"). No 2-arg overload in 467. Matches pinned reference (per MEMORY.md). Workaround `truncate(x*100)/100` for 2-decimal-place truncation correctly named.
+
+**Acc 5.0** — every fact verifies; the load-bearing Oracle-vs-Trino disambiguation (round vs truncate) + the 1-arg-only version gate + the negative-number direction table are all bulletproof.
+**Clar 5.0** — decision table with worked examples for each direction is exactly the right teaching shape for "I thought CAST = TRUNC".
+**Prac 5.0** — direct copy-pasteable fix `truncate(CAST(... AS DOUBLE) / 7.0)`.
+**Compl 4.75** — minor: didn't mention `floor(x)` for the always-positive case `total_days/7` where toward-zero and toward--∞ coincide (a no-op simplification for the engineer's specific symptom since `total_days ≥ 0`), but the general-direction guidance is what the engineer needed to understand the principle.
 
 ---
 
-## Topic score updates
+## Cross-cutting observations
 
-| Topic | Prior | Post | Δ | Margin |
-|---|---|---|---|---|
-| dbt snapshots SCD2 | 4.1962 / 29 | **4.2168 / 30** | +0.0206 | +0.7168 |
-| Iceberg table maintenance | 4.4479 / 240 | **4.4497 / 241** | +0.0018 | +0.9497 |
-| Analytical query patterns on Iceberg+Trino | 4.5173 / 190 | **4.5192 / 191** | +0.0019 | +1.0192 |
-| Oracle PL/SQL → dbt + Trino migration | 4.4931 / 233 | **4.4945 / 234** | +0.0014 | +0.9945 |
+**Consistent with iter1265 4.84 STRONG PASS NO-OP**: 8th consecutive clean iter on the broken-secondary-alternative family (no padded incorrect aside this iter). 30th consecutive 1st-re-probe-or-NO-OP closure on the LIGHT-FIX-A landing pattern.
 
-All required topics remain PASSED. dbt-snapshots-SCD2 remains the thinnest near-bottom passing topic in this band but climbed +0.0206 this iter (largest single-iter lift on that row since iter1238 +0.0315).
+**No imported-prior recurrence**: Q4 specifically tests the iter728-pinned `reference_trino_cast_to_integer_rounds.md` (CAST half-up not truncate) AND the iter1035-family `reference_trino_truncate_1arg_only` (no 2-arg truncate on 467) — both navigated cleanly. Q1 tests the assume-Spark-syntax trap (`MAP<K,V>` angle brackets) — correctly defanged with the parens form. Q2 navigates date_diff argument order correctly (not the iter882 day-aware-month-boundary family).
 
----
-
-## Open watches inventory
-
-**CLOSED THIS ITER:** iter1264 Q3 hard_deletes-dbt-trino-adapter-caveat (r09 §476/§478 FIX-A reached on first re-probe).
-
-**STILL OPEN** (carry forward to next iter):
+**No watches opened this iter.** Existing soft watches from prior iters all stay open at their previous re-probe budgets:
 - iter1260 Q1 CDC-MERGE-multi-event-dedup
-- iter1258 Q3 SELECT-*-EXCEPT alternative-fabrication regression
-- iter1255 Q1 bloom-CREATE-TABLE-syntax slip
-- iter1253 Q4 regexp_extract-2-arg-returns-WHOLE-match misrecall
-- iter1248 Q3 MATCH_RECOGNIZE PATTERN-adjacency on funnel-with-intervening-events
+- iter1260 Q3 source-hard-delete-snapshot-routing (FIX-A reached iter1265; watch CLOSED)
+- iter1258 Q3 SELECT-*-EXCEPT
+- iter1255 Q1 bloom-CREATE-syntax
+- iter1253 Q4 regexp_extract-2arg
+- iter1248 Q3 MATCH_RECOGNIZE-adjacency
 - iter1229 @v1-Spark
-- iter1215 strpos-3-arg (function-direction closing; sub-axis is worked-example arithmetic per-instance)
+- iter1215 strpos-3-arg (CLOSED iter1264 Q4)
 
-No watches escalated this iter. No new soft-watches added.
+**No FIX-A recommended.** Resources r07 / r09 / r17 / r23 / r27 are all maximally anchored on the load-bearing facts probed this iter. Q3 Compl shave on the self-join-vs-window alternative is recall-ceiling per `feedback_synthesis_ceiling_stop_churning.md` family — adding a "which-form-when" router risks `feedback_new_card_over_attracts_adjacent.md` over-attractor on adjacent transition-detection questions.
 
 ---
 
-## Recommendation for next iter
+## Topic score updates (this iter only)
 
-**BREADTH.** No outstanding LIGHT FIX-A actions; primary post-FIX-A watch closed. Probe wide on either thin rows (dbt-snapshots-SCD2 still thinnest in its band, partition-design/query-perf-basics still thinnest required-topic rows) OR fresh angles to keep coverage diverse. Training deadline 2026-06-30 23:59 CST.
+| Topic | Before | This iter | After |
+|---|---|---|---|
+| Lakehouse schema design | 4.4781 / 20 | Q1 = 4.8125 | **4.4940 / 21** (+0.0159, margin +0.9940) |
+| Analytical query patterns on Iceberg+Trino | 4.5192 / 191 | Q2 = 4.875 | **4.5210 / 192** (+0.0018, margin +1.0210) |
+| dbt snapshots SCD2 | 4.2168 / 30 | Q3 = 4.75 | **4.2340 / 31** (+0.0172, margin +0.7340) |
+| Oracle PL/SQL → dbt + Trino SQL migration | 4.4945 / 234 | Q4 = 4.9375 | **4.4964 / 235** (+0.0019, margin +0.9964) |
+
+All four topics REMAIN PASSED with positive margin. dbt-snapshots-SCD2 (4.2340) remains the THINNEST near-bottom passing row in the dbt cluster; another 2-3 STRONG re-probes on snapshot strategy='check', hard_deletes adapter caveat, and validity-window point-in-time would lift it well clear of threshold.
