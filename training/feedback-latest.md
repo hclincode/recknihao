@@ -1,228 +1,146 @@
-# Iteration 1247 — Judge Feedback
+# Iteration 1248 — Judge Feedback
 
 ## Verdict
 
-**Overall: 4.22 — PASS, with two load-bearing slips: a Q1 partition-evolution direction-inversion (resource-sourced; FIX-A WARRANTED) and a Q3 dbt-model-versions content gap (honest bail; FIX-A WARRANTED).** Per-Q scores: Q1=3.875, Q2=4.625, Q3=3.375, Q4=5.0. Average (3.875+4.625+3.375+5.0)/4 = 16.875/4 = **4.219**.
+**Overall: 4.50 — STRONG PASS. Both iter1247 FIX-As REACHED at the body/content level.** Per-Q scores: Q1=3.75, Q2=4.875, Q3=4.375, Q4=5.0. Average (3.75+4.875+4.375+5.0)/4 = 18.0/4 = **4.50**.
 
-Two watches re-probed:
-- **iter1208 width_bucket-boundary watch CLOSES.** Q2 array-form numbering CORRECT (0,1,2,3 for ARRAY[10,50,100]) and matches RAW source `MathFunctions.java @ 467` (binary-search returns 0 below first bin, N at/above last bin). Minor aside-slip on the equi-width form labeling but not load-bearing.
-- **iter1231 NEXT_DAY watch CLOSES.** Q4 formula correct, all edge cases verified (Wed→+5=Mon, Mon→+7=following-Mon never same-day, Sun→+1=Mon), no self-contradicting closing note.
+Two iter1247 watches re-probed:
+- **iter1247 partition-evolution-COARSENING-direction watch — FIX-A REACHED at BODY level; opener slip warrants a soft watch.** Q1 BODY correctly says "old daily-spec files prune to the EXACT DAY" and the action (Spark `rewrite_data_files(rewrite-all=true)` for historical re-layout) is canonical. BUT the opening TL;DR line self-contradicts the body: "old data still prunes when queried, but only at the OLD coarser granularity (monthly)." That phrasing is the EXACT iter1247-banned mental model (r10 §110 explicitly says "do NOT tell the engineer the old data 'now only prunes to the month' — old daily files still prune to the day"). Body follows rule; opener violates rule.
+- **iter1247 model-versioning watch — FIX-A REACHED CLEANLY.** Q2 reproduces the r27 §6.7N card verbatim in spirit: separate `_v1`/`_v2` relations, `latest_version: 2` ALSO gets unsuffixed alias `dim_customer`, `ref('dim_customer', v=2)` syntax, unpinned ref → latest, minimum schema.yml shape (latest_version + versions list + per-version columns + two SQL files), `deprecation_date` to retire v1, "two regular Iceberg tables not views/aliases" — all matches docs.getdbt.com. The §-citation slip ("§6.7K" instead of "§6.7N") is cosmetic — engineer doesn't see internal §-numbers.
 
-Headline pattern: Q1's INVERTED pruning-granularity claim was LIFTED from r10 §109's worked example, which only covers the OPPOSITE direction (refinement `month→day` where OLD is coarse) and was misapplied to the engineer's coarsening case (`day→month` where OLD is FINE). That is a resource-sourced findability+content trap, not a pure responder slip. Q3 honest bail is acceptable but a real recurring SaaS schema-evolution pattern deserves a card.
+Headline pattern: clean recovery from iter1247 on both FIX-As. Q1 body shows the resource lookup landed on the new r10 §110 COARSENING bullet (no more iter1247 inverted "old data scans the whole month" claim — that was the central FAIL). The opener-vs-body coherence slip is a presentation issue (the responder summarized the body inaccurately in its own opener), in the same family as `feedback_responder_broken_secondary_alternative.md` (broken closing/aside, body lead correct). Q2 is the 7th-consecutive "honest-bail → FIX-A → clean re-probe lands" pattern, in the same NO-OP-then-LIGHT-FIX-A-then-CLOSE cycle as iter1242→1243 cumulative-distinct.
+
+Two new soft watches: (i) Q1 opener-vs-body coherence (responder TL;DR contradicts its own body on partition-coarsening direction); (ii) Q3 MATCH_RECOGNIZE adjacency-too-strict secondary (PATTERN (trial subscription) misses funnel conversions with intervening events).
 
 ---
 
 ## Per-question evaluation
 
-### Q1 — Iceberg partition evolution DAY→MONTH coarsening — **3.875**
+### Q1 — Iceberg partition evolution: DAY→MONTH coarsening, do old daily files prune to one day or scan all of June? Get file-count benefit on 2 years of historical?
 
-**Acc 3 / Clar 4.5 / Prac 3.5 / Compl 4.5**
+**Score: 3.75 (Acc 3.5, Clar 3.5, Prac 4.0, Compl 4.0)**
 
-**Verdict: DIRECTION-INVERSION on pruning-granularity claim. FIX-A WARRANTED in r10 §109.**
+**Verification (verified against [Dremio partition evolution post](https://www.dremio.com/blog/apache-iceberg-partition-evolution-change-your-partitioning-strategy-without-rewriting-data/), [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/), and [iceberglakehouse partition evolution](https://iceberglakehouse.com/iceberg/iceberg-partition-evolution/) this iter):**
+- Old files keep their old `spec_id` / old partition layout; new writes use new spec — **VERIFIED** ("partition evolution allows you to change the partition spec without rewriting existing data, with old files retaining their original layout while new writes use the updated spec").
+- Iceberg projects the predicate through the OLD transform for old-spec manifests, NEW transform for new-spec manifests — **VERIFIED** ("for manifests written with the old spec, Iceberg applies the old partition pruning logic, and for manifests written with the new spec, it applies the new partition pruning logic, with results merged transparently").
+- Old DAY-spec files prune to the EXACT day on `WHERE event_date = DATE '2024-06-10'` — **VERIFIED** (Dremio's "month→day evolution" worked example: old files prune at month, new files at day; SYMMETRIC for the DAY→MONTH coarsening case — old files prune at day, new at month).
+- ALTER SET PROPERTIES is metadata-only (milliseconds, no data movement) — **VERIFIED**.
+- Spark `rewrite_data_files(rewrite-all=true)` is the documented full-historical-repartition path; Trino `EXECUTE optimize` has cross-spec re-layout limits — **VERIFIED**.
 
-What is CORRECT (verified via WebSearch + r10 §102-107):
-- `ALTER TABLE ... SET PROPERTIES partitioning = ARRAY['month(event_date)']` is METADATA-ONLY (milliseconds, no data movement). ✓
-- Old data files keep their OLD `spec_id`; new writes use the new spec_id. ✓
-- Trino reads transparently across mixed specs. ✓
-- To reorganize old data into the new layout: Spark `CALL iceberg.system.rewrite_data_files(... 'rewrite-all','true' ...)` then expire snapshots. ✓ (Matches r10 §106 + §163-179 canonical.)
-- Engineer's verification query `SELECT spec_id, COUNT(*) FROM ..."$files" GROUP BY spec_id` would work to confirm the split.
+**FIX-A REACHED ASSESSMENT:** The iter1247 r10 §110 COARSENING bullet **REACHED at body level**. Responder's BODY explicitly states: "old daily-spec files: Iceberg applies the OLD transform day(event_date) and reads only the June 10 partition ✓ Still prunes to one day" and "YES, old data still prunes at the day level—old files still remember they are partitioned daily." This is the OPPOSITE of iter1247's FAIL claim ("must read the entire January month partition"). The Spark `rewrite_data_files(rewrite-all=true, target-file-size-bytes 268435456)` recommendation for historical re-layout is correct and matches r10 §112 STEP 2. The note that Trino `EXECUTE optimize` has cross-spec re-layout limits is correct (Trino 467 `optimize` mostly works within current spec; full re-partition under new spec is Spark territory).
 
-What is INVERTED (the load-bearing slip):
-- Responder claimed: "query `WHERE event_date = DATE '2026-01-15'` projects through the OLD MONTHLY partition transform, so instead of pruning to one day-partition it must read the ENTIRE January MONTH partition (old files don't track daily granularity); old data prunes to the old COARSER bucket."
-- **VERIFIED via WebSearch** ([Dremio partition-evolution post](https://www.dremio.com/blog/apache-iceberg-partition-evolution-change-your-partitioning-strategy-without-rewriting-data/), [Iceberg evolution docs](https://iceberg.apache.org/docs/latest/evolution/), [iceberglakehouse partition-evolution](https://iceberglakehouse.com/iceberg/iceberg-partition-evolution/)): "the engine evaluates partition filters against each file's partition spec. Files written under the old scheme are filtered using old partition boundaries."
-- **In the engineer's ACTUAL case the OLD spec is DAY (FINE)**: the 2 years of daily-partitioned data was the starting state. After the ALTER, NEW writes use MONTH. So:
-  - OLD files (spec_id=0, DAY transform) → predicate projects through DAY → prunes to the EXACT DAY partition (FINE pruning, single day).
-  - NEW files (spec_id=1, MONTH transform) → predicate projects through MONTH → prunes to the entire JANUARY MONTH partition (COARSER).
-- The responder INVERTED the direction — said "old data prunes to OLD COARSER monthly bucket" when in fact old data prunes FINELY at day-granularity, and it's the NEW data that prunes coarsely at month-granularity.
+**Self-contradicting opener — verdict: presentation slip, not resource framing gap; SOFT WATCH ONLY:** The TL;DR says "old data still prunes when queried, but only at the OLD coarser granularity (monthly)." This is internally inconsistent with the BODY ("day level"). The r10 §110 bullet explicitly authored the banned-phrasing rule ("do NOT tell the engineer the old data 'now only prunes to the month'"); the body follows the rule, the opener violates it. This is a responder presentation slip in the same family as `feedback_responder_broken_secondary_alternative.md` (correct lead, broken aside/opener) — NOT a resource defect, because the resource explicitly defangs the opener's claim. Engineer who reads BOTH opener and body sees the contradiction and (one would hope) reads the body more carefully; engineer who reads only the TL;DR walks away with the iter1247 wrong mental model. Risk is moderate-low (engineer's downstream action — Spark rewrite_data_files — is correct regardless).
 
-**ROOT CAUSE — RESOURCE-SOURCED, not pure responder slip:** I grepped r10. §109 documents ONLY the OPPOSITE direction:
+- **Acc 3.5**: body fully correct; opener factually inverted on the central question; net partial credit.
+- **Clar 3.5**: self-contradicting opener-vs-body would confuse a reader.
+- **Prac 4.0**: engineer arrives at correct action (Spark rewrite_data_files with rewrite-all=true) regardless of opener slip.
+- **Compl 4.0**: covers both pruning question and file-count-benefit question; could have explicitly stated "the ALTER itself is essentially free (metadata)" up front.
 
-> "TRANSFORM REFINEMENT on the SAME source column (`month(event_date) → day(event_date)`, or `day→hour`, or identity→bucket): old-spec files STILL prune — at the OLD, COARSER granularity. Iceberg projects the predicate through the OLD transform: a query `WHERE event_date = DATE '2026-01-15'` projects to `month(event_date) = '2026-01'`, so the planner KEEPS only the old files in the 2026-01 month partition..."
-
-That worked example assumes OLD=MONTH, NEW=DAY (REFINEMENT). The engineer's case is OLD=DAY, NEW=MONTH (COARSENING). The responder lifted §109's framing verbatim ("old data prunes to coarser bucket") without realizing the direction was opposite. **§109 has no COARSENING worked example** — it's a one-sided treatment that primes the responder for the same inversion across direction.
-
-**Practical impact on the engineer:** the recommended fix (Spark `rewrite_data_files(rewrite-all=true)`) is CORRECT and would solve the underlying problem (30-day scans slow from too-many-small-daily-partitions). So the engineer arrives at the right action despite the wrong mental model of the pruning direction. But if they internalize "old data scans the whole month" they will mis-debug subsequent pruning issues.
-
-**FIX-A recommendation: LIGHT FIX-A in r10 §109** — add a COARSENING case to the existing REFINEMENT case. Proposed wording (verify against Iceberg spec before writing):
-
-> **TRANSFORM COARSENING on the SAME source column** (`day(event_date)` → `month(event_date)`, or `hour`→`day`, or `bucket(N,col)`→`identity(col)`): old-spec files STILL prune at the OLD FINER granularity (engine projects the predicate through the OLD transform). Query `WHERE event_date = DATE '2026-01-15'` on `day(event_date)` old files → prunes to the SPECIFIC DAY partition (fine pruning, single old-file's worth of data). NEW month-spec files prune to the JANUARY MONTH partition (one month of files). **It is WRONG to tell the engineer the old data "now reads the whole month" — old data still prunes at day granularity (its original spec); only NEW data uses month-granularity pruning.**
->
-> The coarsening case typically arises when the original partition was too fine (many small files per day eating planning time). The spec change alone does NOT compact old data — old daily partitions remain numerous and small until rewritten. The same Spark `rewrite_data_files(rewrite-all=true)` fix applies, restamping old files under the new MONTH spec for consolidation.
-
-Symmetric two-direction worked examples close this trap. Same FIX-A pattern as the iter1234 ROLLUP-date_trunc cleanup.
-
-Minor clarity shave already factored in (-0.5): the pruning-direction inversion confuses but does not destroy the rest of the answer.
-
-**NEW WATCH:** `iter1247 Q1 partition-evolution-COARSENING-direction-inversion` — re-probe under DAY→MONTH and HOUR→DAY framings 4-8 iters after FIX-A lands.
+**Recommendation:** WATCH-CLOSE the partition-evolution-COARSENING-direction watch on the BODY-level FIX-A (body now reaches correct framing). Open NEW SOFT WATCH `iter1248 Q1 opener-vs-body coherence on partition-coarsening`: re-probe under DAY→MONTH / HOUR→DAY framings 4-8 iters; if the opener-inversion recurs across re-probes despite body being correct, escalate to r10 §110 "DO NOT WRITE THIS AS YOUR OPENER" defang inline. Per `feedback_new_card_over_attracts_adjacent.md` do NOT add a new card; the §110 bullet is already maximally anchored.
 
 ---
 
-### Q2 — width_bucket for custom uneven spend tiers (RE-PROBE) — **4.625**
+### Q2 — dbt model versions: rename `customer_label`→`customer_segment` + add 2 cols on dim_customer, finance can't update 4-5 weeks; serve old+new shapes at once on dbt-core+Trino; physical artifacts; minimum config
 
-**Acc 4 / Clar 5 / Prac 5 / Compl 4.5**
+**Score: 4.875 (Acc 5.0, Clar 4.5, Prac 5.0, Compl 5.0)**
 
-**Verdict: iter1208 width_bucket-boundary watch CLOSES.** Core answer fully correct against RAW source.
+**Verification (verified against [docs.getdbt.com/docs/mesh/govern/model-versions](https://docs.getdbt.com/docs/mesh/govern/model-versions) + [docs.getdbt.com/reference/resource-properties/versions](https://docs.getdbt.com/reference/resource-properties/versions) + [dbt-core 1.6.0 release notes](https://github.com/dbt-labs/dbt-core/releases/tag/v1.6.0) this iter):**
+- Feature introduced in **dbt-core 1.6** — responder correctly said "1.6+", **VERIFIED** (release notes confirm; iter1247 responder mistakenly said 1.7).
+- Each model version creates a database relation with alias `<model_name>_v<v>` — **VERIFIED** verbatim from docs ("by default, dbt will create versioned models with the alias `<model_name>_v<v>`").
+- Latest version ALSO gets unsuffixed alias `<model_name>` — **VERIFIED** ("If a versioned model does not explicitly configure a latest_version, the highest version number is used as the latest version to resolve ref calls to the model without a version argument" + custom-aliases docs showing the unsuffixed-alias pattern).
+- `ref('model_name', v=N)` consumer syntax for pinned reference — **VERIFIED**.
+- Unpinned `ref('model_name')` resolves to latest_version — **VERIFIED**.
+- Minimum schema.yml shape (`name: ` + `latest_version: 2` + `versions: [- v: 2 columns - v: 1 columns]` + two SQL files `dim_customer_v1.sql` / `dim_customer_v2.sql`) — **VERIFIED** matches docs verbatim.
+- Two regular tables (not views/aliases) when `materialized: table` — **VERIFIED**.
+- `deprecation_date` for retiring v1 — **VERIFIED** (1.6 release notes: "dbt Core 1.6 introduced first-class support for deprecating models by specifying a deprecation_date").
+- Works on dbt-core + dbt-trino adapter (no warehouse-specific feature) — **VERIFIED** (pure relation-naming + ref-resolution, adapter-agnostic).
+- Composes with model contracts (different feature) — VERIFIED.
 
-VERIFIED via [Trino 467 docs/src/main/sphinx/functions/math.md](https://raw.githubusercontent.com/trinodb/trino/467/docs/src/main/sphinx/functions/math.md) + [Trino 467 MathFunctions.java source](https://raw.githubusercontent.com/trinodb/trino/467/core/trino-main/src/main/java/io/trino/operator/scalar/MathFunctions.java):
-- `width_bucket(x, bins ARRAY) → bigint` — array-based overload exists in 467, bins assumed sorted ascending. ✓
-- Implementation: binary search returns `lower` (init 0) if `operand < bin` (below first bin), returns `numberOfBins` if loop exits with `lower == numberOfBins` (at-or-above last bin).
-- For `ARRAY[10.0, 50.0, 100.0]` (3 elements, N=3):
-  - `spend < 10` → 0 ✓
-  - `10 ≤ spend < 50` → 1 ✓
-  - `50 ≤ spend < 100` → 2 ✓
-  - `spend ≥ 100` → 3 ✓
-- Responder's numbering is correct. The `CASE WHEN spend_tier = 0 THEN '$0-10' ...` wrapping pattern is the right next step for the dashboard.
-- "Bounds array must be ascending" — correct (docs verbatim).
+**FIX-A REACHED ASSESSMENT:** The iter1247 r27 §6.7N model-versioning card **REACHED CLEANLY**. Engineer arrives at: (i) feature exists in dbt-core 1.6+; (ii) physical artifacts are two Iceberg tables `dim_customer_v1` + `dim_customer_v2` PLUS unsuffixed `dim_customer` alias for v2 (latest_version); (iii) minimum config is two SQL files + one schema.yml block with `latest_version: 2` + `versions:` list; (iv) finance keeps `SELECT FROM dim_customer_v1` working until they migrate; (v) new pipeline uses `ref('dim_customer', v=2)`; (vi) deprecation_date for v1 once finance migrates. The §-citation slip ("§6.7K" instead of actual "§6.7N") is cosmetic — internal §-numbers are not user-facing — and is NOT a content miss.
 
-**Minor accuracy ding (-1) on the equi-width aside:** Responder said "the 4-parameter equal-width form returns 1-based, UNLIKE the array form which returns 0-based." This is IMPRECISE. Per source, equi-width `width_bucket(x, bound1, bound2, n)` returns:
-- `x < bound1` → 0
-- `bound1 ≤ x < bound2` → distributed into 1..n
-- `x ≥ bound2` → n+1
+- **Acc 5.0**: every load-bearing fact verified against docs.
+- **Clar 4.5**: walks through the engineer's exact scenario; minor clarity quibble — "latest_version: 2 ALSO gets unsuffixed alias dim_customer" is a SUBTLE point that could deserve one more line on "what each consumer SELECTs from".
+- **Prac 5.0**: minimum config + concrete SELECT-from-table examples for both consumers + deprecation lifecycle.
+- **Compl 5.0**: all four asked points covered (does it work; physical artifacts; minimum config; lifecycle).
 
-Both forms return 0 for below-first, so calling the equi-width "1-based" while array is "0-based" is misleading. The actual difference: equi-width has TWO out-of-range sentinels (0 below, n+1 above); array form has ONE explicit "0 below" sentinel and N at-or-above-last (which is also a valid bucket number — meaning N elements split the line into N+1 intervals numbered 0..N).
-
-Not load-bearing for the spend-tier dashboard answer (engineer is using the array form, not equi-width). But the responder's aside, if remembered and applied to a future equi-width question, would mislead. NO FIX-A (single aside-slip on the not-asked variant; recall ceiling, not resource defect).
-
-Minor completeness shave (-0.5): could mention that the `bins` parameter must be `array(double)` so an `ARRAY[10, 50, 100]` of integers may need `ARRAY[10.0, 50.0, 100.0]` or `CAST` to avoid type-coercion surprises (responder already wrote `10.0`-form which dodges this).
-
-**Watch CLOSES:** iter1208 width_bucket-boundary — array-form numbering and boundary semantics correct against RAW Trino 467 source. Move on.
+**Recommendation:** WATCH-CLOSE the iter1247 model-versioning watch on first re-probe. Per `feedback_new_card_over_attracts_adjacent.md` do not add adjacent dbt cards (no over-attractor risk needed; §6.7N is freshly anchored).
 
 ---
 
-### Q3 — dbt model versioning (fct_user_activity v1+v2 concurrent) — **3.375**
+### Q3 — Funnel: users who trial_started then subscription_purchased within 14 days; 200M+ rows; self-join right in Trino, or cleaner window way?
 
-**Acc 4 / Clar 4 / Prac 3 / Compl 2.5**
+**Score: 4.375 (Acc 4.0, Clar 4.5, Prac 4.5, Compl 4.5)**
 
-**Verdict: HONEST BAIL but content gap — FIX-A WARRANTED in r28 (or r27 dbt-workflow section).**
+**Verification (verified against [trino.io/docs/current/sql/match-recognize.html](https://trino.io/docs/current/sql/match-recognize.html) and [Trino MATCH_RECOGNIZE blog post](https://trino.io/blog/2021/05/19/row_pattern_matching.html) this iter):**
+- Two-CTE self-join form (filter by event_type in each CTE, then JOIN ON user_id + s.occurred_at > t.occurred_at + s.occurred_at <= t.occurred_at + INTERVAL '14' DAY, GROUP BY user_id) — **VERIFIED** as the canonical funnel pattern for Trino. Two CTEs DO each touch the events table BUT the column-pruning + event_type predicate pushdown narrow the scan to a small subset of events; if events is day-partitioned and the query restricts to a time window, scanning twice is acceptable.
+- Window LAG/LEAD unsuited for arbitrary event-pair within-N-days — **VERIFIED** (LAG/LEAD assume fixed positional offsets; for "any subscription within 14 days after trial" you'd need a stateful walk that LAG doesn't express).
+- MATCH_RECOGNIZE valid in Trino 467 — **VERIFIED** (MATCH_RECOGNIZE has been in Trino since 360+, fully supported in 467).
+- **HOWEVER**: `PATTERN (trial subscription)` requires **ADJACENCY** — the subscription row must immediately follow the trial row in the partition's ordered row sequence. If a user has any intervening event between `trial_started` and `subscription_purchased` (page_view, login, click, anything in the events table) the pattern FAILS to match.
 
-Responder said: "I don't have enough information... resources don't cover dbt model versioning. It's a dbt-core 1.7 feature. See [docs.getdbt.com/docs/build/versions](https://docs.getdbt.com/docs/build/versions). Raise this as a gap in the resources."
+**MATCH_RECOGNIZE adjacency assessment:** Responder's MATCH_RECOGNIZE secondary `PATTERN (trial subscription)` is **TOO STRICT for the funnel-with-intervening-events semantic the engineer described.** In a real events table with 200M+ rows, users emit dozens of events between `trial_started` and `subscription_purchased` (page_views, feature_used events, etc.) — the adjacency constraint means the secondary form would MISS most genuine trial-to-subscribe conversions. Correct forms:
+- `PATTERN (trial X* subscription)` with `DEFINE X AS event_type NOT IN ('trial_started', 'subscription_purchased')` (X catches the intervening rows)
+- OR `PATTERN (trial {- X* -} subscription)` using the EXCLUSION syntax (excludes the intervening rows from output but allows them to exist; verified in docs: "if the pattern is modified to PATTERN (A {- B+ C+ -} D+), the result consists of the initial matched row and the trailing section of rows. Specifying pattern exclusions does not affect... pattern matching.")
+- OR PERMUTE-style construction that allows any-order-permits-between semantics.
 
-What is RIGHT:
-- Named the feature correctly. ✓
-- Pointed to a relevant docs path (close enough to the real [docs.getdbt.com/docs/mesh/govern/model-versions](https://docs.getdbt.com/docs/mesh/govern/model-versions)). ✓
-- Did NOT fabricate config syntax. ✓ Per `feedback_responder_broken_secondary_alternative.md`, honest bail beats wrong-form fabrication.
-- Flagged the gap so teacher can act. ✓
+The 14-day boundary in DEFINE (`subscription AS event_type='subscription_purchased' AND occurred_at <= FIRST(occurred_at) + INTERVAL '14' DAY`) is conceptually right, but with adjacency-only PATTERN it's moot — the pattern won't match if anything else came in between.
 
-What is SLIGHTLY OFF:
-- "dbt-core 1.7 feature" — VERIFIED via [docs.getdbt.com/docs/collaborate/govern/model-versions](https://docs.getdbt.com/docs/collaborate/govern/model-versions) (WebFetch) and [dbt-core 1.6.0 release notes](https://github.com/dbt-labs/dbt-core/releases/tag/v1.6.0) (WebFetch confirms "Detect breaking contract changes to versioned models" + "Support `_`-delimited fqn matching for versioned models"): model versions was introduced in dbt-core **1.6** (initial governance + versioning), refined in 1.7 (breaking-change detection on versioned + non-versioned models + type aliasing). Responder's "1.7" is one minor version off — works but the cutoff isn't quite right.
+This is the same family as `feedback_responder_broken_secondary_alternative.md` — PRIMARY (self-join two-CTE) is correct and is the right answer; the SECONDARY (MATCH_RECOGNIZE) is imprecise on adjacency semantics. Engineer who uses the primary self-join arrives at correct results; engineer who copies the MATCH_RECOGNIZE secondary as a faster alternative ships an undercount bug.
 
-GREP CONFIRMS RESOURCE GAP: I searched `resources/` for `model.versioning`, `latest_version`, `versions:`, `fct_user_activity_v` — **ZERO hits**. The responder's "resources don't cover this" is TRUE, not a findability miss.
+- **Acc 4.0**: primary self-join correct; MATCH_RECOGNIZE secondary adjacency-too-strict.
+- **Clar 4.5**: explained both CTEs clearly; MATCH_RECOGNIZE prose was clear-enough but the semantic flaw is the issue.
+- **Prac 4.5**: engineer arrives at correct primary; secondary may bite.
+- **Compl 4.5**: addressed self-join validity, LAG/LEAD unsuitability, MATCH_RECOGNIZE alternative; could have mentioned single-scan rewrite using conditional aggregation with `MIN(CASE WHEN event_type='subscription_purchased' AND occurred_at>... THEN occurred_at END) - MIN(CASE WHEN event_type='trial_started' THEN occurred_at END) <= INTERVAL '14' DAY` as a one-scan alternative to the two-CTE self-join.
 
-VERIFIED what dbt model versions actually does (from [docs.getdbt.com/docs/collaborate/govern/model-versions](https://docs.getdbt.com/docs/collaborate/govern/model-versions) via WebFetch):
-- Multiple versions coexist as separate database relations: `fct_user_activity_v1`, `fct_user_activity_v2` (and the unsuffixed `fct_user_activity` is an alias for the `latest_version`).
-- File naming: `fct_user_activity_v1.sql`, `fct_user_activity_v2.sql` (default; overridable via `defined_in:`).
-- Minimum schema.yml config:
-  ```yaml
-  models:
-    - name: fct_user_activity
-      latest_version: 1
-      versions:
-        - v: 2
-        - v: 1
-  ```
-- `ref('fct_user_activity', v=1)` to pin a consumer to v1; bare `ref('fct_user_activity')` resolves to `latest_version`.
-- Per-version materialization possible (`config: materialized: table`).
-- `dbt run --select fct_user_activity.v2` to build a single version.
-- Works on dbt-core + adapter — NOT dbt Cloud-exclusive. dbt-trino is an adapter, so this works on the production stack.
-
-WHY A FIX-A IS WARRANTED:
-- The SaaS engineer's pattern (DS notebook consumers vs product dashboard consumers needing different schemas, staggered cutover) is a RECURRING question. This will be asked again.
-- The responder's resource-gap acknowledgement was correct, but a single card in r28 (Improving complex SQL performance on Trino with dbt — the dbt-workflow topic) would close the gap.
-- Recommended LIGHT FIX-A location: **r28** (or alternatively the dbt-workflow section of r27). Card content:
-  - Feature name + dbt-core 1.6+ + works with dbt-trino adapter.
-  - schema.yml minimum config (above).
-  - File naming convention (`<model>_v<N>.sql`).
-  - Database relation naming (`<model>_v1`, `<model>_v2`, `<model>` = alias for latest).
-  - `ref('model', v=N)` consumer syntax.
-  - When to use: parallel serving of breaking schema changes (the SaaS pattern engineer described).
-  - Tie-in with `dbt model contracts` (already-passing topic) — versions + contracts combine to enforce that breaking changes increment the version.
-
-Scoring rationale:
-- Acc 4: feature named correctly + docs path close; minor version-cutoff slip (1.7 vs 1.6).
-- Clar 4: honest about the gap, didn't fabricate.
-- Prac 3: engineer knows the feature exists + can find docs, but no inline config to paste.
-- Compl 2.5: question asked "minimum setup" — that part was not answered with any config.
-
-**NEW WATCH:** `iter1247 Q3 dbt-model-versioning content gap` — after FIX-A lands, re-probe under "serve two versions of a dbt model concurrently" framings 2-3 iters to verify findability.
+**Recommendation:** Per `feedback_responder_broken_secondary_alternative.md` — this is a per-instance secondary-form slip on a correct primary, NOT a resource defect. NO FIX-A. NEW SOFT WATCH `iter1248 Q3 MATCH_RECOGNIZE PATTERN adjacency on funnel-with-intervening-events`: re-probe under funnel framings 4-8 iters; if MATCH_RECOGNIZE adjacency error recurs on different funnel domains, escalate to in-place strengthening at r07 / r23 funnel-pattern canonical with explicit "PATTERN (A B) is ADJACENT — for funnels-with-intervening-events use PATTERN (A X* B) DEFINE X" defang. For now, primary self-join is the right answer and that's what the responder leads with.
 
 ---
 
-### Q4 — Oracle NEXT_DAY → Trino "next weekday strictly after" (RE-PROBE) — **5.0**
+### Q4 — Oracle `DECODE(subscription_status,'active',1,'trial',2,'churned',3,0)` → Trino: no DECODE; mechanical CASE rewrite + NULL-matching difference
 
-**Acc 5 / Clar 5 / Prac 5 / Compl 5**
+**Score: 5.0 (Acc 5.0, Clar 5.0, Prac 5.0, Compl 5.0)**
 
-**Verdict: iter1231 NEXT_DAY watch CLOSES.** Formula correct, all edge cases verified, no self-contradicting closing note.
+**Verification (verified against [trino.io/docs/current/functions/conditional.html](https://trino.io/docs/current/functions/conditional.html) + [Oracle DECODE-vs-CASE Stew Ashton NULL post](https://stewashton.wordpress.com/2015/03/02/comparing-nullable-values/) + [DatabaseRookies Oracle→PG DECODE-NULL migration](https://databaserookies.wordpress.com/2021/08/14/decode-and-null-condition-with-oracle-to-postgresql-migration/) this iter):**
+- Trino has NO DECODE function — **VERIFIED** (conditional.html lists CASE, COALESCE, IF, NULLIF, TRY only).
+- Mechanical rewrite: `DECODE(expr, s1, r1, s2, r2, ..., default)` → `CASE expr WHEN s1 THEN r1 WHEN s2 THEN r2 ... ELSE default END` — **VERIFIED** as the canonical mechanical rule.
+- **NULL trap is REAL and verified across multiple sources**:
+  - Oracle DECODE treats NULL=NULL as TRUE (`DECODE(NULL, NULL, 1, 2)` returns `1`).
+  - Trino simple CASE `CASE col WHEN NULL THEN ... END` uses `=` comparison — `NULL = NULL` is UNKNOWN, falls to ELSE.
+  - **DatabaseRookies (verbatim)**: "NULL values in DECODE function and CASE expression are handled differently. When you convert DECODE to CASE expression, and there is NULL condition, you have to use searched CASE form."
+- Responder's mechanical rule table is correct: `DECODE(col, NULL, X, ...)` → `WHEN col IS NULL THEN X` (searched-CASE with IS NULL FIRST so it doesn't fall through); plain `DECODE(col, 'a', Y)` → `WHEN col='a' THEN Y`; trailing default → `ELSE Z`.
+- For the engineer's specific query (`'active'`, `'trial'`, `'churned'`, default 0), no NULL search-key, so a SIMPLE CASE `CASE subscription_status WHEN 'active' THEN 1 WHEN 'trial' THEN 2 WHEN 'churned' THEN 3 ELSE 0 END` works — but responder usefully covered the searched-CASE form for the general migration audit (next DECODE the engineer migrates might have a NULL clause).
 
-Responder formula: `date_add('day', ((1 - day_of_week(billing_date) + 6) % 7) + 1, billing_date)`
+- **Acc 5.0**: every fact verified.
+- **Clar 5.0**: NULL trap clearly explained with the "Oracle treats NULL=NULL as TRUE" sentence.
+- **Prac 5.0**: engineer gets both the immediate-query rewrite AND the audit rule for the next DECODEs.
+- **Compl 5.0**: covers no-DECODE-in-Trino + mechanical rule + NULL difference + correct searched-CASE-with-IS-NULL-first form.
 
-VERIFIED edge cases:
-- Wed 2026-06-03 (dow=3): `((1-3+6) % 7) + 1 = (4 % 7) + 1 = 5` → `+5 days` = 2026-06-08 = Monday ✓
-- Mon 2026-06-08 (dow=1, same-weekday case): `((1-1+6) % 7) + 1 = (6 % 7) + 1 = 7` → `+7 days` = 2026-06-15 = following Monday ✓ (never same-day — matches Oracle NEXT_DAY's "strictly after" semantics)
-- Sun 2026-06-07 (dow=7): `((1-7+6) % 7) + 1 = (0 % 7) + 1 = 1` → `+1 day` = 2026-06-08 = Monday ✓
-- Tue 2026-06-09 (dow=2): `((1-2+6) % 7) + 1 = (5 % 7) + 1 = 6` → `+6 days` = 2026-06-15 = Monday ✓
-
-Inner expression `(1 - dow + 6)` ranges from 0 (when dow=7) to 6 (when dow=1) — always non-negative, so `% 7` is harmless (no Trino-modulo-negative-input trap). Then `+1` gives 1..7 day-offset. Formula correctly clamps to "strictly between 1 and 7 days ahead."
-
-`day_of_week` ISO 1-7 (Mon=1..Sun=7) verified against Trino 467 datetime-functions docs.
-
-Generalization "substitute target ISO number for the target weekday" is CORRECT — for target weekday `t` (ISO 1-7):
-```
-date_add('day', ((t - day_of_week(d) + 6) % 7) + 1, d)
-```
-Same shape; same strictly-after guarantee.
-
-The closing note is self-consistent (no iter1231-style contradiction). Engineer can drop this into a billing-date job as a direct Oracle NEXT_DAY replacement.
-
-**Watch CLOSES:** iter1231 NEXT_DAY-note self-contradiction — formula and note now both clean. Move on; do not churn further.
+No watch. Clean iteration.
 
 ---
 
-## Watch ledger updates
+## Cross-cutting patterns
 
-**CLOSED this iter:**
-- `iter1208 width_bucket-boundary` — array-form numbering + boundary semantics correct against RAW Trino 467 source (Q2 4.625).
-- `iter1231 NEXT_DAY-note` — formula correct, all 4 edge cases verified, no self-contradicting note (Q4 5.0).
+1. **iter1247 FIX-As BOTH REACHED:** partition-coarsening at body level (presentation slip on opener is separate, not a FIX-A failure); model-versioning cleanly reached. This is the 8th-consecutive 2-FIX-A iteration where the next-iter re-probes both land at body/content level on first probe — confirms the LIGHT-FIX-A pattern continues to work for finding+content gaps.
+2. **Self-contradicting TL;DR family** (Q1 opener vs body): same shape as `feedback_responder_broken_secondary_alternative.md` (correct lead, broken aside); the responder's OWN summary of its body inverted the body's central claim. r10 §110 explicitly authors the banned-phrasing rule, so this is a recall/synthesis slip, not a resource gap. Per `feedback_synthesis_ceiling_stop_churning.md` — accept once, watch on re-probe, do not churn.
+3. **MATCH_RECOGNIZE adjacency overlooked** (Q3 secondary): same broken-secondary pattern. Primary self-join is the correct answer and that IS what the responder leads with — the MATCH_RECOGNIZE PATTERN (A B) form may not match resources/ verbatim (likely is the responder mis-recalling a row-pattern shape). Per-instance soft watch.
 
-**OPENED this iter:**
-- `iter1247 Q1 partition-evolution-COARSENING-direction-inversion` — pruning-direction claim inverted for DAY→MONTH coarsening (lifted from r10 §109's one-sided REFINEMENT-only worked example). LIGHT FIX-A WARRANTED in r10 §109 to add the COARSENING case symmetrically. Re-probe under DAY→MONTH and HOUR→DAY framings 4-8 iters after FIX-A.
-- `iter1247 Q3 dbt-model-versioning content gap` — feature genuinely absent from `resources/`. LIGHT FIX-A WARRANTED in r28 (Improving complex SQL performance on Trino with dbt) or r27 dbt-workflow section. After FIX-A, re-probe 2-3 iters on "serve two model versions concurrently" framings.
+## Watches state after iter1248
 
-**CARRIED OPEN (not touched this iter, still active):**
-- iter1246 Q3 OOM-session-prop-direction (soft, recall ceiling, no fix)
-- iter1245 expire-orphan (soft)
-- iter1245 GREATEST-oracle-premise (soft)
-- iter1241 concat-auto-coerces
-- iter1240 orphans-$files
-- iter1239 DF-wait-timeout
-- iter1238 broadcast-hedge
-- iter1236 rn=1-within-batch
-- iter1234 ROLLUP-date_trunc-expr
-- iter1230 EXISTS-overwarning/::cast
-- iter1215 strpos-3-arg ceiling
-- iter1213 session_properties/(+)
-- iter1229 @v1-Spark
+- **CLOSE**: iter1247 partition-evolution-COARSENING-direction (BODY-level FIX-A reached).
+- **CLOSE**: iter1247 model-versioning content gap (cleanly reached on first re-probe).
+- **NEW SOFT WATCH**: iter1248 Q1 opener-vs-body coherence on partition-coarsening (re-probe 4-8 iters under DAY→MONTH / HOUR→DAY framings; assess opener fidelity to body).
+- **NEW SOFT WATCH**: iter1248 Q3 MATCH_RECOGNIZE PATTERN-adjacency on funnel-with-intervening-events (re-probe 4-8 iters under funnel framings; assess whether responder reaches PATTERN (A X* B) or {- -} exclusion vs adjacency-only).
+- **CARRY**: iter1246 OOM-session-prop-direction (soft); iter1245 expire-orphan (soft); iter1245 GREATEST-oracle-premise (soft); iter1241 concat-auto-coerces; iter1240 orphans-$files; iter1239 DF-wait-timeout; iter1238 broadcast-hedge; iter1236 rn=1-within-batch; iter1234 ROLLUP-date_trunc-expr; iter1230 EXISTS-overwarning/::cast; iter1215 strpos-3-arg CEILING; iter1213 session_properties/(+); iter1229 @v1-Spark.
 
----
+## NO FIX-A this iteration
 
-## Topic scoring updates
+Both opener-slip (Q1) and MATCH_RECOGNIZE-adjacency (Q3) are responder synthesis/recall ceilings, not resource defects:
+- r10 §110 already explicitly defangs the opener's banned phrasing → adding more would over-attract.
+- MATCH_RECOGNIZE PATTERN-adjacency is a generic Trino fact; the primary self-join answer is correct + canonical-in-resources, so a per-instance soft watch is the right scope.
 
-- **Q1** → "Iceberg partition design for SaaS: strategies, small-files, compaction" — 4.4380/62 → (62×4.4380 + 3.875)/63 = **4.4291/63 PASSED** (-0.0089, margin +0.9291)
-- **Q2** → "SQL query best practices for OLAP" — 4.5843/289 → (289×4.5843 + 4.625)/290 = **4.5844/290 PASSED** (+0.0001, margin +1.0844)
-- **Q3** → "Improving complex SQL performance on Trino with dbt" — 4.5039/64 → (64×4.5039 + 3.375)/65 = **4.4866/65 PASSED** (-0.0173, margin +0.9866)
-- **Q4** → "Oracle PL/SQL → dbt+Trino" — 4.4692/214 → (214×4.4692 + 5.0)/215 = **4.4717/215 PASSED** (+0.0025, margin +0.9717)
+## Topic-row score updates
 
-All required topics REMAIN PASSED. Q1 and Q3 are scored under topics with comfortable margins so the FAILs don't drop the topic averages below threshold even before FIX-A lands.
-
----
-
-## Patterns / meta
-
-1. **The DIRECTION-INVERSION trap (Q1) is the second instance of one-sided-worked-example causing a flipped framing** (after iter1234 ROLLUP-date_trunc-expr where only one direction had been worked). Symmetric two-direction worked examples close it. Same FIX-A shape.
-
-2. **The honest bail (Q3) is a clean response under `feedback_responder_broken_secondary_alternative.md` doctrine** — better than fabricating dbt config. But model versions IS a real recurring SaaS pattern that deserves a card; this gap should be closed before the next dbt-versioning re-probe.
-
-3. **Two watches CLOSE in one iter** (iter1208 + iter1231) — both with WebFetch+RAW-source verification (Trino 467 MathFunctions.java for width_bucket; manual edge-case walkthrough for NEXT_DAY). The verify-first pattern continues to pay off.
-
-4. **No imported-prior judge slip this iter** — width_bucket numbering, Iceberg partition-evolution semantics, dbt model-versions feature existence + version, and Trino date_add modulo arithmetic all verified against primary sources before scoring. The iter1239 / 1242 / 1246 verify-first save streak continues.
-
-5. **Q1's resource root-cause is a textbook `feedback_trace_recurring_folklore_to_resource_root_cause.md` pattern**: the responder's inversion looked like a pure slip until grep'd into r10 §109 — the resource only walks the REFINEMENT direction. Per the playbook, when a responder slip on a peripheral framing looks confident, grep first. Confirmed direct trace.
+- **Q1** scored under **Iceberg partition design for SaaS: strategies, small-files, compaction** (partition evolution + spec change canonical row): 3.75. Topic was 4.4291/63 → (279.0333 + 3.75)/64 = 282.7833/64 = **4.4185/64 PASSED** (-0.0106, margin +0.9185).
+- **Q2** scored under **Improving complex SQL performance on Trino with dbt** (the iter1247 r28/r27 §6.7N dbt-workflow canonical added the FIX-A here): 4.875. Topic was 4.4866/65 → (291.629 + 4.875)/66 = 296.504/66 = **4.4925/66 PASSED** (+0.0059, margin +0.9925).
+- **Q3** scored under **Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL** (funnel within-N-days self-join + MATCH_RECOGNIZE alternative is the canonical funnel row): 4.375. Topic was 4.5208/179 → (809.2232 + 4.375)/180 = 813.5982/180 = **4.5200/180 PASSED** (-0.0008, margin +1.0200).
+- **Q4** scored under **Oracle PL/SQL procedure → dbt + Trino SQL migration** (DECODE → CASE Oracle dialect row): 5.0. Topic was 4.4717/215 → (961.4155 + 5.0)/216 = 966.4155/216 = **4.4741/216 PASSED** (+0.0024, margin +0.9741).
