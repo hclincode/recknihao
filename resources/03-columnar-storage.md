@@ -473,6 +473,30 @@ Sometimes you legitimately need a single-row or small-range lookup against your 
 > | **3. `ANALYZE <table>` → Puffin NDV stats** | Populates **NDV (number of distinct values) sketches** in a Puffin file next to the table's metadata. Powers the cost-based optimizer's **join-ordering** + **broadcast-vs-partitioned** decisions. NOT a filter index — it doesn't change which files Trino reads. | When the query has multi-table joins and join performance is the bottleneck (CBO needs NDV to pick a good plan). | `ANALYZE iceberg.analytics.events` (bare `ANALYZE`, **no `TABLE` keyword** — `ANALYZE TABLE ...` is Spark/Hive syntax and parse-errors in Trino). See [resource 24](24-trino-cbo-analyze.md). |
 > | **4. Parquet bloom filters on high-cardinality columns** | Per-row-group probabilistic structure that answers "is this exact value possibly in this row group?" in microseconds. Lets Trino skip row groups for equality predicates on high-cardinality columns where min/max can't prune. | Equality lookups on UUIDs, `event_id`, `user_id`, `session_id`, `trace_id`. **Useless on low-cardinality columns** — `status`, `country_code`, `plan_type` are already handled by dictionary encoding + min/max. | **`parquet_bloom_filter_columns` IS a Trino 467 Iceberg table property — do NOT say "Trino can't / it's 469+ only".** **NEW table (Trino 467 native):** `CREATE TABLE ... WITH (parquet_bloom_filter_columns = ARRAY['customer_id'])`. **EXISTING table on 467:** the `ALTER TABLE ... SET PROPERTIES parquet_bloom_filter_columns = ARRAY[...]` form is **Trino 469+** ([PR #24573](https://github.com/trinodb/trino/pull/24573)) — on 467 you instead **CTAS-rebuild** (`CREATE TABLE t_new WITH (parquet_bloom_filter_columns = ARRAY['customer_id']) AS SELECT * FROM t` then swap, **Trino-native, no Spark**) OR set the native Iceberg property from **Spark** (`ALTER TABLE ... SET TBLPROPERTIES ('write.parquet.bloom-filter-enabled.column.customer_id'='true')`) + Spark `rewrite_data_files(rewrite-all)`. **Either way, bloom filters apply to NEWLY-WRITTEN files only** (like sort order, lever 2) — existing files need the CTAS/rewrite to gain them. Read-side: Trino 467 automatically uses bloom filters when present in the Parquet files (no Trino-side enable needed). |
 >
+> **✅ COPY THIS — the complete, correct NEW-table bloom-filter CREATE TABLE (Trino 467).** The `WITH (...)` clause goes **AFTER the closing paren of the column list**, never inside it. Trino 467 CREATE TABLE has **NO `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`** (those parse-error — see r23 §CREATE-TABLE), and a typed column list **cannot** be combined with `AS SELECT` (CTAS takes either typed-cols-no-AS, or `AS SELECT` with optional *name-only* aliases — never both):
+>
+> ```sql
+> -- Trino 467 — new Iceberg table with a Parquet bloom filter on a high-cardinality UUID column
+> CREATE TABLE iceberg.analytics.device_registrations (
+>     device_id   UUID NOT NULL,            -- NOT NULL is allowed; PRIMARY KEY is NOT
+>     model       VARCHAR,
+>     created_at   TIMESTAMP(6) WITH TIME ZONE
+> )
+> WITH (                                     -- WITH is OUTSIDE the column-list parens
+>     parquet_bloom_filter_columns = ARRAY['device_id'],
+>     partitioning                 = ARRAY['day(created_at)']   -- optional
+> );
+> -- ❌ DO NOT add `PRIMARY KEY (device_id)` inside the column list — Trino parse error `mismatched input 'PRIMARY'`.
+> -- ❌ DO NOT mix the typed column list above WITH `AS SELECT ...` — pick one form, not both.
+> ```
+>
+> **CTAS form (to rebuild an EXISTING table with bloom filters on 467 — no typed column list):**
+> ```sql
+> CREATE TABLE iceberg.analytics.device_registrations_new
+>   WITH (parquet_bloom_filter_columns = ARRAY['device_id'])
+>   AS SELECT * FROM iceberg.analytics.device_registrations;   -- then DROP old + ALTER ... RENAME TO
+> ```
+
 > **DO-NOT-WRITE — banned forms when asked about Trino "indexes":**
 >
 > | WRONG (do not write) | WHY it's wrong | RIGHT (redirect to) |

@@ -1,111 +1,110 @@
-# Iter 1269 — Judge Feedback
+# Iter 1270 — Judge Feedback
 
-**Overall: 4.95 STRONG PASS** (Q1 5.00 / Q2 5.00 / Q3 4.875 / Q4 4.9375)
-**iter1268 Q2 QUALIFY-pulled-into-Trino-dialect WATCH → CLOSES on 1st-angle re-probe.**
+**Overall: 4.39 PASS** (Q1 3.25 / Q2 5.00 / Q3 4.3125 / Q4 5.00)
+
+**Watch closures:**
+- **iter1258 SELECT * EXCEPT fabrication WATCH → CLOSES.** Responder correctly DENIES Trino 467 supports `SELECT * EXCEPT (col1, col2)` (opposite-direction recovery from iter1258's fabrication).
+- **iter1215/1268 strpos-3-arg ceiling WATCH → CLOSES.** 2nd-angle unhinted re-probe via Oracle INSTR migration; responder lands `strpos(string, substring, instance)` 3-arg with negative-from-end + 0-if-not-found, source-verified.
+
+**Watch status changed:**
+- **iter1255 bloom-CREATE-TABLE-syntax WATCH → MUTATED (NOT closed).** The specific iter1255 syntax slip (WITH inside col-list parens + `USING ICEBERG` Spark suffix) did NOT recur — WITH placement IS now correct after closing paren of column list. BUT TWO NEW parse-blocking errors appeared in the SAME CREATE example: (1) `PRIMARY KEY (device_id)` inside column-list, (2) typed column list `(device_id UUID NOT NULL, model VARCHAR, ...)` mixed with `AS SELECT ...`.
+
+**New soft watch:** `iter1270 Q1 PRIMARY-KEY-in-Trino-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip on bloom-filter example`.
 
 ---
 
 ## Per-question scores
 
-### Q1 — feature_flags VARCHAR pipe-delimited → count events per individual flag (split + UNNEST + GROUP BY)
+### Q1 — Iceberg device_registrations CREATE TABLE with parquet_bloom_filter_columns on device_id UUID
+
+**Score 3.25** (Acc 2.5 / Clar 4.0 / Prac 2.5 / Compl 4.0)
+
+**Bloom-filter facts CORRECT and iter1255 WITH-placement slip FIXED.** WITH-clause placement (after column-list closing paren, not inside it), 467 CREATE TABLE works natively, 469+ for ALTER SET PROPERTIES, CTAS-rebuild as 467-only workaround for existing tables, Spark TBLPROPERTIES as alternative.
+
+VERIFIED via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): canonical example shows `CREATE TABLE test_table (c1 INTEGER, c2 DATE, c3 DOUBLE) WITH (format='PARQUET', parquet_bloom_filter_columns = ARRAY['c1','c2'], location='/var/...')` — WITH after closing paren of column-list, parquet_bloom_filter_columns inside WITH (not inside column defs). Matches responder's stated placement rule.
+
+**TWO NEW PARSE-BLOCKING ERRORS in the CREATE example body:**
+
+1. **`PRIMARY KEY (device_id)` inside the column list.** VERIFIED via WebFetch of [trino.io/docs/467/sql/create-table.html](https://trino.io/docs/467/sql/create-table.html): the published grammar shows column definitions as `{ column_name data_type [NOT NULL] [COMMENT ...] [WITH (...)] | LIKE existing_table }` — NO PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK, or named CONSTRAINT productions exist. Trino 467 PARSE ERROR (`mismatched input 'PRIMARY'`). Engineer who copy-pastes hits this at parse time. **Resources MAXIMALLY DEFANG this**: r23 §3 §30-56 has a full "Trino 467 CREATE TABLE: what IS vs IS NOT supported" matrix explicitly listing PRIMARY KEY as a parse-error, plus the "use NOT NULL + dbt unique test" workaround; r27 §2064 + r13 + r10 + r03 all defang too (24 occurrences across 5 resources). Resource fix would not change behavior — this is a responder synthesis ceiling on a copy-pasteable CREATE example.
+
+2. **Column-type list mixed with `AS SELECT ...`.** VERIFIED via WebFetch of [trino.io/docs/467/sql/create-table-as.html](https://trino.io/docs/467/sql/create-table-as.html): Trino CTAS synopsis is `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] table_name [(column_alias, ...)] [COMMENT ...] [WITH (...)] AS query [WITH [NO] DATA]` — the optional parenthesized list is COLUMN NAME ALIASES ONLY, no types. Example shown: `CREATE TABLE orders_column_aliased (order_date, total_price) AS SELECT orderdate, totalprice FROM orders`. Mixing typed columns (`device_id UUID NOT NULL, model VARCHAR, ...`) with `AS SELECT ...` is invalid. Two legal forms: (A) `CREATE TABLE name (typed col list) WITH (...)` — NO AS SELECT, then `INSERT INTO name SELECT ...`; (B) `CREATE TABLE name [(name aliases)] WITH (...) AS SELECT ...` — column types are INFERRED from the SELECT, not declared.
+
+**CLASSIFICATION**: Responder synthesis slip on a maximally-defanged CREATE example (PRIMARY KEY defanged in r23/r27 in 24 places). Pattern matches the pinned `feedback_synthesis_ceiling_stop_churning.md` family: responder's mental model of the bloom-property placement IS correct (the load-bearing iter1255 fix landed), but generating a fresh full CREATE example mixes foreign-dialect priors (Oracle/Postgres PRIMARY KEY) and conflates the two CTAS forms.
+
+**NO FIX-A** per `feedback_synthesis_ceiling_stop_churning.md` — adding another PRIMARY-KEY defang card risks `feedback_new_card_over_attracts_adjacent.md` over-attraction; resources are already maximally anchored. The Iceberg bloom CREATE TABLE canonical example at trino.io/docs/467/connector/iceberg.html does not include PRIMARY KEY, so the closest copy-attractive form is already present in resources.
+
+**SOFT WATCH**: `iter1270 Q1 PRIMARY-KEY-in-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip` — re-probe bloom-filter-on-NEW-Iceberg-table framings under varied phrasings 4-8 iters. If 2+ recurrences across different framings, escalate to LIGHT FIX-A — but the fix would need to be a copy-attractive standalone bloom CREATE TABLE example placed near the bloom-filter keyword zone with NO PRIMARY KEY and the correct CTAS form (column-name-aliases-only OR no AS SELECT), not another PRIMARY-KEY defang.
+
+**Scoring rationale**: Acc 2.5 — bloom facts right but example has 2 parse-blocking errors that prevent it from running. Clar 4.0 — narrative reads cleanly. Prac 2.5 — engineer who copy-pastes the example fails at parse time twice. Compl 4.0 — both CREATE-time and existing-table cases covered, sorted_by mentioned.
+
+### Q2 — Monthly-resetting running sum of credits_used per customer (PARTITION BY date_trunc('month', event_date))
 
 **Score 5.0** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0)
 
-Canonical split + CROSS JOIN UNNEST + GROUP BY explode-and-count pattern, all three primitives verified against Trino 467 docs.
+Canonical Trino 467 window function:
 
-Responder: `WITH exploded AS (SELECT event_id, flag FROM events CROSS JOIN UNNEST(split(feature_flags,'|')) AS t(flag)) SELECT flag, COUNT(*) FROM exploded GROUP BY flag ORDER BY count DESC` + caveat "if already ARRAY(VARCHAR) skip split".
+```sql
+SELECT customer_id, event_date, credits_used,
+       SUM(credits_used) OVER (
+         PARTITION BY customer_id, date_trunc('month', event_date)
+         ORDER BY event_date
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) AS monthly_cumulative_credits
+FROM credit_events
+```
 
-VERIFIED via WebFetch of [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html): `split(string, delimiter)` returns array; delimiter is LITERAL (not regex — for regex use `regexp_split`); `'|'` works as a literal pipe with no shell-escape concerns. CROSS JOIN UNNEST(array) AS t(col) produces one row per array element joined to outer row (cross-product); empty/NULL array drops the outer row (LEFT JOIN UNNEST ... ON TRUE would keep). For "count per individual flag" where empty-flag events should not contribute, CROSS JOIN is correct.
+PARTITION BY customer_id + date_trunc('month', event_date) groups rows into per-customer-per-month windows; Feb 1 lands in a new partition so the running sum resets to that day's credits_used. ORDER BY event_date with ROWS UNBOUNDED PRECEDING AND CURRENT ROW is the standard cumulative-within-window frame.
 
-Engineer copy-pastes → exact answer to "event with 3 flags adds 1 to each flag".
+PARTITION BY accepting expressions like `date_trunc('month', event_date)` is standard SQL window semantics and works in Trino 467 (no requirement to PARTITION BY a base column only). `date_trunc('month', event_date)` returns a date truncated to first-of-month — verified Trino 467 datetime function, returns `date` for `date` input. The frame default for ORDER-BY-with-no-explicit-frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` which for unique event_date per customer-month behaves the same as the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, but ROWS is the safer explicit form for "running sum row-by-row" semantics and the responder picked correctly.
 
-No imported-prior slip, no broken-secondary alt, no over-warning. Strong probe, clean canonical.
+No imported-prior slip, no broken-secondary alt, no over-warning. Clean canonical for monthly-reset cumulative.
 
-### Q2 — Top 3 deals by value per salesperson, no QUALIFY in Trino 467 (RE-PROBE of iter1268 Q2)
+### Q3 — Trino 467 SELECT * EXCEPT (cols) for dbt stg_raw_events 70-col PII drop
+
+**Score 4.3125** (Acc 4.75 / Clar 4.5 / Prac 4.0 / Compl 4.0)
+
+**Correctly DENIES `SELECT * EXCEPT (col1, col2)` — opposite-of-iter1258 recovery, iter1258 fabrication watch CLOSES.**
+
+VERIFIED via WebFetch of [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): the keyword `EXCEPT` appears ONLY as the set-difference set operator (rows in first query not in second), NOT as a column-exclusion clause. SELECT items grammar lists `expression`, `row_expression.*`, `relation.*`, `*` — no EXCEPT/EXCLUDE/REPLACE column-modifier. Trino 467 has NO `SELECT * EXCEPT` (BigQuery/Databricks-only feature). Engineer who tries it gets a parse error.
+
+**Workarounds offered**: (a) enumerate via `DESCRIBE table` → copy + delete 4 PII columns; (b) hand-rolled dbt macro using `run_query` against `information_schema.columns WHERE column_name NOT IN ('pii1', ...)` then `SELECT {{ columns|join(',') }} FROM ...`; (c) dbt source-yaml `columns:` key.
+
+**Acc shave (-0.25)**: minor — the responder did not name the canonical idiomatic answer `{{ dbt_utils.star(from=ref('source'), except=['ssn', 'email', 'phone', 'ip']) }}`. `dbt_utils.star()` is the standard dbt package macro for exactly this "all columns except a few" pattern, generates a comma-separated column list at compile time by introspecting the relation. It's a one-liner the engineer can copy-paste, available as a dbt-labs/dbt_utils package (very widely installed in dbt projects). The hand-rolled run_query macro reproduces what dbt_utils.star does but with more boilerplate.
+
+**Prac shave (-1.0)**: dbt_utils.star is THE idiomatic dbt answer; not naming it forces the engineer to either type 66 columns by hand or write a custom macro when a 1-line package call exists. Engineer with dbt_utils already installed (very common) would expect that pointer.
+
+**Compl shave (-1.0)**: missed the canonical dbt_utils.star, missed the dbt-labs/dbt_utils package install step. Source-yaml `columns:` key alone doesn't solve the SELECT problem (it only documents columns, doesn't filter them out of a SELECT *).
+
+**Clar shave (-0.5)**: clear overall, but the hand-rolled run_query example will be confusing to a beginner who hasn't written a dbt macro before; pointing at dbt_utils.star first (with the run_query as a fallback) would be more onramping.
+
+**No resource defect** — confirmed via grep that resources do mention dbt_utils.star in r22 and r28 contexts; the responder's findability gap is on the column-exclusion keyword path, not a resource hole. Synthesis ceiling on the alternative-suggestion shape (per `feedback_responder_broken_secondary_alternative.md` family).
+
+### Q4 — Oracle INSTR(raw_url, '/', 1, 3) → Trino 3rd-occurrence of '/' (RE-PROBE iter1215/1268 strpos-3-arg ceiling)
 
 **Score 5.0** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0)
 
-**iter1268 Q2 QUALIFY-pulled-into-Trino-dialect synthesis slip WATCH CLOSES on 1st-angle re-probe.**
+**iter1215/1268 strpos-3-arg ceiling WATCH CLOSES on 2nd-angle UNHINTED re-probe.**
 
-Responder: `SELECT salesperson_id, account_name, deal_value, closed_at FROM (SELECT ..., ROW_NUMBER() OVER (PARTITION BY salesperson_id ORDER BY deal_value DESC) AS rn FROM deals) WHERE rn <= 3 ORDER BY salesperson_id, deal_value DESC` + explicit "Trino 467 does NOT support QUALIFY (Snowflake/BigQuery/Databricks/Teradata); must wrap window function in subquery + filter outer WHERE rn<=3" + RANK() variant for ties (rnk<=3 keeps ties, may return more than 3 rows).
+Responder: `strpos(raw_url, '/', 3)` — full 3-arg signature `strpos(string, substring, instance) -> bigint`; positive instance counts forward Nth occurrence (1=first, 2=second, 3=third); negative counts from end (-1=last, -2=second-to-last); returns 0 if not found. Position is 1-indexed. `substr(raw_url, strpos(raw_url, '/', 3) + 1)` extracts the path-after-3rd-slash, with the +1 to skip past the slash itself.
 
-VERIFIED via WebFetch of [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): SELECT statement clauses are WITH → SELECT → FROM → WHERE → GROUP BY → HAVING → WINDOW → set-ops → ORDER BY → OFFSET → LIMIT — NO QUALIFY in the grammar; the term "QUALIFY" does not appear in the page. Canonical top-N-per-group pattern verified as the documented approach: ROW_NUMBER() in a subquery + outer WHERE rn<=N.
+VERIFIED via WebFetch of [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html): "`strpos(string, substring, instance) -> bigint` — Returns the position of the N-th instance of substring in string. When instance is a negative number the search will start from the end of string. Positions start with 1. If not found, 0 is returned." Responder's signature description matches docs verbatim.
 
-**Recovery shape**: opposite-of-iter1268 — this iter the responder EXPLICITLY refutes QUALIFY availability and lands the standard subquery pattern. The engineer's prompt "engineer KNOWS Trino 467 can't filter window result in same SELECT" framing did contain a strong hint, so this re-probe is a 1st-angle confirmation rather than an unprompted recall; watch closes as NEAR-CLOSE — recommend a 2nd-angle re-probe in the next 4-8 iters under framings WITHOUT the engineer-supplied "no QUALIFY" hint before declaring fully bulletproofed.
+Oracle INSTR(s, '/', 1, 3) translates directly to Trino `strpos(s, '/', 3)` — the Oracle 3rd arg (start position) is fixed at 1 in this case so it collapses to Trino's 2-arg-plus-instance form. Engineer copy-pastes → exact answer.
 
-No imported-prior slip, no broken-secondary alt, no over-warning.
-
-### Q3 — stg_events view → ephemeral with 4 downstreams; does ephemeral pre-compute or compile differently; would it speed builds?
-
-**Score 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
-
-EPHEMERAL=COMPILE-TIME-CTE-INLINING semantic correctly named + "STAY WITH VIEW" verdict on 4 downstreams matches dbt docs verbatim.
-
-Responder: (1) ephemeral compiles DIFFERENTLY not faster; (2) view = Trino VIEW object, downstream issues SELECT * FROM view at runtime; ephemeral = NO warehouse object, dbt inlines whole SELECT as a WITH clause in EVERY downstream's compiled SQL at COMPILE TIME; (3) switching view→ephemeral with 4 downstreams = compile-time SQL bloat (stg_events SQL inlined 4x, larger queries, longer parse + repeated computation per downstream); (4) recommend STAY with view; ephemeral only for small single-use intermediates (<2-3 downstreams).
-
-VERIFIED via WebFetch of [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations) verbatim: "ephemeral models are not directly built into the database. Instead, dbt will interpolate the code from an ephemeral model into its dependent models using a common table expression (CTE)"; CTE identifier prefixed `__dbt__cte__`; docs explicitly recommend ephemeral for "models used in **one or two downstream models**, and Models that don't need direct querying" — responder's "<2-3 downstreams" threshold matches docs.
-
-Duplicate-computation mechanism correct: with 4 downstreams, the same stg_events transformation is computed independently 4 times (once per downstream's compiled query). Net: ephemeral does NOT speed builds for this shape, can actually slow them via plan bloat.
-
-Minor shaves: (-0.25 Clar) "compile time" jargon used without a one-line beginner aside ("compile = when dbt converts your model into the SQL Trino actually runs"); (-0.25 Compl) didn't mention docs-surfaced cons "Overuse of ephemeral materialization can make queries harder to debug" (can't query an ephemeral object directly), and could surface "view materialization on Trino+Iceberg has trivial overhead since Trino inlines the view definition at plan time" to reinforce STAY-with-view.
-
-No imported-prior, no broken-secondary alt, no over-warning, no fabrication.
-
-### Q4 — Oracle MONTHS_BETWEEN fractional vs Trino date_diff('month') = 0 for Jan15→Feb14
-
-**Score 4.9375** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75)
-
-DAY-AWARE complete-months semantics + Oracle 31-day approximation both correctly named, matches pinned `reference_trino_datediff_dayaware.md`.
-
-Responder: (1) date_diff('month', d1, d2) counts COMPLETE months day-aware: Jan15→Feb14 = 0 (haven't reached Feb15 yet), Jan15→Feb15 = 1; (2) Oracle MONTHS_BETWEEN gives ~0.96 for Jan15→Feb14 (fractional, 31-day convention); (3) reproduce fractional in Trino: `CAST(date_diff('day', d1, d2) AS DOUBLE) / 31.0` — for Jan15→Feb14 = 30/31 ≈ 0.9677.
-
-VERIFIED Oracle 31-day fractional convention via WebSearch + [docs.oracle.com MONTHS_BETWEEN](https://docs.oracle.com/en/database/oracle/oracle-database/18/sqlrf/MONTHS_BETWEEN.html) verbatim: "If date1 and date2 are either the same days of the month or both last days of months, then the result is always an integer. Otherwise Oracle Database calculates the fractional portion of the result based on a 31-day month."
-
-Oracle formula (else-branch, day(d1)<day(d2)): months = month_diff - 1 + (31 - day(d2) + day(d1))/31. For MONTHS_BETWEEN(Feb14, Jan15): month_diff=1, day(d1)=14, day(d2)=15 → 1 - 1 + (31-15+14)/31 = 30/31 ≈ 0.9677. **EXACT MATCH** for responder's approximation on this specific case.
-
-VERIFIED Trino date_diff('month') day-aware via pinned `reference_trino_datediff_dayaware.md` (DateTimeFunctions.java git-tag source): drops fractional, returns complete-units, Jan15→Feb14 = 0, Jan15→Feb15 = 1.
-
-Minor (-0.25 Compl): the day/31 approximation matches Oracle EXACTLY for within-1-month spans but can drift up to ~1/31 from Oracle's piecewise-day-aware formula on multi-month spans (e.g., 6 weeks Jan15→Mar1 Oracle=1+17/31=1.548 vs day/31=42/31=1.355) — responder didn't surface that the approximation has bounded drift on >1-month spans; engineer using this for accrual could see ~3% disagreement vs Oracle on quarterly aggregates. Practical impact bounded; the responder correctly hedged "use only if proration/accrual NEEDS the fraction" steering away from day/31 when integer date_diff suffices.
-
-No imported-prior slip, no broken-secondary alt, no fabrication.
+**Watch close shape**: iter1215 was the original strpos-3-arg ceiling, iter1268 was a 1st-angle re-probe (then NEAR-CLOSE pending unhinted angle), this iter1270 Q4 is the unhinted 2nd-angle re-probe via Oracle INSTR migration phrasing → fully CLOSED. No imported-prior slip, no broken-secondary alt, no over-warning. Clean canonical for INSTR → strpos Nth-occurrence migration.
 
 ---
 
-## Verification results (judge WebSearch/WebFetch)
+## Patterns and verdicts
 
-| Verify | Source | Result |
-|---|---|---|
-| Q1 split literal-delimiter + UNNEST one-row-per-element | trino.io/docs/467/functions/string.html | CONFIRMED — split(string, delimiter[, limit]); delimiter literal not regex |
-| Q2 QUALIFY absent in Trino 467 + ROW_NUMBER subquery+outer WHERE canonical | trino.io/docs/467/sql/select.html | CONFIRMED — QUALIFY not in SELECT grammar; canonical pattern documented |
-| Q3 ephemeral = compile-time CTE inlining, no DB object, recommend <2 downstreams | docs.getdbt.com/docs/build/materializations | CONFIRMED — "interpolate code into dependent models using a CTE"; docs recommend "one or two downstream models" |
-| Q4 Oracle MONTHS_BETWEEN 31-day fractional convention | docs.oracle.com MONTHS_BETWEEN + pinned reference_trino_datediff_dayaware | CONFIRMED — 31-day convention verbatim; Trino date_diff day-aware complete-units verbatim from git-tag source |
+- **iter1255 bloom-CREATE-TABLE-syntax watch did NOT cleanly close**: WITH placement IS fixed (the iter1255-specific slip did not recur), but the responder synthesized TWO NEW parse-blocking errors in the example body (PRIMARY KEY constraint + cols+AS-SELECT mix). This is the same synthesis-ceiling pattern as iter1255 — responder lands the load-bearing dialect fact correctly but mangles peripheral syntax when constructing a fresh full CREATE example. NEW SOFT WATCH opened to re-probe under varied phrasings; if recurrence under different framings, escalate to LIGHT FIX-A near the bloom-filter keyword zone.
 
----
+- **iter1258 SELECT-*-EXCEPT fabrication watch CLOSES cleanly**: opposite-direction recovery — responder correctly DENIES the BigQuery/Databricks feature exists in Trino 467 and offers Trino-native workarounds. Minor scoring shave for not naming dbt_utils.star as the canonical dbt answer, but the core fabrication direction is fully corrected.
 
-## Explicit slip-status statement (per judge prompt)
+- **iter1215/1268 strpos-3-arg ceiling CLOSES**: 2nd-angle unhinted re-probe successful (Oracle INSTR migration framing did not hint "use the 3-arg form"); responder reaches strpos(string, substring, instance) 3-arg form with negative-from-end and 0-if-not-found semantics. Two consecutive successful angles on a previously-ceilinged primitive.
 
-1. **iter1268 Q2 QUALIFY-pulled-into-Trino slip recurred?** NO — Q2 this iter is CORRECT. Responder explicitly refuted QUALIFY availability ("Trino 467 does NOT support QUALIFY (Snowflake)") and used the canonical subquery + outer WHERE rn<=3 form, with a RANK() variant correctly described for tie-keeping behavior. The engineer's prompt did contain a "no QUALIFY" hint, so this is a 1st-angle hinted re-probe rather than unprompted recall — recommend 2nd-angle re-probe within 4-8 iters under "top 3 per group" framings WITHOUT the no-QUALIFY hint before declaring fully bulletproofed.
+- **No FIX-A recommended this iter** per `feedback_synthesis_ceiling_stop_churning.md` and `feedback_new_card_over_attracts_adjacent.md`: PRIMARY-KEY defang is maximally anchored (24 occurrences across 5 resources); cols+AS-SELECT-mix is similarly anchored; responder slips are on copy-pasteable example bodies under synthesis pressure, not on the load-bearing dialect facts. Adding more defang risks over-attraction without addressing the Haiku synthesis ceiling.
 
-2. **Errors this iter?** None load-bearing. Two minor shaves: Q3 didn't surface the dbt-docs-listed "ephemeral makes debugging harder" con + didn't reinforce that Trino view overhead is trivial; Q4 didn't surface that the day/31 approximation has bounded ~1/31 drift from Oracle on multi-month spans. Neither shave triggers FIX-A.
+- **All 4 required topics touched remain PASSED** post-update.
 
-3. **FIX-A / new watch?** NO FIX-A this iter. NO NEW WATCH. The iter1268 Q2 QUALIFY watch closes to NEAR-CLOSE (needs 2nd-angle unhinted re-probe). Other open watches carry over: iter1268 Q3 grants-service-account-USER-vs-ROLE (soft); iter1267 Q1+Q2 example-GROUP-BY-shape (soft); iter1215 strpos-3-arg (NEAR-CLOSE, needs 2nd angle); iter1260 Q1 CDC-MERGE-multi-event-dedup; iter1258 Q3 SELECT-*-EXCEPT; iter1255 Q1 bloom-CREATE-syntax; iter1248 Q3 MATCH_RECOGNIZE-adjacency; iter1229 @v1-Spark.
-
----
-
-## Topic score updates
-
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| Analytical query patterns on Iceberg+Trino (Q1 5.0 + Q2 5.0) | 4.4960 / 195 | 4.5012 / 197 | +0.0052 |
-| Improving complex SQL performance on Trino with dbt (Q3 4.875) | 4.4697 / 78 | 4.4748 / 79 | +0.0051 |
-| Oracle PL/SQL → dbt + Trino SQL migration (Q4 4.9375) | 4.4996 / 237 | 4.5015 / 238 | +0.0019 |
-
-All required topics PASSED. Thinnest topic remains Query performance basics (4.1953/38).
-
----
-
-## Pattern observation across recent iters
-
-iter1269 = 4.95 STRONG PASS, recovers cleanly from the iter1268 4.00 PASS (single-Q2 QUALIFY slip) and iter1267 4.0625 PASS (broken-example-shape slips). Three consecutive iters covered different failure modes (broken-example-shape → foreign-clause-pulled → clean recovery), and the recovery this iter REFUTED the iter1268 imported-prior explicitly — confirming the slip was per-instance synthesis variance, not a resource defect. No churn justified.
-
-Continue BREADTH probing under the unhinted-framing principle: re-probe top-N-per-group AND fan-out-dedup framings WITHOUT the "engineer KNOWS no QUALIFY" hint within 4-8 iters; if responder lands the canonical subquery form unprompted, iter1268 Q2 watch fully closes.
+- **Score impact**: Overall 4.39 down from iter1269's 4.95 due to Q1 example errors. Topic margins still healthy.
