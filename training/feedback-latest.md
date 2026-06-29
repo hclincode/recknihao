@@ -1,110 +1,170 @@
-# Iter 1270 — Judge Feedback
+# Iter 1271 — Judge Feedback
 
-**Overall: 4.39 PASS** (Q1 3.25 / Q2 5.00 / Q3 4.3125 / Q4 5.00)
+**Overall: 3.59 BORDERLINE PASS** (Q1 2.00 / Q2 3.00 / Q3 4.625 / Q4 4.75)
 
-**Watch closures:**
-- **iter1258 SELECT * EXCEPT fabrication WATCH → CLOSES.** Responder correctly DENIES Trino 467 supports `SELECT * EXCEPT (col1, col2)` (opposite-direction recovery from iter1258's fabrication).
-- **iter1215/1268 strpos-3-arg ceiling WATCH → CLOSES.** 2nd-angle unhinted re-probe via Oracle INSTR migration; responder lands `strpos(string, substring, instance)` 3-arg with negative-from-end + 0-if-not-found, source-verified.
+The pass-loop continues but this iter is the THINNEST in many sweeps because **Q1 REGRESSED on the very thing iter1255 + iter1270 had landed correctly** (parquet_bloom_filter_columns IS a valid Trino 467 CREATE TABLE property — only ALTER SET PROPERTIES is 469+). Q2 mechanism right but answered the WRONG question (longest streak vs current/most-recent streak the engineer explicitly asked for, with worked example).
 
-**Watch status changed:**
-- **iter1255 bloom-CREATE-TABLE-syntax WATCH → MUTATED (NOT closed).** The specific iter1255 syntax slip (WITH inside col-list parens + `USING ICEBERG` Spark suffix) did NOT recur — WITH placement IS now correct after closing paren of column list. BUT TWO NEW parse-blocking errors appeared in the SAME CREATE example: (1) `PRIMARY KEY (device_id)` inside column-list, (2) typed column list `(device_id UUID NOT NULL, model VARCHAR, ...)` mixed with `AS SELECT ...`.
+**Q1 verdict — RESOURCE-SOURCED REGRESSION + r17 §713/§1012 reconcile is the RIGHT fix.**
+- VERIFIED via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): canonical example shows `CREATE TABLE test_table (c1 INTEGER, c2 DATE, c3 DOUBLE) WITH (format='PARQUET', location='/var/example_tables/test_table', parquet_bloom_filter_columns = ARRAY['c1','c2'])`. **parquet_bloom_filter_columns IS in the 467 CREATE TABLE property allow-list** — verbatim docs.
+- ALTER TABLE SET PROPERTIES list in the same docs **does NOT include parquet_bloom_filter_columns** in 467 (only `format`, `format_version`, `partitioning`, `sorted_by`, `object_store_layout_enabled`, `data_location`). The ALTER form for parquet_bloom_filter_columns landed in 469+ per PR #24573.
+- Responder said "Trino 467 CANNOT set bloom filters at CREATE TABLE time. parquet_bloom_filter_columns is Trino 469+, not available on 467" — **FACTUALLY WRONG, OPPOSITE direction**. Recommended Spark `ALTER SET TBLPROPERTIES write.parquet.bloom-filter-enabled.column.key_hash` + Spark rewrite_data_files for a brand-new table where the obvious answer is one Trino `CREATE TABLE ... WITH (parquet_bloom_filter_columns=ARRAY['key_hash'])` statement.
+- Never gave the engineer the asked CREATE TABLE statement.
+- Responder cited r17 §1012-1013 — and the iter1270 state confirms r17 carried the OVER-BROAD "469+/Spark-side bloom" framing that contradicts the CORRECT r03 §474 / §469 / §563 + r18 §1251 (which say CREATE-WITH works on 467). The iter1270 r03 copy-attractor FIX-A did NOT prevent this regression because the responder pulled from r17's wrong claim, not r03 — confirming the keyword-magnet was sitting on the WRONG resource.
+- **r17 §713 + §1012 reconcile this iter is the RIGHT fix**: scoping "469+" strictly to the ALTER SET PROPERTIES form + naming CREATE-WITH-works-on-467 + cross-ref r03 §474 should close the regression loop, because the responder's chosen citation now agrees with r03/r18.
+- This is the THIRD instance of "grep ALL resources for a wrong claim" reconcile (after iter1194/1195 optimize-clears-position-deletes r28 ↔ r13 sibling, and the iter1168 migrate-is-native r21/r17 reconcile). Pinned `feedback_reconcile_dont_append.md` validated again.
 
-**New soft watch:** `iter1270 Q1 PRIMARY-KEY-in-Trino-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip on bloom-filter example`.
+**Q2 verdict — LONGEST vs CURRENT MISREAD on a worked-example question. Accuracy/completeness ding.**
+- Gaps-and-islands mechanism (LAG + flag + SUM running over → streak_id, off SELECT DISTINCT activity_date) is the textbook Trino approach and is correct.
+- BUT the engineer EXPLICITLY asked for the **CURRENT/MOST-RECENT** consecutive-days streak, with the worked example **"active Mon-Wed, skip Thu, back Fri-Sat → current streak = 2"** (longest = 3). Responder framed the answer as "LONGEST streak per user" and computed `MAX(streak_len)`, which returns 3 for the example — the WRONG answer.
+- The correct final aggregation: pick the streak_id containing each user's MAX(activity_date), then COUNT(*) for that streak_id. A clean form is `SELECT user_id, COUNT(*) AS current_streak FROM streaks WHERE (user_id, streak_id) IN (SELECT user_id, MAX(streak_id) FROM streaks GROUP BY user_id) GROUP BY user_id` (streak_id is monotonically increasing within each user, so MAX(streak_id) = latest streak).
+- This is a longest-vs-current FRAMING misread on a question with an explicit worked example — the engineer's paste-and-run gets the wrong number on the very example they gave.
+
+**Q3 verdict — CLEAN PASS.** Built-in `relationships` generic test correctly named; schema.yml `data_tests: - relationships: {to: ref('customers'), field: customer_id}` shape verified against [docs.getdbt.com data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) (relationships listed among the 4 built-in generic tests; flat-form syntax still compiles though dbt 1.10+ favors `arguments:` nesting — both work). `source()` variant for raw external sources correctly mentioned. NOT EXISTS / anti-join compilation framing is the correct mental model (dbt docs don't state the exact SQL but the underlying pattern is a `SELECT child.field FROM child WHERE child.field NOT IN (SELECT field FROM parent) AND child.field IS NOT NULL` shape; zero rows = pass).
+
+**Q4 verdict — CLEAN PASS.** DECODE absent from Trino 467 confirmed via [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html). Simple CASE shorthand `CASE plan_tier WHEN 'starter' THEN 1 WHEN 'growth' THEN 2 WHEN 'enterprise' THEN 3 ELSE 0 END` is the less-verbose Trino form. NULL caveat is the load-bearing migration trap: Oracle DECODE treats NULL=NULL as match, but Trino simple-CASE uses `=` equality which returns UNKNOWN on NULL → `WHEN NULL` never fires. Correct routing to searched CASE `WHEN plan_tier IS NULL THEN ... FIRST`.
 
 ---
 
 ## Per-question scores
 
-### Q1 — Iceberg device_registrations CREATE TABLE with parquet_bloom_filter_columns on device_id UUID
+### Q1 — NEW Iceberg api_keys CREATE TABLE with parquet_bloom_filter_columns on key_hash VARCHAR
 
-**Score 3.25** (Acc 2.5 / Clar 4.0 / Prac 2.5 / Compl 4.0)
+**Score 2.00** (Acc 1.0 / Clar 3.5 / Prac 1.5 / Compl 2.0)
 
-**Bloom-filter facts CORRECT and iter1255 WITH-placement slip FIXED.** WITH-clause placement (after column-list closing paren, not inside it), 467 CREATE TABLE works natively, 469+ for ALTER SET PROPERTIES, CTAS-rebuild as 467-only workaround for existing tables, Spark TBLPROPERTIES as alternative.
+**REGRESSION — directly opposite-direction error to iter1255+iter1270, which both stated CREATE-with-bloom works on 467.**
 
-VERIFIED via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): canonical example shows `CREATE TABLE test_table (c1 INTEGER, c2 DATE, c3 DOUBLE) WITH (format='PARQUET', parquet_bloom_filter_columns = ARRAY['c1','c2'], location='/var/...')` — WITH after closing paren of column-list, parquet_bloom_filter_columns inside WITH (not inside column defs). Matches responder's stated placement rule.
+The responder said "Trino 467 CANNOT set bloom filters at CREATE TABLE time. parquet_bloom_filter_columns is Trino 469+, not available on 467" — **FACTUALLY WRONG**. Then offered Spark `ALTER TABLE ... SET TBLPROPERTIES write.parquet.bloom-filter-enabled.column.key_hash = true` + Spark `rewrite_data_files`, and hedged "once cluster upgrades to 469+, set at CREATE via WITH (parquet_bloom_filter_columns=ARRAY[...])". The 469+ hedge is BACKWARDS — CREATE-with works on 467 today; only ALTER SET PROPERTIES is 469+.
 
-**TWO NEW PARSE-BLOCKING ERRORS in the CREATE example body:**
+**Verification:**
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) canonical example verbatim shows `CREATE TABLE test_table (c1 INTEGER, c2 DATE, c3 DOUBLE) WITH (format='PARQUET', location='/var/example_tables/test_table', parquet_bloom_filter_columns = ARRAY['c1','c2'])` — bloom WITH-clause property is FIRST-CLASS on 467 CREATE TABLE.
+- Same docs page lists modifiable-via-ALTER-SET-PROPERTIES properties as `format`, `format_version`, `partitioning`, `sorted_by`, `object_store_layout_enabled`, `data_location` — parquet_bloom_filter_columns is NOT in this list for 467 (the ALTER form is the 469+ addition per PR #24573).
 
-1. **`PRIMARY KEY (device_id)` inside the column list.** VERIFIED via WebFetch of [trino.io/docs/467/sql/create-table.html](https://trino.io/docs/467/sql/create-table.html): the published grammar shows column definitions as `{ column_name data_type [NOT NULL] [COMMENT ...] [WITH (...)] | LIKE existing_table }` — NO PRIMARY KEY, FOREIGN KEY, UNIQUE, CHECK, or named CONSTRAINT productions exist. Trino 467 PARSE ERROR (`mismatched input 'PRIMARY'`). Engineer who copy-pastes hits this at parse time. **Resources MAXIMALLY DEFANG this**: r23 §3 §30-56 has a full "Trino 467 CREATE TABLE: what IS vs IS NOT supported" matrix explicitly listing PRIMARY KEY as a parse-error, plus the "use NOT NULL + dbt unique test" workaround; r27 §2064 + r13 + r10 + r03 all defang too (24 occurrences across 5 resources). Resource fix would not change behavior — this is a responder synthesis ceiling on a copy-pasteable CREATE example.
+**Resource-source check — RESOURCE DEFECT confirmed and r17 §713/§1012 reconcile is RIGHT fix.**
 
-2. **Column-type list mixed with `AS SELECT ...`.** VERIFIED via WebFetch of [trino.io/docs/467/sql/create-table-as.html](https://trino.io/docs/467/sql/create-table-as.html): Trino CTAS synopsis is `CREATE [OR REPLACE] TABLE [IF NOT EXISTS] table_name [(column_alias, ...)] [COMMENT ...] [WITH (...)] AS query [WITH [NO] DATA]` — the optional parenthesized list is COLUMN NAME ALIASES ONLY, no types. Example shown: `CREATE TABLE orders_column_aliased (order_date, total_price) AS SELECT orderdate, totalprice FROM orders`. Mixing typed columns (`device_id UUID NOT NULL, model VARCHAR, ...`) with `AS SELECT ...` is invalid. Two legal forms: (A) `CREATE TABLE name (typed col list) WITH (...)` — NO AS SELECT, then `INSERT INTO name SELECT ...`; (B) `CREATE TABLE name [(name aliases)] WITH (...) AS SELECT ...` — column types are INFERRED from the SELECT, not declared.
+The responder cited r17 §1012-1013 — which carried the OVER-BROAD "469+/Spark-side bloom write" framing inherited from iter1254. Per iter1270 state and pinned `reference_trino_parquet_bloom_filter_469.md`, r03 §474/§469/§563 + r18 §1251 had been correctly reconciled to "CREATE-WITH works on 467, ALTER form is 469+", but r17 §713/§1012 was MISSED in that pass — the classic "grep ALL resources for a wrong claim" miss.
 
-**CLASSIFICATION**: Responder synthesis slip on a maximally-defanged CREATE example (PRIMARY KEY defanged in r23/r27 in 24 places). Pattern matches the pinned `feedback_synthesis_ceiling_stop_churning.md` family: responder's mental model of the bloom-property placement IS correct (the load-bearing iter1255 fix landed), but generating a fresh full CREATE example mixes foreign-dialect priors (Oracle/Postgres PRIMARY KEY) and conflates the two CTAS forms.
+The teacher applied a follow-up FIX-A this iter reconciling r17 §713 + §1012 to:
+1. Scope "469+" narrowly to the ALTER SET PROPERTIES form.
+2. Add explicit "CREATE TABLE ... WITH (parquet_bloom_filter_columns=ARRAY[...]) WORKS on 467" framing.
+3. Cross-ref r03 §474 as the canonical copy-pasteable example.
 
-**NO FIX-A** per `feedback_synthesis_ceiling_stop_churning.md` — adding another PRIMARY-KEY defang card risks `feedback_new_card_over_attracts_adjacent.md` over-attraction; resources are already maximally anchored. The Iceberg bloom CREATE TABLE canonical example at trino.io/docs/467/connector/iceberg.html does not include PRIMARY KEY, so the closest copy-attractive form is already present in resources.
+**This is the right fix.** The keyword-magnet was on r17, not r03 — iter1270's r03 §474 attractor card couldn't prevent the regression because the responder didn't pull from r03 at all. Reconciling r17 in place (not appending another card) collapses the contradictory-resource hazard. Pinned `feedback_reconcile_dont_append.md` applies; this is the 3rd instance of a sibling-resource-defect that needed grep-all-resources discovery (after iter1194 optimize-clears-position-deletes r13 sibling and iter1168 migrate-is-native r21 sibling).
 
-**SOFT WATCH**: `iter1270 Q1 PRIMARY-KEY-in-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip` — re-probe bloom-filter-on-NEW-Iceberg-table framings under varied phrasings 4-8 iters. If 2+ recurrences across different framings, escalate to LIGHT FIX-A — but the fix would need to be a copy-attractive standalone bloom CREATE TABLE example placed near the bloom-filter keyword zone with NO PRIMARY KEY and the correct CTAS form (column-name-aliases-only OR no AS SELECT), not another PRIMARY-KEY defang.
+**Scoring rationale.**
+- **Acc 1.0** — directly contradicts the 467 docs canonical example; engineer told "can't on 467" when 467 docs show the syntax verbatim.
+- **Clar 3.5** — sentences read cleanly enough, just teaching the wrong fact confidently.
+- **Prac 1.5** — engineer follows Spark ALTER+rewrite_data_files workflow for a NEW table when a 5-line Trino CREATE TABLE was the right answer; significant wasted setup work.
+- **Compl 2.0** — never gave the asked full copy-pasteable CREATE TABLE statement; never addressed the NO-PRIMARY-KEY confirmation the engineer asked for explicitly.
 
-**Scoring rationale**: Acc 2.5 — bloom facts right but example has 2 parse-blocking errors that prevent it from running. Clar 4.0 — narrative reads cleanly. Prac 2.5 — engineer who copy-pastes the example fails at parse time twice. Compl 4.0 — both CREATE-time and existing-table cases covered, sorted_by mentioned.
+**Watch status:** the iter1270 PRIMARY-KEY + cols-with-AS-SELECT synthesis-slip watch did NOT recur (responder never reached a CREATE statement at all this iter — different regression family). The iter1270 watch stays OPEN (still under-probed at 1 datapoint); the NEW watch is below.
 
-### Q2 — Monthly-resetting running sum of credits_used per customer (PARTITION BY date_trunc('month', event_date))
+**NEW HARD WATCH `iter1271 Q1 bloom-CREATE-467-vs-469 r17-reconcile FIX-A reach test`** — re-probe bloom-on-NEW-Iceberg-table framings within next 2 iters to verify the r17 §713/§1012 reconcile fired and the responder lands "CREATE-WITH works on 467, ALTER is 469+" cleanly. If the regression recurs, escalate to (a) re-grep ALL resources for any remaining "469+ for CREATE" instances + (b) consider stronger router from "bloom 467" keyword zone to r03 §474.
 
-**Score 5.0** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0)
+### Q2 — Current / most-recent consecutive-days streak per user (worked example: Mon-Wed skip Thu Fri-Sat → current = 2)
 
-Canonical Trino 467 window function:
+**Score 3.00** (Acc 3.0 / Clar 4.0 / Prac 2.5 / Compl 2.5)
+
+**Gaps-and-islands MECHANISM correct; FINAL AGGREGATION answers the wrong question (LONGEST not CURRENT).**
+
+What the responder built:
+1. CTE 1 on `SELECT DISTINCT user_id, activity_date`: `CASE WHEN date_diff('day', LAG(activity_date) OVER (PARTITION BY user_id ORDER BY activity_date), activity_date) = 1 THEN 0 ELSE 1 END AS is_new_streak`.
+2. CTE 2: `SUM(is_new_streak) OVER (PARTITION BY user_id ORDER BY activity_date) AS streak_id`.
+3. Final: `SELECT user_id, MAX(streak_len) FROM (SELECT user_id, streak_id, COUNT(*) AS streak_len FROM streaks GROUP BY user_id, streak_id) GROUP BY user_id`.
+
+The mechanism (LAG + day-diff = 1 flag + running SUM → streak_id) is the textbook Trino gaps-and-islands canonical and is correct. But step (3) returns **LONGEST streak**, not **CURRENT/MOST-RECENT streak**. The engineer's worked example "Mon-Wed (3) skip Thu Fri-Sat (2) → current = 2" pasted into the responder's query returns 3 (longest), not 2 (current). The query does not answer the question.
+
+The correct CURRENT-streak final aggregation is to pick each user's MAX-activity-date streak_id and count its rows:
 
 ```sql
-SELECT customer_id, event_date, credits_used,
-       SUM(credits_used) OVER (
-         PARTITION BY customer_id, date_trunc('month', event_date)
-         ORDER BY event_date
-         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-       ) AS monthly_cumulative_credits
-FROM credit_events
+SELECT user_id, COUNT(*) AS current_streak
+FROM streaks s
+WHERE (user_id, streak_id) IN (
+    SELECT user_id, MAX(streak_id)
+    FROM streaks
+    GROUP BY user_id
+)
+GROUP BY user_id
 ```
 
-PARTITION BY customer_id + date_trunc('month', event_date) groups rows into per-customer-per-month windows; Feb 1 lands in a new partition so the running sum resets to that day's credits_used. ORDER BY event_date with ROWS UNBOUNDED PRECEDING AND CURRENT ROW is the standard cumulative-within-window frame.
+(MAX(streak_id) per user = the latest run, because streak_id is monotonically increasing within each user.)
 
-PARTITION BY accepting expressions like `date_trunc('month', event_date)` is standard SQL window semantics and works in Trino 467 (no requirement to PARTITION BY a base column only). `date_trunc('month', event_date)` returns a date truncated to first-of-month — verified Trino 467 datetime function, returns `date` for `date` input. The frame default for ORDER-BY-with-no-explicit-frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` which for unique event_date per customer-month behaves the same as the explicit `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, but ROWS is the safer explicit form for "running sum row-by-row" semantics and the responder picked correctly.
+Or equivalently, restrict to streaks whose MAX(activity_date) per user matches each user's overall MAX(activity_date).
 
-No imported-prior slip, no broken-secondary alt, no over-warning. Clean canonical for monthly-reset cumulative.
+**Classification.** The responder framed the answer as "longest streak" from the start and never engaged with the engineer's worked example. The "longest" canonical is well-anchored in resources and the responder lifted it cleanly — but lifted the WRONG canonical for the question asked. This is a question-comprehension miss, not a Trino dialect error.
 
-### Q3 — Trino 467 SELECT * EXCEPT (cols) for dbt stg_raw_events 70-col PII drop
+**Resource-source check.** Need to verify whether a CURRENT-streak canonical exists in resources next to the gaps-and-islands canonical. If LONGEST is the only nearby example, the keyword-magnet would pull "current streak" questions into the LONGEST card.
 
-**Score 4.3125** (Acc 4.75 / Clar 4.5 / Prac 4.0 / Compl 4.0)
+**NEW SOFT WATCH `iter1271 Q2 current-vs-longest-streak final-aggregation framing`** — re-probe gaps-and-islands questions under varied framings (current/most-recent vs longest vs total active-day count) for 4-8 iters. If 2+ recurrences where the engineer asks "current" and the responder returns "longest", escalate to LIGHT FIX-A adding a copy-attractive CURRENT-streak final-aggregation block beside the LONGEST canonical with an inline DO-NOT-write "MAX(streak_len) returns longest, not current" defang.
 
-**Correctly DENIES `SELECT * EXCEPT (col1, col2)` — opposite-of-iter1258 recovery, iter1258 fabrication watch CLOSES.**
+**Scoring rationale.**
+- **Acc 3.0** — mechanism right, final aggregation answers the wrong question; the SQL would be technically correct for a "longest" question but the engineer didn't ask that.
+- **Clar 4.0** — narrative clear, three-CTE structure walked cleanly.
+- **Prac 2.5** — engineer pastes the query, gets 3 not 2 on their own worked example, has to debug — significant friction even with the right primitives in hand.
+- **Compl 2.5** — never returned the asked metric (current streak = 2); engineer would need to know the longest-vs-current distinction to repair the final SELECT themselves.
 
-VERIFIED via WebFetch of [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): the keyword `EXCEPT` appears ONLY as the set-difference set operator (rows in first query not in second), NOT as a column-exclusion clause. SELECT items grammar lists `expression`, `row_expression.*`, `relation.*`, `*` — no EXCEPT/EXCLUDE/REPLACE column-modifier. Trino 467 has NO `SELECT * EXCEPT` (BigQuery/Databricks-only feature). Engineer who tries it gets a parse error.
+### Q3 — dbt referential-integrity test (orders.customer_id must exist in customers)
 
-**Workarounds offered**: (a) enumerate via `DESCRIBE table` → copy + delete 4 PII columns; (b) hand-rolled dbt macro using `run_query` against `information_schema.columns WHERE column_name NOT IN ('pii1', ...)` then `SELECT {{ columns|join(',') }} FROM ...`; (c) dbt source-yaml `columns:` key.
+**Score 4.625** (Acc 5.0 / Clar 4.5 / Prac 4.75 / Compl 4.25)
 
-**Acc shave (-0.25)**: minor — the responder did not name the canonical idiomatic answer `{{ dbt_utils.star(from=ref('source'), except=['ssn', 'email', 'phone', 'ip']) }}`. `dbt_utils.star()` is the standard dbt package macro for exactly this "all columns except a few" pattern, generates a comma-separated column list at compile time by introspecting the relation. It's a one-liner the engineer can copy-paste, available as a dbt-labs/dbt_utils package (very widely installed in dbt projects). The hand-rolled run_query macro reproduces what dbt_utils.star does but with more boilerplate.
+**Built-in `relationships` generic test verified verbatim.** [docs.getdbt.com data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) lists `relationships` among the 4 built-in generic data tests; the docs describe it as "validates that all of the records in a child table have a corresponding record in a parent table. This property is referred to as referential integrity. This test automatically excludes NULL values from validation, consistent with how database foreign key constraints work."
 
-**Prac shave (-1.0)**: dbt_utils.star is THE idiomatic dbt answer; not naming it forces the engineer to either type 66 columns by hand or write a custom macro when a 1-line package call exists. Engineer with dbt_utils already installed (very common) would expect that pointer.
+**schema.yml syntax correct.** The responder's `data_tests: - relationships: {to: ref('customers'), field: customer_id}` is the legacy flat-form syntax that still compiles in dbt 1.x. dbt 1.10+ canonical adds an `arguments:` nesting level, but flat form is still supported and is what most production projects use. Note: `field:` should be the PARENT-table primary key column. The engineer's framing ("customer_id must exist in customers") implies customers.customer_id is the PK — if customers uses a different PK column name (e.g. `id`), the responder's `field: customer_id` would be wrong. Mild ambiguity but matches the engineer's naming.
 
-**Compl shave (-1.0)**: missed the canonical dbt_utils.star, missed the dbt-labs/dbt_utils package install step. Source-yaml `columns:` key alone doesn't solve the SELECT problem (it only documents columns, doesn't filter them out of a SELECT *).
+**NOT EXISTS compilation claim is roughly correct.** dbt docs don't quote the exact compiled SQL, but the underlying pattern dbt uses for `relationships` is a `SELECT child.field FROM child LEFT JOIN parent ON child.field = parent.field WHERE parent.field IS NULL AND child.field IS NOT NULL` (anti-join) shape — equivalent to NOT EXISTS. Zero rows returned = pass. Reasonable framing for a Haiku-level explanation.
 
-**Clar shave (-0.5)**: clear overall, but the hand-rolled run_query example will be confusing to a beginner who hasn't written a dbt macro before; pointing at dbt_utils.star first (with the run_query as a fallback) would be more onramping.
+**`source()` variant for raw external sources** correctly mentioned, which is the right routing for testing references from ingested fact tables back to ingested dim tables before dbt models exist for them.
 
-**No resource defect** — confirmed via grep that resources do mention dbt_utils.star in r22 and r28 contexts; the responder's findability gap is on the column-exclusion keyword path, not a resource hole. Synthesis ceiling on the alternative-suggestion shape (per `feedback_responder_broken_secondary_alternative.md` family).
+**Scoring rationale.**
+- **Acc 5.0** — relationships is real, schema.yml shape compiles, source() variant correct.
+- **Clar 4.5** — clean explanation; "anti-join" technical term used without one-sentence zero-assumption framing.
+- **Prac 4.75** — engineer can drop this into schema.yml and run `dbt test` immediately.
+- **Compl 4.25** — minor: didn't surface dbt 1.10+ `arguments:` nested form; didn't surface `where:` filter for partial-table tests; didn't mention severity config (warn vs error). Not load-bearing for the core question.
 
-### Q4 — Oracle INSTR(raw_url, '/', 1, 3) → Trino 3rd-occurrence of '/' (RE-PROBE iter1215/1268 strpos-3-arg ceiling)
+### Q4 — Oracle DECODE(plan_tier, 'starter', 1, 'growth', 2, 'enterprise', 3, 0) → Trino
 
-**Score 5.0** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0)
+**Score 4.75** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.25)
 
-**iter1215/1268 strpos-3-arg ceiling WATCH CLOSES on 2nd-angle UNHINTED re-probe.**
+**No DECODE in Trino 467** — verified via [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html) function index (DECODE is not present; the Oracle/PL/SQL list-of-pairs short-circuit form is Oracle-specific).
 
-Responder: `strpos(raw_url, '/', 3)` — full 3-arg signature `strpos(string, substring, instance) -> bigint`; positive instance counts forward Nth occurrence (1=first, 2=second, 3=third); negative counts from end (-1=last, -2=second-to-last); returns 0 if not found. Position is 1-indexed. `substr(raw_url, strpos(raw_url, '/', 3) + 1)` extracts the path-after-3rd-slash, with the +1 to skip past the slash itself.
+**Simple CASE shorthand correct:** `CASE plan_tier WHEN 'starter' THEN 1 WHEN 'growth' THEN 2 WHEN 'enterprise' THEN 3 ELSE 0 END`. This is the less-verbose form vs searched CASE `CASE WHEN plan_tier='starter' THEN 1 WHEN plan_tier='growth' THEN 2 ...` and is the right migration target.
 
-VERIFIED via WebFetch of [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html): "`strpos(string, substring, instance) -> bigint` — Returns the position of the N-th instance of substring in string. When instance is a negative number the search will start from the end of string. Positions start with 1. If not found, 0 is returned." Responder's signature description matches docs verbatim.
+**NULL caveat correct and load-bearing.** Oracle DECODE matches NULL=NULL as TRUE; Trino simple CASE uses `=` equality which returns UNKNOWN on NULL → `WHEN NULL` never fires (this is ANSI standard behavior in Trino — verified via the conditional expression section of the docs). Correct routing: use searched CASE `WHEN plan_tier IS NULL THEN X` FIRST, then chain the equality branches.
 
-Oracle INSTR(s, '/', 1, 3) translates directly to Trino `strpos(s, '/', 3)` — the Oracle 3rd arg (start position) is fixed at 1 in this case so it collapses to Trino's 2-arg-plus-instance form. Engineer copy-pastes → exact answer.
-
-**Watch close shape**: iter1215 was the original strpos-3-arg ceiling, iter1268 was a 1st-angle re-probe (then NEAR-CLOSE pending unhinted angle), this iter1270 Q4 is the unhinted 2nd-angle re-probe via Oracle INSTR migration phrasing → fully CLOSED. No imported-prior slip, no broken-secondary alt, no over-warning. Clean canonical for INSTR → strpos Nth-occurrence migration.
+**Scoring rationale.**
+- **Acc 5.0** — DECODE absent, simple CASE shape correct, NULL semantics correct.
+- **Clar 4.75** — clean side-by-side with the original DECODE shown; NULL trap explained with the WHY (= NULL → UNKNOWN), not just the WHAT.
+- **Prac 5.0** — engineer can paste-and-run, NULL caveat is exactly the production-migration gotcha they'd hit on a real plan_tier nullable column.
+- **Compl 4.25** — didn't mention `COALESCE` as a NULL→sentinel pre-wrap alternative (`CASE COALESCE(plan_tier, '__null__') WHEN ...`) for cases where NULL handling needs to stay inside the simple-CASE shape. Minor.
 
 ---
 
-## Patterns and verdicts
+## Overall pattern
 
-- **iter1255 bloom-CREATE-TABLE-syntax watch did NOT cleanly close**: WITH placement IS fixed (the iter1255-specific slip did not recur), but the responder synthesized TWO NEW parse-blocking errors in the example body (PRIMARY KEY constraint + cols+AS-SELECT mix). This is the same synthesis-ceiling pattern as iter1255 — responder lands the load-bearing dialect fact correctly but mangles peripheral syntax when constructing a fresh full CREATE example. NEW SOFT WATCH opened to re-probe under varied phrasings; if recurrence under different framings, escalate to LIGHT FIX-A near the bloom-filter keyword zone.
+- **Q1 is a hard regression on a topic that was correctly answered in iter1255 + iter1270.** Root cause: contradictory resources (r17 said 469+, r03/r18 said 467-OK). The responder picked the wrong one. Teacher's r17 §713/§1012 reconcile this iter is the correct fix.
+- **Q2 is a question-comprehension miss on a worked-example question.** Mechanism right, framing wrong, engineer gets the wrong number.
+- **Q3 + Q4 are clean PASSes.**
 
-- **iter1258 SELECT-*-EXCEPT fabrication watch CLOSES cleanly**: opposite-direction recovery — responder correctly DENIES the BigQuery/Databricks feature exists in Trino 467 and offers Trino-native workarounds. Minor scoring shave for not naming dbt_utils.star as the canonical dbt answer, but the core fabrication direction is fully corrected.
+The pass-loop continues — average 3.59 is above the 3.5 threshold — but Q1 is the kind of regression that drags topic averages backwards. The r17 reconcile should close the loop; verify next 1-2 iters.
 
-- **iter1215/1268 strpos-3-arg ceiling CLOSES**: 2nd-angle unhinted re-probe successful (Oracle INSTR migration framing did not hint "use the 3-arg form"); responder reaches strpos(string, substring, instance) 3-arg form with negative-from-end and 0-if-not-found semantics. Two consecutive successful angles on a previously-ceilinged primitive.
+## Watches
 
-- **No FIX-A recommended this iter** per `feedback_synthesis_ceiling_stop_churning.md` and `feedback_new_card_over_attracts_adjacent.md`: PRIMARY-KEY defang is maximally anchored (24 occurrences across 5 resources); cols+AS-SELECT-mix is similarly anchored; responder slips are on copy-pasteable example bodies under synthesis pressure, not on the load-bearing dialect facts. Adding more defang risks over-attraction without addressing the Haiku synthesis ceiling.
+**OPEN (new):**
+- `iter1271 Q1 bloom-CREATE-467-vs-469 r17-reconcile FIX-A reach test` — re-probe bloom-on-NEW-Iceberg-table framings within 2 iters to verify the r17 §713/§1012 reconcile fired.
+- `iter1271 Q2 current-vs-longest-streak final-aggregation framing` — re-probe gaps-and-islands "current" vs "longest" framings 4-8 iters.
 
-- **All 4 required topics touched remain PASSED** post-update.
+**OPEN (carried):**
+- `iter1270 Q1 PRIMARY-KEY-in-CREATE-TABLE + cols-with-AS-SELECT-mix synthesis slip` — did NOT recur this iter (responder never reached a CREATE statement), so watch is uncovered; carry forward.
+- `iter1268 Q3 grants-USER-vs-ROLE`
+- `iter1267 Q1+Q2 example-GROUP-BY-shape`
+- `iter1260 Q1 CDC-MERGE-multi-event-dedup`
+- `iter1248 Q3 MATCH_RECOGNIZE-adjacency`
+- `iter1229 @v1-Spark`
 
-- **Score impact**: Overall 4.39 down from iter1269's 4.95 due to Q1 example errors. Topic margins still healthy.
+## Sources
+
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — parquet_bloom_filter_columns canonical CREATE example + ALTER SET PROPERTIES list (does NOT include bloom on 467)
+- [trino.io/docs/467/functions/list.html](https://trino.io/docs/467/functions/list.html) — DECODE absence + CASE conditional support
+- [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) — relationships built-in generic test
+- [trinodb/trino PR #24573](https://github.com/trinodb/trino/pull/24573) — ALTER SET PROPERTIES for parquet_bloom_filter_columns landed in 469
+- pinned `reference_trino_parquet_bloom_filter_469.md` — CREATE-vs-ALTER cutoff
+- pinned `feedback_reconcile_dont_append.md` — sibling-resource reconcile pattern
