@@ -2008,7 +2008,9 @@ This is the **wrap-the-window-then-compare** fix in its purest form — outer `W
 
 ---
 
-#### LEADING CANONICAL — SECOND-LARGEST / Nth-LARGEST per group: choose `DENSE_RANK` vs `ROW_NUMBER` (do NOT use `RANK` — it leaves GAPS after ties and silently returns nothing) (iter643 PIN — FIX-A)
+#### LEADING CANONICAL — SECOND-LARGEST / Nth-LARGEST per group (the `= N` EXACT case): choose `DENSE_RANK = N` vs `ROW_NUMBER = N` (do NOT use `RANK = N` — gaps after ties silently return nothing) (iter643 PIN — FIX-A)
+
+> **⚠️ SCOPE — this canonical is ONLY for the `= N` EXACT-position case ("the 2nd-highest", "the Nth-largest"). If your question is "TOP N rows per group INCLUDING everyone tied at the Nth-place cutoff" (a `<= N` RANGE — e.g. "top 3 reps per region, show both reps tied for 3rd"), this is the WRONG section — go to the [TOP-N-WITH-TIES canonical at §2098 below](#leading-canonical--top-n-rows-per-group-with-ties-fetch-first--rank--n-not-dense_rank--n-iter714-pin--fix-a2). There the answer is `RANK() <= N` (NOT `DENSE_RANK() <= N`). The "do NOT use RANK" warning here applies to `= N` EXACT only — for `<= N` RANGE-with-ties, `RANK()` is the CORRECT tool: boundary-tied rows all get rank N, so all pass `<= N`. Do NOT carry the "avoid RANK" rule into the `<= N` case.**
 
 > **READ THIS FIRST if your question contains any of these keywords:** `second-largest order per customer`, `second-highest amount per customer`, `runner-up amount per group`, `2nd-largest per group`, `third-highest per group`, `Nth-largest per group`, `Nth-highest per group`, `the next-biggest after the max`, `2nd-ranked by amount per group`, `second-best per customer`, `second-most per group`, `second-place per partition`, `who is in second place per group`, `the runner-up`, `Nth from the top per group`, `second-distinct-highest amount`, `second-distinct value per group`, `RANK vs DENSE_RANK vs ROW_NUMBER`, `which ranking function for Nth-per-group`, `WHERE rank = 2`, `WHERE dense_rank = 2`, `WHERE rn = 2 amount`. Verified at [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html) on 2026-06-07.
 
@@ -2155,9 +2157,28 @@ ORDER BY sales DESC;
 - `ROW_NUMBER() <= 3` → exactly 3 rows: `100, 100, 90`. If asked for `<= 4`, exactly 4 rows: `100, 100, 90, 80` (only ONE of the three 80s — picked arbitrarily; add a tiebreaker to the `ORDER BY` to make it deterministic).
 - `DENSE_RANK() <= 3` → rows with `DENSE_RANK` in `{1, 1, 2, 3, 3, 3}` = sales `100, 100, 90, 80, 80, 80` (6 rows — the **top 3 distinct values**, NOT the top 3 positions).
 
-**INLINE DEFANG — the iter713 false claim about `RANK() <= N`.**
+**PER-GROUP worked example (the iter1245 shape — "top 3 reps per region, include reps tied at the 3rd-place cutoff").** `FETCH FIRST` is a query-level clause and has NO per-partition form, so for top-N WITHIN EACH GROUP use **`RANK() OVER (PARTITION BY g ORDER BY x DESC) <= N`**:
 
-> -- ❌ WRONG CLAIM (iter713 Q1 fabrication): "`RANK() OVER (...) <= 10` would miss row #10 if it ties with row #9". FALSE. **`RANK() <= N` returns ALL rows tied at rank `<= N`, INCLUDING all ties at the boundary.** RANK's gap-after-ties behavior (1, 1, 3) means it never assigns `2` if there's a tie at `1`, but `<= N` still captures both tied rows. The bug being conflated is `WHERE rank = N` (which CAN silently miss rows if the sequence skips N — see the §3.1G Nth-LARGEST canonical above). DO NOT REPEAT.
+```sql
+-- ✅ top 3 reps per region, ALL reps tied at the 3rd-place cutoff included
+WITH ranked AS (
+  SELECT region, rep_name, deals_closed,
+         RANK() OVER (PARTITION BY region ORDER BY deals_closed DESC) AS rnk
+  FROM sales_reps
+)
+SELECT region, rep_name, deals_closed
+FROM ranked
+WHERE rnk <= 3                       -- RANK, NOT DENSE_RANK
+ORDER BY region, deals_closed DESC;
+```
+
+For one region with deals `60, 55, 47, 47, 40`: `RANK()` = `1, 2, 3, 3, 5`, so `rnk <= 3` returns `60, 55, 47, 47` — **BOTH reps tied at 47 (rank 3) appear** (4 rows). `ROW_NUMBER() <= 3` would have dropped one of the 47s. **`DENSE_RANK() <= 3` is the WRONG tool here** — it numbers DISTINCT deal-counts (`1, 2, 3, 3, 4`), so on data with a tie ABOVE the cutoff (e.g. `60, 60, 55, 47, 47, 40` → DENSE_RANK `1, 1, 2, 3, 3, 4`) `<= 3` reaches the 47s as "3rd distinct value" and returns the wrong set (the top-3 *deal-count tiers*, not the top-3 *reps*). Use `RANK() <= N` for "top N reps/rows including boundary ties"; reserve `DENSE_RANK` for "top N distinct VALUE-tiers".
+
+**INLINE DEFANG — the iter713 + iter1245 false claims about `RANK() <= N`.**
+
+> -- ❌ WRONG CLAIM #1 (iter713 Q1 fabrication): "`RANK() OVER (...) <= 10` would miss row #10 if it ties with row #9".
+> -- ❌ WRONG CLAIM #2 (iter1245 Q1 fabrication): "RANK ties get the same rank then the next rank skips (1,2,2,4), so `RANK() <= N` still doesn't include all tied reps at position N — use DENSE_RANK instead."
+> -- BOTH FALSE. **`RANK() <= N` returns ALL rows tied at rank `<= N`, INCLUDING every tie at the boundary.** Two reps tied at the 3rd-place cutoff BOTH get `RANK = 3`; both satisfy `<= 3`; both appear. RANK's gap-after-ties (1, 1, 3) means the value `2` is never assigned, but a `<= N` RANGE filter does not care about gaps — it captures every row at rank N. The gap only bites `WHERE rank = N` EXACT (which CAN skip past N — that is the §2011 `= N` canonical, a DIFFERENT question). For "top N rows/reps per group INCLUDING boundary ties", `RANK() <= N` is the CORRECT choice; `DENSE_RANK() <= N` over-returns (top-N distinct value-tiers). DO NOT REPEAT.
 
 **DO NOT WRITE — the wrong shapes for "top N including ties":**
 

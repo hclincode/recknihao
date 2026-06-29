@@ -1,143 +1,164 @@
-# Iteration 1244 — Judge Feedback
+# Iteration 1245 — Judge Feedback
 
 ## Verdict
 
-**Overall: 4.328 — PASS (BUT Q2 IS A REAL FAIL — wrong lead recommendation on top-N-with-ties).** Per-Q scores: Q1=4.875, Q2=2.875, Q3=4.75, Q4=4.8125. Average (4.875+2.875+4.75+4.8125)/4 = 17.3125/4 = **4.328**.
+**Overall: 3.969 — PASS BUT Q1 IS A HARD RE-PROBE FAIL — the iter1244 routing FIX-A DID NOT REACH.** Per-Q scores: Q1=2.875, Q2=4.375, Q3=4.75, Q4=3.875. Average (2.875+4.375+4.75+3.875)/4 = 15.875/4 = **3.969**.
 
-**Watch closure update**: `iter1243 date_trunc-DATE-literal-pruning fragility-overstatement` watch **CLOSES** on first re-probe (Q1 this iter responder LED with "RELIABLY prunes" — the iter1243 corpus-reconcile FIX-A REACHED).
+The headline finding: **iter1244's routing FIX-A (r23 §2011 4th DECIDE-FIRST router + §2098 PER-GROUP keyword extension) did NOT reroute the responder.** Responder again recommended `DENSE_RANK() <= N` for "top N rows per group including boundary ties" AND falsely claimed `RANK() <= N` "doesn't include all tied reps at position N". Same wrong shape as iter1244 Q2, despite the FIX-A landing the day before. For the engineer's exact data the output happens to coincide (only-tied-at-boundary case), but the framing + the RANK dismissal are factually wrong general rules.
 
-**New issue**: Q2 responder applied the WRONG canonical (DENSE_RANK ≤ N) to a top-N-with-ties shape that has an explicit defang at r23 §2163. **LIGHT FIX-A WARRANTED** — cross-link strengthening at r23 §2011 to route "top-N range per group with ties at cutoff" → §2098 (see §4 below).
-
----
-
-## Q1 — date_trunc('month', order_ts) on day(order_ts)-partitioned table: still prunes or full scan?
-
-**Score: 4.875** (Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 5.0)
-
-**Verdict: CORRECT — watch CLOSES.** Responder LED with "Yes, Trino 467 STILL prunes — NOT a full scan" and correctly identified default-on UnwrapDateTruncInComparison / UnwrapYearInComparison / UnwrapCastInComparison as the rewrite rules that turn `date_trunc('month', order_ts) = DATE '2026-06-01'` into a bare-range `order_ts >= TIMESTAMP '2026-06-01' AND order_ts < TIMESTAMP '2026-07-01'` which then pushes to Iceberg pruning. EXPLAIN verification (look for `constraint=` on TableScan) is the correct diagnostic. Genuine pruning-killers correctly named (LOWER/SUBSTR/UDFs on partition column).
-
-**Verification**: matches pinned `reference_trino_unwrap_temporal_predicates.md` (467-tag UnwrapDateTruncInComparison.java verified, SupportedUnit = HOUR/DAY/MONTH/YEAR). The iter1243 corpus-reconcile FIX-A (r22 §3261, r28 §710/§1093/§1097/§1319) succeeded — responder lifted the correct framing this iter, not the stale fragility framing.
-
-**Iter1243 date_trunc-pruning fragility-overstatement watch: CLOSES on first re-probe (24th consecutive 1st-re-probe-CLOSE).**
+Q2/Q3 clean. Q4 has a Trino-fix-correct + Oracle-premise-FALSE issue (Oracle GREATEST also returns NULL on any NULL — does NOT ignore NULLs — engineer's premise was false and responder reinforced it).
 
 ---
 
-## Q2 — Top-5 accounts by revenue per plan_tier, include boundary ties: which ranking function?
+## Q1 — Top-N-per-group with boundary ties (RE-PROBE of iter1244 FIX-A) — **2.875 FAIL**
 
-**Score: 2.875** (Acc 2.5 / Clar 3.5 / Prac 2.5 / Compl 3.0)
+**Engineer's data**: 3rd and 4th sales reps both closed 47 deals within a region; ROW_NUMBER<=3 drops one of them. Wants top-3-per-region with all boundary ties included. Which ranking function?
 
-**Verdict: WRONG LEAD RECOMMENDATION.** Responder recommended **DENSE_RANK() OVER (PARTITION BY plan_tier ORDER BY total_revenue DESC) ≤ 5** as the canonical "top 5 including ties" answer. This is wrong — it returns the top-5 DISTINCT REVENUE VALUES per group, NOT the top-5 ACCOUNTS-by-position including ties at the cutoff. The two are different shapes:
+**Responder said**: "Use `DENSE_RANK()`, not `ROW_NUMBER()` or `RANK()`." Characterization of the three:
+- ROW_NUMBER 1,2,3,4 — drops ties: correct.
+- **"RANK() — ties get the same rank, then the next rank skips (1,2,2,4). Still doesn't include all tied reps at position N."** — FACTUALLY WRONG.
+- DENSE_RANK 1,2,2,3 "All tied reps at rank N are included" — over-generalized.
+- Recommended SQL: `DENSE_RANK() OVER (PARTITION BY region ORDER BY deals_closed DESC) AS dense_rank ... WHERE dense_rank <= 3`.
 
-| Shape | Correct function | Why |
-|---|---|---|
-| **Top N rows INCLUDING everyone tied at the Nth position** (the asked shape — "top 5 accounts; both tied accounts at the boundary should appear") | **`FETCH FIRST 5 ROWS WITH TIES`** OR **`RANK() OVER (...) ≤ 5`** | RANK sequence `1,2,3,4,5,5,7,...` — both tied rows at position 5 pass `≤ 5`; gap-after-ties at rank 6/7 is HARMLESS for a `≤ N` range filter. |
-| **Top N DISTINCT value-tiers** (e.g. "top 3 price tiers") | `DENSE_RANK() ≤ N` | DENSE_RANK sequence `1,1,2,3,3,4` — returns ALL rows whose value lands in one of the top N distinct values; row count can be much larger than N. |
-| **The Nth-largest DISTINCT value** (e.g. "second-highest amount") | `DENSE_RANK() = N` | This is the §2011 LEADING CANONICAL — but it's the EXACT case, not the range case. |
+**Correct (verified at [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html))**:
+- `RANK()` returns "one plus the number of rows preceding the row that are not peer with the row. Thus, tie values in the ordering will produce gaps in the sequence." For values [60, 55, 47, 47] DESC, RANK = 1, 2, 3, 3. **`RANK() <= 3` returns all 4 rows including both tied 47s.** This IS the canonical "top N rows including boundary ties" semantic — matches SQL Server's `TOP N WITH TIES` and ANSI `FETCH FIRST n ROWS WITH TIES`.
+- `DENSE_RANK()` is "similar to rank(), except that tie values do not produce gaps." For [100, 95, 95, 80, 75] DESC, DENSE_RANK = 1, 2, 2, 3, 4. **`DENSE_RANK() <= N` returns top N DISTINCT VALUE-TIERS, not top N positions.** With ties ABOVE the boundary it OVER-RETURNS rows.
 
-**The responder's reasoning is muddled**: it claimed "RANK() with rank ≤ 5 would get rows at ranks 1,1,3,4,5 (7 rows, skipping rank 2)". That's mathematically wrong — five ranks `{1,1,3,4,5}` is 5 rows, not 7, and the gap at rank 2 is BEFORE the filter cutoff so it doesn't drop anything. The responder also claimed DENSE_RANK ≤ 5 in the 5-account boundary-tie example returns 6 rows — that count happens to be right for the BOUNDARY case but the responder fails to surface the danger case: when ties exist ABOVE the boundary, DENSE_RANK ≤ 5 returns MORE than the true top-5-by-position. E.g. with revenues `1000,1000,800,700,600,500,500`:
-- RANK ≤ 5: `1,1,3,4,5` → 5 rows = the true top-5 positions (including the boundary case naturally).
-- DENSE_RANK ≤ 5: `1,1,2,3,4,5,5` → 7 rows — returns the top-5 DISTINCT values, which over-fires beyond "top 5 accounts."
+**The responder's "RANK() still doesn't include all tied reps at position N" claim is the inverse of reality.** For the boundary ties at position 3 (deals=[60,55,47,47] → RANK=1,2,3,3), both 47-reps get rank 3, and rank 3 ≤ 3 → both are returned. The "gap to rank 4 after the ties" only matters for the row AFTER the ties (excluded), NOT for the tied rows themselves (included).
 
-**Resource check — the canonical IS already correctly authored:**
-- **r23 §2098 LEADING CANONICAL** (iter714 PIN — FIX-A2): *"TOP-N INCLUDING TIES AT THE CUTOFF — use `FETCH FIRST n ROWS WITH TIES` or `RANK() ≤ N` (NOT `DENSE_RANK() ≤ N`, NOT `ROW_NUMBER() ≤ N`)"*.
-- **r23 §2163 DEFANG** explicitly bans `DENSE_RANK() OVER (ORDER BY sales DESC) ≤ 10` for "top 10 leaderboard with ties at the 10th spot" with the exact wrong-shape reason.
-- **r23 §2134 table** has the side-by-side disambiguation of "top N rows incl. ties" vs "top N distinct value-tiers".
+**For the engineer's EXACT data**: Since the tie is ONLY at the 3rd-place boundary (no ties above), DENSE_RANK<=3 and RANK<=3 happen to return the same rows. So the SQL "works" for this case. But the framing teaches the wrong general rule — if a future query has ties above the boundary (e.g. two reps tied at 1st), DENSE_RANK<=3 will over-return.
 
-So the resource is RIGHT and the responder mis-routed. The likely failure mode: Haiku keyword-matched "Nth-largest per group" / "ties consume the slot" at r23 §2011 (the LEADING CANONICAL for Nth-largest DISTINCT VALUE → DENSE_RANK = N) and over-applied DENSE_RANK to a top-N range case at §2098 — even though §2098 explicitly defangs that.
+### DID THE iter1244 FIX-A REACH? — **NO**
 
-**Verified via WebFetch of [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) + [Microsoft Learn RANK](https://learn.microsoft.com/en-us/sql/t-sql/functions/rank-transact-sql) + [Erik Darling TOP WITH TIES](https://erikdarling.com/a-little-about-top-with-ties-in-sql-server/)**: SQL Server's `TOP N WITH TIES` semantic — the canonical interpretation of "top 5 accounts including ties at the boundary" — is implemented in standard SQL as `RANK() ≤ N`, NOT `DENSE_RANK() ≤ N`. Trino's native ANSI form is `FETCH FIRST n ROWS WITH TIES` (with required `ORDER BY`).
+iter1244 added:
+1. A 4th DECIDE-FIRST router row at **r23 §2011** distinguishing "Nth-largest DISTINCT VALUE (=N exact) → DENSE_RANK=N" vs "TOP-N ROWS range INCLUDING boundary ties (<=N) → RANK<=N / FETCH FIRST WITH TIES, NOT DENSE_RANK<=N".
+2. Extended r23 §2098 (top-N-with-ties LEADING CANONICAL) keyword anchors with PER-GROUP phrasings + per-group-vs-whole-result note.
 
-**LIGHT FIX-A RECOMMENDED** (per §4 below) — strengthen the routing path from §2011 to §2098 so Haiku doesn't lift "DENSE_RANK = N for Nth-largest" and over-generalize to "DENSE_RANK ≤ N for top-N range with ties". This is a real risk pattern, not a one-off — the keyword overlap ("ties", "per group") between §2011 and §2098 makes the wrong route plausible.
+The responder still routed to the DENSE_RANK<=N answer. Worse, this iteration the responder ACTIVELY DISMISSED RANK with a false claim. Two consecutive failures on the same canonical = real defect, not recall slip.
 
----
+### WHY THE FIX-A FAILED — likely root cause
 
-## Q3 — dbt model contracts: does enforced contract actually FAIL the build on type mismatch?
+The router at §2011 was added INSIDE the Nth-largest canonical section. That section's primary rule (correct for the =N exact case: "do NOT use RANK because ties produce gaps and rank=N may match zero rows for Nth-largest DISTINCT VALUE") is over-attracting and the responder is generalizing its "avoid RANK" warning into the <=N range case. Even though the router row presumably says "for <=N range use RANK", the surrounding §2011 prose (warning against RANK for the =N case) creates a stronger negative-association than the router's scoped correction. Result: responder's gestalt = "the canonical says avoid RANK here" → answers in the same shape regardless of <=N vs =N framing.
 
-**Score: 4.75** (Acc 5.0 / Clar 4.5 / Prac 4.75 / Compl 4.75)
+The §2098 PER-GROUP keyword extension may also not have landed because the question used "top 3 sales reps WITHIN EACH region" framing — possibly the keyword anchors added are still narrower than the engineer's phrasing reaches.
 
-**Verdict: CORRECT.** Responder said "Yes, ACTUALLY FAILS the build" with the correct config (`contract: {enforced: true}` + `columns:` with `name` + `data_type`), the correct error message shape ("This model has an enforced contract that failed" + mismatch table, "No changes were applied to the warehouse"), the correct mechanism (warehouse-interactive preflight — dbt issues `SELECT ... WHERE 1=0` introspection to Trino, reads ACTUAL result-set types, compares to YAML — REQUIRES a live Trino connection; dbt parse/compile offline won't catch it), and the correct runtime-vs-declared split (only `not_null` enforced at write time on dbt-trino+Iceberg; `primary_key`/`unique`/`foreign_key` definable but NOT runtime-enforced — pair with dbt tests).
+### RECOMMEND — STRENGTHEN, do not accept as ceiling
 
-**Verification via WebFetch of [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract)**: confirms validation at compile/build time before materialization, requires live warehouse connection to execute introspection query that reports actual returned dataset, fails with compilation error if column names/data types don't match, build halts before any table create/replace, and constraint enforcement varies by platform. Matches pinned `reference_dbt_contract_needs_live_connection.md` (iter1194 reconcile that fixed an older r27 §6.7C + r28 §282 claim of "compile time / SQL never sent to Trino"). Resource r27 §6.7C is correctly authored and the responder lifted it cleanly.
+This is the SECOND consecutive iteration on the same canonical with the same wrong recommendation. The iter1244 FIX-A was targeted but not sufficient. Recommend a stronger FIX-A:
 
-Minor Compl shave: didn't surface the `dbt-trino` specific note that contracts work even on incremental/views (not just tables), but that's recall-ceiling not a defect.
+1. **At r23 §2011** (Nth-largest section) — explicitly SCOPE the "do NOT use RANK" warning to the **=N EXACT case only**, with an immediate "BUT for <=N RANGE-with-boundary-ties, **RANK IS the right tool**" boldface counterpoint INLINE in the same prose block. The current FIX-A apparently puts the router at the top but leaves the avoid-RANK prose below; engineers/responder read the prose. Either:
+   - Inline-defang the avoid-RANK prose: "do NOT use RANK = N (zero rows possible). NOTE: this avoidance is SPECIFIC to the =N exact case. For top-N rows including ties at the boundary (<=N range), RANK<=N IS the canonical correct choice — see §2098."
+   - Or move §2011 to AFTER §2098 in DAG order so the responder hits the <=N canonical first when keyword-matching "top N per group".
+2. **At r23 §2098** — add an explicit worked example with the EXACT engineer-shape ("top 3 sales reps per region by deals_closed; 3rd and 4th tied at 47") showing `RANK() OVER (PARTITION BY region ORDER BY deals_closed DESC) <= 3` returning all four (1st, 2nd, both 47s). Include a "RANK at the boundary: both tied rows get rank 3, both pass <=3" inline explanation to directly defang the "RANK <=N skips boundary ties" misconception the responder voiced this iter.
+3. **Add a DO-NOT-WRITE row** at §2098 with the exact wrong claim ("RANK() ties get same rank then next skips — so RANK<=N doesn't include all tied reps at position N") explicitly marked WRONG, with a one-line correction. This is the responder's literal wrong sentence; banning it by name should reach next time.
 
----
+If a THIRD consecutive iteration still mis-routes, then this is a Haiku synthesis ceiling on rank-function selection per `feedback_synthesis_ceiling_stop_churning.md` and we should stop churning.
 
-## Q4 — Oracle SUBSTR(error_code, -3) returns NULL in Trino — does Trino support negative SUBSTR?
-
-**Score: 4.8125** (Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 4.75)
-
-**Verdict: CORRECT.** Responder said "Trino DOES support negative start positions — ports directly" with the canonical example `substr('Quadratically', -5) = 'cally'` and the right NULL-diagnostic checklist (NULL input / shorter-than-3 input / non-VARCHAR type). Safe last-N form `CASE WHEN LENGTH(s) < 3 THEN s ELSE substr(s, -3) END` is appropriate for short-input safety.
-
-**Verification via [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html)**: verbatim *"Positions start with 1. A negative starting position is interpreted as being relative to the end of the string."* Matches r27 §993 SUBSTR canonical (the iter Oracle→Trino string row explicitly anchored on "NEGATIVE START SUPPORTED" + "Oracle `SUBSTR(s, -n)` ports DIRECTLY to Trino `substr(s, -n)` — no rewrite needed" + "NO `right()` / `left()` IN TRINO. Use `substr(s, -n)` for the LAST n chars"). Engineer arrives at the right diagnosis: silent NULLs are NOT from the negative index (it works); they're from NULL input or non-VARCHAR type.
-
-Minor Compl shave: could have mentioned that `substr(s, -3)` with `LENGTH(s) < 3` returns the whole string (not NULL) — clarifying this would have explained why the CASE wrapper is optional for the "string shorter than N" case (Trino simply returns whatever's available, not NULL). Not load-bearing for the asked question.
+**Scores**: Acc 2.0 (wrong general rule, false RANK claim), Clar 4.0 (presentation clear), Prac 2.5 (works for this exact data only), Compl 3.0 (covers three functions but wrong winner). **2.875 FAIL**.
 
 ---
 
-## Resource-source check
+## Q2 — Iceberg expire_snapshots on a streaming pipeline — **4.375 PASS**
 
-| Q | Resource | Status | Source-correct? | Responder slip? |
-|---|---|---|---|---|
-| Q1 | r28 §1072 lead + r22/r28 reconciled (iter1243 FIX-A) | Correct | Yes — RELIABLY prunes for HOUR/DAY/MONTH/YEAR units, identity/day/month/year transforms | None — clean lift |
-| Q2 | r23 §2098 (top-N with ties) + §2163 (defang) | Correct | Yes — explicitly says RANK ≤ N or FETCH FIRST, NOT DENSE_RANK ≤ N | **YES — mis-routed to §2011 (Nth-largest DISTINCT) and applied DENSE_RANK ≤ N** |
-| Q3 | r27 §6.7C dbt model contracts | Correct | Yes — warehouse-interactive preflight, SELECT...WHERE 1=0, live connection, not_null-only write-time | None — clean lift |
-| Q4 | r27 §993 SUBSTR negative-index row | Correct | Yes — negative start supported, no rewrite needed | None — clean lift |
+**Verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)**:
+- `ALTER TABLE iceberg.<schema>.<table> EXECUTE expire_snapshots(retention_threshold => '7d')` — exact syntax CORRECT (parameter name `retention_threshold`, value duration string — responder did NOT slip into the `retention_days => 7` form from iter1214 — clean).
+- "Removes all snapshots and all related metadata and data files" — responder's claim that it deletes the actual data files from MinIO storage CORRECT.
+- `iceberg.expire-snapshots.min-retention` default `7d` floor — CORRECT; values below this fail with an error.
+- Time-travel-to-expired-snapshot-fails tradeoff — CORRECT.
+- Idempotent — CORRECT.
 
----
+**Completeness shave (Compl 4.0)**: The engineer's scenario is "5-min streaming pipeline + MinIO ballooning + thousands of snapshots + old data files never cleaned." Expire_snapshots handles the snapshot-history-bloat side. But streaming pipelines with frequent commits ALSO produce **orphan files** (files left in MinIO from crashed/aborted commits — not referenced by ANY snapshot, current or historical). `expire_snapshots` does NOT touch these per docs (orphans are "files from a table's data directory that are not linked from metadata files"). The proper hygiene for a streaming pipeline is the pair: `expire_snapshots(retention_threshold => '7d')` + `remove_orphan_files(retention_threshold => '7d')`. Responder mentioned only the first.
 
-## FIX-A recommendation for Q2
+This is the same paired-procedure point iter1240 covered for the orphan-cleanup angle — responder reached one half cleanly but didn't surface the streaming-orphan pairing.
 
-**LIGHT FIX-A — TARGETED CROSS-LINK STRENGTHENING (no new card).**
-
-**Where**: `resources/23-sql-best-practices-olap.md`
-
-**Edit 1 — at §2011 (LEADING CANONICAL for Nth-LARGEST distinct value)**: add an inline router at the TOP of the section that reads roughly:
-
-> **Router — which shape do you have?**
-> - **"Nth-LARGEST distinct VALUE per group"** (e.g. second-highest amount, third-distinct revenue tier — exact `= N`) → THIS section, `DENSE_RANK() = N`.
-> - **"Top N ROWS per group INCLUDING ties at the Nth boundary"** (e.g. top 5 accounts per plan_tier with both boundary-tied accounts shown — range `≤ N`) → see **§2098** TOP-N INCLUDING TIES AT THE CUTOFF, use `RANK() ≤ N` or `FETCH FIRST n ROWS WITH TIES`. **`DENSE_RANK() ≤ N` is the WRONG shape for the range case** — returns top-N distinct VALUES, not top-N ROWS.
-> - **"Exactly one row per group at position N"** (a specific record, not a tie-handling question) → ROW_NUMBER subquery.
-
-**Edit 2 — at §2098 LEADING CANONICAL header**: extend the keyword-anchor list to include "top 5 accounts per plan_tier with both boundary-tied accounts shown" / "top N per group including ties" / "PARTITION BY ... ORDER BY ... DESC, want all rows tied at the Nth" so the per-group ranking-with-ties framing is keyword-routable directly.
-
-**Why this is the right FIX-A shape (not a new card)**:
-- Per `feedback_new_card_over_attracts_adjacent.md` — adding another standalone canonical for "top-N-with-ties per group" risks over-attracting the §2011 Nth-largest distinct questions.
-- The resource ALREADY has the correct content at §2098 + the correct defang at §2163. The gap is purely findability — Haiku reached §2011 (Nth-largest distinct) and stopped, missing §2098. Cross-linking at §2011 fixes the routing.
-- Per `feedback_reconcile_dont_append.md` — edit in place, don't add.
-- Per `feedback_responder_overwarning_folklore.md` family logic — this is NOT a content gap; the wrong rec was confidently authoritative-sounding. A cross-link router IS the right corrective shape.
-
-**Not recommended**: a "DO-NOT-WRITE DENSE_RANK ≤ N for top-N range" defang inside §2011 itself — that's redundant with §2163 and risks the defanged form being copy-attractive per `feedback_defang_donotwrite_snippets.md`.
+**Scores**: Acc 4.5 (verified facts clean), Clar 4.5 (clear command + retention floor), Prac 4.5 (engineer can copy command), Compl 4.0 (missed remove_orphan_files pairing for streaming orphans). **4.375 PASS**.
 
 ---
 
-## Pattern summary across the 4 answers
+## Q3 — dbt ephemeral materialization — **4.75 STRONG PASS**
 
-- **Two clean re-probe closures**: Q1 closed the iter1243 date_trunc-pruning watch on first re-probe (24th consecutive 1st-re-probe-CLOSE in the loop history); Q3 implicitly closes the iter1243 --full-refresh-atomicity soft watch (responder showed clean dbt + Iceberg + dbt-trino understanding under the contract-mechanism framing).
-- **One responder-side failure on a maximally-anchored resource**: Q2 wrong lead recommendation despite §2098 + §2163 being correctly authored. Mirrors the iter1242 cumulative-distinct slip pattern (responder reached the wrong canonical despite the right one being anchored). Distinction: iter1242 was recall-ceiling on an isolated DO-NOT-WRITE form; this iter Q2 is mis-routing between TWO neighbor canonicals with overlapping keyword anchors — a routing gap that a cross-link CAN fix.
-- **Q4 imported-prior calibration continues to land**: responder did NOT claim Trino lacks negative-substr or recommend a workaround — the `reference_trino_to_char_exists.md` family lesson ("verify existence before asserting absence") continues to land for negative-index variants.
+**Verified at [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations)**:
+- "Ephemeral models are not directly built into the database. Instead, dbt interpolates the code from an ephemeral model into its dependent models using a common table expression (CTE)." → Responder's "dbt inlines the ephemeral SELECT as a CTE into every downstream at compile time, no table created" — CORRECT.
+- Identifier prefix `__dbt__cte__` — responder didn't surface but not load-bearing.
+- "Since ephemeral models are not persisted in the database, the CTE logic executes each time a downstream model that references it runs" — Responder's "re-runs every downstream execution (no persisted reuse)" — CORRECT.
+- Multiple downstream refs: SQL gets inlined into each, runs separately, no shared cache, no deduplication — Responder's "two downstreams ref'ing it → SQL inlined into both, runs twice, no shared cache; 3+ downstreams → compile-time bloat" — CORRECT.
+- "Use for small normalization; avoid for expensive/large/3+-downstream" guidance — CORRECT, matches docs' "very light-weight transformations early in DAG / models used in only one or two downstream models".
 
-## Watches
+**Minor recall ceiling (Compl 4.5)**: Could have surfaced that ephemeral models cannot be queried directly (`SELECT * FROM ephemeral_model` fails) and don't support model contracts. Not load-bearing for this question (the engineer asked about inlining, re-run cadence, multi-downstream behavior, Trino problems — responder hit all four).
 
-**CLOSING this iter**:
-- `iter1243 date_trunc-DATE-literal-pruning fragility-overstatement` — Q1 LED with "reliably prunes" + UnwrapDateTruncInComparison + correct EXPLAIN diagnostic. **CLOSED on first re-probe.**
+**Scores**: Acc 5.0 (all verified correct), Clar 4.75 (very clear), Prac 4.75 (engineer knows when to use vs avoid), Compl 4.5 (small omissions but all asked points covered). **4.75 STRONG PASS**.
 
-**Soft CLOSING** (implicit):
-- `iter1243 Q3 dbt-trino-on-Iceberg --full-refresh atomicity-mechanism` — Q3 this iter showed clean dbt-trino + Iceberg + contract mechanism with warehouse-interactive preflight, demonstrating the adapter understanding the soft watch was probing. Soft watch can be considered light-CLOSED.
+---
 
-**OPENING this iter**:
-- `iter1244 Q2 top-N-with-ties-per-group mis-route DENSE_RANK<=N from §2011 instead of RANK<=N from §2098` — **PRIMARY post-FIX-A watch**. Re-probe under "top N per group including ties at boundary" / "leaderboard per group with ties" / "want both tied accounts at the Nth position to appear" framings 4-8 iters after the §2011 router edit lands. If responder STILL recommends DENSE_RANK ≤ N for the range-with-ties shape, escalate to in-place strengthening at §2098 with explicit per-group worked example.
+## Q4 — Oracle GREATEST(NULL,…) → Trino — **3.875 PASS**
 
-**STILL OPEN** (carried):
-- iter1242 cumulative-distinct (closed at iter1243 re-probe, monitoring); iter1241 concat-auto-coerces (soft); iter1240 orphans-$files (soft); iter1239 DF-wait-timeout; iter1238 broadcast-hedge; iter1236 rn=1-within-batch; iter1234 ROLLUP-date_trunc-expr; iter1231 NEXT_DAY-note; iter1230 EXISTS-overwarning/::cast; iter1215 strpos-3-arg CEILING; iter1213 session_properties/(+); iter1229 @v1-Spark; iter1208 width_bucket boundary label.
+### (i) Trino fix — CORRECT
 
-## Topic score updates (delta this iter)
+**Verified at [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html)** (and matches pinned `reference_trino_greatest_least_null.md`): Trino 467 GREATEST/LEAST RETURN NULL if ANY arg is NULL. Responder's claim CORRECT.
 
-| Topic | Q | Score | Old avg/N | New avg/N | Δ |
-|---|---|---|---|---|---|
-| SQL query best practices for OLAP | Q1 | 4.875 | 4.5823/287 | 4.5833/288 | +0.0010 |
-| Analytical query patterns on Iceberg+Trino | Q2 | 2.875 | 4.5375/176 | 4.5281/177 | -0.0094 |
-| Improving complex SQL performance on Trino with dbt | Q3 | 4.75 | 4.4979/61 | 4.5020/62 | +0.0041 |
-| Oracle PL/SQL → dbt + Trino SQL migration | Q4 | 4.8125 | 4.4684/211 | 4.4700/212 | +0.0016 |
+Responder's fix — wrap each arg in COALESCE with a floor sentinel:
+```sql
+GREATEST(
+  COALESCE(last_login_ts, TIMESTAMP '1900-01-01'),
+  COALESCE(last_purchase_ts, TIMESTAMP '1900-01-01')
+)
+```
+For numbers, COALESCE(x, 0). Sentinel-must-not-appear-in-real-data caveat — CORRECT general approach. Engineer arrives at working Trino SQL that handles NULLs without poisoning the max.
 
-All four topics REMAIN PASSED. Net iteration score 4.328 — standard PASS (above 3.5 threshold), Q2 drags the iteration average significantly but the FIX-A cross-link addresses the root cause.
+### (ii) Oracle premise — **FALSE; responder accepted false premise**
+
+**Verified via WebSearch** (multiple Oracle community sources: Ask TOM, Oracle Forums, OraFAQ, codestudy.net): **Oracle's GREATEST function RETURNS NULL if any argument is NULL — it does NOT "ignore" NULLs.** From the search consensus: "Unlike aggregate functions, which ignore null values, greatest and least will return a null if any of the supplied columns (or expressions) are null."
+
+This means:
+- The engineer's premise ("Oracle ignores NULL and returns the other") is **FALSE**.
+- The responder's affirmation ("In Oracle, GREATEST(a, NULL, c) ignores the NULL and returns the max of non-NULL args") is **FALSE**.
+- There is actually NO behavioral difference between Oracle and Trino on this point. BOTH return NULL.
+- The engineer's source Oracle code probably already had NVL/COALESCE wrapping (which is the standard Oracle pattern), and what they observed as "Oracle ignored the NULL" was actually NVL-wrapping in their PL/SQL that they forgot about. The Trino migration needs the same COALESCE wrapping (which the responder correctly provided).
+
+**Why this matters**: The responder's Trino fix is CORRECT, so the engineer arrives at working SQL. But the engineer walks away believing a false fact about Oracle (which they may carry into future migrations and miscalibrate their expectations) and the responder reinforced rather than corrected. A high-quality answer would have been: "Quick correction — Oracle GREATEST ALSO returns NULL if any arg is NULL. Your existing Oracle code likely had NVL/COALESCE wrapping that gave the appearance of ignoring NULLs. Here's the Trino equivalent with COALESCE…"
+
+This is the SAME assumed-presence/assumed-absence verify-first family that pinned memory (`feedback_responder_overwarning_folklore`, `reference_trino_to_char_exists.md` family) keeps catching. The responder defaulted to accepting the engineer's premise without verifying.
+
+**Scores**: Acc 3.0 (Trino fix correct but Oracle premise false), Clar 4.5 (clear), Prac 4.0 (engineer gets working SQL despite false premise about Oracle), Compl 4.0 (covers fix + sentinel caveat; missed the "Oracle behaves the same" correction). **3.875 PASS**.
+
+**No FIX-A**: This is an Oracle-fact slip on a peripheral assertion, not a Trino-resource defect. The Trino fix the responder gave is canonical-correct. r27 §6.X (Oracle migration section) does not need to add an Oracle-GREATEST-NULL myth row — that risks over-attracting non-NULL Oracle GREATEST questions. Per `feedback_new_card_over_attracts_adjacent.md`, hold off.
+
+**SOFT WATCH** `iter1245 Q4 responder-accepts-engineer-false-oracle-premise`: re-probe under "Oracle X behaves Y differently from Trino" framings 4-8 iters where the Oracle premise itself is suspect, see if responder verify-firsts vs accepts.
+
+---
+
+## Topic mapping + rubric updates
+
+- **Q1** → "Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL" (rubric line 92, current 4.5281/177). **+2.875**.
+  - New: (4.5281×177 + 2.875)/178 = (801.4737 + 2.875)/178 = 804.3487/178 = **4.5188/178 PASSED** (-0.0093, margin still +1.0188).
+- **Q2** → "Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup" (rubric line 214, current 4.4429/232). **+4.375**.
+  - New: (4.4429×232 + 4.375)/233 = (1030.7528 + 4.375)/233 = 1035.1278/233 = **4.4426/233 PASSED** (-0.0003, margin +0.9426).
+- **Q3** → "Improving complex SQL performance on Trino with dbt" (rubric line 514, current 4.5020/62). **+4.75**.
+  - New: (4.5020×62 + 4.75)/63 = (279.124 + 4.75)/63 = 283.874/63 = **4.5059/63 PASSED** (+0.0039, margin +1.0059).
+- **Q4** → "Oracle PL/SQL → dbt+Trino" (rubric line 397, current 4.4700/212). **+3.875**.
+  - New: (4.4700×212 + 3.875)/213 = (947.64 + 3.875)/213 = 951.515/213 = **4.4673/213 PASSED** (-0.0027, margin +0.9673).
+
+All required topics REMAIN PASSED with margin.
+
+---
+
+## Open watches summary
+
+- **PRIMARY (escalated): `iter1244+1245 top-N-per-group-WITH-TIES routing FIX-A NOT REACHING`** — Q1 this iter is the RE-PROBE; failed. Strengthen the FIX-A as described above (inline-defang the avoid-RANK prose at §2011, add engineer-shape worked example at §2098, add DO-NOT-WRITE row banning the responder's exact wrong sentence). Re-probe again next iter. If 3rd consecutive failure, accept as synthesis ceiling.
+- **NEW SOFT**: `iter1245 Q2 expire-snapshots-without-remove-orphan-files for streaming pipelines` — responder missed the paired-procedure point for failed-streaming-commit orphans; re-probe 4-8 iters under "streaming + MinIO bloat" framings.
+- **NEW SOFT**: `iter1245 Q4 responder-accepts-false-oracle-premise on GREATEST NULL` — Oracle GREATEST ALSO returns NULL; both Oracle and Trino are identical on this, no migration difference; responder reinforced the false claim. Re-probe under similar "Oracle X vs Trino Y" Oracle-side-premise-suspect framings.
+- Iter1243 date_trunc-fragility (CLOSED prior); full-refresh-atomicity (soft-closed); iter1241 concat-auto-coerces (soft); iter1240 orphans-$files (soft); iter1239 DF-wait-timeout; iter1238 broadcast-hedge; iter1236 rn=1-within-batch; iter1234 ROLLUP-date_trunc-expr; iter1231 NEXT_DAY-note; iter1230 EXISTS-overwarning/::cast; iter1215 strpos-3-arg CEILING; iter1213 session_properties/(+); iter1229 @v1-Spark; iter1208 width_bucket.
+
+---
+
+## Next iter recommendation
+
+PRIMARY: re-probe top-N-per-group-with-ties under DIFFERENT phrasings (e.g. "top 5 customers by spend per region, include all customers tied at the 5th spot", or "leaderboard top 10 per category showing all boundary ties") to test whether a strengthened FIX-A reaches across phrasings. If it still mis-routes after the strengthened FIX-A, accept as Haiku synthesis ceiling on rank-function selection per `feedback_synthesis_ceiling_stop_churning.md`.
+
+Sources:
+- [Trino window functions docs (RANK / DENSE_RANK semantics)](https://trino.io/docs/current/functions/window.html)
+- [Trino Iceberg connector docs (expire_snapshots / retention_threshold / min-retention / remove_orphan_files)](https://trino.io/docs/467/connector/iceberg.html)
+- [dbt materializations docs (ephemeral CTE inlining)](https://docs.getdbt.com/docs/build/materializations)
+- [Ask TOM — GREATEST returning NULL](https://asktom.oracle.com/ords/f?p=100%3A11%3A0%3A%3A%3A%3AP11_QUESTION_ID%3A524526200346472289)
+- [codestudy.net — Handling NULL in Oracle GREATEST](https://www.codestudy.net/blog/handling-null-in-greatest-function-in-oracle/)
+- [Sydney Oracle Lab — Greatest, Least and NULLs](http://blog.sydoracle.com/2013/01/greatest-least-and-nulls.html)
