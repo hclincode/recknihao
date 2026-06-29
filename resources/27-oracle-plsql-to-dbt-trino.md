@@ -3913,6 +3913,38 @@ dbt build --select "result:error+" --state target/
 
 ---
 
+### 6.7F3 LEADING CANONICAL — dbt SLIM CI: `state:modified+` + `--state` + `--defer` (build only what changed on a PR, don't rebuild the whole DAG)
+
+> **READ THIS FIRST if your question contains any of these keywords:** `dbt slim CI`, `only build changed models on a PR`, `dbt CI takes an hour rebuild everything`, `state:modified`, `--state`, `--defer`, `dbt state artifact`, `what is the dbt state manifest`, `compare PR against production manifest`, `skip unchanged dbt models in CI`, `dbt build only modified + downstream`, `table does not exist for upstream model in CI`, `dbt defer to production`. Verified at [docs.getdbt.com/reference/node-selection/state-comparison-caveats](https://docs.getdbt.com/best-practices/best-practice-workflows) + [docs.getdbt.com/reference/node-selection/defer](https://docs.getdbt.com/reference/node-selection/defer) on 2026-06-30.
+
+**The state artifact is the prior run's `manifest.json`.** A production `dbt build`/`dbt run`/`dbt compile` writes `target/manifest.json` — a full snapshot of every node's compiled-SQL hash + the DAG. Slim CI diffs the PR's freshly-parsed project against that SAVED prod manifest to find what changed. dbt does NOT auto-publish it — your CI fetches it from wherever you stored it (S3/MinIO/artifact store/a dedicated branch).
+
+**The TWO flags do DIFFERENT jobs — use BOTH together:**
+
+| Flag | Job | Without it |
+|---|---|---|
+| `--select state:modified+` | **SELECTS** only the nodes whose definition changed vs the saved manifest, **plus** all downstream children (`+`). This is what shrinks the run from 90 models to ~5. | A plain `dbt build` rebuilds the entire selected DAG. |
+| `--defer` (with `--state`) | **RESOLVES** the `ref()`s to UNSELECTED upstream models against the **production** relations (from the saved manifest) instead of the PR schema. So an unbuilt upstream is read from prod, not rebuilt. | Without `--defer`, a selected model that `ref()`s an unbuilt upstream errors with **`TABLE NOT FOUND` / `does not exist`** in the empty PR-CI schema — the #1 slim-CI gotcha. |
+
+```bash
+# In the PR CI pipeline (the saved prod manifest is in ./prod-artifacts/manifest.json):
+dbt build --select state:modified+ --defer --state ./prod-artifacts
+#   state:modified+  -> build changed models + their downstream
+#   --defer          -> read any UNSELECTED upstream ref() from the PROD relations (don't rebuild them)
+#   --state DIR      -> the directory holding the prior PROD run's manifest.json (both flags read it)
+
+# After the PR merges and the PROD job runs, RE-SAVE the new manifest for the next PR's comparison:
+dbt build && aws s3 cp target/manifest.json s3://my-bucket/dbt-state/manifest.json
+```
+
+> **The mental model:** `--state` points at "what prod looks like" (the manifest dir). `state:modified+` uses it to pick the CHANGED subset. `--defer` uses it so the changed subset can still `ref()` the UNCHANGED upstreams **without rebuilding them** (reading prod's versions). Drop `--defer` and you must `+state:modified` (leading `+` to ALSO build all upstream parents) — which defeats the point of slim CI. Pair `state:modified+` with `--defer`.
+
+> **DO-NOT-WRITE:** *"`dbt build --select state:modified+ --state target/` is the complete slim-CI command."* **INCOMPLETE** — without `--defer`, the selected models' `ref()`s to unbuilt upstreams fail with `TABLE NOT FOUND` in the fresh CI schema. Slim CI = `state:modified+` **AND** `--defer` together. (Also: `state:modified` diffs the `manifest.json` (graph state); it is NOT freshness — that's `source_status:fresher+` against `sources.json`, see §6.7K.)
+
+> **Cross-references:** §6.7F (`--select` graph/set operators); §6.7F2 (`dbt retry` / `result:error+`, which reuses `run_results.json` — a DIFFERENT artifact from the `manifest.json` that `state:*` reads); §6.7K (`source_status:fresher+` freshness-state, do not confuse with `state:modified` graph-state).
+
+---
+
 ### 6.7G LEADING CANONICAL — dbt `var()` for per-run configurable values (NOT `{% set %}`)
 
 > **Keyword anchors:** dbt var configurable, dbt vars block dbt_project.yml, dbt run --vars override, parameterize dbt model lookback days, var vs set dbt, var default value, dbt variable from CLI, change dbt model parameter without code change. Verified at [docs.getdbt.com/reference/dbt-jinja-functions/var](https://docs.getdbt.com/reference/dbt-jinja-functions/var) and [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables).
