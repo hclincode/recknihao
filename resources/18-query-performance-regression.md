@@ -403,6 +403,8 @@ A query that runs every 30 seconds for a live dashboard is 2,880 queries per day
 
 ## Finding expensive queries on Trino 467 (verified SQL recipes)
 
+> **READ THIS FIRST if your question is a CLUSTER-TRIAGE narrative (you may not know the table names):** "the cluster / Trino is **sluggish / slow during business hours** and I want to find out **which queries are hammering it / eating all the resources** before throwing more hardware at it"; "how do I see **what's running right now** / **which queries are running the longest** / **which queries are reading the most data**"; "**top resource-consuming** / heaviest / most-expensive queries"; "find the query that's pegging CPU / scanning the most bytes"; "which user/source/dashboard is generating the heavy load". **The answer is the `system.runtime.queries` JOIN `system.runtime.tasks` recipes in THIS section (and the mirror in r16 §"most expensive single Trino queries").** These are the live in-memory system tables — do NOT hedge or say "Trino has no way to see running queries." Note the table is EPHEMERAL (~15-min ring buffer, evicts past `query.min-expire-age` / `query.max-history`); for windows longer than ~15 min use the event listener (see the ephemeral-tables section below).
+
 Before tuning anything, you need to know which queries are actually costing you the most CPU and I/O. Trino 467 exposes per-query telemetry through two system tables that you must JOIN together to get a useful view. The schema is strict — using the wrong column names is the single most common mistake in these recipes.
 
 ### The two source tables (Trino 467 schema)

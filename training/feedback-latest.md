@@ -1,163 +1,321 @@
-# Judge Feedback — Iteration 1280
+# Judge Feedback — Iteration 1281
 
-**Overall**: 4 questions, average **4.25 PASS** (Q1 4.25 / Q2 3.875 / Q3 4.5 / Q4 4.375). Q2 is the weakest single answer — mechanism-diagnosis slip that the responder's OWN cited formulas refute, even though the practical FIX (ROUND/CAST) works.
+**Overall**: 4 questions, average **3.22 FAIL** (Q1 3.125 / Q2 3.125 / Q3 2.875 / Q4 3.75). **Biggest single-iteration drop in many sweeps.** Three of four questions below the 3.5 pass threshold. Two HEDGES (Q1, Q3) are NOT pure-recall ceilings — both confirm as **findability/framing gaps** where canonical content EXISTS but the keyword routing doesn't reach it. One broken example (Q2), one backwards rule (Q4).
 
 **Headline results**:
-1. **Q1 — Trino 467 partition-evolution; responder matches r10 §98-126 PIN with a minor "MUST use Spark" framing slip vs r10 §125's explicit defang.** NOT a Spark-spillover error — the conservative Spark-rewrite path IS what r10 + Trino docs (silent) + open Trino issues + Streamkap/Starburst guidance all recommend. Teacher's hypothesis that Trino EXECUTE optimize natively handles cross-spec re-layout is technically plausible but unverified — Trino docs are SILENT, open issues document gaps. NO FIX-A.
-2. **Q2 — DECIMAL × INTEGER + SUM mechanism conclusion contradicts the responder's own cited formulas.** Responder correctly says scale=2 is preserved through both multiply (DECIMAL(10,2)*INTEGER → DECIMAL(20,2)) and SUM (DECIMAL(38,2)) — but then claims "extra internal precision shows up in display" which is impossible with scale=2 (display IS exactly 2 decimals). The 12-trailing-zeros symptom must come from upstream DOUBLE cast, division, or different upstream type — none of which the responder considered. FIX still works.
-3. **Q3 — dbt_utils install mechanics + 4 of 5 listed macros/tests verified; `relationships` is dbt CORE built-in not dbt_utils** (peripheral mislabel; dbt_utils has `relationships_where`).
-4. **Q4 — DENSE_RANK + WHERE rank=1 idiom correct; minor tie-handling completeness gap** (returns multiple rows per group on ties; Oracle MAX(...) KEEP DENSE_RANK FIRST returns exactly one via the MAX tie-break).
+1. **Q1 — FINDABILITY GAP confirmed.** Responder HEDGED on `system.runtime.queries`/`tasks` when r16 §295 AND r18 §404 both have full top-N-expensive-queries recipes — both framed as "expensive query / cost" not "cluster sluggish / hammering / longest-running / triage". FIX-A required.
+2. **Q2 — Per-instance responder slip.** UNNEST mechanism correct, JSON-string variant correct, but the worked example `SELECT e.event_id, t.tag ... GROUP BY t.tag` violates Trino GROUP BY (e.event_id neither grouped nor aggregated → analysis error). r07 §1a's source example is correct (no GROUP BY there) and r07 §4's split-and-count example is correct (proper `SELECT t.tag, COUNT(*) ... GROUP BY t.tag`). Responder mashed two patterns. NO FIX-A — broken-secondary-alternative family, per-instance.
+3. **Q3 — FINDABILITY GAP confirmed (partial-content variant).** r27 §6.7M generate_schema_name canonical exists with dev/staging/prod mention + `dbt run --target` reference, but framed as ADVANCED schema-name-macro override ("targets clobber each other"). r27 §2519 profiles.yml canonical only shows ONE output (prod). The BASIC "two outputs: dev + prod with different schemas + default `target:` + `dbt run --target dev`" question doesn't route to either section's keyword zone. FIX-A required.
+4. **Q4 — Backwards rule, SQL conversions correct.** Responder stated rule: "(+) appears on the table that should be the OUTER table (the one that keeps all its rows)" — Oracle (+) actually marks the OPTIONAL / null-supplying side; the table WITHOUT (+) is preserved. Yet the worked SQL conversions land correctly (`a.id=b.id(+)` → `accounts LEFT JOIN orders`; `a.id(+)=b.id` → `accounts RIGHT JOIN orders`). r27 L1755 has ONE example, no prose rule — backwards rule is a responder paraphrase slip, not resource-sourced. LIGHT FIX-A recommended (add one-line correct rule statement + second-variation example).
 
 ---
 
-## Q1 — Iceberg partition spec evolution (month → day) on 600M-row events table
+## Q1 — Find top resource-consuming queries (cluster sluggish, longest-running, most data read)
 
-**Score: 4.0 / 4.5 / 4.5 / 4.0 = 4.25**
+**Score: Acc 3.5 / Clar 4.0 / Prac 2.5 / Compl 2.5 = 3.125 FAIL**
 
-**Topic scored under**: "Iceberg partition design for SaaS: strategies, small-files, compaction" (4.4131/68 → 4.4111/69, margin +0.9111).
+**Topic scored under**: "Query performance regression diagnosis: oncall workflow for slow queries" (4.3436/21 → 4.2882/22).
 
-### CAN Trino 467 EXECUTE optimize NATIVELY repartition old-spec files to the new day spec? Is the responder's "MUST use Spark" claim FALSE?
+### Verification — system.runtime.queries+tasks recipe is VALID Trino 467
 
-**Verdict: NO, the Spark-required claim is NOT factually false — it matches Trino docs, open issues, and industry guidance.** Trino docs at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) describe EXECUTE optimize as bin-pack compaction with file_size_threshold (default 100MB); the docs are **SILENT** on whether it re-stamps pre-existing files to a newly-evolved partition spec. Open Trino issues confirm REAL gaps post-evolution:
-- [trinodb/trino #25279](https://github.com/trinodb/trino/issues/25279) — newly-added partition column can't be a predicate during optimize (`IllegalStateException`);
-- [trinodb/trino #12362](https://github.com/trinodb/trino/issues/12362) — hidden-partition columns can't be targeted by WHERE in optimize;
-- [trinodb/trino #12983](https://github.com/trinodb/trino/issues/12983) — no parameter to selectively rewrite specific spec_ids.
+WebFetch of [trino.io/docs/467/connector/system.html](https://trino.io/docs/467/connector/system.html) describes the tables but does not enumerate columns. **Authoritative column reference** is in iter1141-pinned `system.runtime.queries`/`tasks` content (r18 §410-454 + r16 §270-282 DO-NOT-WRITE matrix), which has been validated against `QuerySystemTable.java` source on multiple prior iterations:
 
-Industry guidance:
-- [Streamkap operational guide](https://streamkap.com/resources-and-guides/iceberg-partition-evolution-operational-guide) explicitly recommends `Spark CALL ... rewrite_data_files` with `WHERE` time-scoping for cross-spec re-layout;
-- [Starburst blog](https://www.starburst.io/blog/iceberg-partitioning-and-performance-optimizations-in-trino-partitioning/): "The existing data will remain partitioned by day unless the table is recreated."
+- `system.runtime.queries` (15-min ephemeral, ~100 query ring buffer): `query_id`, `state`, `"user"` (double-quoted; bare `user` returns current_user), `source`, `query`, `resource_group_id`, `created`, `started`, `last_heartbeat`, `end`, `error_type`, `error_code`. NO `catalog`, NO `schema`, NO `peak_memory_bytes`, NO `cost_usd`.
+- `system.runtime.tasks`: `query_id`, `task_id`, `stage_id`, `state`, `split_cpu_time_ms` (NOT `cpu_time_ms`), `physical_input_bytes` (added Trino release 330, per iter1141 pin), `processed_input_bytes`, `output_bytes`, `output_rows`, `splits`, `created`, `start`, `end`.
 
-Teacher's hypothesis "Trino optimize SHOULD re-stamp rewritten files to day-partitioning, making this Trino-native with NO Spark needed" is **technically plausible** (when Trino's optimize rewrites a file it would write under the current spec, and raising file_size_threshold above all existing files' sizes would force-rewrite them) but **unverified for cross-spec correctness on Trino 467**. Trino docs don't endorse it; open issues document scenarios where it produces incorrect/NULL partition values. The responder's conservative answer matching r10 §98-126 PIN is the right answer on this stack.
+Canonical Q1 answer (already in r16 §301-323 + r18 §456-498):
+```sql
+SELECT q.query_id, q.state, q."user", q.source,
+       substr(q.query, 1, 200) AS sql_preview,
+       SUM(t.split_cpu_time_ms) / 1000.0  AS total_cpu_sec,
+       SUM(t.physical_input_bytes) / 1e9   AS gb_scanned,
+       COUNT(t.task_id) AS task_count
+FROM system.runtime.queries q
+LEFT JOIN system.runtime.tasks t ON t.query_id = q.query_id
+WHERE q.created > current_timestamp - INTERVAL '15' MINUTE
+GROUP BY q.query_id, q.state, q."user", q.source, q.query
+ORDER BY total_cpu_sec DESC
+LIMIT 20;
+```
 
-### Is the claim RESOURCE-SOURCED (r10 grep result → FIX-A needed?) or a responder fabrication?
+### Findability gap CONFIRMED via Grep
 
-**Resource-sourced — r10 §98-126 (PARTITION EVOLUTION PIN, iter537 pin) and §131-233 (LEADING CANONICAL "Migrating from date-only to (date, tenant_bucket) on a 3TB table") teach EXACTLY this 3-step procedure**: ALTER TABLE SET PROPERTIES partitioning (Trino) → CALL iceberg.system.rewrite_data_files(rewrite-all=true) (Spark) → EXECUTE expire_snapshots (Trino). The 5-step worked example at r10 §141-200 is the canonical the responder cited.
+Grep `system.runtime.queries|find.*heavy queries|top.*resource-consuming|cluster slow|hammering|sluggish` across resources → **only `system.runtime.queries` matches** (in r16, r18). No hits on "cluster sluggish", "queries hammering", "longest-running", "top resource-consuming", "before adding hardware" — the exact phrases the engineer used.
 
-**Slight framing slip vs r10 §125's explicit defang**: r10 §125 explicitly tells the teacher to AVOID the "MUST use Spark, Trino cannot do it at all" wording: *"Do not paraphrase this nuance as 'you MUST use Spark, Trino cannot do it at all.' Paraphrase it as 'Spark rewrite_data_files is the reliable, documented full-historical-repartition path; Trino optimize stays in its lane as go-forward compaction within the current spec.'"* The responder's "you MUST use Spark, NOT Trino" + "Trino rejects CALL" framing is SLIGHTLY STRONGER than this. The CALL-rejection sub-claim IS correct (Trino has no `CALL iceberg.system.rewrite_data_files`), but the overall framing exceeds what r10 wants. This is a **responder paraphrase slip** of an existing defang, NOT a resource defect (r10 already defangs the strong framing).
+- **r16 §295** canonical heading: *"How do I find the most expensive single Trino queries (by CPU and bytes scanned) in the last 15 minutes?"* — keyword anchors all cost/expensive-framed.
+- **r18 §404** section heading: *"Finding expensive queries on Trino 467 (verified SQL recipes)"* — Recipe 1 = "Top 50 most expensive queries by bytes scanned". Keyword anchor again "expensive query / cost".
 
-**NO FIX-A needed.** r10 has the right framing + defang; this is per-instance responder paraphrase slip matching `feedback_synthesis_ceiling_stop_churning.md` family.
+Responder pattern-matched the perf-triage framing ("cluster sluggish during business hours / hammering / before adding hardware") and didn't route to either section. HEDGED + pivoted to `EXPLAIN ANALYZE` (which only diagnoses ONE already-running query at the operator level, NOT "which queries are heavy right now" — engineer needs to identify the heavy queries first BEFORE running EXPLAIN ANALYZE on them). The answer fails the practical test: the engineer cannot identify what to investigate next.
 
-### Other dings
-- Minor Compl shave: responder didn't cover the partial-pruning behavior of old-spec files DURING the migration window. r10 §108-111 teaches that month-spec files STILL prune to the OLD month coarseness for date-range queries (a single-day query reads ~one month of old data, NOT the whole 2-year table). Engineer might worry the migration breaks queries until rewrite completes; r10 explicitly addresses this.
+### FIX-A — perf-triage routing anchors at r18 §404 and r16 §295 (mirrored)
 
-### NEW SOFT WATCH — `iter1280-Q1 partition-evolution MUST-use-Spark paraphrase slip vs r10 §125 defang`
-Re-probe in 4-8 iters under varied "after partition evolution, how do I rewrite old files / can Trino do it / do I need Spark" framings. If 2+ recurrences with same "MUST use Spark" wording, escalate to LIGHT FIX-A strengthening r10 §125 defang anchor at the "rewrite_data_files" keyword zone (e.g., add a copy-attractive 1-line "Trino optimize IS go-forward compaction; Spark rewrite_data_files IS guaranteed historical re-layout — do not phrase as 'Trino CANNOT'" pin near the Step 2 Spark CALL command).
+**Primary location: r18 §404** (the perf-regression file is the more natural keyword landing for "cluster slow / heavy queries" phrasings):
 
----
+Add a `> **READ THIS FIRST** if your question contains any of these phrases` anchor block at the top of §404, immediately before "Finding expensive queries on Trino 467", listing:
+- "cluster sluggish", "cluster slow during business hours", "Trino is slow"
+- "queries hammering the cluster", "what's hammering my cluster"
+- "find the heavy queries", "find the heaviest queries", "top resource-consuming queries"
+- "longest-running queries", "queries reading the most data", "most data scanned"
+- "find slow queries on a live cluster", "find the bad query right now"
+- "before adding hardware", "before scaling the cluster", "before throwing hardware at it"
+- "queries to kill", "queries to optimize first", "Trino system tables for slow queries"
+- "which Trino system tables", "system.runtime tables", "system.runtime.queries", "system.runtime.tasks"
 
-## Q2 — DECIMAL × INTEGER money math accumulating extra decimal places
+**Secondary mirror: r16 §295** — append the same perf-triage anchors to the existing keyword block (the recipe is already there; only the routing is broken).
 
-**Score: 3.5 / 4.0 / 4.5 / 3.5 = 3.875**
-
-**Topic scored under**: "SQL query best practices for OLAP" (4.5906/300 → 4.5882/301, margin +1.0882). **Weakest answer this iter.**
-
-### Is the DECIMAL × INTEGER + SUM mechanism explanation accurate (scale preserved at 2?) even though the ROUND/CAST FIX is right?
-
-**The CITED FORMULAS are correct; the CONCLUSION drawn from them is internally inconsistent and wrong.** Verified via WebFetch of [trino.io/docs/467/functions/decimal.html](https://trino.io/docs/467/functions/decimal.html):
-- **Multiplication**: result precision = `min(38, xp+yp)`, result **scale = xs+ys** (verbatim). So DECIMAL(10,2) * INTEGER (coerced to DECIMAL(10,0)) = DECIMAL(min(38, 20), 2+0) = **DECIMAL(20, 2)** — scale is **2**, not widened.
-- **SUM(DECIMAL(p,s))**: `sum(decimal(p, s)) -> decimal(38, s)` per [aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — precision widens to 38 BUT **scale stays at s**. So SUM(DECIMAL(20,2)) = **DECIMAL(38, 2)** — scale is still **2**.
-
-The responder cited both rules correctly: "DECIMAL(10,2)*INTEGER → auto-widened precision, preserved scale" + "SUM(DECIMAL) auto-widens to DECIMAL(38, s) with s=original scale (2)." **But then concluded "extra internal precision shows up in display" — which is impossible with scale=2.** Trino displays exactly s decimal places for a DECIMAL(p, s) result. DECIMAL(38, 2) displays as `1234.56`, full stop. It does NOT display as `1234.560000000000`.
-
-**The 12-trailing-zeros symptom CANNOT come from the cited DECIMAL(10,2) × INTEGER + SUM path.** Real root causes (per r23 §3.1B troubleshooting checklist):
-1. **An upstream CAST to DOUBLE**: DOUBLE is IEEE-754 floating-point and displays full precision (`1234.56` becomes `1234.5600000000001` in some contexts). If `unit_price` is actually DOUBLE not DECIMAL(10,2), or someone cast it, this is the culprit.
-2. **A DECIMAL/DECIMAL division upstream**: Division DOES widen scale per Trino's `scale = max(xs, ys) + max(0, ys-xs)` rule (verified at decimal.html). A division before SUM would widen scale.
-3. **The upstream column actually isn't DECIMAL(10,2)** — engineer's mental model of the schema is wrong. r23 §3.1B step 1 says: run `SHOW CREATE TABLE` first to verify the declared type.
-
-The responder's FIX — `ROUND(SUM(unit_price*quantity), 2)` or `CAST(unit_price*quantity AS DECIMAL(18,2))` before SUM — **WORKS regardless of root cause** (truncates whatever extra precision is present). Engineer ships a working query but learns the wrong reason for the symptom. If the column is actually DOUBLE, the fix masks the underlying type problem; if there's an upstream division, the fix masks scale widening; engineer doesn't learn to look at `SHOW CREATE TABLE` or `EXPLAIN` first.
-
-### Resource check — was the wrong mechanism resource-sourced?
-
-**NO. Grepped r23 §3.1B (line 955-984):**
-- r23 line 959: "Trino's `sum(decimal(p, s)) -> decimal(38, s)`... **Precision is auto-widened to 38 (Trino's maximum); scale is retained.**" — CORRECT, matches Trino docs.
-- r23 §3.1B includes a 5-cause troubleshooting checklist (line 963-971) for "SUM looks too small / numbers are truncated" that explicitly enumerates upstream CAST to smaller scale, integer division, NULL-heavy column.
-- **r23 does NOT have a "scale widens on display" myth.** The responder's wrong conclusion is per-instance responder reasoning, not resource-sourced.
-
-### NO FIX-A
-r23 §3.1B is the right canonical. The responder cited the right formulas but didn't reach the troubleshooting-checklist mental model (r23 §3.1B step 1: run `SHOW CREATE TABLE`; step 5: check for upstream integer division). This is per-instance responder reasoning slip — NOT findability, NOT content gap, NOT resource defect.
-
-### NEW SOFT WATCH — `iter1280-Q2 DECIMAL-SUM-scale-preserved mechanism conclusion slip`
-Re-probe in 4-8 iters under "money math too many decimals / decimal precision / SUM(DECIMAL*INTEGER) display" framings. If 2+ recurrences where responder cites the right formula but draws the wrong display conclusion, escalate to LIGHT FIX-A adding to r23 §3.1B a copy-attractive callout: **"scale=s preserved through SUM = display shows EXACTLY s decimals; if you see MORE decimals, the culprit is upstream — DOUBLE cast / division / wrong source type. Run `SHOW CREATE TABLE` first."**
+This is a **routing-only FIX-A** (no recipe rewrite). The system.runtime.queries+tasks recipe in both files is already correct, exhaustively defanged, and column-verified.
 
 ---
 
-## Q3 — dbt_utils package: what it is, install mechanics, day-to-day use
+## Q2 — UNNEST array column to count events per tag
 
-**Score: 4.5 / 4.5 / 4.5 / 4.5 = 4.5**
+**Score: Acc 2.5 / Clar 4.0 / Prac 2.5 / Compl 3.5 = 3.125 FAIL**
 
-**Topic scored under**: "Improving complex SQL performance on Trino with dbt" (4.4864/85 → 4.4866/86, margin +0.9866).
+**Topic scored under**: "Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL" (4.4836/204 → 4.4770/205).
 
-### Verification
-- **Install mechanics correct**: packages.yml at project root with `packages: - package: dbt-labs/dbt_utils, version: [">=1.1.0","<2.0.0"]`; `dbt deps` materializes to `dbt_packages/`. Matches r27 §4.5A canonical (lines 1764-1788) verbatim.
-- **`generate_surrogate_key(['email','signup_source'])` → MD5 hash surrogate** — CORRECT, matches r27 §4.5A.
-- **`expression_is_true` — IS dbt_utils generic test** ✓
-- **`not_null_proportion` — IS dbt_utils generic test** ✓
-- **`unique_combination_of_columns` — IS dbt_utils generic test** ✓
+### What the responder said vs. what the resource teaches
 
-### MINOR MISLABEL — `relationships` is dbt CORE built-in, NOT dbt_utils
+**Responder's worked example (broken)**:
+```sql
+SELECT e.event_id, t.tag
+FROM events e
+CROSS JOIN UNNEST(e.tags) AS t(tag)
+GROUP BY t.tag
+ORDER BY COUNT(*) DESC;
+```
+This is **not valid Trino SQL** — `e.event_id` appears in the SELECT list but is neither in `GROUP BY` nor inside an aggregate. Trino 467 analysis error: `Column 'event_id' must appear in the GROUP BY clause or be used in an aggregation function`. Engineer copying this hits a hard analysis-time failure.
 
-Verified via WebSearch + [docs.getdbt.com/docs/build/data-tests](https://docs.getdbt.com/docs/build/data-tests): **"dbt ships with four generic data tests already defined: unique, not_null, accepted_values, and relationships."** dbt_utils has `relationships_where` (relationships + WHERE filter for excluding test entities or recent records due to ETL lag) — possibly the responder confused these two.
+**The correct query for "count events per tag"**:
+```sql
+SELECT t.tag, COUNT(*) AS n
+FROM events e
+CROSS JOIN UNNEST(e.tags) AS t(tag)
+GROUP BY t.tag
+ORDER BY n DESC;
+```
 
-**Minor peripheral mislabel** — doesn't affect install mechanics or the 4 correctly-listed macros/tests. The engineer would still install dbt_utils and find the correct tests; they'd just be momentarily confused that `relationships` is available without dbt_utils (which is actually a happy surprise, not a blocker).
+### r07 source check — resource is NOT broken; responder slip
 
-### NO FIX-A
-r27 §4.5A is correct on install/macros. Resources don't claim relationships is dbt_utils — this is per-instance responder slip, not resource defect or findability gap. No imported-prior, no broken-secondary, no fabrication.
+**Grep r07 §1a (L84-108)** — the cited section — shows the EXPLODE form ONLY, no GROUP BY:
+```sql
+SELECT u.user_id, t.tag
+FROM iceberg.analytics.users u
+CROSS JOIN UNNEST(u.tags) AS t(tag);
+```
+This is one-row-per-(parent, element) explode — correct shape, no aggregation.
 
-Minor Clar/Prac/Compl shaves (-0.5 each): no on-prem-stack-specific notes like dbt-trino adapter compatibility or how `dbt_packages/` gets vendored in CI for offline builds (peripheral, recall ceiling).
+**Grep r07 §4 (L405, L420, L437)** — split-then-count examples are correct: `SELECT TRIM(tag) AS tag, COUNT(*) AS n ... GROUP BY TRIM(tag)`.
+
+The responder kept the §1a `SELECT e.event_id, t.tag` head and welded on a §4-style `GROUP BY t.tag ORDER BY COUNT(*) DESC` tail. **Both source forms are individually correct**; the mash-up is a responder-side synthesis slip.
+
+**Classification**: Per pinned `feedback_responder_broken_secondary_alternative.md` — Haiku often appends a broken "for completeness" alternative form. Here it's the MAIN example, not a secondary, which makes the slip more harmful, but the recall ceiling is the same. No single resource fix would prevent this.
+
+**NO FIX-A.** Per-instance responder synthesis slip. Carry as soft watch `iter1281-Q2 UNNEST-GROUP-BY-column-not-in-list`: re-probe in 4-8 iters under different "UNNEST + GROUP BY + count per element" phrasings; if 2+ recurrences, consider a worked "count per tag" canonical example with explicit "SELECT tag, COUNT(*) — do NOT include event_id in SELECT" defang at r07 §1a.
+
+### Mechanism portion was correct
+
+- `CROSS JOIN UNNEST(arr) AS t(elem)` = INNER semantics, drops NULL/empty-array parents — verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html).
+- `LEFT JOIN UNNEST(arr) AS t(elem) ON TRUE` = preserves NULL/empty-array parents — also verified.
+- JSON-string variant `CROSS JOIN UNNEST(CAST(json_parse(col) AS ARRAY(VARCHAR)))` for varchar-holding-JSON columns — correct (r07 §1a L118).
+
+The mechanism explanation would earn 4.5+ if standalone. The broken main example drops it to 3.125.
 
 ---
 
-## Q4 — Oracle MAX(col) KEEP (DENSE_RANK FIRST ORDER BY created_at) → Trino
+## Q3 — dbt dev vs prod: separate schema so a laptop run doesn't overwrite prod
 
-**Score: 4.5 / 4.5 / 4.5 / 4.0 = 4.375**
+**Score: Acc 3.5 / Clar 4.0 / Prac 2.0 / Compl 2.0 = 2.875 FAIL**
 
-**Topic scored under**: "Oracle PL/SQL → dbt+Trino" (4.5076/248 → 4.5070/249, margin +1.0070).
+**Topic scored under**: "Oracle PL/SQL procedure → dbt + Trino SQL migration" (4.5070/249 → 4.5005/250 after this question; canonical r27 dbt-OPS content lives there).
 
-### Verification
-- **Core idiom CORRECT**: CTE `DENSE_RANK() OVER (PARTITION BY order_id ORDER BY created_at) AS rank_val`, outer `WHERE rank_val=1` → earliest row per group. Standard Trino window-function pattern.
-- **ALT FIRST_VALUE OVER (PARTITION BY ... ORDER BY created_at)** — valid Trino window form.
-- **"No KEEP in Trino"** — CORRECT, Oracle KEEP DENSE_RANK FIRST/LAST is a non-portable Oracle extension; ANSI SQL alternative is window functions.
-- **"window form not much longer" tradeoff** — fair characterization.
+### What the responder did
 
-### MINOR TIE-HANDLING COMPLETENESS GAP
+HEDGED — *"I don't have enough info; the resources don't document dev/prod environments via profiles.yml / target schemas."* Deferred to dbt docs.
 
-Verified via [Oracle DENSE_RANK docs](https://docs.oracle.com/en/database/oracle/oracle-database/26/sqlrf/DENSE_RANK.html) + WebSearch: Oracle `MAX(value) KEEP (DENSE_RANK FIRST ORDER BY created_at)` is a TIE-BREAKER. Among rows tied at rank 1 (same earliest `created_at`), the outer MAX returns exactly ONE row by taking the maximum `value`.
+### Verification — content EXISTS but framing doesn't route from "dev vs prod" question shape
 
-**Responder's `WHERE rank_val=1` returns MULTIPLE rows per order_id when ties exist** (two rows with identical `created_at` → both rank 1 → both returned). For strict Oracle KEEP MAX equivalence:
-- **`ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY created_at, value DESC) AS rn`** then `WHERE rn=1` — guarantees one row + matches MAX tie-break direction;
-- **Wrap an outer `MAX(value)` aggregate** over the WHERE rank_val=1 subset;
-- The responder's `FIRST_VALUE(created_at) OVER (...)` ALT is closer to deterministic but still broadcasts the same value to every row in the partition — needs `DISTINCT` or filter to one-row-per-group.
+**Grep `generate_schema_name|dev vs prod|separate schema|dbt target|outputs:` on r27 confirms**:
 
-If the engineer's Oracle source uses MAX/MIN as a tie-breaker (the canonical Oracle pattern), the responder's DENSE_RANK + WHERE rank=1 form would produce DIFFERENT row counts than the Oracle source. Per-instance completeness slip.
+- **r27 §2519-2542** has a profiles.yml canonical with `env_var()` + `DBT_ENV_SECRET_` secrets handling. **Shows only ONE output (`prod`)**. L2565 mentions "env-specific connection params (host, catalog, schema per dev/staging/prod)" in passing. NO two-target example, NO `dbt run --target dev` walkthrough.
 
-### NO FIX-A
-Core idiom is correct; r07/r27 already teach window-functions-replace-Oracle-KEEP. The tie-handling note is peripheral; engineer with strict-equivalence need would catch it in CI / row-count diff testing. Per-instance completeness gap, NOT findability/content gap.
+- **r27 §6.7M (L4315-4367)** is the `generate_schema_name` macro canonical:
+  - L4317 keyword anchors: *"dbt dev/staging/prod all land in the same schema / overwrite each other; want dev → dev_analytics, staging → staging_analytics, prod → analytics; per-environment schema; per-developer schema so devs don't clobber each other; generate_schema_name macro... control target schema by environment on dbt-trino."*
+  - L4352 mentions `dbt run --target dev|staging|prod` (one inline reference, not a worked walkthrough).
+  - L4354 `generate_schema_name_for_env` shortcut.
+  - L4365 DO-NOT-WRITE for the "every env writes to same schema" footgun.
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
+**The framing problem.** §6.7M is correct but framed around the ADVANCED schema-name-macro override case ("you tried multi-env and they're all landing in the same Trino schema — write a macro to fix it"). The BEGINNER question ("how do I set up dev vs prod in the first place so a laptop run writes to a separate schema?") doesn't match those anchors. The responder pattern-matched "dbt dev vs prod / separate schema / scared of overwriting prod / where to configure" and found no direct keyword hit.
+
+**Missing keyword anchors at §6.7M (and the absent §2519.X two-target intro canonical)**:
+- "dev vs prod" (plain, not "dev/staging/prod")
+- "don't overwrite production"
+- "scared of overwriting prod"
+- "safe local dbt run"
+- "run dbt on my laptop safely"
+- "dbt environments setup"
+- "dbt profiles dev"
+- "team running same prod catalog"
+- "personal dev schema"
+- "default target dev not prod"
+
+**Verified via WebSearch** of [docs.getdbt.com](https://docs.getdbt.com) ("About profiles.yml", "Connection profiles"): the canonical dbt pattern is exactly what the engineer needs — multiple outputs in one profile, separate schemas, `--target` flag override, `dbt_<username>` dev-schema convention. The fact IS in r27 §6.7M but routed only from the "schemas-clobber-each-other" symptom shape, not the "set up dev vs prod from scratch" shape.
+
+### FIX-A — add a leading "dbt dev vs prod target separation" canonical near r27 §2519
+
+**Recommended location**: NEW section §2519.X (or §2518.5) placed BEFORE the existing §2519 secrets canonical. This is the first dbt-OPS question a beginner asks; secrets come second.
+
+**Recommended content (sketch)**:
+
+> ### LEADING CANONICAL — dbt dev vs prod target separation — two outputs in profiles.yml so a laptop run writes to a SEPARATE schema (the "team scared of overwriting prod" fix)
+>
+> **READ THIS FIRST if your question contains any of these phrases:** dbt dev vs prod, set up dbt environments, run dbt on my laptop safely, separate schema for local dev, don't overwrite production, scared of overwriting prod, dbt profiles dev, two targets in profiles.yml, team running against same prod catalog, personal dev schema, default target dev not prod, dbt run --target, dbt --target flag, dbt environment variable for target, where to configure dev vs prod, dbt local-vs-prod safety.
+>
+> **The one fact.** `profiles.yml` supports MULTIPLE `outputs:` under one profile; each output is a "target" with its own connection params + schema. `target:` declares the DEFAULT target for that profile (set it to `dev` so a bare `dbt run` on a laptop NEVER writes to prod). `dbt run --target prod` explicitly opts in to prod. Local devs get a personal schema like `dbt_<username>` per dbt-Labs convention.
+>
+> ```yaml
+> my_project:
+>   target: dev          # SAFE default: bare `dbt run` writes to dev, never prod
+>   outputs:
+>     dev:
+>       type: trino
+>       host: trino.internal
+>       user: "{{ env_var('TRINO_USER') }}"
+>       password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+>       catalog: iceberg
+>       schema: dbt_alice            # personal/dev schema — never collides with prod or teammates
+>       threads: 4
+>     prod:
+>       type: trino
+>       host: trino.internal
+>       user: "{{ env_var('TRINO_USER') }}"
+>       password: "{{ env_var('DBT_ENV_SECRET_TRINO_PROD_PASSWORD') }}"
+>       catalog: iceberg
+>       schema: analytics            # production schema — only CI/runbook writes here via --target prod
+>       threads: 8
+> ```
+>
+> ```bash
+> dbt run                       # uses target: dev → writes to iceberg.dbt_alice.<model>
+> dbt run --target prod         # explicit opt-in → writes to iceberg.analytics.<model>
+> ```
+>
+> **Verified at [docs.getdbt.com/docs/core/connection-profiles](https://docs.getdbt.com/docs/core/connection-profiles)**: "dbt supports multiple targets within one profile to encourage the use of separate development and production environments... In development, a pattern we've found to work well is to name the schema in your dev target `dbt_<username>`."
+>
+> **For 3+ environments with systematic naming (`dev_analytics` / `staging_analytics` / `analytics`):** see §6.7M `generate_schema_name` macro override — a more advanced solution that derives the prefix from `target.name` so each developer uses the same project but lands in a different schema.
+
+**Anchors must be exhaustive** — phrase mining from this question alone:
+- "dev vs prod", "set up dev and prod", "dev/prod environments"
+- "scared of overwriting prod", "scared a local run will overwrite production"
+- "separate schema for dev", "personal schema", "laptop schema"
+- "dbt profiles dev prod", "two outputs in profiles.yml"
+- "where do I configure dev vs prod"
+- "team running dbt against prod catalog"
+
+**Cross-ref**: §6.7M `generate_schema_name` macro (advanced multi-env case + per-developer auto-prefix); §2519 secrets canonical (the `env_var` and `DBT_ENV_SECRET_` mechanics, sibling concern).
+
+**Why NOT just expand §6.7M anchors**: §6.7M's title and framing are inseparable from the "schemas-clobber-each-other" diagnostic shape (the macro IS the fix for that specific symptom). A beginner's "set up dev vs prod safely" question deserves its own LEADING CANONICAL with a clean two-target example BEFORE the macro override. Routing both shapes to §6.7M alone overloads it.
 
 ---
 
-## Summary — NEW WATCHES + carry forward
+## Q4 — Oracle `(+)` outer join → Trino ANSI
 
-### NEW WATCHES (this iter)
-1. **`iter1280-Q1 partition-evolution MUST-use-Spark paraphrase slip vs r10 §125 defang`** — re-probe in 4-8 iters under varied "rewrite old files post-evolution / can Trino do it / do I need Spark" framings. Escalate to LIGHT FIX-A only if 2+ recurrences with the same strong wording.
-2. **`iter1280-Q2 DECIMAL-SUM-scale-preserved mechanism conclusion slip`** — re-probe in 4-8 iters under "money math too many decimals / decimal precision / SUM(DECIMAL*INTEGER) display" framings. Escalate to LIGHT FIX-A only if 2+ recurrences where responder cites the right formula but draws the wrong display conclusion. The fix would be a copy-attractive callout to r23 §3.1B.
+**Score: Acc 3.0 / Clar 4.0 / Prac 4.0 / Compl 4.0 = 3.75 PASS**
 
-### Carry forward (from iter1279)
-- `iter1279-Q4 Trino-now()-as-alias-not-confirmed` — re-probe 4-8 iters under NOW()/Postgres-now-migration framings; not touched this iter.
-- `iter1278-Q1 Scheduled-vs-CPU-Blocked-time imprecision` — re-probe 3-7 more iters; not touched this iter.
+**Topic scored under**: "Oracle PL/SQL procedure → dbt + Trino SQL migration" (4.5005/250 → 4.4975/251 after this question; same topic as Q3).
 
-### Pattern signals
-- **Q1 framing slip + Q2 mechanism slip** are BOTH per-instance responder reasoning slips on otherwise-correct cited formulas/resources. Neither is resource-sourced. Matches `feedback_synthesis_ceiling_stop_churning.md` family.
-- **Q3 relationships mislabel + Q4 tie-handling miss** are BOTH peripheral completeness slips on otherwise-correct core answers. Recall ceiling, NO FIX-A.
-- **No imported-prior assumed-absence/assumed-presence errors this iter** (the imported-prior family that has been hot for many iters is quiet).
-- **No broken-secondary alternative** (the iter936/943/948/950/954/1013/1019/1020 family is quiet).
-- **No over-warning** (the iter1016/1017/1021 family is quiet).
+### Backwards rule — verified
 
-### Topic margins remain healthy
-- Iceberg partition design: 4.4111/69 (margin +0.9111)
-- SQL best practices for OLAP: 4.5882/301 (margin +1.0882)
-- Improving complex SQL perf on Trino with dbt: 4.4866/86 (margin +0.9866)
-- Oracle PL/SQL → dbt+Trino: 4.5070/249 (margin +1.0070)
+**Responder's stated rule**: *"the `(+)` appears on the table that should be the OUTER table (the one that keeps all its rows)."*
 
-**iter1280 = 4.25 PASS — pure breadth round; 2 new soft watches; NO FIX-A; continuing PASS loop pattern from iter1279 4.797 STRONG PASS. Q2 is the iter's weakest (3.875) and the only score that materially dips below typical recent averages — worth re-probing decimal-precision framings to disambiguate one-off vs systemic.**
+**Oracle's actual rule** (verified via WebSearch of [Oracle Database 10g Joins docs](https://docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm) + [Oracle Optimizer blog: Outerjoins in Oracle](https://blogs.oracle.com/optimizer/outerjoins-in-oracle)):
+
+> *"The (+) marker is placed on the column(s) from the table that is OPTIONAL (the side that may fail to match)... If `table2.col(+)` appears, then `table2` is OPTIONAL and the query behaves like a LEFT OUTER JOIN from table1 to table2. If `table1.col(+)` appears, then `table1` is OPTIONAL and the query behaves like a RIGHT OUTER JOIN from table1 to table2."*
+
+So **the (+) is on the NULL-supplying / optional / "may fail to match" side; the table WITHOUT the (+) is the one whose rows are all PRESERVED**. The responder's rule is exactly inverted.
+
+### Yet the SQL conversions land correctly
+
+- `WHERE a.id = b.account_id(+)` → `accounts a LEFT JOIN orders b ON a.id = b.account_id` ✓ (accounts is preserved, b is optional)
+- `WHERE a.id(+) = b.account_id` → `orders b LEFT JOIN accounts a ON a.id = b.account_id` ≡ `accounts a RIGHT JOIN orders b ON a.id = b.account_id` ✓ (orders is preserved, a is optional)
+
+The responder labeled "(+) on b, so orders is outer table" / "(+) on a, so a is outer / accounts is outer" — terminology backwards (the no-(+) side is the preserved/outer-input side). But the actual SQL the engineer would copy matches Oracle's behavior. **A reader who copies the SQL is fine; a reader who internalizes the rule and applies it to a novel 3-table case will invert the join direction.**
+
+### r27 L1755 source check — backwards rule is NOT resource-sourced
+
+```
+| `SELECT ... FROM a, b WHERE a.id = b.id(+)` (Oracle outer-join) | `SELECT ... FROM a LEFT JOIN b ON a.id = b.id` | ANSI JOIN syntax; Oracle `(+)` is parse error in Trino. |
+```
+
+r27 §4.5 L1755 shows ONE example pair, no prose rule, no second variation (`a.id(+) = b.id` → `a RIGHT JOIN b`). The backwards rule the responder gave is a **paraphrase invented during answer assembly**, not lifted from the resource.
+
+### LIGHT FIX-A — add explicit rule + second variation at r27 §4.5 L1755
+
+Suggest a 2-3 line addition to the L1755 row's "Notes" column (or a follow-up bullet block beneath the table):
+
+> **The rule (memorize this — engineers paraphrase it backwards constantly):** `(+)` marks the **OPTIONAL / null-supplying side** (the side that MAY fail to match). The table **WITHOUT** `(+)` is the one whose rows are **PRESERVED**.
+>
+> | Oracle form | Trino ANSI rewrite | Who is preserved |
+> |---|---|---|
+> | `WHERE a.id = b.id(+)` | `a LEFT JOIN b ON a.id = b.id` | `a` (no `(+)` on `a.id`) |
+> | `WHERE a.id(+) = b.id` | `a RIGHT JOIN b ON a.id = b.id`  (or equivalently `b LEFT JOIN a`) | `b` (no `(+)` on `b.id`) |
+> | `WHERE a.id(+) = b.id(+)` | `a FULL OUTER JOIN b ON a.id = b.id` | both (each side has its own `(+)`) |
+>
+> **DO-NOT-WRITE — backwards paraphrase that engineers reflexively give:** *"`(+)` appears on the OUTER table / the table that keeps all its rows."* That is **EXACTLY INVERTED**. The `(+)`-marked side is the one that may CONTRIBUTE NULL rows; the un-marked side is the preserved/outer-input side. Use the table above, not the paraphrase.
+>
+> **Multi-condition restriction (Oracle gotcha worth preserving):** If `a` and `b` are joined by multiple conditions, ALL of them must carry `(+)` on the same side, or Oracle silently degrades to an inner join. The ANSI rewrite makes this explicit in the `ON` clause.
+
+**Anchors to add**: "(+) outer join", "Oracle plus sign outer join", "Oracle (+) syntax", "convert Oracle outer join", "which side is outer Oracle (+)", "Oracle proprietary outer join Trino", "FULL OUTER (+) both sides".
+
+This is a small additive defang (the row already exists; the rule prose + second-variation row + DO-NOT-WRITE backwards-paraphrase callout are the additions). Verify via grep that the backwards paraphrase isn't already present elsewhere before adding the defang (likely a clean addition).
+
+---
+
+## Findability/content gap summary (RECOMMENDED FIX-A actions)
+
+| # | Q | Type | Location | Estimated effort |
+|---|---|---|---|---|
+| 1 | Q1 | Routing-only (anchors) | **r18 §404 (primary)** + **r16 §295 (mirror)** — perf-triage keyword anchors above the existing recipes | LIGHT — 15-25 lines of anchor blocks |
+| 2 | Q3 | New leading canonical | **r27 NEW §2519.X** (before existing §2519 secrets canonical) — two-output profiles.yml + `--target` flag + dev/prod schemas + cross-ref to §6.7M | MEDIUM — ~50-80 lines including anchors, code block, DO-NOT-WRITE, cross-refs |
+| 3 | Q4 | Small additive defang | **r27 §4.5 L1755** — correct rule prose + second-variation row + backwards-paraphrase DO-NOT-WRITE | LIGHT — 10-15 lines additive to existing table row |
+
+**Q2 — NO FIX-A** (per-instance responder synthesis slip; both r07 §1a explode form and §4 split-and-count form are individually correct).
+
+---
+
+## Watches
+
+**NEW HARD WATCH `iter1281-Q1 system.runtime perf-triage findability gap`**: re-probe within 2-3 iters under "find heaviest queries / which queries are hammering the cluster / cluster slow how do I find the bad queries" framings. After FIX-A, responder should route directly to r18 §404 recipe (Recipe 1 by bytes scanned + Recipe 2 by frequency) and produce the `system.runtime.queries JOIN system.runtime.tasks ON query_id` recipe with `split_cpu_time_ms` + `physical_input_bytes` columns. If hedge recurs, escalate (add a top-of-file callout in r18, or duplicate the recipe into a separate "find the bad query" leading canonical).
+
+**NEW HARD WATCH `iter1281-Q3 dbt dev-vs-prod target-separation findability gap`**: re-probe within 2-3 iters under "set up dev environment for dbt / how do I keep my laptop runs from overwriting prod / two targets in profiles.yml" framings. After FIX-A, responder should produce the two-output profiles.yml example + `target: dev` default + `dbt run --target prod` opt-in walkthrough. If hedge recurs, escalate (mirror the canonical into the §6.7M anchor block or hoist to r28 dbt-OPS section).
+
+**NEW LIGHT WATCH `iter1281-Q4 Oracle (+) backwards-rule paraphrase`**: re-probe within 4-6 iters under "Oracle (+) outer join convert / which side is outer in a.id=b.id(+)" framings. After LIGHT FIX-A, responder should give the correct "(+) marks optional / no-(+) side is preserved" rule. If backwards rule recurs even with FIX-A in place, treat as recall-ceiling and add a more aggressive top-of-§4.5 callout.
+
+**NEW SOFT WATCH `iter1281-Q2 UNNEST SELECT-col-not-in-GROUP-BY synthesis slip`** (broken-secondary-alternative family per pinned `feedback_responder_broken_secondary_alternative.md`): re-probe in 4-8 iters under "count events per tag / per-tag aggregate after UNNEST" framings. Per-instance, **NO RESOURCE FIX** unless 2+ recurrences with the same exact shape, at which point consider a worked "count per tag" canonical at r07 §1a with explicit "drop parent columns from SELECT" defang.
+
+**Carry from iter1280**: `iter1280-Q1 MUST-use-Spark paraphrase-slip-vs-r10-§125-defang` (re-probe 3-7 more); `iter1280-Q2 DECIMAL-SUM-scale-preserved mechanism-conclusion slip` (re-probe 3-7 more).
+**Carry from iter1278/1279**: `iter1278-Q1 Scheduled-vs-Blocked imprecision` (re-probe 2-6); `iter1279-Q4 now()-alias` (re-probe 3-7).
+
+---
+
+## Rubric score updates
+
+| Topic | Before | This iter | After | Margin |
+|---|---|---|---|---|
+| Query performance regression diagnosis (Q1) | 4.3436 / 21 | +3.125 | **4.2882 / 22** | +0.7882 (-0.0554 this iter — biggest single-iter drop on this thin topic) |
+| Analytical query patterns on Iceberg+Trino (Q2) | 4.4836 / 204 | +3.125 | **4.4770 / 205** | +0.9770 (-0.0066) |
+| Oracle PL/SQL → dbt+Trino migration (Q3+Q4) | 4.5070 / 249 | +2.875, +3.75 | **4.4975 / 251** | +0.9975 (-0.0095) |
+
+All topics remain PASSED (no topic fell below threshold), but **Query performance regression diagnosis** absorbed a meaningful drag (-0.0554) and now sits at 4.2882 — close to (but not crossing) the 4.0 informal "thin-topic re-watch" floor. The FIX-A for Q1 routing should lift this back on the next re-probe.
+
+**Iteration overall: 3.22 FAIL** — three of four questions below threshold. Two findability/framing gaps + one broken example + one backwards rule prose. NOT a knowledge gap on the part of the resources (all four answers EXIST in `resources/` or are derivable from it); a routing + synthesis-precision gap.
+
+---
+
+## Sources
+
+- [trino.io/docs/467/connector/system.html](https://trino.io/docs/467/connector/system.html) — system tables (Q1)
+- [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) — UNNEST semantics (Q2)
+- [docs.getdbt.com/docs/core/connection-profiles](https://docs.getdbt.com/docs/core/connection-profiles) — multiple targets, --target flag (Q3)
+- [docs.getdbt.com/docs/build/custom-schemas](https://docs.getdbt.com/docs/build/custom-schemas) — generate_schema_name (Q3 cross-ref)
+- [docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm](https://docs.oracle.com/cd/B19306_01/server.102/b14200/queries006.htm) — Oracle (+) outer-join semantics (Q4)
+- [blogs.oracle.com/optimizer/outerjoins-in-oracle](https://blogs.oracle.com/optimizer/outerjoins-in-oracle) — Oracle Optimizer team confirmation of "(+) on the optional side" (Q4)

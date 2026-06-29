@@ -1761,6 +1761,20 @@ SELECT greatest(price_usd, price_eur, price_gbp) AS highest_price FROM products;
 
 > **EXPLAIN-rendering sub-note (iter513 — applies to any SemiJoin node in EXPLAIN, whether from `INTERSECT`, `EXCEPT`, `IN`, `EXISTS`, `NOT IN`, or `NOT EXISTS`):** Trino renders a semi-join as `SemiJoin[<joinkey> = <joinkey>]` producing a boolean output symbol (typically named `semijoinoutput:boolean`). Anti-semantics (`EXCEPT` / `NOT EXISTS` / `NOT IN`) appear as a **downstream `Filter[NOT semijoinoutput]`** node that keeps the rows where the boolean is FALSE — NOT as a flag on the SemiJoin node itself. **DO-NOT-WRITE: `SemiJoin[..., FilterMode = ANTI]`** — there is no `FilterMode = ANTI` token in Trino EXPLAIN output; that string is a fabrication. Look for the `Filter[NOT semijoinoutput]` downstream of the SemiJoin to identify anti-semantics. See [resource 23 §10 jargon gloss](23-sql-best-practices-olap.md) for the full plan-text walkthrough.
 
+> **Oracle `(+)` outer-join conversion — the CORRECT rule + every variation (keyword anchors: Oracle (+) outer join, plus sign join, a.id = b.id(+), which side is outer, convert (+) to ANSI, RIGHT JOIN from (+), FULL OUTER from (+)).**
+>
+> **THE RULE (do not get this backwards):** the `(+)` marks the **OPTIONAL / NULL-SUPPLYING side** — the table that may have NO matching row and gets NULL-padded. The table **WITHOUT** the `(+)` is the one whose rows are ALL **PRESERVED (kept)**. So `(+)` is on the side that is *dropped/optional*, NOT on the side that is kept. Verified at Oracle docs: "if `table2.col(+)` appears, then `table2` is optional and the query behaves like a LEFT OUTER JOIN from `table1` to `table2`."
+>
+> | Oracle (+) form | Which side is PRESERVED (all rows kept) | Trino ANSI equivalent |
+> |---|---|---|
+> | `FROM a, b WHERE a.id = b.id(+)` | **`a`** (the side WITHOUT `(+)`) | `FROM a LEFT JOIN b ON a.id = b.id` |
+> | `FROM a, b WHERE a.id(+) = b.id` | **`b`** (the side WITHOUT `(+)`) | `FROM a RIGHT JOIN b ON a.id = b.id` (≡ `FROM b LEFT JOIN a ON a.id = b.id`) |
+> | `FROM a, b WHERE a.id(+) = b.id(+)` | both (no preserved side dropped) | `FROM a FULL OUTER JOIN b ON a.id = b.id` (NOTE: Oracle actually REJECTS `(+)` on both sides — ANSI `FULL OUTER JOIN` is how you express the intent in Trino) |
+>
+> **❌ DO-NOT-WRITE the inverted rule:** "the `(+)` appears on the table that should be the OUTER table / the one that keeps all its rows" — that is **EXACTLY BACKWARDS**. The `(+)` is on the table that does NOT keep all its rows (the optional, null-padded side). Memory hook: `(+)` = "add NULLs HERE when there's no match" → so the row count there can SHRINK; the other side is preserved.
+>
+> **Multi-condition caveat:** in Oracle you had to put `(+)` on EVERY join predicate to the optional table (e.g. `a.id = b.id(+) AND a.region = b.region(+)`); in ANSI/Trino all of those simply move into the single `LEFT JOIN b ON a.id = b.id AND a.region = b.region` clause. A predicate on the optional table in a `WHERE` (without `(+)`) silently turned the outer join into an inner join in Oracle — in Trino, put filters on the optional table in the `ON` clause to keep LEFT-JOIN semantics, or in `WHERE` to deliberately filter post-join.
+
 ### 4.5A ICEBERG-IDENTITY-COLUMN-NEGATION GUARDRAIL — Iceberg has NO user-facing identity / auto-increment columns; use `dbt_utils.generate_surrogate_key` instead
 
 > **Findability anchor (read first if your question contains any of these keywords):** "NEXTVAL", "sequence", "Trino sequence", "Trino CREATE SEQUENCE", "Iceberg identity column", "Iceberg auto-increment", "surrogate key", "surrogate key Trino", "surrogate key Iceberg", "hash surrogate key", "md5 surrogate key", "generate_surrogate_key", "dbt surrogate key", "md5 concat varchar Trino", "concat_ws Trino", "md5 of varchar Trino". **PRIMARY canonical replacement: `{{ dbt_utils.generate_surrogate_key(['col1', 'col2']) }}`** (idempotent, VARCHAR MD5 hex output, stable across runs and clusters). **DO NOT write bare `md5(<varchar>)` or naked `md5(concat_ws(...))`** — Trino's `md5(varbinary) -> varbinary` per [trino.io/docs/current/functions/binary.html](https://trino.io/docs/current/functions/binary.html); the type mismatch is the bug, NOT the inner function. **`concat_ws` itself DOES exist in Trino 467** as `concat_ws(separator, string1, ..., stringN) -> varchar` per [trino.io/docs/current/functions/string.html](https://trino.io/docs/current/functions/string.html) — see §4.3 string-family canonical for the full signature. Hand-rolled fallback that compiles: `to_hex(md5(to_utf8(concat_ws('||', CAST(a AS VARCHAR), CAST(b AS VARCHAR)))))` OR `to_hex(md5(to_utf8(concat(CAST(a AS VARCHAR), '||', CAST(b AS VARCHAR)))))`. See the DO-NOT-WRITE table below for the full ban.
@@ -2513,6 +2527,59 @@ Is the model a small reusable intermediate referenced 1-2 times?
    YES -> ephemeral
    NO  -> default to view, revisit when performance issues surface
 ```
+
+---
+
+## dbt dev vs prod — separate environments in profiles.yml so a laptop `dbt run` writes to its OWN schema (never overwrites production)
+
+> **READ THIS FIRST if your question is any of:** "everyone runs dbt against the **same prod catalog** and I'm scared a local `dbt run` **overwrites production / real customer data**"; "how do I set up **dev vs prod** in dbt"; "make my **laptop** dbt writes go to a **separate / different schema**"; "**dbt environments**, where do I configure them"; "isolate dev from prod in dbt"; "profiles.yml **targets** / outputs / `--target`"; "dbt dev schema per developer". **YES — dbt does this with multiple named `outputs:` (targets) in `profiles.yml`, each pointing at a DIFFERENT schema; the answer is below. Do NOT hedge.**
+
+**The mechanism.** A dbt profile has an `outputs:` map with one entry per environment (e.g. `dev`, `prod`) and a `target:` that picks the DEFAULT one. Each output is a full connection spec **with its own `schema:`** — so the SAME models build into a DIFFERENT physical schema depending on which target is active. Point `target:` at `dev` so the *default* (what runs when someone just types `dbt run` on their laptop) is the safe dev schema; production runs must **explicitly** opt in with `dbt run --target prod`.
+
+```yaml
+# ~/.dbt/profiles.yml   (the profile name must match `profile:` in dbt_project.yml)
+my_project:
+  target: dev                       # <- DEFAULT target = dev. A bare `dbt run` on a laptop hits THIS, not prod.
+  outputs:
+    dev:
+      type: trino
+      host: trino.internal
+      port: 443
+      http_scheme: https
+      user: "{{ env_var('USER') }}"           # developer's own principal
+      password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+      catalog: iceberg
+      schema: "dbt_{{ env_var('USER') }}"      # <- per-developer dev schema, e.g. dbt_alice — ISOLATED from prod
+      threads: 4
+    prod:
+      type: trino
+      host: trino.internal
+      port: 443
+      http_scheme: https
+      user: "{{ env_var('DBT_PROD_USER') }}"
+      password: "{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}"
+      catalog: iceberg
+      schema: analytics                        # <- the real production schema
+      threads: 8
+```
+
+```bash
+dbt run                 # uses target: dev  -> builds into schema dbt_<you> (safe; cannot touch analytics)
+dbt run --target prod   # EXPLICIT opt-in   -> builds into schema analytics (production)
+```
+
+**Why this protects prod:** with `target: dev` as the default, the dangerous action (writing to `analytics`) requires the extra `--target prod` flag — there is no way to *accidentally* overwrite production by just running `dbt run`. Give the `dev` Trino `user` write access ONLY to the `dbt_*` dev schemas (not `analytics`) for defense-in-depth.
+
+**Schema-name nuance (important on dbt-trino).** The `schema:` in the target is dbt's *target schema*. By default dbt's built-in `generate_schema_name` macro **concatenates** a model's custom `+schema:` config onto the target schema (`<target_schema>_<custom>`), which surprises people — if you want dev and prod to use cleanly different schema NAMES (not concatenations), override `generate_schema_name` (see **§6.7M**) so dev resolves to `dbt_<you>` and prod to `analytics` without prefixing. For CI, set a third `ci` output with its own ephemeral schema.
+
+> **Anti-patterns:**
+> | ❌ | Why it's wrong |
+> |---|---|
+> | One single `outputs:` entry shared by the whole team, all pointing at `schema: analytics` | No isolation — exactly the "a local run overwrites prod" hazard. Add a `dev` output with a per-developer schema and make it the default `target:`. |
+> | `target: prod` as the default | Makes production the accidental default. Default MUST be `dev`; require `--target prod` to write prod. |
+> | Hardcoding the password in each output | Use `{{ env_var('DBT_ENV_SECRET_TRINO_PASSWORD') }}` — see the secrets canonical immediately below. |
+
+**Cross-references:** the **"dbt connection & secrets"** canonical immediately below (env_var / DBT_ENV_SECRET_ — how to fill the `password:` safely); **§6.7M** (`generate_schema_name` override — control how a target maps to a physical schema name); **§6.7F** (`--select` / node selection — run a subset within a target).
 
 ---
 
