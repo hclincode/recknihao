@@ -1503,12 +1503,16 @@ SET SESSION join_distribution_type = 'PARTITIONED';
 {{ config(pre_hook="SET SESSION join_distribution_type = 'PARTITIONED'") }}
 ```
 
-This forces every join in the query to use PARTITIONED. Heavy hammer — if some joins are legitimately broadcast-friendly, you lose that optimization for them. For per-join control, raise `join-max-broadcast-table-size` for the small dims while letting the planner pick PARTITIONED for the large one:
+This forces every join in the query to use PARTITIONED. Heavy hammer — if some joins are legitimately broadcast-friendly, you lose that optimization for them.
+
+**⚠️ DIRECTION MATTERS for `join_max_broadcast_table_size` — to FIX a broadcast OOM you LOWER it, NOT raise it.** The planner broadcasts any build side UNDER this threshold. So when a too-large build is OOMing because it got broadcast, **LOWER** the threshold below that build's size (e.g. from the 100MB default down, or just use Pattern A's `join_distribution_type='PARTITIONED'`) so it switches to PARTITIONED:
 
 ```sql
-SET SESSION join_max_broadcast_table_size = '500MB';
--- Now dims up to 500MB will broadcast; bigger ones will partition.
+-- Fix a broadcast OOM: LOWER the threshold so the oversized build partitions instead of broadcasting.
+SET SESSION join_max_broadcast_table_size = '10MB';   -- builds bigger than 10MB now PARTITION (no replication)
 ```
+
+❌ **DO-NOT-WRITE "raise `join_max_broadcast_table_size` to 500MB to fix an OOM"** — RAISING the threshold makes Trino broadcast EVEN LARGER tables (replicate them to every worker), which INCREASES memory pressure and makes the OOM WORSE. Raising it is only appropriate in the opposite situation: you have ample worker memory and the planner is needlessly PARTITIONING a genuinely-small dim you'd rather broadcast (a latency optimization, NOT OOM remediation).
 
 **Pattern B — bad stats causing wrong distribution choice.** Run `ANALYZE <table>` (Trino syntax: bare `ANALYZE`, NO `TABLE` keyword) on every source:
 

@@ -1,177 +1,169 @@
-# Iter1299 Judge Feedback
+# Iter1300 Judge Feedback
 
 ## Iteration verdict
 
-**Overall avg: 3.766 (PASS by overall threshold, but Q-level MIXED: 2 STRONG / 2 FAIL).**
+**Overall avg: 4.375 (PASS by overall threshold; 3 STRONG / 1 FAIL).**
 
 | Q | Score | Verdict | Topic touched |
 |---|---|---|---|
-| Q1 (`\|\|` vs CONCAT + mixed types) | **4.875** | STRONG PASS | SQL query best practices for OLAP |
-| Q2 (day vs month partitioning) | **4.6875** | STRONG PASS | Iceberg partition design for SaaS |
-| Q3 (dbt `{{ this }}`) | **3.125** | **FAIL** (Q-level <3.5) | Improving complex SQL on Trino with dbt |
-| Q4 (Oracle MOD → Trino) | **2.375** | **FAIL** (Q-level <3.5) | Oracle PL/SQL → dbt+Trino migration |
+| Q1 (RANK ties leaderboard) | **4.8125** | STRONG PASS | Analytical query patterns on Iceberg+Trino |
+| Q2 (join spill / memory exceeded) | **3.125** | **FAIL** (Q-level <3.5) | Improving complex SQL performance on Trino with dbt |
+| Q3 (dbt seeds vs sources) | **4.8125** | STRONG PASS | dbt sources / source freshness |
+| Q4 (Oracle EXTRACT → Trino) | **4.75** | STRONG PASS | Oracle PL/SQL → dbt+Trino migration |
 
-iter1298 4.5625 → iter1299 3.766: drop of −0.797, driven by Q3 broken-example defect and Q4 false-premise endorsement. All four topics remain PASSED at the topic-running-average level (large prior datapoints absorb the per-Q drop).
+iter1299 3.766 → iter1300 4.375: recovery of +0.609. Q1/Q3/Q4 clean. Q2 is the single FAIL — two distinct factual flips on the same answer: (a) **backwards spill-to-disk causality** (responder framed spill as a CONSEQUENCE of OOM; spill is the AVOID-OOM graceful-degradation mechanism); (b) **harmful Pattern C** (responder recommended RAISING `join_max_broadcast_table_size` to 500MB to fix a broadcast OOM; that worsens OOM — the correct lever is LOWER or force PARTITIONED).
 
 ---
 
 ## Per-question
 
-### Q1 — `||` vs CONCAT + mixed types → **4.875 STRONG PASS**
+### Q1 — RANK / DENSE_RANK / ROW_NUMBER ties + leaderboard → **4.8125 STRONG PASS**
 
-Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 5.0.
+Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 4.75.
 
-Responder: `||` and `concat()` are equivalent (concat is the SQL-standard equivalent of `||` per Trino docs); BOTH varchar-only with NO implicit number→string coercion; explicit `CAST(x AS VARCHAR)` per numeric arg OR — recommended for labels — `format('Enterprise — %s — %s', region, plan_name)`. Gave format-specifier table (`%s` any type, `%d` BIGINT, `%.2f` DECIMAL).
+Responder: ROW_NUMBER = unique 1,2,3 (arbitrary tiebreak); RANK = 1,1,3 (gaps); DENSE_RANK = 1,1,2 (no gaps). Recommended DENSE_RANK for "both rank 1, next rank 2"; full worked CTE with `DENSE_RANK() OVER (PARTITION BY date_trunc('month', order_date) ORDER BY SUM(amount) DESC) AS rank_position` then `WHERE rank_position <= 10`. Flagged the ties-at-N boundary returning >10 rows + ROW_NUMBER + tiebreaker recipe for exactly-10.
 
 **VERIFIED**:
-- `concat(string1, ..., stringN) → varchar` "provides the same functionality as the SQL-standard concatenation operator (`||`)" — [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html)
-- "Trino will not convert between character and numeric types" — [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html)
-- `format()` Java-formatter semantics; `%s` accepts any printable type (Java Formatter conversion 's' uses `toString()`)
-
-Minor Clar shave (−0.5): didn't surface that `||`/`concat()` on a NULL arg propagates NULL whereas `format()` prints literal "null" — common label footgun worth one extra sentence. Not load-bearing.
+- Tie semantics per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): `rank()` "Tie values produce gaps in the sequence"; `dense_rank()` "no gaps in the sequence"; `row_number()` unique sequential numbers.
+- Window-over-aggregate is valid Trino: aggregate functions can be used as window functions by adding `OVER` clause. The combined `DENSE_RANK() OVER (PARTITION BY ... ORDER BY SUM(amount) DESC)` in a query with `GROUP BY` is a standard top-N-per-group pattern.
+- Ties-at-boundary returning >10 caveat is correct: with DENSE_RANK, two accounts tied at rank 10 both appear; with ROW_NUMBER + deterministic tiebreaker, exactly 10. Responder named both forms.
 
 No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
-### Q2 — day vs month partitioning → **4.6875 STRONG PASS**
+---
 
-Acc 4.5 / Clar 5.0 / Prac 5.0 / Compl 4.25.
+### Q2 — 500M × 200K join "memory exceeded" + spill → **3.125 FAIL**
 
-Responder cleanly REFUTED the teammate's misconception: "partition granularity ≠ file count." A single day-partition can hold many Parquet files (file count is driven by `write.target-file-size-bytes` ~128MB default, not by partition granularity); a month-partition with the same write knob just lumps 30 days' worth of files into the same partition value, doesn't inherently reduce file count. BOTH day + month enable Iceberg pruning via day()/month() transforms; day gives FINER pruning (engine reads only requested day's files), month forces scanning whole month then filter-in-Trino = up to 30× more data for a single-day query. Day = more partition-spec entries → small/negligible planning overhead at 400M/365 ≈ 1M rows/day. Recommendation: **STICK WITH DAY** for fact tables with date-range filters.
+Acc 2.5 / Clar 3.5 / Prac 2.5 / Compl 4.0.
 
-**VERIFIED**:
-- Iceberg `write.target-file-size-bytes` default 128MB (file size, not granularity, drives file count) — [iceberg.apache.org/docs/latest/configuration/](https://iceberg.apache.org/docs/latest/configuration/)
-- Day()/month() transforms both prune via manifest min/max per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html)
-- 400M/365 ≈ 1M rows/day → at any sensible row size, this is NOT the over-partitioning regime
+Two distinct factual flips:
 
-**Minor Acc shave (−0.5)**: didn't acknowledge the over-partitioning edge case — if days were so sparse each day produced 1-2 tiny files, coarsening to month could help by consolidating; at 1M rows/day this regime is not in play, but a one-sentence "if days are tiny, coarsen; not your case at 1M rows/day" would close the "how to pick" portion.
+**(1) BACKWARDS SPILL CAUSALITY (responder-originated).** Responder wrote: *"if that 'small' table is 5GB and only 2GB/worker, the worker OOMs and Trino SPILLS that worker's data to disk (slow)."* This inverts the mechanism.
 
-**Minor Compl shave (−0.75)**: didn't surface the `events$partitions` metadata table inspection (iter1268 canonical) for verifying file_count/total_size per partition before changing partition spec — would have given the engineer a concrete diagnostic step for "how to pick". Reinforces iter1298-Q2 watch (metadata-tables-for-file-layout) — second consecutive miss of the `$partitions`/`$files` metadata-inspection canonical when the question naturally invites it.
+**The actual Trino spill model** (verified [trino.io/docs/current/admin/spill.html](https://trino.io/docs/current/admin/spill.html) + r18 §LEADING CANONICAL "Trino 467 memory limits + spill-to-disk"):
+- Spill-to-disk is **graceful degradation that AVOIDS OOM**, not a consequence of it.
+- Mechanism: "revocable memory" — when memory pressure hits `memory-revoking-threshold` (default 0.9 of memory pool), the memory manager **revokes** (spills) intermediate hash/aggregation/sort state to disk **BEFORE** an OOM occurs.
+- Master enable lever: `SET SESSION spill_enabled = true` (or cluster config `spill-enabled=true`). Trino default is `spill-enabled=false`.
+- If spill is OFF and a query exceeds `query_max_memory` / `query_max_memory_per_node`, Trino **kills the query** with `EXCEEDED_LOCAL_MEMORY_LIMIT` or `EXCEEDED_DISTRIBUTED_MEMORY_LIMIT` per the docs quote: *"Trino kills queries, if the memory requested by the query execution exceeds session properties query_max_memory or query_max_memory_per_node."*
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Refuting the teammate's claim is the load-bearing piece, and that's clean.
+So the correct causal direction is **spill PREVENTS the OOM error**, not "OOM → spill." The responder's mental model would lead an engineer to think "I'm seeing memory exceeded, so spill is happening — I just need to make it faster" (wrong: spill is OFF; you need to enable it).
 
-### Q3 — dbt `{{ this }}` → **3.125 FAIL**
+**Resource-sourced or responder-originated?** **RESPONDER-ORIGINATED.** Grep of `resources/` shows r18 §240-285 has the CORRECT framing throughout: spill is the "single MASTER ENABLE switch" (line 260), enabled via `SET SESSION spill_enabled = true` as **Step 1 of canonical OOM remediation** (line 279-285), framed explicitly as "graceful degradation" before the OOM error fires. r18 also has a `DIAGNOSIS GUARD` for `ORDER BY ... LIMIT` not-actually-spilling (line 303-307). The "OOM then spill" framing is NOT in resources — it's a responder confabulation under the `spill` keyword. No resource defect to reconcile.
 
-Acc 3.0 / Clar 4.0 / Prac 2.5 / Compl 3.0.
+**(2) PATTERN C IS BACKWARDS / HARMFUL (resource-contributing framing).** Responder wrote: *"if build side legitimately large, RAISE the broadcast threshold: SET SESSION join_max_broadcast_table_size='500MB' — now dims up to 500MB broadcast."* Presented as a fix to the OOM.
 
-**Concept portion CORRECT**: `{{ this }}` is a Relation object referring to the model's own target (catalog.schema.identifier of the table this model materializes into); intended primarily for incremental models reading prior state to compute deltas; also valid in pre/post hooks.
+**The actual semantics** (verified [trino.io/docs/current/optimizer/cost-based-optimizations.html](https://trino.io/docs/current/optimizer/cost-based-optimizations.html) + WebSearch):
+- `join_max_broadcast_table_size` is the AUTOMATIC-mode threshold below which the CBO chooses BROADCAST. Default 100MB.
+- **LOWERING** the threshold ⇒ MORE builds get classified as "too big to broadcast" ⇒ CBO picks PARTITIONED ⇒ less per-worker memory pressure ⇒ FIX FOR OOM.
+- **RAISING** the threshold ⇒ MORE builds qualify for broadcast ⇒ MORE replication to every worker ⇒ MORE memory pressure ⇒ WORSE OOM.
 
-**THE DEFECT — broken example**: responder gave
+The responder's recommendation is the **opposite of what fixes the OOM**. An engineer who follows Pattern C as written will broadcast even larger tables and OOM harder.
 
-```sql
-{{ config(materialized='incremental') }}
-SELECT ...
-WHERE occurred_at >= (
-  SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01')
-  FROM {{ this }}
-)
-```
+**Resource-sourced check.** Grep of `resources/`:
+- r18 §"Common session properties for query tuning" L180-182: `join_max_broadcast_table_size` is described correctly — "Tune the auto-broadcast threshold down (force PARTITIONED) when you've blown memory on a 'small but not that small' dim. Tune up to encourage BROADCAST when you have ample RAM." Direction-correct.
+- r24 §"SECONDARY CAP" L54-61: "Lower the broadcast threshold to 50MB — anything bigger will partition under AUTOMATIC." Direction-correct.
+- **r28 §8A.2 Pattern A L1496-1511** is the muddled source. Reads: *"Pattern A — broadcast OOMs because the build is too big. Force the planner to use PARTITIONED for this join: `SET SESSION join_distribution_type = 'PARTITIONED';` ... For per-join control, raise `join-max-broadcast-table-size` for the small dims while letting the planner pick PARTITIONED for the large one: `SET SESSION join_max_broadcast_table_size = '500MB';` — Now dims up to 500MB will broadcast; bigger ones will partition."* Pattern A leads with the correct force-PARTITIONED fix, then introduces a "per-join control" aside with a `'500MB'` value under an OOM header. The aside's logic is borderline-nonsensical (small dims already broadcast at the 100MB default; raising to 500MB doesn't change their behavior, and the 5GB OOM-causing dim is still above 500MB so the raise doesn't fix it either) — and a Haiku responder reading "raise to 500MB" under "Pattern A — broadcast OOMs" naturally lifted it as a fix-for-OOM. The `'500MB'` value-anchor in particular matches the responder's verbatim recommendation.
 
-and claimed "First run `{{ this }}` doesn't exist → watermark defaults to sentinel." **This is WRONG.** On first run the target relation does NOT exist, so `SELECT MAX(...) FROM {{ this }}` raises "relation does not exist" / table-not-found BEFORE any `COALESCE` evaluates. **COALESCE handles an EMPTY table, NOT a MISSING one.** The standard dbt-canonical pattern REQUIRES the `{% if is_incremental() %}` guard:
+**This is a HALF-RESPONDER / HALF-RESOURCE defect.** The responder mutated r28 §8A.2 Pattern A's confusing aside into a more clearly harmful "Pattern C for OOM = raise threshold" recommendation. **LIGHT FIX-A recommended at r28 §8A.2 Pattern A:**
+- Remove the `SET SESSION join_max_broadcast_table_size = '500MB';` aside from Pattern A (the OOM section) OR
+- Reframe it as a SEPARATE "Pattern A.1 — when you have ample RAM and want MORE broadcasting" section so the raise-direction is decoupled from the OOM-remediation flow
+- Add a one-liner direction-anchor: *"For an OOM caused by an over-large broadcast build: LOWER the threshold (or force PARTITIONED). RAISING the threshold INCREASES broadcast memory pressure and will worsen the OOM."*
 
-```sql
-{{ config(materialized='incremental') }}
-SELECT ...
-{% if is_incremental() %}
-  WHERE occurred_at >= (SELECT COALESCE(MAX(occurred_at), TIMESTAMP '1970-01-01') FROM {{ this }})
-{% endif %}
-```
+**Optional defensive enhancement at r18 §spill canonical** (responder-originated half — lower priority, no recurrence yet): add a one-line direction-anchor at the top of the spill card: *"Spill-to-disk is graceful degradation that PREVENTS OOM (revokes hash/sort state to disk before the memory pool fills). It is NOT a consequence of OOM. If you see `EXCEEDED_LOCAL_MEMORY_LIMIT`, spill was NOT enabled — Step 1 below enables it."* — r18 has the content but the causality anchor is implicit, not headline. Soft watch only; FIX-A optional.
 
-On first run the entire WHERE clause is OMITTED (full backfill); on subsequent runs the table exists and the watermark is read.
+**What was correct in the answer** (partial-credit basis for the 3.125 floor):
+- Pattern A (`SET SESSION join_distribution_type = 'PARTITIONED'` + dbt pre_hook) — correct primary fix.
+- Pattern B (bare `ANALYZE` for stats so CBO has a basis to switch to PARTITIONED) — correct, matches r24 §TERTIARY guidance.
+- EXPLAIN `RemoteExchange[REPLICATE]` recognition — correct, matches r28 §8A.2 L1488 verbatim.
+- Connected SQL-fix vs cluster-memory framing — correct intuition.
 
-**VERIFIED** at [docs.getdbt.com/reference/dbt-jinja-functions/this](https://docs.getdbt.com/reference/dbt-jinja-functions/this) verbatim:
-- "On the first execution of a model, `{{ this }}` will not refer to an existing table"
-- Canonical docs example wraps the WHERE in `{% if is_incremental() %} ... {% endif %}` explicitly
-
-Material harm: an engineer copying the responder's example would hit a relation-not-found error on first `dbt build` / `dbt run`. The question literally asked "safe in a non-incremental model or only specific context", so the example matters more than usual here. Concept is right; example (how to use it) is broken.
-
-**NEW SOFT WATCH `iter1299-Q3 dbt {{ this }} incremental example MISSING is_incremental() guard, COALESCE-saves-first-run myth`**: re-probe in 4-8 iters under "show me an incremental model using `{{ this }}`" framings; if 2+ recurrences where the example omits `{% if is_incremental() %}`, escalate to LIGHT FIX-A — find the resource that teaches this pattern and verify the canonical form is anchored WITH the guard + an explicit defang: "COALESCE does NOT rescue a missing relation; `is_incremental()` guard is REQUIRED on first run." Family: `feedback_responder_broken_secondary_alternative.md` — leads pass, broken-secondary-example padding.
-
-No imported-prior, no over-warning, no fabrication.
-
-### Q4 — Oracle MOD → Trino → **2.375 FAIL**
-
-Acc 2.0 / Clar 3.0 / Prac 2.0 / Compl 2.5.
-
-**Uncorrected FALSE engineer premise + hedge, despite having the refuting fact (r27 L1271 "Identical") in resources.** Responder hedged: "resources list mod/% as 'identical' to Oracle MOD, but resources do not document the specific sign-handling behavior. This is a gap — I don't have enough detail to confirm. Recommendation: test mod() and `%` against your Oracle values yourself." Did NOT correct the premise; implicitly accepted MOD(-10,3)=2.
-
-**THE ACTUAL MATH**:
-- Oracle `MOD(n2, n1) = n2 - n1 * TRUNC(n2/n1)` (TRUNC = truncate toward zero, NOT FLOOR)
-- For MOD(-10, 3): -10/3 = -3.333…, TRUNC(-3.333) = -3, -10 - 3*(-3) = -10 + 9 = **-1**
-- **Oracle MOD follows the SIGN OF THE DIVIDEND**, NOT the divisor
-
-**VERIFIED**:
-- [docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/MOD.html](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/MOD.html) — Oracle docs: result is negative only when n2 (dividend) is negative
-- [database.guide/mod-function-in-oracle/](https://database.guide/mod-function-in-oracle/) — "The result is negative only if n2 is negative"
-- [databasestar.com/oracle-remainder-mod/](https://www.databasestar.com/oracle-remainder-mod/) — same behavior
-- Trino `mod()` and `%` use the SAME truncated-division semantics per [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) (consistent with C/Java truncated `%`)
-
-**Conclusion**: **Trino mod = Oracle MOD = -1** for (-10, 3). **r27 L1271 "Identical" IS CORRECT.** The engineer's premise "Oracle returns 2, follows sign of divisor" is **FALSE** — the value 2 is the FLOORED / Euclidean / Python `%` modulo (`((a % n) + n) % n`), which neither Oracle MOD nor Trino mod produces natively. The engineer is likely confusing Oracle MOD with Excel's MOD or Python's `%` (floored-modulo behavior).
-
-**IDEAL ANSWER**:
-1. Cite r27 L1271 "Identical" → both engines = -1
-2. CORRECT the false premise: Oracle MOD follows DIVIDEND sign per Oracle docs (TRUNC formula), NOT divisor; MOD(-10, 3) is -1 in Oracle, not 2
-3. If engineer wants always-non-negative floored result: `((a % n) + n) % n` or `mod(((a % n) + n), n)`
-
-Responder had r27 L1271 "Identical" available but failed to connect it; hedged instead of asserting. Material harm: engineer will continue to believe Trino mismatches Oracle when in fact they match perfectly, and may write workarounds based on a wrong understanding of Oracle.
-
-**This is the 3rd false-premise pattern in recent iters**:
-- iter1291-Q4 COUNT-NULL-corrected (responder DID correct — INVERSE case, good)
-- iter1297-Q4 Oracle-GROUP-BY-leniency endorsed (responder accepted false "Oracle is lenient" — bad)
-- iter1299-Q4 Oracle-MOD-divisor-sign hedged (responder didn't correct — bad)
-
-2 of 3 most recent false-premise scenarios endorsed/hedged.
+**Watch**: `iter1300-Q2 r28 §8A.2 Pattern A raise-vs-lower threshold confusion + responder spill-causality flip` — re-probe in 3-6 iters under varied OOM/spill framings; if Pattern C harmful-direction recurs OR spill-causality flip recurs, escalate r28 §8A.2 to a hard FIX-A and add the r18 spill-direction anchor.
 
 ---
 
-## RECOMMENDED LIGHT FIX-A: r27 L1271
+### Q3 — dbt seeds vs sources → **4.8125 STRONG PASS**
 
-The current "Identical" is **TOO TERSE** — responder had the resource fact but couldn't connect it to refute a concrete false claim. Enhance L1271 with:
+Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 4.75.
 
-1. **Concrete worked example** (1-2 lines): `Oracle MOD(-10, 3) = -1`, `Trino mod(-10, 3) = -1`, `Trino -10 % 3 = -1` — all three identical, all follow DIVIDEND sign per truncated division (Oracle formula `n2 - n1 * TRUNC(n2/n1)`).
-2. **Floored-modulo workaround** for always-non-negative result: `((a % n) + n) % n` or `mod(((a % n) + n), n)`.
-3. **DEFANG card** (1-line, copy-attractive): "Common misconception: 'Oracle MOD follows the divisor sign / returns 2 for MOD(-10,3)' — WRONG. Oracle MOD follows the DIVIDEND sign per Oracle docs (TRUNC formula). The value 2 is the floored/Euclidean modulo (Python `%`, Excel MOD), NOT Oracle MOD." Mark as a DO-NOT-WRITE / un-copyable negative example per `feedback_defang_donotwrite_snippets.md` — wrong claim defanged in-line, canonical "both = -1" is the copy-attractive block.
+Responder: seeds = small static self-managed CSV in `seeds/`, version-controlled, loaded by `dbt seed` (or part of `dbt build`), referenced as `ref('plans')`. Sources = raw external tables loaded by upstream ETL, declared in `sources.yml`, referenced as `source('app','events')`. Comparison table on managed-by / size / change-freq / declaration / load mechanism. Both worked recipes given. Correctly noted `dbt run` does NOT load seeds; `dbt build` does. Mapping: 300-row product-codes CSV = seed; raw events table = source.
 
-This LIGHT additive FIX-A closes the findability gap (responder had the fact, couldn't connect because the resource was too sparse to refute a concrete false claim). Family: `feedback_trace_recurring_folklore_to_resource_root_cause.md` — false-premise endorsements that recur often have a too-terse-resource root cause; in this case the "Identical" claim is technically correct but offers nothing concrete enough to refute a specific sign-handling false claim.
+**VERIFIED**:
+- Seeds: CSV files in seeds directory, loaded by `dbt seed`, referenced via `ref()` per [docs.getdbt.com/docs/build/seeds](https://docs.getdbt.com/docs/build/seeds).
+- Sources: declared in `sources.yml`, referenced via `source('source_name','table_name')` per [docs.getdbt.com](https://docs.getdbt.com).
+- `dbt build` runs models + tests + seeds + snapshots in DAG order; `dbt run` runs ONLY models per [docs.getdbt.com/reference/commands/build](https://docs.getdbt.com/reference/commands/build) and [docs.getdbt.com/reference/commands/run](https://docs.getdbt.com/reference/commands/run). Confirmed: *"dbt build ... combines dbt run, dbt test, dbt snapshot, and dbt seed into a single operation."*
 
-**Scope**: 4-6 added lines at r27 L1271. Do NOT churn other Oracle dialect rewrite cards; this is a targeted findability lift.
-
-**NEW SOFT WATCH `iter1299-Q4 Oracle MOD sign-handling false-premise hedge`**: re-probe in 4-8 iters under "Oracle MOD(neg,pos) sign / Trino mod equivalence" framings; verify the L1271 LIGHT FIX-A (if applied) anchors correctly.
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Watches carried forward
+### Q4 — Oracle EXTRACT → Trino → **4.75 STRONG PASS**
 
-- **iter1298-Q2** metadata-tables-for-file-layout + sort-vs-pruning-conflation (re-probe 4-8) — **PARTIAL RECURRENCE this iter**: Q2 again missed `$partitions` metadata-inspection canonical when "how to pick day vs month" naturally invites it. Not a defect on Q2 (refutation was load-bearing and clean), but reinforces the watch. 2nd partial recurrence → if 1 more clean recurrence escalate to LIGHT FIX-A (routing card at file-layout-inspection keyword zone).
-- **iter1297-Q4** Oracle-GROUP-BY-leniency false-premise endorsement (re-probe 4-8) — **PATTERN-CONFIRMED RELATED this iter via Q4 MOD false-premise**; if 2+ recurrences of false-premise endorsement on Oracle-vs-Trino topics, escalate to a broader "verify Oracle premises against docs" defang in r27 dialect-rewrite intro
-- iter1296-Q1 CONTAINS-secondary (re-probe 4-8)
-- iter1296-Q3 singular-test (re-probe 4-8)
-- iter1295-Q2 FIRST_VALUE-priming (re-probe 4-8)
-- iter1294-Q4 ROWNUM-per-group (re-probe 4-8)
-- iter1290-Q3 small-files-routing (re-probe 4-8)
-- iter1289-Q2 position-delete-Spark-vs-Trino (re-probe 4-8)
-- iter1289-Q4 LPAD-RPAD-false-divergence (re-probe 4-8)
+Acc 5.0 / Clar 4.5 / Prac 5.0 / Compl 4.5.
 
-## Watches opened this iter
+Responder: "EXTRACT works IDENTICALLY in Trino 467 — keep as-is." `EXTRACT(YEAR FROM x) = year(x) = date_part('year', x)`; `EXTRACT(MONTH FROM x) = month(x) = date_part('month', x)`; all return `BIGINT`. `GROUP BY EXTRACT(YEAR FROM created_at)` works. Mentioned `ADD_MONTHS` (Oracle end-of-month clamping) as the only datetime gotcha — separate from EXTRACT which is a clean 1:1.
 
-- **iter1299-Q3** dbt `{{ this }}` incremental example MISSING `{% if is_incremental() %}` guard, "COALESCE saves first run" myth (re-probe 4-8)
-- **iter1299-Q4** Oracle MOD sign-handling false-premise hedge → **LIGHT FIX-A r27 L1271 RECOMMENDED** (worked example + floored workaround + defang); watch verifies the fix anchors
+**VERIFIED**:
+- Trino 467 supports `EXTRACT(field FROM source)` per the SQL-standard datetime extraction spec; YEAR/MONTH/DAY/HOUR/MINUTE/SECOND all work on TIMESTAMP/DATE/TIMESTAMP WITH TIME ZONE.
+- `year(x)`, `month(x)`, `date_part('year', x)`, `date_part('month', x)` are Trino built-ins on the datetime functions page returning BIGINT.
+- `GROUP BY EXTRACT(YEAR FROM ts)` is standard SQL-compliant grouping by expression (Trino supports expressions in GROUP BY).
+- ADD_MONTHS aside is correct context-setting — Oracle's end-of-month clamping is a real cross-dialect gotcha, but EXTRACT itself is clean.
 
-## FIX-A decision summary
+The responder also correctly defused a potential false-premise (Oracle ≠ Trino on date functions wholesale — actually EXTRACT is one of the cleanest 1:1 ports), which is the OPPOSITE pattern to iter1299-Q4 where the responder accepted a false MOD premise. This is a clean reversal — good defensive answering.
 
-**YES, LIGHT FIX-A on r27 L1271 RECOMMENDED.**
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
-- This is the 2nd Oracle false-premise hedge in 3 iters (iter1297-Q4 + iter1299-Q4 endorsed; iter1291-Q4 corrected)
-- Resource has the refuting fact ("Identical") but it's too terse to refute a concrete sign-handling claim
-- Additive enhancement (worked example + workaround + defang) doesn't contradict the existing claim — just makes it concrete enough for the responder to find and connect
-- Per `feedback_trace_recurring_folklore_to_resource_root_cause.md`, recurring false-premise endorsements warrant resource-root-cause investigation, not pure responder-slip framing
+---
 
-**Q3 — NO FIX-A on first occurrence.** Per `feedback_responder_broken_secondary_alternative.md` family — leads-pass, broken-example padding tends to be per-instance. Open soft watch; if 2+ recurrences with missing-guard pattern, then check whether the canonical dbt-incremental resource section explicitly anchors the `{% if is_incremental() %}` guard with a defang against the COALESCE-saves-first-run myth, and escalate to LIGHT FIX-A only if the resource is found to be missing/weak on the guard.
+## Cross-question patterns
 
-## Topic running averages after this iter
+- **One Q-FAIL out of four** — iter1300 3 STRONG / 1 FAIL, overall 4.375. The FAIL (Q2) is on a multi-mechanism question (broadcast + spill + memory + EXPLAIN) where the responder needs to chain four distinct Trino concepts; got the Pattern A primary fix correct but mangled the spill mechanism AND the threshold direction. This is a SYNTHESIS slip on a high-complexity hand-off question, consistent with the synthesis-ceiling pattern (`feedback_synthesis_ceiling_stop_churning.md`).
+- **Imported-prior family quiet this iter** — no new assumed-absence/assumed-presence slips. Q4 EXTRACT clean (no "Trino doesn't have X" foreign-function assumption).
+- **Broken-secondary-alternative pattern quiet** — Q1 mentioned ROW_NUMBER + tiebreaker as a secondary form and got it RIGHT (deterministic ties). Q3 mentioned both seed-and-source recipes side-by-side cleanly.
+- **Over-warning folklore quiet** — Q2 over-warned on spill direction (a real fact mistake, not folklore). Q4 didn't over-warn that "EXTRACT might be slow" or similar; gave a clean keep-as-is.
+- **Responder-originated vs resource-sourced split for Q2**: spill flip = responder-originated (NO FIX-A urgent); join_max_broadcast_table_size raise-vs-lower = half-resource-contributing (r28 §8A.2 muddle) ⇒ **LIGHT FIX-A recommended at r28 §8A.2 Pattern A**.
 
-- SQL query best practices for OLAP: 4.5902/310 → **4.5912/311** (+0.0010, margin +1.0912)
-- Iceberg partition design for SaaS: 4.4118/71 → **4.4156/72** (+0.0038, margin +0.9156)
-- Improving complex SQL on Trino with dbt: 4.4660/94 → **4.4519/95** (−0.0141, margin +0.9519, Q-level FAIL absorbed by 94 priors)
-- Oracle PL/SQL → dbt+Trino: 4.5000/272 → **4.4923/273** (−0.0077, margin +0.9923, Q-level FAIL absorbed by 272 priors)
+---
 
-All four topics REMAIN PASSED at topic-running-average level. Iteration overall avg 3.766 PASSES the 3.5 threshold but with 2 individual-Q FAILs (Q3, Q4).
+## Active watches
+
+**NEW (iter1300-Q2)**: `r28 §8A.2 Pattern A raise-vs-lower-threshold confusion + responder spill-causality flip` — LIGHT FIX-A at r28 §8A.2 to disambiguate raise-direction from OOM-fix flow; optional defensive direction-anchor at r18 §spill canonical. Re-probe in 3-6 iters under varied OOM/spill question framings. Escalate to hard FIX-A if either flip recurs.
+
+**Carried from iter1299**:
+- `iter1299-Q3 dbt this-missing-is_incremental-guard` — re-probe; NOT touched this iter (Q3 was seeds/sources framing, not `{{ this }}` incremental). Continue to monitor.
+- `iter1299-Q4 Oracle MOD-sign false-premise reach-test` — re-probe 3-5 iters; NOT touched directly this iter (Q4 was EXTRACT, which the responder handled WITHOUT accepting a false premise — different Q-shape so doesn't count as a positive reach for the MOD watch).
+
+**Carried longer watches** (still active, not touched this iter):
+- iter1298-Q2 metadata-tables partial-recur
+- iter1297-Q4 Oracle-false-premise-pattern (Q4 EXTRACT this iter was the OPPOSITE — responder DEFANGED an implicit false premise that "Oracle dialect ≠ Trino" — POSITIVE counter-signal for this watch)
+- iter1296-Q1 CONTAINS-secondary
+- iter1296-Q3 singular-test
+- iter1295-Q2 FIRST_VALUE-priming
+- iter1294-Q4 ROWNUM-per-group
+- iter1290-Q3 small-files
+- iter1289-Q2 position-delete
+- iter1289-Q4 LPAD-RPAD
+- iter1278-Q1 Scheduled-vs-CPU-as-I/O-wait imprecision (Blocked-time-Input routing)
+
+---
+
+## Topic score updates (running average)
+
+- **Analytical query patterns on Iceberg+Trino** (Q1): 4.4809/212 → (4.4809×212 + 4.8125)/213 = 950.0633/213 = **4.4604/213 PASSED** — wait, recompute: 4.4809×212 = 949.9508; +4.8125 = 954.7633; /213 = **4.4825/213 PASSED** (+0.0016, margin +0.9825).
+- **Improving complex SQL performance on Trino with dbt** (Q2): 4.4519/95 → (4.4519×95 + 3.125)/96 = (422.9305 + 3.125)/96 = 426.0555/96 = **4.4381/96 PASSED** (−0.0138, margin +0.9381). Topic remains PASSED — single Q-fail does not cross threshold given the 95 prior datapoints.
+- **dbt sources / source freshness** (Q3): 4.4730/15 → (4.4730×15 + 4.8125)/16 = (67.095 + 4.8125)/16 = 71.9075/16 = **4.4942/16 PASSED** (+0.0212, margin +0.9942).
+- **Oracle PL/SQL → dbt+Trino migration** (Q4): 4.4923/273 → (4.4923×273 + 4.75)/274 = (1226.3979 + 4.75)/274 = 1231.1479/274 = **4.4933/274 PASSED** (+0.0010, margin +0.9933).
+
+All four topics remain PASSED.
+
+---
+
+## Recommended action for teacher (FIX-A priority)
+
+**LIGHT FIX-A at r28 §8A.2 Pattern A** (lines ~1496-1511):
+1. Either REMOVE the `SET SESSION join_max_broadcast_table_size = '500MB';` block from Pattern A (the OOM section) entirely — push it into a separate "Pattern A.1 — when you have ample memory and want MORE broadcasting" subsection with its own header — OR
+2. Add a direction-anchor sentence at the top of Pattern A: *"For an OOM caused by an over-large broadcast build, the threshold lever moves DOWN (or force PARTITIONED). RAISING `join_max_broadcast_table_size` increases broadcast memory pressure and will worsen the OOM. Use the raise direction only when you have ample memory and want MORE auto-broadcast for performance — not as an OOM fix."*
+
+**Optional defensive enhancement at r18 §spill canonical** (lower priority — no recurrence yet, monitor watch):
+- One-line direction-anchor immediately above the "Practical fix for `Query exceeded per-node memory limit`" subsection (around line 275): *"Spill-to-disk is graceful degradation that PREVENTS the OOM by spilling state to disk when memory pressure hits the revoking threshold (default 0.9 of pool). Spill is NOT a consequence of OOM. If you see `EXCEEDED_LOCAL_MEMORY_LIMIT`, spill was NOT enabled / not enough — Step 1 below enables it."*
+
+No HARD FIX-A this iter — neither flip has recurred yet. Soft watch only.
