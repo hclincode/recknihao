@@ -90,6 +90,17 @@ When you read Trino's EXPLAIN ANALYZE output, you'll hit these terms. Definition
 > >
 > > So the slowness is **NOT a data scan** — it is almost always **PARTITION-COUNT EXPLOSION / manifest-planning overhead**: the table is identity-partitioned on a **high-cardinality** column (e.g. `account_id` with tens of thousands of values × day = millions of tiny partitions), so even a metadata-only count pays a huge **planning** cost walking an enormous manifest set. **Diagnose:** `SHOW CREATE TABLE <t>` (confirm it's `identity(account_id)` on a high-cardinality column) + `SELECT COUNT(*) FROM iceberg.<schema>."<t>$partitions"` (millions of partitions = the smoking gun). **Fix:** re-partition with `bucket(account_id, N)` (e.g. 32–64) to bound the partition count — see [r10 §bucket vs identity](10-lakehouse-partitioning.md). **Trade-off to state honestly:** the `bucket()` transform means a `WHERE account_id = X` count is no longer purely a partition predicate, so it gives up the metadata-only fast path for that filter (it prunes to one bucket's files but counts them) — usually a good trade because it eliminates the planning blow-up, but say so.
 >
+> **⭐ "Can I see how much this will SCAN *before* I run it?" — YES, use plain `EXPLAIN`, NOT `EXPLAIN ANALYZE`.** *Keyword anchors: estimate scan size before running, how much will Trino scan ahead of time, dry-run a query, preview I/O without executing, will this read the whole table, check scan size without running the slow query, pre-flight a query.* **`EXPLAIN ANALYZE` EXECUTES the query (it re-pays the full 40s) — it is NOT a pre-run estimate.** The pre-run, no-execution tools are:
+> ```sql
+> -- (a) Planner ESTIMATE of rows + bytes + which predicates push down — NO execution, returns instantly:
+> EXPLAIN (TYPE IO, FORMAT JSON) <your query>;
+> --     read `inputTableColumnInfos[].estimate` (estimated rows + size from table stats) and `columnConstraints`
+> --     (which predicates pushed to the scan). This is the "how much will it scan" answer, before running.
+> -- (b) The distributed plan with the TableScan constraint (also NO execution) — see Check 3 below:
+> EXPLAIN (TYPE DISTRIBUTED) <your query>;
+> ```
+> (Estimates are only as good as your table stats — run `ANALYZE <table>` if the estimates look wildly off. For ACTUAL post-run bytes use `EXPLAIN ANALYZE` + `physicalInputDataSize`, but that runs the query.) **Note:** a filter on a NON-partition column (e.g. `status = 'failed'`) does NOT prune — Trino reads every file in the matching date-partitions and applies `status` at read, so a tiny *result* set can still mean a large *scan*. A bloom filter / sorted_by on `status`, or a partition transform, is what makes that filter skip files.
+>
 > ### Check 3 (≈20s): Did partition pruning silently break? — `EXPLAIN` and look at the TableScan
 >
 > ```sql
