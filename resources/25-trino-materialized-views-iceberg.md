@@ -45,13 +45,13 @@ A Trino materialized view is **a regular Iceberg table dressed up as a view**. W
 
 ## 2. CREATE MATERIALIZED VIEW — syntax
 
-### 2.1 Full Trino syntax (from Trino 481 docs)
+### 2.1 Trino 467 syntax (this stack)
 
 ```sql
+-- THE TRINO 467 FORM (this stack) — there is NO WHEN STALE clause on 467:
 CREATE [ OR REPLACE ] MATERIALIZED VIEW
 [ IF NOT EXISTS ] view_name
 [ GRACE PERIOD interval ]
-[ WHEN STALE ( INLINE | FAIL ) ]
 [ COMMENT string ]
 [ WITH ( property = value, ... ) ]
 AS query
@@ -59,8 +59,8 @@ AS query
 
 - `OR REPLACE` and `IF NOT EXISTS` are mutually exclusive.
 - `GRACE PERIOD` default: **infinity** (cache served indefinitely until manually refreshed).
-- `WHEN STALE` default: **`INLINE`** — falls through to the underlying SELECT once stale + past grace. Only `INLINE` and `FAIL` are valid; there is **no** `REFRESH` option (a common misreading).
 - `WITH (...)` properties are passed to the Iceberg connector to configure the **storage table** (format, partitioning, etc.).
+- **⚠️ `WHEN STALE ( INLINE | FAIL )` is NOT a Trino 467 clause — do NOT write it on this stack (it parse-errors).** The explicit `WHEN STALE` control clause is **post-467** (added ~Trino 473+ via [PR #27356](https://github.com/trinodb/trino/pull/27356)/[#27502](https://github.com/trinodb/trino/pull/27502)). **The BEHAVIOR it names IS the Trino 467 default and is automatic:** once an MV is stale AND past its `GRACE PERIOD`, Trino 467 **falls through to executing the underlying SELECT** (the "INLINE" behavior) — you just can't (and don't need to) spell it out as a clause on 467. (There is no `REFRESH` stale-mode option in any version — a common misreading.) If you copied a `WHEN STALE INLINE` / `WHEN STALE FAIL` line from a newer Trino doc (481+), delete it for 467.
 
 ### 2.2 Worked example — the dashboard-aggregation pattern
 
@@ -71,7 +71,7 @@ AS query
 
 CREATE MATERIALIZED VIEW iceberg.analytics.events_daily_by_tenant
   GRACE PERIOD INTERVAL '90' MINUTE
-  WHEN STALE INLINE
+  -- (NO `WHEN STALE` line — that clause is post-467; on 467 stale+past-grace falls through to the SELECT automatically)
   COMMENT 'Hourly rollup feeding the per-tenant dashboard. Owner: analytics team.'
   WITH (
     format = 'PARQUET',
@@ -362,7 +362,7 @@ There's no "drop view but keep storage table" mode in Trino. If you want to pres
 
 | Task | Trino syntax |
 |---|---|
-| Create MV with grace period and partitioned storage | `CREATE MATERIALIZED VIEW iceberg.analytics.events_daily_by_tenant GRACE PERIOD INTERVAL '90' MINUTE WHEN STALE INLINE WITH (format='PARQUET', partitioning=ARRAY['event_date']) AS SELECT ...` |
+| Create MV with grace period and partitioned storage | `CREATE MATERIALIZED VIEW iceberg.analytics.events_daily_by_tenant GRACE PERIOD INTERVAL '90' MINUTE WITH (format='PARQUET', partitioning=ARRAY['event_date']) AS SELECT ...` (NO `WHEN STALE` clause on Trino 467 — it's post-467) |
 | Refresh manually | `REFRESH MATERIALIZED VIEW iceberg.analytics.events_daily_by_tenant;` |
 | Inspect last-refresh time | `SELECT MAX(committed_at) FROM iceberg.analytics."events_daily_by_tenant$snapshots";` |
 | Show definition | `SHOW CREATE MATERIALIZED VIEW iceberg.analytics.events_daily_by_tenant;` |
