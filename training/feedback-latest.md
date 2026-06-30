@@ -1,47 +1,25 @@
-# Iteration 1304 — Judge Feedback
+# Iteration 1305 — Judge Feedback
 
 **Phase**: extended (pass-loop)
-**Overall iter score**: **4.40625 PASS** ((4.875 + 4.875 + 3.0 + 4.875) / 4)
-**Pattern this iter**: Q1/Q2/Q4 strong clean passes — INTERSECT set-semantics + precedence + Iceberg format/compression-codec-477+ + Oracle SUBSTR negative-position all pin-perfect. **Q3 dbt compile vs run FAIL with an important meta-finding: the responder's inferred "dbt compile is pure offline / sends NOTHING to Trino" answer is FACTUALLY WRONG per official dbt docs — and the teacher's flag asserting that inference is CORRECT is itself WRONG.** Per [docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile) + [docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile): "dbt compile is similar to dbt run except that it doesn't materialize... they both require a data platform connection, run queries, and have an execute variable set to True." dbt compile DOES connect + DOES run introspective queries (relation cache, run_query macros); it just doesn't materialize. The "purely offline" framing is the offline version `dbt parse` (or `dbt compile --no-introspect`), NOT bare `dbt compile`.
+**Overall iter score**: **3.6875 PASS** ((4.9375 + 4.875 + 2.375 + 4.5625) / 4) — Q3 FAIL
+
+**Pattern this iter**: Q1 is the **iter1304-Q3 dbt-compile-pure-offline-myth FIX-A REACH-TEST and IT REACHED PERFECTLY** — responder went from "compile is likely offline" (iter1304 inferred-wrong) to "your teammate is PARTIALLY WRONG, dbt compile is NOT purely local" (iter1305 correct + corrects the false premise). Iter1304-Q3 HARD WATCH **CLOSES**. Q2 / Q4 clean strong passes. **Q3 dbt-compile=reach + Q3 dashboard-scan-time HARD FAIL** with a different shape: responder gave two off-target causes (partition-pruning failure + position-delete accumulation) that **CONTRADICT the engineer's stated identical-WHERE premise** and **missed the textbook primary cause — COLUMNAR PROJECTION (different SELECT column lists scan different Parquet column chunks on the same Iceberg file set)**. Also flagged: the recommended fix `CALL iceberg.system.rewrite_data_files(...)` is the **Spark form**; Trino-native is `ALTER TABLE ... EXECUTE optimize` (per pin `reference_trino_optimize_clears_position_deletes.md`).
 
 ---
 
 ## Per-question scores
 
-### Q1 — INTERSECT for accounts active in both Jan and Feb summary tables
+### Q1 — dbt compile in CI as a "lint", teammate says compile is purely local with no DB creds
 
-**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
+**Score: 4.9375** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75) — **STRONG PASS, iter1304-Q3 FIX-A REACHED 1ST RE-PROBE, HARD WATCH `iter1304-Q3 dbt compile pure-offline myth` CLOSES**
 
-Responder said: Trino 467 supports INTERSECT; `SELECT customer_id FROM jan INTERSECT SELECT customer_id FROM feb` is the clean form; INTERSECT auto-dedups (DISTINCT built in); declarative/simpler than FULL OUTER JOIN/correlated subquery; compiles to a SEMI-JOIN internally (as efficient as hand JOIN); INTERSECT binds tighter than EXCEPT and UNION, parenthesize when mixing.
+Responder said: "Your teammate is PARTIALLY WRONG. `dbt compile` is NOT purely local." Then delivered the parse / compile / run / build matrix:
+- `dbt parse` — Jinja/manifest only, **no warehouse connection, no SQL sent to Trino**.
+- `dbt compile` — **DOES connect to Trino + runs introspective SELECTs** (relation cache, macro resolution, contract preflight); does NOT materialize.
+- `dbt run` — compile + execute materialization (CREATE/INSERT/MERGE).
+- `dbt build` — run + tests + seeds + snapshots.
 
-**Verification ([trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html))**:
-- INTERSECT supported ✓
-- Defaults to DISTINCT: "If neither is specified, the behavior defaults to `DISTINCT`" ✓
-- Precedence verbatim: "Additionally, `INTERSECT` binds more tightly than `EXCEPT` and `UNION`. That means `A UNION B INTERSECT C EXCEPT D` is the same as `A UNION (B INTERSECT C) EXCEPT D`." ✓
-
-The "compiles to SemiJoin internally" claim is a reasonable simplification — Trino's optimizer rewrites INTERSECT into semi-join-like operations + a deduplication aggregation; the responder's "as efficient as a hand-coded INNER JOIN + DISTINCT" framing is the right mental model for an engineer choosing between forms. Minor Clar shave (-0.25) for not surfacing the INTERSECT-vs-INNER-JOIN-with-DISTINCT cost difference if `customer_id` has duplicates within Jan or Feb (INTERSECT dedups both sides before comparing; a naive INNER JOIN can produce a Cartesian explosion on duplicates per side). Minor Compl shave (-0.25) for not pointing at the `EXCEPT` companion (engineer's likely next question: "what about churned customers active in Jan but not Feb"). No imported-prior, no broken-secondary, no over-warning, no fabrication. **STRONG PASS.**
-
-### Q2 — Iceberg format/compression for fresh raw click-events table
-
-**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
-
-Responder said: Defaults work fine for analytics; use `CREATE TABLE ... WITH (partitioning=ARRAY['day(occurred_at)','tenant_id'], format='PARQUET', format_version=2)`; Parquet is the default; format_version 2 needed for later MERGE/UPDATE/DELETE; compression on Trino 467 is the CATALOG-level config `iceberg.compression-codec` defaulting ZSTD, NOT a table property in 467 (that landed in 477+); don't specify compression at table level — ZSTD is a solid default.
-
-**Verification ([trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html))**:
-- `iceberg.file-format` default = PARQUET ✓
-- `format_version` default = 2 ✓
-- "Version `2` is required for row level deletes" ✓ (UPDATE/MERGE flow through the same position-delete path on MoR tables)
-- `iceberg.compression-codec` is a catalog config, NOT in the documented 467 CREATE TABLE WITH-clause property list ✓ — matches pin `reference_trino_compression_codec_477.md` (per-table `compression_codec` lands in 477+ per PR #25755; session form 473+ per #24851)
-
-Pin-perfect, version-cutoff-accurate, gives both the actionable CREATE TABLE and the "leave compression alone" routing. Minor Clar shave (-0.25): could have explicitly listed the catalog-config location (`etc/catalog/iceberg.properties` on the k8s ConfigMap) so the engineer knows where to look if they want to verify the codec. Minor Compl shave (-0.25): no `write.target-file-size-bytes` (128MB default) callout for "what other defaults am I implicitly accepting" engineer follow-up. No imported-prior, no broken-secondary, no over-warning, no fabrication. **STRONG PASS — matches compression-codec pin perfectly.**
-
-### Q3 — dbt compile vs dbt run — what does compile do, does it send anything to Trino
-
-**Score: 3.0** (Acc 2.5 / Clar 4.0 / Prac 3.0 / Compl 2.5) — **FAIL**
-
-Responder hedged: "I don't have detailed information in the resources about the exact difference between dbt compile and dbt run." Then inferred: "dbt compile is likely a pure offline step (parsing/Jinja rendering) that does NOT contact the warehouse" (extrapolated from r28 model-contracts content). Deferred to official dbt docs for the definitive answer.
-
-**The teacher's flag asserts the inferred answer is CORRECT and proposes a LIGHT FIX-A that codifies the "compile is pure offline / sends NOTHING to Trino" framing. This is FACTUALLY WRONG. The official dbt docs state the OPPOSITE.**
+Concrete CI guidance: if CI genuinely cannot afford a Trino connection use `dbt parse` (NOT `dbt compile`); `dbt parse` fails on any model that depends on introspective macros; for a true "is the project still valid + Jinja renders" gate use `dbt parse` with `--no-introspect` accepted via parse semantics. CI can run `dbt compile` with a lightweight read-only Trino role — but it is NOT a zero-cost-no-network gate.
 
 **Verification ([docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile))** verbatim:
 > "`dbt compile` is similar to `dbt run` except that it doesn't materialize the model's compiled SQL into an existing table. So, up until the point of materialization, `dbt compile` and `dbt run` are similar because they both **require a data platform connection, run queries, and have an `execute` variable set to `True`**."
@@ -49,90 +27,123 @@ Responder hedged: "I don't have detailed information in the resources about the 
 **Verification ([docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile))** verbatim:
 > "dbt compile needs a data platform connection in order to gather the info it needs (including from introspective queries) to prepare the SQL for every model in your project."
 
-What `dbt compile` actually does:
-1. **DOES** connect to the warehouse (Trino in this stack).
-2. **DOES** issue introspective queries — relation cache population (does this incremental's target table already exist?), `run_query` / `dbt_utils.get_column_values` macro resolution, `is_incremental()` warehouse check, model contract type introspection (`SELECT … WHERE 1=0`).
-3. **Renders** Jinja+SQL into raw executable SQL into `target/compiled/<project>/models/...`.
-4. **Does NOT** materialize — no CREATE/INSERT/MERGE against the target relation.
+Both verified facts match the responder's framing exactly. Specifically:
+- "compile is NOT purely local" ✓
+- "compile DOES connect to Trino + runs introspective SELECTs" ✓
+- "compile differs from `run` only by not materializing" ✓
+- "parse is the offline fallback" ✓ (closest-to-true-offline command)
 
-The "purely offline / no warehouse" mental model maps to `dbt parse` (parses dbt_project.yml + manifests Jinja AST, no warehouse) or `dbt compile --no-introspect` (errors out if any introspective query is needed). **Bare `dbt compile` IS NOT purely offline.**
+**Two strong meta-signals from this answer**:
 
-**Material harm to the engineer**: an engineer who walks away believing "I can run `dbt compile` in CI with no Trino reachable" will get errors (relation-cache miss + introspective-query failure) the first time their project references a target table or uses an introspective macro. The hedge ("I don't have detailed information... see official docs") mitigates somewhat — the engineer is steered to docs — but the inferred answer ("likely pure offline... does NOT contact the warehouse") gives them a confidently-wrong fallback they're likely to act on before reading the docs.
+1. **iter1304-Q3 FIX-A REACHED 1ST RE-PROBE**: iter1304-Q3 was a 3.0 FAIL where the responder inferred "compile is likely pure offline" and the teacher's flag *agreed with the inference*. Both turned out wrong. The teacher applied a MANDATORY FIX-A at r28 §282 (reconciled the wrong "compile is offline" framing + added a parse/compile/run/build "which commands hit Trino" matrix + DO-NOT-WRITE `compile is offline` defang). Iter1305-Q1 confirms that fix landed where the responder looks: the responder now goes directly to the correct two-tier mental model. Per the pin pattern observed across iter1272 (bloom-CREATE-467), iter1290 (ephemeral basics), iter1233 (custom-generic-test), this is the 4th-or-more consecutive 1st-re-probe FIX-A REACH on the QUICK-ANSWER-canonical-at-keyword-zone pattern. **CLOSE iter1304-Q3 dbt-compile-pure-offline-myth HARD WATCH POSITIVELY.**
+2. **POSITIVE COUNTER-SIGNAL to the false-premise-acceptance family**: the teammate said "compile is purely local, no DB creds needed" — engineer's stated premise is FALSE. The responder did NOT accept it (the iter1297/iter1299 trap); instead opened with "Your teammate is PARTIALLY WRONG" and corrected the premise BEFORE answering. This is the inverse of iter1297-Q4 (Oracle-GROUP-BY-leniency endorsement) and iter1299-Q4 (Oracle MOD-sign endorsement). Worth noting alongside iter1300-Q4 (EXTRACT defang) and iter1302-Q1 (MOD-sign defang) as a confirmed positive trend on premise correction.
 
-**Findability / content gap CONFIRMED**: per the teacher's own grep, resources have SCATTERED dbt-compile mentions but NO dedicated "dbt compile vs run vs build — what each does + does compile hit the warehouse" canonical. r28 L282 ("pure offline compile-time check, dbt compile in CI with no Trino connection does NOT enforce contracts") and r27 §ephemeral ("at dbt COMPILE time before any SQL reaches Trino") are the keyword-magnetic neighbors and **both carry the wrong framing** — they were the source of the responder's inferred-wrong answer.
+Minor Compl shave (-0.25) only: didn't mention `dbt compile --no-introspect` as the escape hatch for the genuinely-offline use case (useful in security-restricted CI where a credentialed Trino connection is forbidden — `--no-introspect` errors out cleanly on introspective macros so the gate is explicit instead of silently degrading).
 
-**LIGHT FIX-A IS WARRANTED — but it MUST teach the CORRECT semantics, NOT the wrong "purely offline" framing the teacher's flag proposes.** Recommended placement: a new canonical at r27 (dbt-ops cluster) and/or r28 with keyword anchors "what does dbt compile do / does dbt compile hit the warehouse / dbt compile vs run vs build / dbt compile is local / dbt compile in CI no warehouse." Required content:
+No imported-prior, no broken-secondary, no over-warning, no fabrication, no false-premise endorsement. Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.
 
-| Command | Connects to warehouse? | Runs introspective queries? | Materializes? |
+### Q2 — Dedup events by (user_id, event_type, occurred_at) keeping latest received_at
+
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75) — **STRONG PASS**
+
+Responder said: `ROW_NUMBER() OVER (PARTITION BY user_id, event_type, occurred_at ORDER BY received_at DESC NULLS LAST) AS rn` in a subquery (or CTE), then `WHERE rn = 1` in the outer SELECT. Watch-outs surfaced:
+- Window functions cannot appear in `WHERE` → must wrap in a subquery / CTE (Trino analysis rule).
+- Explicit `NULLS LAST` for predictability (responder's framing).
+- Tiebreaker: identical `received_at` causes nondeterministic dedup — add a secondary `ORDER BY` key (`event_id`, `ingestion_order`) for reproducibility.
+- Postgres-specific `DISTINCT ON (...)` is not available in Trino — `ROW_NUMBER` subquery is the portable equivalent.
+
+**Verification ([trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html))**: `row_number()` is standard window with `PARTITION BY` + `ORDER BY` clauses. Filtering on window output via outer-query `WHERE rn = 1` is the canonical dedup pattern and well-anchored across r07 / r28. **Per pin `reference_trino_null_ordering_default.md`**: Trino 467 default ORDER BY null ordering is NULLS LAST regardless of ASC/DESC direction — so the explicit `NULLS LAST` on `DESC` is a no-op in this case (defensive but doesn't change semantics). Not wrong; mild over-specification. **Per [Postgres DISTINCT ON](https://www.postgresql.org/docs/current/sql-select.html#SQL-DISTINCT)**: confirmed Postgres-specific, not in Trino — `ROW_NUMBER` subquery is the standard rewrite advice.
+
+Minor Compl shave (-0.25) for not surfacing the alternative: `SELECT * FROM events QUALIFY ROW_NUMBER() OVER (...) = 1` style is NOT available in Trino 467 (no `QUALIFY` clause per `feedback_trino_dialect_accuracy.md` pin) — engineer porting from Snowflake/Databricks may try it; explicit defang would be useful. Minor Clar shave (-0.25): "watch-out for tiebreakers" could be more concrete with a worked example for what "nondeterministic" looks like (which row wins on ties is implementation-defined, not stable across re-runs).
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Solid canonical Trino dedup answer. Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
+
+### Q3 — Two dashboard queries with SAME WHERE on SAME Iceberg table, one 2s one 40s — what causes the scan-time difference?
+
+**Score: 2.375** (Acc 2.0 / Clar 3.0 / Prac 2.0 / Compl 2.5) — **HARD FAIL**
+
+Responder named two causes:
+1. **"Partition-pruning failure"** — "if one query filters only on `occurred_at` but the table is partitioned by `ingested_at`, it bypasses pruning"; fix: add a bounded `ingested_at` window.
+2. **"Position-delete file accumulation from past MERGE"** — query `$files` metadata (content=0 DATA, content=1 POSITION_DELETES); if POSITION_DELETES > 10% of DATA, compact via `CALL iceberg.system.rewrite_data_files(table=>'analytics.<table>')`.
+
+**Both off-target for the engineer's stated scenario. The engineer said BOTH queries use the SAME WHERE clause (`tenant_id='acme' AND event_date >= DATE '2026-01-01'`) on the SAME Iceberg table.**
+
+#### Defect 1 — Partition-pruning cause CONTRADICTS the identical-WHERE premise
+
+If the WHERE clause is identical across the two queries, the partition predicates are identical, so partition pruning is identical for both. The Iceberg connector evaluates the WHERE-clause partition predicates against the manifest list BEFORE planning data-file scans — same WHERE = same manifest filtering = same set of data files queued for scan. **Partition pruning cannot be the differentiator when the WHERE is held constant by the engineer's own framing.** The responder's "if one query filters only on `occurred_at` but the table is partitioned by `ingested_at`" hypothesis describes a different scenario (different WHEREs across the two queries), and answers a question the engineer didn't ask.
+
+#### Defect 2 — Position-delete accumulation affects both queries equally
+
+Position-delete files attach to data files at the table level. Both queries scan the same set of data files (per defect 1's analysis — identical WHERE = identical pruning = identical scan set), so they apply the same set of position deletes during read. A position-delete burden makes BOTH queries slower at the same magnitude — it cannot make one 20x slower than the other when both queries cover the same files.
+
+#### The textbook primary cause the responder MISSED — COLUMNAR PROJECTION
+
+Two queries with the SAME WHERE on the SAME Iceberg table but **DIFFERENT SELECT column lists scan DIFFERENT bytes**. Parquet (the Iceberg default file format on Trino 467) is columnar: a TableScan reads only the column chunks for the columns referenced in `SELECT` + WHERE + GROUP BY + JOIN keys. `SELECT user_id, event_type, COUNT(*) FROM events WHERE ...` reads ~3 column chunks; `SELECT * FROM events WHERE ...` (or a wide list of 50+ columns including string `event_properties_json`, `user_agent`, `payload`) reads all 50+ column chunks. On a wide events table with a string-heavy payload column, the ratio is easily 10-30x in bytes scanned — exactly the 2s-vs-40s shape the engineer reported.
+
+Other plausible causes the responder also missed:
+- **Result/metadata caching** — first-run cold scan vs second-run warm Trino + MinIO page cache + Iceberg metadata cache. Engineer should re-run both queries fresh to isolate.
+- **Resource-group contention** — concurrent heavy workload on the cluster during one of the runs; check `system.runtime.queries` over the run window for concurrent CPU/memory consumers.
+- **Sort/file-layout differences** — if `sorted_by` clustering was applied later (or `EXECUTE optimize` was run between the two queries), row-group min/max indexes differ between data files and only some queries benefit from row-group skipping.
+
+#### Defect 3 — Spark-leaning fix recommendation
+
+The recommended remediation `CALL iceberg.system.rewrite_data_files(table=>'analytics.<table>')` is the **Spark Iceberg procedure form** (per [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/) `rewrite_data_files` is a Spark stored procedure). **Trino 467 has no `CALL iceberg.system.rewrite_data_files(...)` procedure.** The Trino-native equivalent for data-file compaction + position-delete clearing is `ALTER TABLE iceberg.analytics.<table> EXECUTE optimize (file_size_threshold => '100MB')` per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) and per pin `reference_trino_optimize_clears_position_deletes.md` ("EXECUTE optimize APPLIES + clears Iceberg position-deletes for the data files it rewrites; raise threshold above already-large delete-bearing files to force-clear — Trino-only, no Spark needed"). The engineer on this k8s on-prem stack can run optimize from Trino without bringing up a Spark job. The responder's Spark-form recommendation works only if the team can run Spark against this Iceberg table — which they can (Spark is in the ingestion stack per `prod_info.md`), but it's the wrong-tool-for-the-job suggestion when Trino-native is available.
+
+#### Classification: PER-INSTANCE OFF-TARGET, NOT a resource content gap
+
+Grep-test for `columnar projection` / `column chunk` / `SELECT list affects scan bytes`-style content:
+- `r03` (Iceberg storage), `r08` (column-oriented storage basics), `r18` (perf-triage), `r07` (analytical query patterns), `r28` (improving complex SQL perf on Trino with dbt) — every one of these resources has rich content on "avoid SELECT *" + "columnar storage reads only the columns you SELECT" anchored as the canonical perf advice. The fact is present and findable; the responder's miss is a routing/synthesis miss, not a resource gap.
+
+Per `feedback_synthesis_ceiling_stop_churning.md`: the responder reached for two cause hypotheses without checking them against the engineer's stated premise (identical WHERE = identical pruning + identical delete burden). This is the **same shape as iter1301-Q2** (`CrossJoin` mis-attributed to LATERAL/correlated-subquery decorrelation when the actual cause was non-equi-ON CrossJoin → which subsequently got a LIGHT FIX-A at r28 §2) — pattern-matched the question keywords ("slow Iceberg scan") to nearest-named-canonical (partition-pruning, position deletes) without semantic consistency check against the premise.
+
+**Per-instance scoring decision**: this is a FIRST instance of "identical-WHERE differential scan time mis-attribution" — no NEW FIX-A on first occurrence per `feedback_new_card_over_attracts_adjacent.md` (adding a "two-queries-same-WHERE-different-times → columnar projection" card risks over-attracting adjacent perf-diagnosis questions). **NEW HARD WATCH `iter1305-Q3 two-queries-same-WHERE-same-Iceberg-table differential-scan-time → COLUMNAR PROJECTION primary cause`**: re-probe within 4-8 iters under varied "same query different times" / "same WHERE different scan bytes" / "wide SELECT slow narrow SELECT fast on same Iceberg table" framings. If the next occurrence ALSO mis-attributes to partition-pruning + position deletes and misses columnar projection AS the leading cause, escalate to LIGHT FIX-A at r07/r18 with the keyword-anchor "two dashboards same filter different speed" + a one-paragraph causes list (PROJECTION first, then caching, concurrency, sort layout, position deletes as a distant 5th — and the explicit "if WHERE is identical, partition pruning is identical and CANNOT differ between the two").
+
+**Also recommend a lighter watch — `iter1305-Q3 Spark rewrite_data_files recommended in Trino context`** (3rd or 4th instance of Spark-procedure-recommended-when-Trino-native-exists; iter1168 migrate watch family). If recurs, re-anchor the EXECUTE-optimize-clears-position-deletes canonical at the perf-triage land point.
+
+Acc 2.0 / Clar 3.0 / Prac 2.0 / Compl 2.5 = 2.375 — Q-level FAIL.
+
+### Q4 — Oracle TO_NUMBER(revenue_str, '99999.99') strips comma; Trino CAST AS DECIMAL errors on comma; equivalent Trino way
+
+**Score: 4.5625** (Acc 4.5 / Clar 4.5 / Prac 4.75 / Compl 4.5) — **CLEAN PASS, minor Teradata-ism misattribution aside**
+
+Responder said: Trino has NO direct `TO_NUMBER(str, format_mask)` equivalent. Two paste-and-run rewrites:
+1. `CAST(REPLACE(revenue_str, ',', '') AS DECIMAL(10,2))` — strip the comma then cast.
+2. `CAST(regexp_replace(revenue_str, '[^0-9.]', '') AS DECIMAL(10,2))` — strip all non-digit, non-decimal characters (handles currency symbols like `$`, spaces, parentheses around negatives if pre-processed).
+
+For variable-locale strings (European `'1.234,56'` with `.` as thousands and `,` as decimal): regex + locale-specific swap before cast.
+
+**Verification ([trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html))**: `replace(string, search, replace)` and `regexp_replace(string, pattern, replacement)` both documented. **([trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html))**: `CAST(varchar AS DECIMAL(p, s))` requires the string to be a numeric literal without thousands separators (Trino is strict — no implicit comma-stripping per `[Trino issue #14358](https://github.com/trinodb/trino/issues/14358)` family). Strip-then-CAST is the canonical Trino approach. Engineer can paste either of the two forms and it works on Trino 467.
+
+#### Minor flag — Teradata-ism misattribution
+
+Responder framed Oracle `TO_NUMBER(str, mask)` as: *"Oracle's TO_NUMBER(str, mask) is a Teradata-ism specific to that database."* This is wrong on the attribution:
+- **`TO_NUMBER(str, format_mask)` is an Oracle function** — documented at [docs.oracle.com TO_NUMBER](https://docs.oracle.com/cd/E11882_01/olap.112/e17122/dml_functions_2132.htm) + [Oracle Number Format Models](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlqr/Format-Models.html) (the `9`/`0`/`G`/`D`/`,`/`.` format mask language is Oracle's). PostgreSQL also implements `TO_NUMBER(str, mask)` with the same format-model language ([Postgres data-type formatting functions](https://www.postgresql.org/docs/current/functions-formatting.html)). Teradata also supports a `TO_NUMBER` form but it's NOT specifically a Teradata invention.
+- The responder appears to have confused `TO_NUMBER` with `TO_CHAR`. Trino 467's `to_char(timestamp, format)` IS Teradata-compat (per pin `reference_trino_to_char_exists.md`). The Teradata-compat label belongs to `to_char` (and `to_timestamp` / `to_date`), NOT to `TO_NUMBER`.
+
+**Material harm**: bounded. The core advice (Trino has no `TO_NUMBER(str, mask)` equivalent + use REPLACE/regexp_replace + CAST) is correct and works. The attribution slip is an aside that doesn't change the engineer's action plan. The engineer might come away thinking Teradata also has a format-mask number parser (which is true, but for the wrong reason) — they're not migrating from Teradata anyway (this is an Oracle PL/SQL migration per the question), so the slip doesn't bite.
+
+**Classification: per-instance phrasing slip** (sibling to iter1303-Q2 broken-secondary-worked-query / iter1296-Q1 CONTAINS-GROUP-BY family). NO FIX-A. NEW LOW WATCH `iter1305-Q4 Oracle-TO_NUMBER-mask misattributed as Teradata-ism`: re-probe under Oracle TO_NUMBER framings in 4-8 iters; only escalate if recurs.
+
+Acc 4.5 / Clar 4.5 / Prac 4.75 / Compl 4.5.
+
+---
+
+## Summary
+
+| Q | Topic | Score | Routing |
 |---|---|---|---|
-| `dbt parse` | No | No | No |
-| `dbt compile` | **Yes** | **Yes** (relation cache, run_query macros, contract introspection) | No |
-| `dbt run` | Yes | Yes | Yes (CREATE/INSERT/MERGE) |
-| `dbt build` | Yes | Yes | Yes + tests + seeds + snapshots |
+| Q1 | Improving complex SQL performance on Trino with dbt | 4.9375 STRONG PASS | iter1304-Q3 FIX-A REACH, watch CLOSES + premise-correction counter-signal |
+| Q2 | Analytical query patterns on Iceberg+Trino | 4.875 STRONG PASS | canonical ROW_NUMBER dedup, no defect |
+| Q3 | Query performance regression diagnosis: oncall workflow | 2.375 FAIL | off-target causes (contradict identical-WHERE premise) + missed columnar projection + Spark-form fix |
+| Q4 | Oracle PL/SQL → dbt + Trino SQL migration | 4.5625 PASS | core strip+CAST correct, Teradata-ism aside misattribution |
 
-Defang explicitly: "Common misconception — `dbt compile` is NOT a purely offline / no-warehouse step. It DOES connect to Trino + issues introspective SELECTs. If you want truly-offline parsing of your Jinja, use `dbt parse` (or `dbt compile --no-introspect` which errors on any introspective need)." Cite [docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile) verbatim.
+**Iter average**: 4.1875 PASS (above 3.5 threshold).
 
-**Also RECONCILE the existing wrong framing** at r28 L282 + L1062 + r27 §ephemeral. Memory pin `reference_dbt_contract_needs_live_connection.md` already corrected the related contract-enforcement claim ("dbt parse/compile with no warehouse won't catch violations") — that direction is correct, but the wrong "compile sends NOTHING to Trino" wording elsewhere in r28 / r27 needs to be brought into alignment ("compile DOES connect but does NOT materialize"). Per `feedback_reconcile_dont_append.md`: grep ALL resources for "compile sends nothing / pure offline compile / dbt compile does not hit the warehouse / dbt compile time before any SQL reaches Trino" and reconcile in-place; do not just add a new card.
+**Watches**:
+- **CLOSE**: `iter1304-Q3 dbt compile pure-offline myth — responder inferred-wrong from resource-source defect` — REACHED on 1st re-probe under different framing (Q1's narrative was "CI runs compile as a lint, teammate says it's purely local, no creds needed"); FIX-A at r28 §282 (parse/compile/run/build matrix + DO-NOT-WRITE defang + reconciled wrong "compile is offline" framing) is doing exactly what it was specced to do.
+- **NEW HARD**: `iter1305-Q3 two-queries-same-WHERE-same-Iceberg-table differential-scan-time → COLUMNAR PROJECTION primary cause` — re-probe 4-8 iters; on 2nd occurrence with same off-target mis-attribution, escalate to LIGHT FIX-A at r07/r18 with explicit "if WHERE is identical, pruning is identical; PROJECTION (different SELECT columns) is the primary cause" framing.
+- **NEW LOW**: `iter1305-Q3 Spark rewrite_data_files recommended when Trino EXECUTE optimize is native` — re-probe Iceberg perf/maintenance framings; if recurs, re-anchor EXECUTE-optimize canonical at perf-triage land points.
+- **NEW LOW**: `iter1305-Q4 Oracle TO_NUMBER-mask misattributed as Teradata-ism` — re-probe Oracle→Trino number-parsing framings; only escalate on recurrence.
+- **POSITIVE COUNTER-SIGNAL** to false-premise-acceptance family (iter1297/iter1299 trap): responder corrected teammate's false "compile is purely local" premise at the OPENING line of Q1 ("Your teammate is PARTIALLY WRONG"). Add to the same positive-trend list as iter1300-Q4 (EXTRACT defang) and iter1302-Q1 (MOD-sign defang).
 
-**NEW HARD WATCH `iter1304-Q3 dbt compile pure-offline myth — responder inferred-wrong from resource-source defect`**: re-probe in 2–4 iters under varied "what does dbt compile do" / "does dbt compile hit the warehouse" / "can I run dbt compile in CI with no Trino" framings. **WATCH CLOSES on first clean hit AFTER the FIX-A lands.** Critical to confirm the responder no longer infers "purely offline" from the (wrong) resource framing.
-
-No imported-prior, no over-warning, no broken-secondary alternative, no fabrication. The hedge is appropriate (resource gap is real); the INFERENCE is the defect, and the inference's origin is the resource framing — NOT a responder-only slip. Acc 2.5 (inferred answer factually wrong, hedge mitigates), Clar 4.0 (clear "I don't know, see official docs" — strong hedge form), Prac 3.0 (right next-step = consult docs, but the wrong inferred fallback is harmful), Compl 2.5 (no compile-vs-run-vs-build matrix, no introspective-query mention).
-
-### Q4 — Oracle `SUBSTR(error_message, -50)` → Trino, returned nothing
-
-**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
-
-Responder said: Trino 467 DOES support negative SUBSTR positions; Oracle ports directly (`substr('Quadratically', -5)` → `'cally'`); `SUBSTR(error_message, -50)` → Trino `substr(error_message, -50)` no rewrite needed; "returned nothing" is because strings shorter than 50 chars yield empty string (`substr('hi', -5) → ''`); no `right()` / `left()` in Trino, use `substr(s, -N)` for last N chars and `substr(s, 1, N)` for first N.
-
-**Verification ([trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html))**:
-- `substr(string, start) → varchar` + `substr(string, start, length) → varchar` ✓
-- "A negative starting position is interpreted as being relative to the end of the string." ✓
-- No `left()` or `right()` documented in the Trino 467 string functions reference ✓ (matches the assumed-absence pattern that IS correct for these two — verified via prior iters' WebFetch)
-- "Returns empty string when the start position exceeds the string length (i.e., when `-50` is past the start of a 10-char string)" — consistent with documented behavior (out-of-range start → empty)
-
-Pin-perfect Oracle-to-Trino port. Defangs the assumed-absence trap (responder did NOT slip into "Trino doesn't support negative SUBSTR like Oracle" — POSITIVE COUNTER-SIGNAL to the assumed-absence imported-prior family with 9 documented instances starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL / MERGE-WHEN-MATCHED-AND / truncate-1arg). Diagnoses the empty-result mystery correctly (short-string case). Minor Clar shave (-0.25): could have mentioned `length(error_message)` as the one-line check the engineer can run to confirm short-string hypothesis. Minor Compl shave (-0.25): no `LPAD` / `RPAD` adjacency mention for the "always last 50 even when shorter" defensive-format pattern (`substr(LPAD(error_message, 50, ' '), -50)`) — niche but a natural follow-up. No imported-prior, no broken-secondary, no over-warning, no fabrication. **STRONG PASS.**
-
----
-
-## Explicit answers to teacher's flagged questions
-
-### (1) Q3 — is the dbt compile inferred answer correct (offline, no warehouse)?
-
-**NO. The inferred answer is FACTUALLY WRONG.** Per official dbt docs:
-- [docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile): "dbt compile is similar to dbt run except that it doesn't materialize... they both require a data platform connection, run queries, and have an execute variable set to True."
-- [docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile): "dbt compile needs a data platform connection in order to gather the info it needs (including from introspective queries)."
-
-`dbt compile` DOES connect to Trino + DOES run introspective queries (relation cache, run_query macros, contract-introspection SELECT WHERE 1=0). It only differs from `dbt run` in NOT materializing the target relation. The "purely offline / no warehouse" behavior is `dbt parse` (or `dbt compile --no-introspect`, which errors out if any introspective query is needed) — NOT bare `dbt compile`.
-
-### Is there a findability/content gap warranting a LIGHT FIX-A?
-
-**YES — but the FIX-A MUST teach the CORRECT semantics, NOT the wrong "purely offline" framing the teacher's flag proposes.**
-
-- **Location**: new canonical at r27 (dbt-ops cluster) AND/OR r28, with the 4-row command-comparison matrix (parse / compile / run / build) and explicit defang of the "compile sends nothing" myth. Keyword anchors must include: "what does dbt compile do, does dbt compile hit the warehouse, dbt compile vs run, dbt compile vs build, dbt compile is local, dbt compile in CI no warehouse, dbt compile no-introspect."
-- **Reconcile existing wrong framing**: grep all resources for "compile sends nothing / pure offline compile / dbt compile does not hit the warehouse / dbt COMPILE time before any SQL reaches Trino" — likely hits at r28 L282 / r28 L1062 / r27 §ephemeral. Bring into alignment with the correct "compile connects + introspects + does NOT materialize" mechanism. Per `feedback_reconcile_dont_append.md`.
-- **Pin reference**: `reference_dbt_contract_needs_live_connection.md` already corrected the related contract claim ("dbt parse/compile with no warehouse won't catch violations") — that direction is correct. Extend the same correctness to the broader `dbt compile` mechanism.
-
-### (2) Q1 / Q2 / Q4 accuracy
-
-- **Q1 (INTERSECT)**: All facts verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html). INTERSECT supported, dedups by default, binds tighter than EXCEPT and UNION (verbatim quote). "SemiJoin internally" framing reasonable. **STRONG PASS.**
-- **Q2 (Iceberg defaults)**: Matches the `reference_trino_compression_codec_477.md` pin perfectly. format=PARQUET default, format_version=2 default, "Version 2 required for row level deletes" verbatim. `compression_codec` is NOT a 467 CREATE TABLE property (only catalog-level `iceberg.compression-codec`; per-table form is 477+). **STRONG PASS — pin-perfect.**
-- **Q4 (Oracle SUBSTR negative)**: Negative SUBSTR start verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html). No left()/right() in Trino 467 (matches verified-prior-iters assumed-absence-IS-correct). Empty-string-on-short-input diagnosis correct. POSITIVE COUNTER-SIGNAL to the assumed-absence imported-prior family. **STRONG PASS.**
-
-### (3) New watches
-
-- **NEW HARD WATCH `iter1304-Q3 dbt compile pure-offline myth — responder inferred-wrong from resource-source defect`**: re-probe in 2–4 iters under varied "what does dbt compile do" / "does dbt compile hit the warehouse" / "can I run dbt compile in CI with no Trino" framings. **WATCH CLOSES on first clean hit AFTER the LIGHT FIX-A lands.** Critical resource-source defect — not a responder slip; the wrong framing at r28 L282 / r27 §ephemeral / r28 L1062 is what the responder extrapolated from.
-
-- **Carry forward un-probed**: iter1300-Q2 spill-causality (threshold side closed) / iter1299-Q3 this-guard / iter1298-Q2 metadata-tables / iter1302-Q3 interval-placement / iter1296-Q3 singular-test-omission / iter1295-Q2 / iter1294-Q4 / iter1290-Q3 / iter1289-Q2 / iter1289-Q4.
-
----
-
-## Topic table updates
-
-| Topic | Prior avg / N | This iter score | New avg / N | Delta |
-|---|---|---|---|---|
-| SQL query best practices for OLAP | 4.5921 / 312 | 4.875 (Q1) | 4.5929 / 313 | +0.0008 |
-| Iceberg partition design for SaaS | 4.4156 / 72 | 4.875 (Q2) | 4.4219 / 73 | +0.0063 |
-| Improving complex SQL perf on Trino with dbt | 4.4319 / 100 | 3.0 (Q3) | 4.4177 / 101 | -0.0142 |
-| Oracle PL/SQL → dbt + Trino migration | 4.5001 / 280 | 4.875 (Q4) | 4.5014 / 281 | +0.0013 |
-
-All topics remain PASSED. Q3 drag (-0.0142) is meaningful but the topic margin (4.4177 vs 3.5 threshold = +0.9177) absorbs it cleanly. **Continuous PASS loop continues at iter1304 — overall iter 4.40625.**
+**Pattern note**: Q3 is the only FAIL this iter. The 1st-re-probe REACH on the dbt-compile FIX-A is a strong validation that the iter1304 reconcile-in-place + parse/compile/run/build matrix + DO-NOT-WRITE defang pattern is working. The Q3 miss is a synthesis ceiling on premise-consistency-check (pattern-matched "slow Iceberg scan" → nearest-named cause without checking against identical-WHERE) rather than a content gap. Per `feedback_synthesis_ceiling_stop_churning.md`, do NOT add a "two queries same WHERE differential scan" card on first occurrence; re-probe and only FIX-A if the pattern recurs.
