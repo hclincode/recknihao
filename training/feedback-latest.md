@@ -1,164 +1,89 @@
-# Iter1301 Judge Feedback
+# Iter1302 Judge Feedback
 
-## Iteration verdict
+## Overall
 
-**Overall avg: 4.328 (PASS by overall threshold; 3 STRONG / 1 FAIL).**
+**Average: 4.766 STRONG PASS** (Q1 4.875 / Q2 4.875 / Q3 4.4375 / Q4 4.875). Two HARD WATCH closures + one new minor soft watch.
 
-| Q | Score | Verdict | Topic touched |
-|---|---|---|---|
-| Q1 (boolean / null-safe equality) | **4.875** | STRONG PASS | SQL query best practices for OLAP |
-| Q2 (plain LEFT JOIN plan shows CROSS JOIN) | **2.8125** | **FAIL** (Q-level <3.5) | Improving complex SQL performance on Trino with dbt |
-| Q3 (per-developer schema via env_var) | **4.6875** | STRONG PASS | Improving complex SQL performance on Trino with dbt |
-| Q4 (Oracle LAG 3-arg default → Trino) | **4.9375** | STRONG PASS | Oracle PL/SQL → dbt+Trino migration |
+## Per-question scores
 
-iter1300 4.375 → iter1301 4.328: essentially flat. Q1/Q3/Q4 clean. Q2 is the single FAIL — root-cause off-target: engineer described a PLAIN LEFT JOIN (no subquery) plan rendering as `CrossJoin`, responder attributed it to LATERAL / decorrelation-failed `CorrelatedJoin`, which is a DIFFERENT plan node and a DIFFERENT scenario. The primary cause for "plain JOIN renders as CrossJoin" — a **non-equi (inequality/range/function-wrapped) ON predicate** that prevents hash-join — was not surfaced. Content gap CONFIRMED via grep: no findable "non-equi JOIN ON → CrossJoin + Filter" canonical anchored to r28's join section. LIGHT FIX-A recommended.
+### Q1 (MOD non-negative bucket RE-PROBE) — 4.875 STRONG PASS
 
----
-
-## Per-question
-
-### Q1 — Boolean / null-safe equality (`is_active = 1` errors; null-safe compare; null-safe "different from") → **4.875 STRONG PASS**
-
-Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
-
-Responder: `is_active = 1` is a type error in Trino 467 (no implicit boolean ↔ integer coercion); use `WHERE is_active = true`, `WHERE is_active = false`, or `WHERE NOT is_active`. Null-safe equality = `IS NOT DISTINCT FROM`; null-safe "is A different from B" = `IS DISTINCT FROM`. Correctly contrasted `NULL = NULL → NULL` (three-valued logic) vs `NULL IS NOT DISTINCT FROM NULL → TRUE`.
-
-**VERIFIED**:
-- Trino 467 boolean is a distinct type with no integer coercion — `WHERE bool_col = 1` raises "Cannot apply operator: boolean = integer" at analyze time per [trino.io/docs/current/functions/comparison.html](https://trino.io/docs/current/functions/comparison.html) + [trino.io/docs/467/language/types.html](https://trino.io/docs/467/language/types.html).
-- `IS NOT DISTINCT FROM` / `IS DISTINCT FROM` documented as null-safe comparison operators per [trino.io/docs/467/functions/comparison.html](https://trino.io/docs/467/functions/comparison.html): "These operators function the same as the equality operators, but treat null values as equal to each other."
-- Resource alignment: r28 L1222 lists `IS NOT DISTINCT FROM` among supported equi-join predicates; r13/r17/r22/r23 all reference the operator. No imported-prior (no assumed-absence), no over-warning, no broken-secondary.
-
-Minor Clar/Compl shaves: didn't surface that `IS NOT DISTINCT FROM` is also a valid equi-join key (DF participates per r28 L1222) — would have closed the loop for "I want to JOIN on nullable boolean columns." Non-load-bearing.
-
----
-
-### Q2 — Unexpected CROSS JOIN in plan (plain LEFT JOIN, no subquery) → **2.8125 FAIL**
-
-Acc 2.5 / Clar 3.5 / Prac 2.5 / Compl 2.75.
-
-Responder attributed the plan-side `CrossJoin` to **(1)** LATERAL subquery correlation (`CROSS JOIN LATERAL` / `LEFT JOIN LATERAL ... ON true`) and **(2)** correlated-subquery decorrelation failure rendering a `CorrelatedJoin` nested-loop. Diagnostic guidance: `EXPLAIN (FORMAT TEXT)`; recognize `Join[INNER][BROADCAST/PARTITIONED]`, `CorrelatedJoin`, `RemoteExchange[REPLICATE/REPARTITION]`; then `EXPLAIN ANALYZE`.
-
-**ROOT-CAUSE OFF-TARGET — CONFIRMED**:
-
-The engineer's scenario is a **plain `LEFT JOIN` between two tables with no subquery**. The responder's framing is wrong on TWO points:
-
-1. **LATERAL/correlated-subquery decorrelation doesn't apply here.** No subquery → no decorrelation step → no `CorrelatedJoin`. The responder is answering a different question (correlated subquery slowness, which is the r28 §2 canonical).
-
-2. **`CorrelatedJoin` ≠ `CrossJoin` — they are distinct plan nodes.** `CorrelatedJoin` is the marker for failed decorrelation of a correlated subquery (r28 §2 "the smoking gun"). `CrossJoin` is the cartesian-product / nested-loop operator used when a JOIN's ON clause has NO usable equality predicate. The engineer literally said the plan shows a `CrossJoin` — that's a categorically different signal from `CorrelatedJoin`.
-
-**Primary cause for "I wrote a plain LEFT JOIN and the plan shows CrossJoin" — VERIFIED**:
-
-A `JOIN ... ON <pred>` whose `<pred>` cannot be reduced to at least one equi-key (i.e., is purely inequality / range / `BETWEEN` / `!=` / function-wrapped / type-mismatched) **cannot be hash-joined**. Trino plans it as `CrossJoin` (cartesian product) with the predicate as a downstream `Filter`. This is the nested-loop O(N×M) fallback.
-
-VERIFIED via:
-- [trino.io/episodes/9.html](https://trino.io/episodes/9.html): "In Trino, a hash-join is the common algorithm that is used to join tables" — hash-join requires equality. Non-equi predicates fall outside this fast path.
-- [trinodb/trino PR #4994](https://github.com/trinodb/trino/pull/4994) + [PR #5276](https://github.com/trinodb/trino/pull/5276): nested-loop join operator (`NestedLoopJoinPagesBuilder`) handles "pure non-equi joins" and "outer joins with non-equi conditions." The plan-side rendering for these is the `CrossJoin` node.
-- Background: "Join operations are not limited to equijoin criteria, and the Hash Join algorithm is not suitable for join conditions with inequality constraints." Non-equi → nested-loop → CrossJoin in plan.
-
-**Concrete trigger shapes the responder did not surface**:
-
-| Engineer's ON clause | Why hash-join can't fire | Plan |
+| Dim | Score | Reason |
 |---|---|---|
-| `ON e.account_id BETWEEN a.id_low AND a.id_high` | Range, not equality | `CrossJoin` + `Filter` |
-| `ON e.acct_id > a.id` | Inequality | `CrossJoin` + `Filter` |
-| `ON e.account_id != a.id` | Inequality | `CrossJoin` + `Filter` |
-| `ON LOWER(e.acct) = a.id` | Function-wrap on join key prevents equi-key extraction | `CrossJoin` + `Filter` (or full scan + filter) |
-| `ON e.acct_id = CAST(a.id AS varchar)` | Type-mismatch on join key disables hash-key extraction | `CrossJoin` + `Filter` |
-| `ON 1 = 1` / forgotten ON | No predicate at all (already covered by r23 §4 single-line "you forgot a join condition") | `CrossJoin` |
+| Technical accuracy | 5.0 | Trino mod/% and Oracle MOD both follow the DIVIDEND sign; both return -1 for (-10, 3). VERIFIED via [Trino math.html](https://trino.io/docs/467/functions/math.html) (mod = standard truncated-division remainder, matches Java/C `%`) + [Oracle MOD docs](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/MOD.html) ("result is negative only when n2 is negative") + [database.guide MOD](https://database.guide/mod-function-in-oracle/). Floored-modulo workaround `((a % n) + n) % n` is correct and standard for the always-non-negative-bucket use case. |
+| Beginner clarity | 4.75 | Worked example `((-10 % 16) + 16) % 16 = 6` walks through the math. Minor: didn't explicitly call out "this is the floored-modulo / Euclidean modulo idiom from Python" for engineers transferring from other languages. |
+| Practical applicability | 5.0 | Engineer gets exact rewrite + worked example for the 0..15 bucket index. |
+| Completeness | 4.75 | Could've surfaced `mod(((a % n) + n), n)` form (same thing, named-function variant). Non-load-bearing. |
 
-**EXPLAIN diagnostic the responder should have given**:
-1. Run `EXPLAIN (FORMAT TEXT)` and grep the JOIN node.
-2. If the JOIN node prints as `CrossJoin` with a sibling/downstream `Filter[<the ON predicate>]`, the ON clause has no equi-key.
-3. Re-read the ON clause: look for inequality (`<`, `>`, `!=`, `<>`), range (`BETWEEN`), function-wraps (`LOWER()`, `CAST()`, `date_trunc()`), or implicit type mismatches.
-4. If at least one equi-key exists alongside non-equi predicates, rewrite as `ON e.k = a.k AND <range pred>` — Trino can then hash-join on `e.k = a.k` and apply the rest as a join filter (visible in EXPLAIN as `Join[<eq_key>][filter=...]`).
+**iter1299-Q4 MOD FIX-A CONFIRMED REACHED, WATCH CLOSES.** The iter1299 LIGHT FIX-A at r27 §4.4 L1271 (enhance "Identical" line with concrete `Oracle MOD(-10,3) = -1` worked example + DO-NOT-WRITE defang against the "Oracle follows divisor sign / returns 2" myth + floored-modulo workaround `((a % n) + n) % n`) landed on the **1st re-probe**. Responder no longer hedges, no longer endorses the false premise, gives the floored workaround directly. Pattern matches iter1272 bloom-CREATE-467 (1st-re-probe close after r17 §713 reconcile) + iter1290 ephemeral-basics (1st-re-probe close after r27 §3 QUICK-ANSWER hoist). **CLOSE HARD WATCH `iter1299-Q4 Oracle MOD sign-handling false-premise hedge`.**
 
-**Content gap — CONFIRMED via grep of `resources/`**:
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
-- `resources/23-sql-best-practices-olap.md` §4 L2479 has only the single line `CrossJoin — you forgot a join condition. Almost always a bug.` — covers MISSING-ON only, not non-equi-ON.
-- `resources/28-complex-sql-performance-trino-dbt.md` has rich `CorrelatedJoin` coverage (§2 — correlated subqueries, L15, L783–842, L1345) but no "plain JOIN ON non-equi predicate → CrossJoin" canonical.
-- r28 L1220–1222 lists the supported DF predicates (`=, <, <=, >, >=, IS NOT DISTINCT FROM`) — useful for the DF angle but does not explain that inequality predicates as the SOLE join condition force the JOIN itself to a CrossJoin.
+### Q2 (BETWEEN-in-ON CrossJoin RE-PROBE) — 4.875 STRONG PASS
 
-**Recommendation — LIGHT FIX-A**: add a short canonical card at r28 §2 (or a new §2a) and a sibling expansion of r23 §4 L2479. Suggested keyword anchors: *"plain JOIN plan shows CrossJoin", "wrote LEFT JOIN but EXPLAIN shows CrossJoin", "BETWEEN/inequality/range in ON clause", "JOIN on non-equality slow", "no equi-key in ON clause", "JOIN with `!=` Trino", "JOIN on function-wrapped key"*. The card should:
-- State the rule: a JOIN whose ON predicate contains NO equality on at least one key cannot hash-join → planned as `CrossJoin` + `Filter` (O(N×M)).
-- Show the 6-row trigger-shapes table above.
-- Distinguish `CrossJoin` from `CorrelatedJoin` in one line (different plan nodes, different root causes — see §2 for `CorrelatedJoin`).
-- Give the rewrite: add at least one equi-key (`ON e.k = a.k AND <range_pred>`); if no natural equality exists, materialize a bucket key (e.g., `date_trunc('day', ts)`) and equi-join on the bucket + filter for the exact range.
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5.0 | Non-equi ON BETWEEN → CrossJoin + Filter nested-loop is the canonical Trino behavior. VERIFIED via [Trino episode 9 on hash joins](https://trino.io/episodes/9.html) (hash-join requires equality predicate) + [Trino issue #17422 on sort-merge join](https://github.com/trinodb/trino/issues/17422) (Trino has hash-join + nested-loop, no SMJ for range joins as of 467) + [PR #4994](https://github.com/trinodb/trino/pull/4994)/[#5276](https://github.com/trinodb/trino/pull/5276) (NestedLoopJoinOperator handles "pure non-equi joins"). Responder correctly distinguished CrossJoin (this case) from CorrelatedJoin (subquery decorrelation — iter1301 off-target). "Add an equi-key (tenant_id)" fix is exactly right. |
+| Beginner clarity | 4.75 | Clean diagnostic step-by-step: read EXPLAIN, find CrossJoin node + Filter-above carrying BETWEEN, contrast with hash-join + DF. Minor: didn't define "equi-key" before using it (one-line gloss would help a beginner). |
+| Practical applicability | 5.0 | Three concrete fixes (A: add equi-key, B: pre-aggregate tiers, C: EXISTS / broadcast small side). Engineer with 80M-row 45-min query has exact playbook. |
+| Completeness | 4.75 | Could've mentioned `join_distribution_type='BROADCAST'` as the "small bt tiers table" path when bt fits in worker memory. Minor. |
 
-**NEW HARD WATCH `iter1301-Q2 non-equi-JOIN-ON renders as CrossJoin content gap`**: after LIGHT FIX-A landing, re-probe in 2-4 iters under varied "plain JOIN but plan shows CrossJoin" / "BETWEEN in ON makes the JOIN slow" / "JOIN on type-mismatched key" framings. Reach-test the new card; close watch on first clean hit.
+**iter1301-Q2 CrossJoin FIX-A CONFIRMED REACHED, WATCH CLOSES.** The iter1301 LIGHT FIX-A at r28 §2 (new "plain JOIN with non-equi-ON renders as CrossJoin+Filter" canonical + 5-row trigger-shapes table + CrossJoin-vs-CorrelatedJoin distinction + heavy keyword anchors) landed on the **1st re-probe**. Responder no longer mis-attributes to LATERAL/CorrelatedJoin (iter1301 off-target), correctly identifies non-equi-ON as the trigger, names the BETWEEN/range shape, gives add-equi-key fix as primary. **CLOSE HARD WATCH `iter1301-Q2 non-equi-JOIN-ON renders as CrossJoin content gap`.**
 
-No imported-prior. No over-warning. No fabrication. The misdirection is a topic-mixup, not a hallucination — the responder reached for r28 §2 (the most heavily-anchored "join is slow" canonical) when the question's plan-node signal pointed elsewhere.
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
----
+### Q3 (dbt target.name) — 4.4375 PASS
 
-### Q3 — Per-developer schema via `env_var('USER')` → **4.6875 STRONG PASS**
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 4.0 | target.name semantics CORRECT (active target name from profiles.yml; settable via --target, defaults to profile's `target:` key). Referenceable in model SQL, config(), macros, dbt_project.yml — VERIFIED at [docs.getdbt.com/reference/dbt-jinja-functions/target](https://docs.getdbt.com/reference/dbt-jinja-functions/target). **The example bug**: `WHERE order_date >= (SELECT MAX(order_date) FROM {{ this }} - INTERVAL '7' DAY)` misplaces INTERVAL inside FROM — parses as `FROM ({{this}} - INTERVAL '7' DAY)` which is invalid (can't subtract an interval from a relation). Correct form: `WHERE order_date >= (SELECT MAX(order_date) FROM {{ this }}) - INTERVAL '7' DAY`. -1.0 Acc shave: load-bearing-ish (engineer copy-pasting hits a parse error). |
+| Beginner clarity | 4.75 | Concrete examples per context (model SQL Jinja, config block, dbt_project.yml). Clear concept. |
+| Practical applicability | 4.5 | Engineer can act on the dev/prod conditional pattern. Interval-placement bug forces a minor edit before paste. |
+| Completeness | 4.5 | Covered the main contexts; `target.schema`, `target.database`, `target.type` siblings could've been surfaced as a one-line "target also exposes ..." for completeness. Not load-bearing. |
 
-Acc 4.75 / Clar 4.5 / Prac 5.0 / Compl 4.5.
+**NEW SOFT WATCH `iter1302-Q3 SELECT...FROM {{ this }} - INTERVAL misplacement (broken secondary example)`**: per `feedback_responder_broken_secondary_alternative.md` family — lead is fine, secondary worked example has a per-instance synthesis slip. Re-probe target.name / {{ this }} interval-arithmetic framings in 4-8 iters; if recurs with same FROM-clause interval placement, escalate to a LIGHT FIX-A. **No FIX-A on first occurrence** per pinned policy.
 
-Responder: `profiles.yml` with two targets — `dev` schema `"dbt_{{ env_var('USER') }}"` (each developer gets `dbt_alice`, `dbt_bob` without manual `--target`) and `prod` schema `analytics`. `dbt run` → dev, `dbt run --target prod` → prod.
+No imported-prior, no over-warning, no fabrication, no false premise endorsement.
 
-**VERIFIED** via [docs.getdbt.com/reference/dbt-jinja-functions/env_var](https://docs.getdbt.com/reference/dbt-jinja-functions/env_var) + [docs.getdbt.com/docs/core/connect-data-platform/connection-profiles](https://docs.getdbt.com/docs/core/connect-data-platform/connection-profiles): `env_var()` is supported inside `profiles.yml`; `$USER` is the conventional shell variable per-developer; quoting form `"dbt_{{ env_var('USER') }}"` is the canonical pattern. dbt-trino's `profiles.yml` schema property does accept Jinja expressions per dbt-trino docs.
+### Q4 (Oracle ''=NULL → Trino) — 4.875 STRONG PASS
 
-Minor shaves:
-- Compl: did not surface the alternative `target: dev` `dev_user: "{{ env_var('USER') }}"` + custom generate_schema_name macro pattern (the dbt-Labs "best practice for shared dev warehouse" route) — useful when developers need different *schemas* AND different *credentials*. Responder's simpler form works for the asked question.
-- Clar: didn't explicitly say "set `USER` in CI/cron environments otherwise the schema collapses to `dbt_` (empty)" — material on a k8s/cron stack where `$USER` may be unset and `env_var()` will raise an error unless a default is supplied via `env_var('USER', 'ci')`. Recall-ceiling, not a content gap.
+| Dim | Score | Reason |
+|---|---|---|
+| Technical accuracy | 5.0 | Oracle ''=NULL (`'' IS NULL` returns TRUE in Oracle, FALSE in Trino — Trino treats '' as a distinct zero-length VARCHAR) — VERIFIED via [AWS blog Oracle empty strings](https://aws.amazon.com/blogs/database/handle-empty-strings-when-migrating-from-oracle-to-postgresql/) (Trino inherits ANSI behavior like PostgreSQL on this point). NULLIF(col,'') at ingestion normalization is the clean architectural answer. Audit recommendation (grep IS NULL / IS NOT NULL / NVL / DECODE / string-compares) is the right migration discipline. Replacement-with-IS-NULL-only is correctly flagged as insufficient (need `(col IS NULL OR col='')` if not normalized at ingest). |
+| Beginner clarity | 4.75 | Migration mapping table makes the per-construct rewrite concrete. Edge cases enumerated. Minor: could've stated more starkly "Trino: `'' IS NULL` returns FALSE" as a one-liner before the table for a beginner mental model. |
+| Practical applicability | 5.0 | Two-path answer (surgical: replace ='' with `IS NULL OR =''`; architectural: normalize at ingestion via NULLIF) lets the engineer pick by migration scope. grep-audit patterns + concrete column-rewrite examples = directly actionable. |
+| Completeness | 4.75 | Could've mentioned `NULLIF(trim(col),'')` for whitespace-only-as-empty cases (sometimes Oracle-NULL but always Trino-non-empty). Non-load-bearing. |
 
-No imported-prior, no over-warning, no fabrication.
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
----
+## Pattern summary
 
-### Q4 — Oracle `LAG(order_total, 1, 0)` 3-arg default → Trino → **4.9375 STRONG PASS**
+- **2 HARD WATCH closures on 1st re-probe** (iter1299-Q4 MOD + iter1301-Q2 CrossJoin). Both FIX-As were the right shape (worked example + DO-NOT-WRITE defang for MOD; new canonical with anchors + trigger-shapes table + CrossJoin-vs-CorrelatedJoin distinction for CrossJoin). The QUICK-ANSWER-with-explicit-question-shape-anchors-at-keyword-zone canonical pattern continues to be reliably effective.
+- **1 minor synthesis slip** (Q3 interval-placement) — per-instance broken-secondary-example, not a content gap. New soft watch logged, no FIX-A.
+- **Topic mix**: Q1 + Q4 → Oracle PL/SQL → dbt + Trino (function-rewrite + empty-string-vs-NULL dialect). Q2 → Improving complex SQL performance on Trino with dbt (plan-shape diagnosis). Q3 → Oracle PL/SQL → dbt + Trino (dbt target.name) — pure dbt-runtime question without Oracle angle but routes cleanest to that umbrella.
+- **Zero imported-prior, zero broken-secondary in leads, zero over-warning, zero fabrication, zero false-premise endorsement.** Clean iteration.
 
-Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.
+## Watch status snapshot
 
-Responder: "Trino LAG supports the 3-arg default form: `LAG(column, offset, default) OVER (...)`. Direct Oracle equivalent: `LAG(order_total, 1, 0)`. First row in the partition → 0 default; subsequent rows → 1 row back. Offset must be positive integer constant. No COALESCE wrapper needed."
+CLOSED THIS ITER:
+- iter1299-Q4 Oracle MOD sign-handling false-premise hedge (Q1 1st re-probe REACHED).
+- iter1301-Q2 non-equi-JOIN-ON renders as CrossJoin content gap (Q2 1st re-probe REACHED).
 
-**VERIFIED** via [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html) (verbatim signature `lag(x[, offset[, default_value]])`): "If the offset refers to a row that is not within the partition, the `default_value` is returned, or if it is not specified `null` is returned." Trino 467 supports the 3-arg form natively. Matches pin **reference_trino_listagg_native** family (assumed-PRESENCE counter-signal — responder correctly identified the function as present, did NOT fall into the assumed-absence trap that has bitten 9 times: starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL / MERGE-WHEN-MATCHED-AND / truncate-1arg).
+NEW THIS ITER:
+- SOFT `iter1302-Q3 SELECT MAX(...) FROM {{ this }} - INTERVAL '7' DAY misplacement`. Re-probe 4-8 iters under target.name / {{ this }} / dbt-incremental-watermark framings.
 
-**POSITIVE COUNTER-SIGNAL** for iter1297-Q4 Oracle-false-premise-pattern watch: the responder DIRECTLY confirmed the 3-arg form exists and works identically to Oracle, refusing to hedge or suggest a COALESCE workaround. Same defensive-answering pattern as iter1300-Q4 (Oracle EXTRACT → Trino kept-as-is). Matches the pin family.
+CARRY (not probed this iter):
+- iter1300-Q2 spill-causality + r28 §8A.2 broadcast-threshold raise-vs-lower direction.
+- iter1299-Q3 `{{ this }}` is_incremental() guard missing on incremental example.
+- iter1298-Q2 Iceberg metadata tables.
+- iter1297-Q4 Oracle-GROUP-BY-leniency false-premise endorsement.
+- iter1296-Q1 / iter1296-Q3 (dbt singular vs generic test placement).
+- iter1295-Q2 / iter1294-Q4.
+- iter1290-Q3 / iter1289-Q2 / iter1289-Q4.
+- iter1278-Q1 Scheduled-vs-CPU framing imprecision (route to Blocked: Input).
 
-Minor Compl shave: didn't mention the GitHub edge case ([trinodb/trino #19003](https://github.com/trinodb/trino/issues/19003)) where LAG/LEAD don't return the default when the offset itself is NULL (rather than out-of-range) — extremely niche, non-load-bearing for the Oracle migration question.
+## Recommendation to teacher
 
-No imported-prior, no over-warning, no broken-secondary, no fabrication.
+**NO-OP this iter.** Both HARD-WATCH FIX-As reached on first re-probe — no further reinforcement needed at their land-points. The Q3 interval-placement slip is per-instance synthesis padding; per `feedback_responder_broken_secondary_alternative.md` family, no resource fix scales. Carry the new soft watch + watch for recurrence pattern.
 
----
-
-## Cross-question patterns
-
-- **Imported-prior assumed-absence family**: clean this iter. Q4 LAG 3-arg correctly confirmed PRESENT (positive counter-signal); no assumed-absence slip.
-- **Responder broken-secondary alternative**: clean — no padded "for completeness" alternative on Q1/Q3/Q4.
-- **Responder over-warning folklore**: clean — Q1 boolean-equality answer was direct, not folklore-hedged.
-- **False-premise endorsement family** (iter1297/iter1299 watch): clean — no false premises asked this iter; Q4 LAG 3-arg correctly asserted.
-- **Topic-mixup**: NEW pattern this iter (Q2). Responder reached for the wrong canonical (`CorrelatedJoin` r28 §2 = correlated-subquery slowness) when the engineer's signal (`CrossJoin` plan node + plain JOIN, no subquery) pointed at a different root cause (non-equi ON predicate). This is NOT assumed-absence and NOT a synthesis ceiling — it's a routing miss where the keyword "CROSS JOIN" matches CorrelatedJoin lexically (both contain "Join") but the plan node names are categorically different.
-
----
-
-## Watches
-
-### NEW
-
-- **HARD `iter1301-Q2 non-equi-JOIN-ON renders as CrossJoin content gap`**: LIGHT FIX-A recommended at r28 §2 (or new §2a) + sibling expansion of r23 §4 L2479. Re-probe in 2-4 iters under "plain JOIN plan shows CrossJoin" / "BETWEEN in ON makes the JOIN slow" / "JOIN on type-mismatched key" framings. Close watch on first clean hit (FIX-A reaches).
-
-### CARRY (un-probed)
-
-- iter1300-Q2 spill-causality-flip + broadcast-threshold-raise-vs-lower (re-probe 3-6)
-- iter1299-Q3 dbt `{{ this }}` `is_incremental()` guard reach-test
-- iter1299-Q4 Oracle MOD sign-handling false-premise hedge (L1271 LIGHT FIX-A reach-test)
-- iter1298-Q2 metadata-tables
-- iter1297-Q4 Oracle-false-premise-endorsement (Q4-LAG-3-arg positive counter-signal this iter)
-- iter1296-Q1 / iter1296-Q3 / iter1295-Q2 / iter1294-Q4 / iter1290-Q3 / iter1289-Q2 / iter1289-Q4
-
-### CLOSED this iter
-
-None.
-
----
-
-## Rubric topic deltas
-
-| Topic | Before | After | Delta |
-|---|---|---|---|
-| SQL query best practices for OLAP | 4.5912 / 311 | 4.5921 / 312 | +0.0009 |
-| Improving complex SQL performance on Trino with dbt (Q2 + Q3, 2 datapoints) | 4.4381 / 96 | 4.4241 / 98 | -0.0140 |
-| Oracle PL/SQL → dbt+Trino migration | 4.4933 / 274 | 4.4949 / 275 | +0.0016 |
-
-All required topics remain PASSED. Margins remain comfortable (smallest = Query-performance-basics at +0.6364, not touched this iter).
+Continue breadth probing — the loop is healthy.
