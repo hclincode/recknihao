@@ -1,150 +1,209 @@
-# Judge Feedback — Iteration 1284
+# Judge Feedback — Iteration 1285
 
-**Overall**: 4 questions, average **3.734 PASS-marginal** (Q1 2.00 FAIL / Q2 4.875 STRONG PASS / Q3 3.125 FAIL / Q4 4.9375 STRONG PASS).
+**Overall**: 4 questions, average **4.359 PASS** (Q1 4.875 STRONG / Q2 3.50 PASS-borderline / Q3 4.125 PASS / Q4 4.9375 STRONG).
 
-**Headline**: Two failing answers — but they fail for **structurally different reasons**, and the recommendation diverges.
-- **Q1 = 4th CONSECUTIVE NON-REACH** on the `system.runtime.queries` JOIN `system.runtime.tasks` perf-triage recipe. The iter1283 2-part FIX-A (affirmative-first hoist at r18 §404 + L127 pointer) DID land the right shape on the resource — the recipe sits at the TOP of §404 with copy-pasteable SQL, and the L127 myth row now says "DON'T stop here — see §Finding expensive queries below." The responder still didn't reach it. This iter it landed at a THIRD different decoy (r27 §6.7L query-comment example, L4333) and regenerated the same base-training "bytes aren't in the system tables → use EXPLAIN ANALYZE" myth. **The recipe is correct. The responder cannot assemble it.** Source-verified: `system.runtime.tasks` does expose `physical_input_bytes` + `split_cpu_time_ms` columns on Trino 467 (raw `TaskSystemTable.java` 467 tag), and the JOIN on `query_id` to `system.runtime.queries` is the documented way to get per-query bytes + CPU without an event listener. **My decision: RECALL-CEILING STOP** (details below).
-- **Q3 = responder slip on correct + present content.** Resources r27 §3.2 L322-326 + r28 L402 + L1679/L1692 explicitly list `delete+insert` as one of the four built-in dbt-trino `incremental_strategy` values, with the exact SQL it emits. Verified at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) verbatim: dbt-trino supports `append` (default), `delete+insert`, and `merge`. The responder said *"delete+insert — Not a built-in dbt strategy; you'd write it manually"* — FALSE. NOT a resource gap. Per-instance per `feedback_synthesis_ceiling_stop_churning.md` discipline → NO FIX.
-- **Q2 + Q4 are clean STRONG PASSES.**
+**Headline**: Q1 + Q4 are clean strong passes. Q2 has a SUBTLE BUT REAL accuracy slip on TIMESTAMP→TZ tagging (the "CAST = UTC assumption" framing). Q3 reproduces the **iter1208 dbt-selector-direction WATCH** — and this time the wrong selector is sitting verbatim in r27 §6.7H2 L4135 of the resource itself, so it's now a RESOURCE DEFECT, not just a responder slip.
 
 | Q | Topic | Score | Status | Verdict |
 |---|---|---|---|---|
-| Q1 | Perf-triage RE-PROBE #4 (LIVE system tables for CPU + bytes) | **2.00** | **FAIL** | 4th consecutive NON-REACH; recipe at r18 §404 IS correct + hoisted + L127-pointed; responder landed at r27 §6.7L (3rd different decoy) and regenerated the "bytes need EXPLAIN ANALYZE" base-training myth |
-| Q2 | Above-group-average (correlated subquery vs window) | **4.875** | STRONG PASS | `AVG(amount) OVER (PARTITION BY account_id)` led + filter; correlated-subquery framing accurate (Trino decorrelates; EXPLAIN-for-CorrelatedJoin caveat sound) |
-| Q3 | dbt incremental strategies (append/merge/delete+insert) | **3.125** | **FAIL** | LOAD-BEARING wrong claim: "delete+insert is not built-in." It IS built-in in dbt-trino (r27 §3.2 + r28 L402 both teach this verbatim) |
-| Q4 | Oracle TO_CHAR/TO_DATE + `'Invoice #' \|\| number` → Trino | **4.9375** | STRONG PASS | TO_CHAR/TO_DATE absence + `date_format`/`format_datetime` mask mapping correct; `to_char` Teradata lowercase-numeric-only caveat correct; `\|\|` varchar-only with CAST(number AS VARCHAR) / `format()` fix correct |
-
-**Iter average**: (2.00 + 4.875 + 3.125 + 4.9375) / 4 = **3.734** (margin +0.234 over 3.5; thinnest pass since iter1254 3.8125).
+| Q1 Iceberg time-travel revenue-bug recovery | Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.875 | STRONG PASS | $snapshots / FOR TIMESTAMP AS OF / FOR VERSION AS OF / whole-token quoting all correct |
+| Q2 mixed TIMESTAMP vs TIMESTAMP WITH TIME ZONE date_diff | SQL query best practices for OLAP | 3.50 | PASS-borderline | Implicit coercion claim correct; "CAST = UTC" is SUBTLY WRONG (CAST attaches SESSION zone, not UTC); session-zone caveat omitted; r22 §2A.3 canonical not reached |
+| Q3 dbt exposures for 40-model project | Improving complex SQL perf on Trino with dbt | 4.125 | PASS | Exposures shape / types / lineage / selective build all correct; impact-analysis selector direction WRONG (leading + = ancestors; should be trailing + for descendants) — copied verbatim from r27 §6.7H2 L4135 RESOURCE DEFECT |
+| Q4 Oracle TRUNC(date) → Trino | Oracle PL/SQL → dbt + Trino SQL migration | 4.9375 | STRONG PASS | date_trunc('day', ts), unit table, TS→TIMESTAMP return-type diff, AT TIME ZONE for local-date grouping all correct |
 
 ---
 
-## Q1 — perf-triage recipe (4th non-reach) — DECISION: RECALL-CEILING STOP
+## Q1 — Iceberg time-travel on bad-deploy revenue rows (4.875 STRONG PASS)
 
-### Confirm: recipe IS correct
-Source-verified this iter against raw Trino 467 source:
-- `system.runtime.tasks` columns (from [TaskSystemTable.java @ 467 tag](https://raw.githubusercontent.com/trinodb/trino/467/core/trino-main/src/main/java/io/trino/connector/system/TaskSystemTable.java)): includes `query_id`, `physical_input_bytes`, `split_cpu_time_ms`, `output_bytes`, `output_rows`, `physical_written_bytes`, lifecycle (`created`/`start`/`end`), etc.
-- `system.runtime.queries` columns: `query_id`, `state`, `"user"`, `source`, `query` (full SQL text), `resource_group_id`, `queued_time_ms`, etc. — but **no `physical_input_bytes` or `split_cpu_time_ms` directly** (those live on `tasks`, hence the JOIN).
-- The r18 §404 recipe at L410-425 (queries JOIN tasks on query_id, SUM(physical_input_bytes)/1e9 AS gb_scanned, SUM(split_cpu_time_ms)/1000.0 AS cpu_sec, GROUP BY q.query_id/q."user"/q.source/q.query, ORDER BY gb_scanned DESC LIMIT 20) is CORRECT Trino 467 SQL and IS the right answer to Q1's exact framing.
+**Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.5.**
 
-**Conclusion: this is a responder-reach failure, NOT a resource defect.**
+Responder gave the canonical full workflow:
+1. **`FOR TIMESTAMP AS OF TIMESTAMP '2026-06-20 10:00:00 UTC'`** — wall-clock entry point. Verified valid Trino 467 syntax against [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html).
+2. **`SELECT snapshot_id, committed_at, operation, summary FROM "orders$snapshots" ORDER BY committed_at`** — discovery query with whole-token quoting `"orders$snapshots"` (single quote pair around the whole token, the split-pair form `"orders"$snapshots` is a parse error). $snapshots column list matches docs: `committed_at TIMESTAMP(3) WITH TIME ZONE`, `snapshot_id BIGINT`, `parent_id BIGINT`, `operation VARCHAR`, `manifest_list VARCHAR`, `summary map(VARCHAR,VARCHAR)`.
+3. **`FOR VERSION AS OF <bigint snapshot_id>`** — exact-reproducibility form for the pre-bad-deploy snapshot once identified.
 
-### Responder's landing this iter
-- Cited **r27 line 4333** (the §6.7L `query-comment` dbt-model identification example).
-- Used `"elapsed.cpu"` as the CPU column on `system.runtime.queries` alone (no JOIN to tasks).
-- For BYTES, fell back to: *"you need EXPLAIN ANALYZE instead (not a direct column in system.runtime.queries)... look for physicalInputDataSize."*
+All three load-bearing facts source-verified. Minor Compl shave (-0.5): didn't mention the 7-day default `expire_snapshots` retention floor (`iceberg.expire-snapshots.min-retention`) — last Tuesday was 8 days ago given today's date, so if the table has had `expire_snapshots(retention_threshold => '7d')` run since then, the snapshot may be gone. A one-line "verify the snapshot still exists in `$snapshots` before assuming you can travel back" would close this. Not load-bearing — the responder's workflow is paste-and-run for any case where the snapshot still exists.
 
-This is the **3rd different decoy in 4 iters** (iter1282 r05 tenant-cost, iter1283 r18 L127 myth, iter1284 r27 §6.7L query-comment). Every iter, the responder regenerates the base-training prior "bytes scanned isn't on system tables → EXPLAIN ANALYZE / event listener" REGARDLESS of how the recipe is presented.
-
-### My decision: RECALL-CEILING STOP
-
-**Reasoning**:
-1. **Four iters of escalating FIX-As have produced zero movement.** anchors → r05 reconcile → r18 affirmative-first + L127 pointer. The recipe is now at the literal TOP of r18 §404, decorated with ⭐ markup, and the most-magnetic decoy (the L127 myth) explicitly points to it. The responder still didn't reach.
-2. **Moving-target pattern means whack-a-mole won't converge.** Three different decoys in four iters (r05 / r18 L127 / r27 §6.7L). A 5th FIX-A targeting r27 §6.7L would just move the responder to a 4th decoy (r18 L395 dedup-frequency, r15, r16-myths, or back to r05 with new keyword routing). The grep shows ~6+ system.runtime.queries mentions across r05/r15/r16-myths/r18-L127/r18-L395/r27-§6.7L, most scoped to their own topic and therefore NOT showing the tasks JOIN — they each function as a decoy when the responder lands there.
-3. **Per `feedback_synthesis_ceiling_stop_churning.md`**: "after a FIX-A closes the specific FAIL-causing sub-bug across many re-probes but the responder STILL can't assemble the full hard multi-step query on novel domains, that residual is a Haiku synthesis ceiling NOT a resource gap → STOP churning the defang, accept the occasional Q cost, return to breadth." This is the textbook fit.
-4. **Risk of regression on adjacent.** Per `feedback_new_card_over_attracts_adjacent.md`, adding more perf-triage-magnetic decoy pointers risks pulling adjacent dbt-model-identification or query-comment questions into the wrong answer.
-5. **A surgical r27 §6.7L pointer would be low-leverage AND low-fit.** The §6.7L section is the dbt-model-identification-via-query-comment canonical — it's intentionally narrow. Adding "for full CPU+bytes ranking JOIN system.runtime.tasks — see r18 §404" there pollutes a clean dbt-side section to chase a moving-target decoy that may not even re-attract next iter.
-
-**Recommended action**:
-- **DECLARE recall-ceiling on the perf-triage recipe assembly task.**
-- **DOWNGRADE the iter1283-Q1 HARD watch to a periodic SOFT re-probe** (every 8-12 iters, not every iter).
-- Accept the occasional Q1-cost on this specific recipe-assembly framing.
-- **NO further resource edits to r05/r16/r18/r27 on system.runtime.queries+tasks.** The recipe is correct, prominent, and findable. Continued churning is now negative-EV.
-- If the responder cleanly reaches the recipe on a future SOFT re-probe, treat it as a positive datapoint but do not interpret as "the ceiling broke" until ≥2 consecutive clean reaches.
-
-### Why NOT the r27 §6.7L decoy pointer
-The teacher asked me to weigh this alternative. I considered the exact text:
-> `> For per-query CPU + bytes scanned (the "top heaviest queries" / "what's hammering the cluster" question), the LIVE recipe is queries JOIN system.runtime.tasks on query_id — see resource 18 § "Finding expensive queries on Trino 467". The query-comment example here uses ONLY queries.elapsed.cpu, which is dbt-model-identification scope, NOT perf-triage scope.`
-
-This is technically the right surgical pointer for **this iter's specific decoy**. But:
-- It does not address iter1282's decoy (r05 tenant-cost) or iter1283's decoy (r18 L127 — which already has a pointer).
-- The moving-target pattern strongly predicts a 4th decoy next iter.
-- Each pointer dilutes its host section's scope coherence.
-- The §6.7L section's primary keyword path is `dbt model behind a query / node_id / query-comment / model.unique_id` — NOT `top queries by CPU and bytes`. A perf-triage pointer there is off-topic for the section's own consumers.
-
-**Net: the marginal expected benefit of a 5th FIX-A is below the marginal regression risk.** STOP.
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Q3 — `delete+insert` responder slip (confirmed)
+## Q2 — Mixed TIMESTAMP vs TIMESTAMP WITH TIME ZONE date_diff (3.50 PASS-borderline)
 
-**Responder claim**: *"delete+insert — Not a built-in dbt strategy; you'd write it manually."*
+**Acc 3.0 / Clar 4.5 / Prac 3.0 / Compl 3.5.**
 
-**Resources teach the correct fact**:
-- `resources/27-oracle-plsql-to-dbt-trino.md` §3.2 L322-326: third row of the strategy table is `delete+insert` with the exact SQL emitted (`DELETE FROM target WHERE <unique_key> IN (SELECT <unique_key> FROM source); INSERT INTO target SELECT ... FROM source`).
-- `resources/27-oracle-plsql-to-dbt-trino.md` L300: incremental materialization line lists strategies as `append / merge / delete+insert / microbatch`.
-- `resources/28-complex-sql-performance-trino-dbt.md` L402: *"valid `incremental_strategy` values for dbt-trino are `append` (default), `delete+insert`, and `merge` per [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs)."*
-- `resources/28-complex-sql-performance-trino-dbt.md` L1679 + L1692: shows `incremental_strategy='delete+insert'` as a partition-replace pattern.
+### (a) Implicit coercion claim — CORRECT
 
-**Verified via WebFetch this iter** at [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs): dbt-trino supports `append` (default), `delete+insert`, and `merge`. Verbatim doc snippet: *"With the `delete+insert` incremental strategy, you can instruct dbt to use a two-step incremental approach. First, it deletes the records detected through the configured `is_incremental()` block, then re-inserts them."*
+Responder said *"Trino AUTOMATICALLY coerces between TIMESTAMP and TIMESTAMP WITH TIME ZONE — join/comparison work WITHOUT conversion"*. This is **correct per pinned `reference_trino_timestamp_tz_coercion`**: Trino 467's TypeCoercion.java DOES implicitly coerce TIMESTAMP → TIMESTAMP WITH TIME ZONE in comparison/date_diff contexts. The query `date_diff('hour', e.created_at, s.session_start)` will RUN, not type-error. **This part of the answer is right.**
 
-**Classification**: RESPONDER SLIP on correct + findable content. NOT a resource defect. NOT a recall-volatility on a known-confusing edge — the strategy is plainly listed in r28's leading canonical AND in the r27 §3.2 strategy table the responder cites elsewhere.
+### (b) "CAST = UTC" — SUBTLE ACCURACY ERROR
 
-**Fits `feedback_responder_broken_secondary_alternative.md` family** — append + merge primaries were correctly described; the broken claim was on the third strategy as a "for completeness" item. Pattern matches the 8th+ instance of broken-secondary-alternative.
+Responder said *"to be explicit (recommended): CAST(e.created_at AS TIMESTAMP WITH TIME ZONE) -- explicit UTC assumption"*. This is **WRONG**. Per [trino issue #37](https://github.com/trinodb/trino/issues/37) ("TIMESTAMP behaviour does not match sql standard") + SQL spec: when you CAST a TIMESTAMP without time zone to TIMESTAMP WITH TIME ZONE, Trino uses the **SESSION time zone** (`current_timezone()`), not UTC.
 
-**Recommendation**: NO FIX. Per-instance per `feedback_synthesis_ceiling_stop_churning.md` (and the existing strong-canonical state at r27 §3.2 + r28 L402, additional defang would dilute, not strengthen). Soft watch only.
+- If the cluster JVM has `-Duser.timezone=UTC` AND no client has issued `SET TIME ZONE 'X'`, the session zone IS UTC and CAST works as the responder described.
+- If the session zone is anything else (e.g., a JDBC client set `SET TIME ZONE 'America/New_York'`, or a node's `-Duser.timezone` is NY), the CAST tags the UTC-stored wall-clock as NY-time. `date_diff('hour', ...)` then under-reports by the offset and comparisons silently misalign.
 
----
+**The implicit coercion in (a) ALSO uses the session zone.** So both code paths the responder offered have the same hidden assumption — neither is "explicit UTC."
 
-## Q2 — above-group-average (clean PASS, verified)
+### (c) The actually-correct UTC-tag
 
-Lead: `AVG(amount) OVER (PARTITION BY account_id) AS account_avg` then `WHERE amount > account_avg` (via a CTE or subquery wrap, since you can't reference window expressions directly in WHERE).
+To unambiguously tag a TIMESTAMP whose wall-clock IS UTC:
+- **`e.created_at AT TIME ZONE 'UTC'`** — interprets the wall-clock as UTC, returns TIMESTAMP WITH TIME ZONE with UTC attached; **session-zone independent**.
+- **`with_timezone(e.created_at, 'UTC')`** — function form, same semantics, preferred in complex expressions to avoid `AT TIME ZONE` operator-precedence surprises.
 
-Trino 467 verified: aggregate-as-window function syntax is supported per [trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html). The CTE pattern is idiomatic.
+**Both are already canonicalized at r22 §2A.3 L2179-2196 verbatim**: *"CRITICAL — CAST(naive_ts AS TIMESTAMP WITH TIME ZONE) attaches the SESSION timezone, NOT unconditionally UTC. This is the single most common factual slip when people describe how to 'convert' a MySQL DATETIME (naive) into a comparable timezone-aware value..."* with the full safer-alternative table.
 
-Correlated-subquery framing is correct: Trino's optimizer decorrelates many correlated subqueries (UnnestCorrelatedFilter / DecorrelateUnnestRule), so the form is *not necessarily* slow as folklore implies. Responder's "verify via EXPLAIN, watch for CorrelatedJoin in the plan" is sound advice — this is the right way to check whether decorrelation kicked in.
+### (d) Why the canonical wasn't reached — FINDABILITY GAP
 
-Minor Compl shave (-0.25): didn't mention that the window form is **one scan** vs the correlated-subquery's potential decorrelation-to-self-join cost (one extra hash join). Not load-bearing.
+The r22 §2A.3 canonical lives under "Trino federation / PostgreSQL+MySQL connector" — its anchors are framed around MySQL `DATETIME`-vs-Postgres `TIMESTAMPTZ` federation joins. **Q2's framing has NO federation keyword** — both `events` and `sessions` are presumably plain Iceberg tables on the same Trino. So the responder didn't route to r22.
 
-**Scores**: Acc 5.0 / Clar 5.0 / Prac 4.75 / Compl 4.75 = **4.875**.
+### (e) Severity
 
----
+**Subtle but real.** On a production cluster where session zone is reliably UTC (typical `-Duser.timezone=UTC` setup per r22 §2A.4: *"If Trino's JVM is set to UTC (the typical production setup — see `-Duser.timezone=UTC` in `jvm.config`)..."*), the responder's answer works exactly as described and no engineer hits a bug. On a cluster with mixed session-zone settings (any client that issued `SET TIME ZONE 'X'`, any per-node `-Duser.timezone` drift), the responder's `CAST` advice silently misinterprets the UTC-stored wall-clock by the local offset and `date_diff('hour', ...)` is wrong by hours. The engineer asked specifically because they're worried about the mismatch — and the responder told them "CAST to make it explicit UTC" without flagging that CAST is exactly the wrong tool for "make it UTC."
 
-## Q4 — Oracle TO_CHAR/TO_DATE + `||` concat → Trino (clean PASS, verified)
+### (f) Is this a resource gap — FIX-A or per-instance?
 
-All three claims verified:
-1. **TO_CHAR(date, mask)** — Trino 467 does NOT have Oracle/Postgres-style `TO_CHAR(date, 'YYYY-MM-DD')`. Use `date_format(ts, '%Y-%m-%d')` (MySQL-style codes) or `format_datetime(ts, 'yyyy-MM-dd')` (Joda-style codes). Per `reference_trino_to_char_exists.md` memory pin: Trino DOES have a `to_char(timestamp, format)` Teradata-compat overload, but it accepts ONLY lowercase numeric format codes (`dd/hh/mi/mm/ss/yyyy/yy`) — uppercase masks fail, month names not supported. Responder surfaced this caveat correctly.
-2. **TO_DATE(s, mask)** — Trino has no Oracle `TO_DATE`. The pattern is `CAST(date_parse(s, '%Y-%m-%d') AS DATE)` (MySQL-style) or `CAST(parse_datetime(s, 'yyyy-MM-dd') AS DATE)` (Joda); `from_iso8601_date('2024-01-15')` works for ISO-8601. Responder gave all three. Verified at [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html).
-3. **`'Invoice #' || number`** — FAILS in Trino. `||` is the `concat` operator overloaded only for varchar in Trino 467 (no implicit numeric coercion). Fix: `'Invoice #' || CAST(invoice_number AS VARCHAR)` or `format('Invoice #%s', invoice_number)`. Verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html).
+**Marginal FIX-A candidate.** The CORRECT canonical exists at r22 §2A.3. The gap is that no non-federation framing (just "events table has TIMESTAMP, sessions table has TIMESTAMP WITH TIME ZONE on the same Iceberg catalog") routes there. r23 (SQL best practices) is the natural home for a Trino-side reach card.
 
-**Scores**: Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75 = **4.9375** (minor Compl shave: didn't mention `format('Invoice #%05d', n)` for zero-padded display masks).
+**My recommendation: LIGHT additive card** at r23 (SQL best practices) OR r07 (analytical query patterns) keyed on the keywords this question used:
+- "events table TIMESTAMP, sessions table TIMESTAMP WITH TIME ZONE / date_diff between mixed timestamp types / one column has time zone the other doesn't / join across naive and tz-aware timestamps"
+- 4-line canonical: (1) implicit coercion exists, comparison/date_diff RUN, (2) but coercion uses SESSION zone, (3) to tag a UTC-wall-clock as UTC explicitly use `expr AT TIME ZONE 'UTC'` or `with_timezone(expr, 'UTC')`, (4) **NEVER** `CAST(naive_ts AS TIMESTAMP WITH TIME ZONE)` for UTC-tagging (uses session zone)
+- Cross-ref to r22 §2A.3 for the full federation-context version.
 
----
+This is materially the same defect family as the resource-source check for Q3 below (correct content lives at a sibling framing, doesn't get reached from new framing). Pattern matches `feedback_responder_findability.md` ("place content where keywords lead, not just where it's topically correct").
 
-## Watches
-
-**Watches CLOSING with directional change**:
-- **iter1283-Q1 perf-triage HARD watch** → **DOWNGRADE to periodic SOFT re-probe** (every 8-12 iters). 4-iter escalation produced zero movement; declaring recall-ceiling per `feedback_synthesis_ceiling_stop_churning.md`. The recipe is correct + prominently placed at r18 §404; further FIX-As are negative-EV.
-
-**NEW soft watches**:
-- **iter1284-Q3 `delete+insert`-not-built-in responder slip** — re-probe under "dbt-trino incremental strategies / delete+insert / when to use which" framings 6-10 iters. Resources r27 §3.2 + r28 L402 are CORRECT; this is recall-variance on a present canonical, NO FIX. If recurs ≥2 more times within 10 iters under explicit dbt-trino-strategy framings, reconsider — but expect ceiling not gap.
-
-**Open watches (carry-forward)**:
-- iter1281-Q2 UNNEST; iter1278-Q1 Scheduled-vs-CPU; iter1279-Q4 now(); iter1280-Q1 partition-Spark; iter1280-Q2 DECIMAL-scale; iter1264-Q3 hard_deletes-dbt-trino-adapter-caveat; iter1260-Q1 CDC-MERGE-multi-event-dedup; iter1258-Q3 SELECT-*-EXCEPT; iter1255-Q1 bloom-CREATE-syntax; iter1253-Q4 regexp_extract-2arg; iter1248-Q3 MATCH_RECOGNIZE-adjacency; iter1230 EXISTS-overwarning/::cast; iter1229 @v1-Spark; iter1215 strpos-3-arg CEILING.
+**NEW WATCH** `iter1285-Q2 mixed-TIMESTAMP-types CAST-attaches-session-zone non-federation framing findability gap`: re-probe within 4-8 iters under any "Iceberg table A is TIMESTAMP, Iceberg table B is TIMESTAMP WITH TIME ZONE, join/compare/date_diff between them" framing that doesn't mention federation/MySQL/Postgres. If recurs with same "CAST = UTC" slip, escalate to mandatory LIGHT FIX-A at r23.
 
 ---
 
-## Pattern observation
+## Q3 — dbt exposures for 40-model project (4.125 PASS)
 
-iter1284 is the **4th consecutive iter** of NON-REACH on the perf-triage queries-JOIN-tasks recipe. The trajectory is clear:
-- iter1281: partial reach with hedge ("columns not documented")
-- iter1282: full hedge → 2-part FIX-A (r05 reconcile + r18 affirmative-first hoist + L127 pointer)
-- iter1283: full hedge again → escalation: affirmative-first + L127 pointer LANDED but responder still didn't reach
-- iter1284: still didn't reach; this time landed at a 3rd different decoy (r27 §6.7L)
+**Acc 3.5 / Clar 5.0 / Prac 3.5 / Compl 4.5.**
 
-The responder regenerates the base-training "bytes scanned aren't in system tables → use EXPLAIN ANALYZE" prior regardless of how prominently the recipe is presented. This is the same pattern as `feedback_synthesis_ceiling_stop_churning.md` calls out for gaps-and-islands streak-construction (iter951-956). **Declaring recall-ceiling and stopping the churn is the right call.**
+### (a) Exposures shape — CORRECT
 
-Q3's `delete+insert`-not-built-in slip is the latest instance of the broken-secondary-alternative family (`feedback_responder_broken_secondary_alternative.md`). Resources are correct; recall variance is the ceiling. NO FIX.
+- `exposures:` at top of `exposures.yml` (`version: 2`) — CORRECT.
+- Per-exposure: `name`, `label`, `type` (one of `dashboard`/`notebook`/`analysis`/`ml`/`application`), `maturity` (`high`/`medium`/`low`), `url`, `description`, `owner` (`name`+`email`), `depends_on: [ref('model_name'), source('schema','table')]` — ALL VERIFIED against [docs.getdbt.com/reference/exposure-properties](https://docs.getdbt.com/reference/exposure-properties).
+- Lineage rendering via `dbt docs generate && dbt docs serve` — CORRECT (exposure appears as downstream-leaf node on the DAG site).
+- `manifest.json` exposure node ID — CORRECT.
+- Selective-build `dbt build --select +exposure:revenue_dashboard` (leading + = ancestors of the exposure = the upstream models the dashboard depends on, which IS what you want to build for that dashboard) — CORRECT direction.
+- File placement under `models/` or dedicated subdirectory — CORRECT.
 
-Q2 + Q4 are clean STRONG PASSES with source-verified accuracy, confirming the responder reaches correctly on idiomatic Trino window functions and Oracle→Trino mask-mapping under matched-prior keyword routing.
+### (b) Impact-analysis selector direction — WRONG (RESOURCE DEFECT, iter1208 WATCH RECURRENCE)
 
-**Training in closing window** (deadline 2026-06-30 23:59 CST; ~14 hours remaining). The right end-of-training posture for the perf-triage recipe is **accept the ceiling, stop churning, preserve the bulletproofed clean topics**. Recommendation = **NO-OP** on resources for iter1285 (no FIX-A on either Q1 or Q3); commit rubric + feedback only; downgrade Q1 watch to periodic SOFT re-probe.
+Responder wrote: `dbt ls --select +model:fct_orders --resource-type exposure`
+
+Per [dbt graph operators docs](https://docs.getdbt.com/reference/node-selection/graph-operators), verified via WebFetch this iter:
+- **Leading `+`** (e.g. `+my_model`) = "the resource and all its **ancestors** (upstream dependencies)."
+- **Trailing `+`** (e.g. `my_model+`) = "the resource and all its **descendants** (downstream dependencies)."
+
+Exposures DEPEND ON models — they live DOWNSTREAM of models. To list "every exposure that consumes fct_orders" you need `model:fct_orders+ --resource-type exposure` (trailing +, descendants). The responder's `+model:fct_orders --resource-type exposure` returns ANCESTORS of fct_orders intersected with exposures = always empty (exposures are leaf-only, never ancestors of a model).
+
+**Engineer impact**: paste the command, see empty output, conclude "no dashboards depend on this model" — proceed with the breaking change. This is exactly the situation exposures are meant to prevent.
+
+### (c) Source check — RESOURCE DEFECT confirmed
+
+Grep `resources/27-oracle-plsql-to-dbt-trino.md` L4135:
+
+> `dbt ls --select +model:fct_orders --resource-type exposure` lists every exposure (dashboard/ML pipeline) downstream of `fct_orders`...
+
+**The responder's wrong direction is a verbatim copy of this line.** This was almost certainly introduced as a late FIX-A after the iter1208 directional WATCH was opened — but the fix encoded the WRONG direction. The responder is faithfully following the resource; the resource is wrong.
+
+The adjacent line at L4134 — `dbt build --select +exposure:revenue_dashboard` (ancestors of the exposure = the upstream models to build for the dashboard) — is CORRECT direction. So the file has BOTH a correct directional example AND an incorrect one, adjacent to each other.
+
+### (d) iter1208 WATCH status
+
+iter1208 (line 740 of rubric.md) opened a soft WATCH `iter1208 Q3 dbt selector direction +model vs model+ for impact analysis` with re-probe in 4-8 iters. **iter1285 is iter77 after iter1208** — well past the re-probe window, but iter1285's recurrence is meaningful because it now manifests as a RESOURCE DEFECT not a responder slip. **WATCH ESCALATES from soft → mandatory FIX-A.**
+
+### (e) Recommended FIX-A
+
+**SURGICAL EDIT at r27 §6.7H2 L4135.** Change:
+
+```
+- **Impact analysis** — `dbt ls --select +model:fct_orders --resource-type exposure` lists every exposure (dashboard/ML pipeline) downstream of `fct_orders`...
+```
+
+to:
+
+```
+- **Impact analysis** — `dbt ls --select model:fct_orders+ --resource-type exposure` lists every exposure (dashboard/ML pipeline) downstream of `fct_orders` (trailing `+` = descendants per dbt graph-operator docs)...
+```
+
+Plus a one-line directional-mnemonic add at the same paragraph:
+
+> **Selector direction**: `+model` = ancestors (upstream); `model+` = descendants (downstream). Exposures depend on models, so they're DOWNSTREAM — use `model_name+ --resource-type exposure` to find exposures consuming a model.
+
+Optional: add a DO-NOT-WRITE row to the §6.7H2 table:
+- `dbt ls --select +model:X --resource-type exposure` | **WRONG direction.** Leading `+` selects ancestors of X; exposures are downstream leaves, never ancestors. Returns empty. Use trailing `+` (`model:X+`) for descendants.
 
 ---
 
-## Sources
-- [trino.io/docs/467/connector/system.html](https://trino.io/docs/current/connector/system.html) — system.runtime.* table catalog (Trino 467 ships system connector)
-- [raw.githubusercontent.com/trinodb/trino/467/.../TaskSystemTable.java](https://raw.githubusercontent.com/trinodb/trino/467/core/trino-main/src/main/java/io/trino/connector/system/TaskSystemTable.java) — verified `system.runtime.tasks` exposes `query_id`, `physical_input_bytes`, `split_cpu_time_ms`
-- [docs.getdbt.com/reference/resource-configs/trino-configs](https://docs.getdbt.com/reference/resource-configs/trino-configs) — verified dbt-trino supports `append` / `delete+insert` / `merge` as built-in `incremental_strategy` values
-- [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/current/functions/datetime.html) — `date_format` / `format_datetime` / `date_parse` / `from_iso8601_date`
-- [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html) — `concat` / `||` varchar-only, `format()` printf-style
-- [trino.io/docs/467/functions/window.html](https://trino.io/docs/current/functions/window.html) — aggregate-as-window for `AVG(x) OVER (PARTITION BY ...)`
+## Q4 — Oracle TRUNC(date) → Trino (4.9375 STRONG PASS)
+
+**Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.**
+
+Responder gave:
+- `date_trunc('day', order_date)` as the direct Oracle TRUNC(date) port — correct per [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html).
+- Full unit table: `second / minute / hour / day / week (ISO-Monday) / month / quarter / year` — correct unit list, ISO-Monday week boundary correctly called out (Oracle TRUNC('iw') matches; Oracle TRUNC('w') Sunday-week does NOT, which is a real engineer trap but not load-bearing here).
+- Return-type diff: Oracle TRUNC returns DATE; Trino `date_trunc` on a TIMESTAMP returns TIMESTAMP (a midnight TIMESTAMP, not a DATE). Engineers comparing the result to a `DATE` literal need a `CAST(... AS date)` or `DATE(...)` wrap if the comparison fails — correctly framed.
+- TZ caveat: `date_trunc` on TIMESTAMP WITH TIME ZONE returns a value in the SESSION time zone, so for local-day grouping use `CAST(date_trunc('day', created_at AT TIME ZONE 'America/New_York') AS DATE)` — CORRECT pattern, matches r23 §canonical (and ironically the right pattern that Q2 should have produced too).
+
+Minor Compl shave (-0.25): didn't mention that Iceberg `partitioning = ARRAY['day(occurred_at)']` is the partition-prune-friendly equivalent if the engineer is doing this group-by repeatedly on a partitioned fact table — would be a nice forward pointer. Non-load-bearing.
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
+
+---
+
+## Score updates (rubric.md)
+
+| Topic | Pre | Post | Delta |
+|---|---|---|---|
+| Iceberg table maintenance (Q1) | 4.4521/243 | 4.4538/244 | +0.0017 |
+| SQL query best practices for OLAP (Q2) | 4.5882/301 | 4.5846/302 | -0.0036 |
+| Improving complex SQL perf on Trino with dbt (Q3) | 4.4866/86 | 4.4825/87 | -0.0041 |
+| Oracle PL/SQL → dbt + Trino (Q4) | 4.4912/254 | 4.4929/255 | +0.0017 |
+
+All four topics remain comfortably above their 3.5 pass thresholds.
+
+---
+
+## Actions for the teacher
+
+### MANDATORY THIS ITER (FIX-A)
+
+**Q3 — r27 §6.7H2 L4135 directional fix.** Reverse the impact-analysis selector from leading `+model:fct_orders` to trailing `model:fct_orders+`. Add a one-line directional mnemonic. Optionally add a DO-NOT-WRITE row defanging the leading-+ form. This is a **resource defect** — the wrong selector is now baked into the canonical text and the responder is faithfully copying it. Verified WRONG against [docs.getdbt.com/reference/node-selection/graph-operators](https://docs.getdbt.com/reference/node-selection/graph-operators) verbatim "(`+`) Placed before a model/resource — Includes the resource itself and all its ancestors (upstream dependencies). Placed after a model/resource — Includes the resource itself and all its descendants (downstream dependencies)." (iter1208 WATCH escalated soft → mandatory FIX-A by recurrence + resource-defect confirmation.)
+
+### MARGINAL — DECIDE NEXT ITER
+
+**Q2 — r23 (or r07) non-federation TIMESTAMP-vs-TIMESTAMP-WITH-TIME-ZONE findability card.** The correct canonical exists at r22 §2A.3 L2179-2196 (verified correct), but its anchors are federation-framed (MySQL DATETIME / Postgres TIMESTAMPTZ). A 4-line additive card at r23 keyed on non-federation framings ("two Iceberg tables, one TIMESTAMP one TIMESTAMP WITH TIME ZONE, date_diff/join/compare between them") with the AT TIME ZONE 'UTC' / with_timezone(ts,'UTC') canonical + the SESSION-zone-CAST defang + cross-ref to r22 §2A.3 would close the gap.
+
+**Open as NEW SOFT WATCH** `iter1285-Q2 mixed-TIMESTAMP-types CAST-attaches-session-zone non-federation findability gap`: re-probe within 4-8 iters. If recurs under any non-federation "join two timestamp types" framing with the "CAST = UTC" slip, escalate to mandatory LIGHT FIX-A. If the next re-probe ALSO comes through the non-federation framing AND lands a good answer (by pulling r22 §2A.3 anyway, perhaps the responder is improving cross-file routing), CLOSE the watch.
+
+### CARRY WATCHES
+
+- iter1283-Q1 perf-triage HARD → DOWNGRADED to periodic SOFT (re-probe 8-12); per `feedback_synthesis_ceiling_stop_churning.md`
+- iter1284-Q3 dbt delete+insert-not-built-in slip (soft, re-probe 6-10, no fix)
+- iter1283-Q3 hard_deletes (soft, no fix)
+- iter1283-Q4 strpos-3-arg (soft, no fix; recall ceiling per `feedback_synthesis_ceiling_stop_churning.md`)
+- iter1281-Q2 UNNEST SELECT-col-not-in-GROUP-BY (soft, re-probe 4-8)
+- iter1280-Q1 partition-Spark (soft)
+- iter1280-Q2 DECIMAL-scale mechanism conclusion (soft)
+- iter1278-Q1 Scheduled-vs-CPU (soft)
+- iter1279-Q4 now() empty-parens (soft)
+- iter1208-Q3 dbt selector direction — **CLOSED via mandatory FIX-A this iter** (escalated and resolved)
+
+### DO NOT
+
+- Do not churn r05/r18 perf-triage land-points further (iter1283 confirmed recall-ceiling, per pinned synthesis-ceiling memory)
+- Do not add aggressive defangs for the Q4 TRUNC family — current r27 §4 + r23 datetime cards are doing fine
+- Do not over-attract Q2 family by colliding with the r22 §2A.3 federation canonical (cross-ref, don't duplicate)
+
+---
+
+## Meta — patterns this iter
+
+1. **Resource-defect-from-late-FIX-A**: iter1208 opened a directional WATCH for `+model vs model+`. Sometime between iter1208 and iter1285, a teacher pass added the wrong-direction selector to r27 §6.7H2 — exactly the form iter1208 had flagged as wrong. The watch was open but the resource defect went uncaught. Lesson: when a directional/syntactic watch is opened, the teacher must grep BOTH `+model:` AND `model:.*+` patterns in the resource at FIX-A time to confirm the canonical reflects the correct direction, not just add a "do not write" defang. Pattern aligns with `feedback_trace_recurring_folklore_to_resource_root_cause.md` (when a slip recurs, grep resources for the wrong claim before treating as pure responder slip — but the converse also holds, when a teacher adds a "directional mnemonic," verify it's the right direction).
+
+2. **Findability gap on adjacent framings (Q2)**: r22 §2A.3 has the perfectly-correct canonical for the CAST=session-zone gotcha, but anchored on federation/MySQL framing. A SaaS engineer asking the same question about two plain Iceberg tables doesn't route there. Same pattern as iter1274-Q1 source-freshness (correct canonical in r27, but Fivetran/ingestion narrative routed to r13 where there was no anchor). Lesson: high-value technical canonicals deserve mirror-anchors at sibling framings, not just the framing they originally lived under.
+
+3. **Q1 / Q4 continue the long-running breadth-clean trend** on Iceberg time-travel + Oracle migration topics. Both responder reaches were direct to canonical content, no synthesis slips, no broken-secondary alternatives. These topic rows have a healthy combined margin (Iceberg-maintenance +0.95, Oracle-migration +0.99) and recent runs consistently land 4.75-5.0.
