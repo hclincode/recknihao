@@ -1,116 +1,88 @@
-# Judge Feedback — Iteration 1291
+# Judge Feedback — Iteration 1292
 
-**Overall: 4.828 — STRONG PASS. iter1288-Q1 COUNT(*)-slow HARD WATCH CLOSES (FIX-A REACHED on 1st re-probe with explicit canonical citation).**
+**Overall: 4.828 — STRONG PASS. All 4 clean, no new FIX-A, no new watches. Continuous-PASS-loop streak holds.**
 
 | Q | Score | Acc | Clar | Prac | Compl | Topic | Result |
 |---|---|---|---|---|---|---|---|
-| Q1 (COUNT(*) slow re-probe) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | Iceberg table maintenance | iter1288 FIX-A REACHED, WATCH CLOSES |
-| Q2 (NTILE quartiles) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | Analytical query patterns | Clean |
-| Q3 (dbt vars) | **4.8125** | 5.0 | 4.75 | 5.0 | 4.5 | Oracle PL/SQL → dbt+Trino | Clean |
-| Q4 (Oracle COUNT(col) NULL) | **4.75** | 5.0 | 4.75 | 4.75 | 4.5 | Oracle PL/SQL → dbt+Trino | Clean (resisted false-divergence trap) |
+| Q1 (UNION vs UNION ALL) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | SQL query best practices for OLAP | Clean |
+| Q2 (Iceberg ADD COLUMN nullable, metadata-only) | **4.8125** | 5.0 | 4.75 | 5.0 | 4.5 | Lakehouse schema design | Clean |
+| Q3 (dbt docs generate / lineage / persist_docs) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | Oracle PL/SQL → dbt+Trino | Clean |
+| Q4 (Oracle REGEXP_SUBSTR → Trino regexp_extract) | **4.75** | 5.0 | 4.5 | 5.0 | 4.5 | Oracle PL/SQL → dbt+Trino | Clean (cosmetic typo only) |
 
-Average: (4.875 + 4.875 + 4.8125 + 4.75) / 4 = **4.828**
-
----
-
-## Q1 — COUNT(*) slow MoR/MERGE re-probe — **iter1288 FIX-A REACHED, HARD WATCH CLOSES**
-
-Responder fully inverted the iter1288 FAIL. Verified:
-
-- **"Plain COUNT(*) is normally metadata-only (sums record_count from manifests)"** — CORRECT. Trino Iceberg connector executes COUNT(*) with no predicate as a manifest-sum operation, returning instantly on clean v2 tables.
-- **"Once position-delete files exist, Trino can't trust raw counts, must open data files + apply deletes"** — CORRECT per [trinodb/trino#13092](https://github.com/trinodb/trino/issues/13092) (DeleteFilter re-opens delete files per page, slow scales with delete-file count) and [#17114](https://github.com/trinodb/trino/issues/17114).
-- **Diagnostic `$files GROUP BY content`** — CORRECT (content=0 data, content=1 position deletes, content=2 equality deletes).
-- **Fix: `EXECUTE optimize(file_size_threshold => '512MB')` + `expire_snapshots(retention_threshold => '7d')`** — CORRECT per pinned `reference_trino_optimize_clears_position_deletes` (raise threshold above already-large delete-bearing files to force-clear; default 100MB; see [trinodb/trino#12617](https://github.com/trinodb/trino/issues/12617) + [#24086](https://github.com/trinodb/trino/issues/24086)).
-- **Did NOT recommend approx_distinct for a row count** — this was the iter1288 broken recommendation; now correctly absent.
-- **Cited r18 §"Why is my SELECT COUNT(*) slow on Iceberg?"** by name — the new FIX-A canonical anchored cleanly.
-
-**Outcome: iter1288-Q1 HARD WATCH CLOSES.** Inverted fact + broken approx_distinct both gone; canonical findability confirmed by name-citation. Same pattern as iter1272 bloom-CREATE close (FIX-A REACHED on 1st re-probe with explicit canonical citation).
-
-Tiny Compl shave (-0.25): didn't mention that **MERGE-via-dbt on Iceberg defaults to MoR position-deletes** so the rate of accumulation is proportional to the number of incremental dbt runs — useful framing for "how often should we optimize?" follow-up. Tiny Clar shave (-0.25): "Trino can't trust raw counts" anthropomorphizes; the mechanism is that position-delete files reduce logical row count below the manifest sum and the connector falls back to a regular scan to apply deletes.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
+Average: (4.875 + 4.8125 + 4.875 + 4.75) / 4 = **4.828**
 
 ---
 
-## Q2 — NTILE(4) quartiles — clean
+## Accuracy confirmations (all 4 verified)
 
-Verified facts:
+### Q1 — UNION vs UNION ALL — CONFIRMED
 
-- **`NTILE(4) OVER (ORDER BY ... DESC)` in subquery** — CORRECT.
-- **"Remainder rows go to EARLIEST buckets (95 → 24/24/24/23)"** — CORRECT per [trino.io/docs/current/functions/window.html](https://trino.io/docs/current/functions/window.html): "If the number of rows in the partition does not divide evenly into the number of buckets, then the remainder values are distributed one per bucket, starting with the first bucket."
-- **"Window fns can't go in WHERE; no QUALIFY in Trino 467 → wrap in CTE/subquery"** — CORRECT (pinned reference).
-- **"Ties arbitrary → add tiebreaker `ORDER BY SUM(order_total) DESC, account_id`"** — CORRECT. NTILE explicitly ignores ties (creates evenly-sized buckets even if same value lands in different buckets); without a deterministic tiebreaker, two accounts with identical revenue may end up in different quartiles non-reproducibly.
+- **"UNION removes duplicates (dedup pass = sort/hash-aggregate, slower); UNION ALL keeps all incl duplicates (cheaper, no dedup)"** — CORRECT. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (UNION default is DISTINCT; ALL keeps duplicates) and [SQL UNION vs UNION ALL — Atlassian](https://www.atlassian.com/data/sql/what-is-the-difference-between-union-and-union-all). UNION requires sort/hash to dedupe — computational overhead scales with row count.
+- **"For 'no duplicate customer IDs' use bare UNION (= UNION DISTINCT)"** — CORRECT mapping. Trino bare `UNION` defaults to `DISTINCT`.
+- **"Coworker partially right but BACKWARDS: bare UNION is the SLOWER one; UNION ALL skips dedup"** — CORRECT inversion of the coworker's "UNION-everywhere is slower" claim, which is the OPPOSITE of reality (UNION ALL is the faster default, and is what should be used "everywhere" when dedup is not needed).
+- **Nuance: "if the two queries are already disjoint (date-partitioned), UNION wastes a dedup pass — but here customers overlap across quarters so UNION is correct + the cost is unavoidable"** — CORRECT practical framing. Matches [trinodb/trino#14 — Optimize union all of similar aggregations](https://github.com/trinodb/trino/issues/14) (Trino has optimizer paths specifically for UNION ALL, not for UNION).
 
-Tiny Compl shave (-0.25): could have noted that for "top quartile = bucket 1" framing, the outer `CASE WHEN ntile = 1 THEN 'top' ...` is more readable than reversed ordering. Tiny Clar shave (-0.25): "remainder goes to earliest buckets" deserves the explicit "so bucket 1 is the largest by 1 row when uneven" callout.
+### Q2 — Iceberg ADD COLUMN metadata-only + old-rows-NULL — CONFIRMED
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
+- **"ALTER TABLE ADD COLUMN on Iceberg is METADATA-ONLY, no downtime, completes in ms even on 8 months data"** — CORRECT. Verified at [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/): "Iceberg schema updates are metadata changes, so no data files are rewritten." Iceberg uses immutable numeric field IDs (not column names) to map columns to Parquet files — adding a new field assigns a new field ID, never touches existing data.
+- **"Old rows return NULL for the new column"** — CORRECT. Per the same Iceberg spec page: when a column is added, existing files have no field ID for it, so reads project NULL. No backfill required.
+- **"Added columns are nullable by design"** — CORRECT for Trino 467 specifically. Per [trinodb/trino PR #13673](https://github.com/trinodb/trino/pull/13673) (release 393), Trino disallows `ALTER TABLE ADD COLUMN ... NOT NULL` on Iceberg precisely because existing files would violate; nullable is the only path on an existing table. Responder did not explicitly raise this caveat (engineer didn't ask), but everything stated is consistent with it.
+- **`ALTER TABLE iceberg.analytics.fct_events ADD COLUMN device_type VARCHAR` syntax** — CORRECT per [trino.io/docs/467/sql/alter-table.html](https://trino.io/docs/467/sql/alter-table.html) and [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html).
+- **"For non-NULL historical: one-off Spark backfill"** — CORRECT secondary alternative. Spark `UPDATE` (or CTAS-and-swap on this stack) is the documented backfill path.
 
----
+Pin alignment: matches iter1237 Q1 + iter1205 Q1 prior canonicals (field-ID schema evolution); no regression.
 
-## Q3 — dbt vars at runtime — clean
+### Q3 — dbt docs generate / lineage / persist_docs — CONFIRMED
 
-Verified facts against [docs.getdbt.com/reference/dbt-jinja-functions/var](https://docs.getdbt.com/reference/dbt-jinja-functions/var) + [docs.getdbt.com/docs/build/project-variables](https://docs.getdbt.com/docs/build/project-variables):
+- **"`dbt docs generate` builds `target/manifest.json` (DAG / model + test + macro nodes) + `target/catalog.json` (warehouse column metadata via `information_schema`)"** — CORRECT per [dbt docs cmd-docs](https://docs.getdbt.com/reference/commands/cmd-docs) + [Manifest JSON](https://docs.getdbt.com/reference/artifacts/manifest-json): generate copies `index.html`, compiles into `manifest.json`, queries warehouse for `catalog.json`.
+- **"Does NOT run SQL / does NOT materialize models"** — CORRECT. `dbt docs generate` only reads `information_schema` (cheap metadata query) — it does NOT execute model SQL or refresh tables.
+- **"View: `dbt docs serve` → http://localhost:8080"** — CORRECT. Default port 8080, `--port` flag overrides.
+- **"Useful beyond a diagram: search-by-column, lineage upstream/downstream per model, team knowledge from descriptions, BI integration"** — CORRECT.
+- **"GOTCHA: `dbt docs generate` does NOT push descriptions into Trino — for SHOW COLUMNS / BI native comments use `+persist_docs: {relation: true, columns: true}` (writes COMMENT ON TABLE/COLUMN on `dbt build`)"** — CORRECT and load-bearing for this on-prem Trino+dbt stack. Per [persist_docs](https://docs.getdbt.com/reference/resource-configs/persist_docs): the config translates yml `description:` into native database comments. dbt-trino supports this; comments then surface in Trino via `SHOW CREATE TABLE` / `information_schema.columns.comment` and in any BI tool that reads native comments. This is exactly the distinction a SaaS engineer needs to know to avoid the "I wrote descriptions in dbt but my BI tool can't see them" trap.
 
-- **`var("retention_days", 90)` with default** — CORRECT.
-- **Top-level `vars:` block in `dbt_project.yml` (sibling to `models:`)** — CORRECT (top-level vars override per-project scoping; both forms supported).
-- **`dbt run --vars '{retention_days: 365}'` YAML-dict flag** — CORRECT.
-- **Precedence: CLI `--vars` > `dbt_project.yml` `vars:` > `var()` inline default** — CORRECT per dbt docs: "Variables defined using --var override values defined in dbt_project.yml."
-- **`{% set retention_days = 90 %}` defang** ("compile-time hardcoded, not overridable") — CORRECT pedagogical framing: `{% set %}` is a Jinja assignment baked at compile time and cannot be overridden by CLI flags.
+Cited r27 §6.7 (dbt docs / persist_docs canonical zone).
 
-Cited r27 §6.7G.
+### Q4 — Oracle REGEXP_SUBSTR → Trino regexp_extract 3-arg group — CONFIRMED
 
-Tiny Compl shave (-0.5): could have mentioned (a) `--vars` can be passed in JSON form on the CLI too; (b) for the on-prem k8s deployment, the typical pattern is to pass `--vars` from a CI/CD job's env-substituted YAML, not interactively — practical context for SaaS infra.
+- **"Trino 467 has NO regexp_substr (parse error)"** — CORRECT. Verified via WebFetch of [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html): the only documented regex functions are `regexp_count`, `regexp_extract`, `regexp_extract_all`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split`. No `regexp_substr`.
+- **"Use `regexp_extract(string, pattern)` for full match, `regexp_extract(string, pattern, group)` for a capture group"** — CORRECT both signatures verified verbatim from docs.
+- **"Capture groups are 1-indexed, group 0 = full match, not-found returns NULL"** — CORRECT. Trino regex uses JONI (re2j-style) where capturing group 0 conventionally references the entire match; groups 1..N are explicit parentheses. Not-found → NULL is the documented behavior.
+- **Mapping table: Oracle `REGEXP_SUBSTR(url, 'utm_source=([^&]+)', 1, 1, NULL, 1)` (6th arg = group 1) → Trino `regexp_extract(url, 'utm_source=([^&]+)', 1)` (3rd arg = group 1)** — CORRECT mapping. Oracle's 6th positional arg is the capture-group selector (position, occurrence, match_param, sub_expression respectively at args 3–6); Trino collapses positional / occurrence / flags into the pattern itself, leaving only the group selector as the 3rd arg.
+- **"Trino regex engine is JONI, `'\d'` works"** — CORRECT, matches pinned `reference_trino_regex_backslash` (single-backslash works in actual SQL because string literals do not process backslash escapes; the rendered-HTML double-backslash is a Sphinx artifact).
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
-
----
-
-## Q4 — Oracle COUNT(column) NULL → Trino — clean (correctly resisted false-divergence trap)
-
-Verified:
-
-- **"Oracle and Trino handle COUNT(column) IDENTICALLY — both skip NULLs (ANSI SQL)"** — CORRECT. Per [trino.io/docs/current/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html): "Except for count(), count_if(), max_by(), min_by() and approx_distinct(), all aggregate functions ignore null values" — count(col) skips NULLs; Oracle behaves identically (`COUNT(expr)` returns the count of non-null rows). No divergence here.
-- **Empty-string-vs-NULL** — CORRECT framing: Oracle treats `''` as NULL (Oracle deviates from ANSI SQL), Trino treats `''` as distinct from NULL. **IF cancelled_at is a STRING column**, Oracle would skip `''` rows while Trino would count them — responder correctly hedges with the IF.
-- **Likely real causes** (type coercion strictness, migrated data differences, JOIN/GROUP BY shape changes) all reasonable diagnostic angles.
-- **Debug queries** (COUNT(*) vs COUNT(col); empty-vs-NULL counts; SHOW CREATE TABLE for column types) are exactly the right triage steps.
-
-Strong probe — this is the same pattern as the carried `iter1289-Q4 LPAD-RPAD-false-divergence` watch (responder correctly resists inventing a divergence where the ANSI behavior matches). Pattern of correctly-resisting-false-Oracle-vs-Trino-divergence accumulating across iterations.
-
-Caveat (-0.25 Prac, -0.5 Compl): `cancelled_at` is typically a TIMESTAMP column (it reads as "when was it cancelled"), so the empty-string angle is unlikely the actual root cause for this field-name. Responder hedged correctly but spent the most words on the least-likely-for-this-field-name explanation. The more probable real causes for `cancelled_at`-named column are (a) NULL-vs-sentinel-date in the source (Oracle SQL*Loader sometimes loads a `0000-00-00` or epoch-zero sentinel that Trino sees as a non-NULL date while Oracle stored as NULL); (b) JOIN cardinality changes during migration (LEFT vs INNER); (c) timezone-stripping converting NULLs differently across the porting tool.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
+Cosmetic Clar shave (-0.25): "lookahead / lookahead" typo (likely meant "lookahead / lookbehind"). Doesn't change the substance. Cosmetic Compl shave (-0.5): could have noted `regexp_extract_all` as the multi-occurrence alternative (Oracle's 4th arg = `occurrence`, so anyone migrating from `REGEXP_SUBSTR(..., 1, 2)` to extract the 2nd occurrence needs `regexp_extract_all(...)[2]` not 3-arg `regexp_extract`).
 
 ---
 
 ## Watches
 
-- **CLOSE iter1288-Q1 COUNT(*)-slow canonical (HARD).** FIX-A REACHED on 1st re-probe with explicit canonical citation; responder correctly states metadata-only normally, identifies position-deletes as cause, recommends EXECUTE optimize, no approx_distinct. r18 §"Why is my SELECT COUNT(*) slow on Iceberg?" canonical is reliably findable by name.
 - **CARRY iter1290-Q3 small-files-routing (SOFT, re-probe 4-8).** Not exercised this iter.
-- **CARRY iter1289-Q2 position-delete-Spark-vs-Trino (SOFT).** Adjacent to today's Q1 framing but the Spark-vs-Trino axis was not directly re-probed.
-- **CARRY iter1289-Q4 LPAD-RPAD-false-divergence (SOFT).** Today's Q4 confirms the broader pattern (responder correctly resists inventing false Oracle-vs-Trino divergence); LPAD-RPAD-specific re-probe still pending.
-- **CARRY perf-triage-recall-ceiling periodic.**
-- No new watches.
+- **CARRY iter1289-Q2 position-delete-Spark-vs-Trino (SOFT).** Not exercised this iter.
+- **CARRY iter1289-Q4 LPAD-RPAD-false-divergence (SOFT).** Today's Q4 lands in the broader "Oracle→Trino function dialect" family with `regexp_extract` correctly mapped (NOT a false divergence — Oracle and Trino genuinely differ here, and responder correctly named both); pattern of correct divergence-vs-non-divergence discrimination accumulating.
+- **CARRY perf-triage-recall-ceiling periodic SOFT.** Not exercised this iter (pure breadth round).
+- **No new watches.**
 
 ## FIX-A
 
-None. All 4 answers clean. iter1288 FIX-A REACHED; no new defects identified. No churn.
+**None.** All 4 answers clean. Pure breadth round, continuous-PASS-loop streak (4.828 this iter, 4.828 iter1291, 4.97 iter1093, 4.95 iter1092) holds. No churn.
 
 ## Rubric updates
 
-- **Iceberg table maintenance**: 4.4534/246 → (1095.5364 + 4.875)/247 = **4.4551/247** (+0.0017, margin +0.9551). HARD WATCH CLOSES.
-- **Analytical query patterns on Iceberg+Trino**: 4.4823/208 → (932.3184 + 4.875)/209 = **4.4842/209** (+0.0019, margin +0.9842).
-- **Oracle PL/SQL → dbt+Trino**: 4.4938/260 → (1168.388 + 4.8125 + 4.75)/262 = **4.4960/262** (+0.0022, margin +0.9960).
+- **SQL query best practices for OLAP**: 4.5879/306 → (1403.8974 + 4.875)/307 = **4.5887/307** (+0.0008, margin +1.0887).
+- **Lakehouse schema design**: 4.4940/21 → (94.374 + 4.8125)/22 = **4.5085/22** (+0.0145, margin +1.0085).
+- **Oracle PL/SQL → dbt+Trino**: 4.4960/262 → (1177.952 + 4.875 + 4.75)/264 = **4.4984/264** (+0.0024, margin +0.9984).
 
 All topics PASSED. All-topics-passed terminal state preserved.
 
 ## Sources
 
-- [trinodb/trino#13092 — Iceberg scanning with Delete Files is extremely slow](https://github.com/trinodb/trino/issues/13092)
-- [trinodb/trino#12617 — Remove unused position deletes when running Iceberg optimize](https://github.com/trinodb/trino/issues/12617)
-- [trinodb/trino#24086 — Delete files not removed after Iceberg maintenance](https://github.com/trinodb/trino/issues/24086)
-- [trinodb/trino#17114 — Iceberg v2 with many delete files very slow](https://github.com/trinodb/trino/issues/17114)
-- [Trino Window functions docs](https://trino.io/docs/current/functions/window.html)
-- [dbt var() Jinja function](https://docs.getdbt.com/reference/dbt-jinja-functions/var)
-- [dbt Project variables](https://docs.getdbt.com/docs/build/project-variables)
-- [Trino Aggregate functions docs (COUNT NULL skip)](https://trino.io/docs/current/functions/aggregate.html)
-- [trinodb/trino#21457 — aggregate over null behavior](https://github.com/trinodb/trino/issues/21457)
+- [Trino 467 regexp functions](https://trino.io/docs/467/functions/regexp.html)
+- [Trino SELECT (UNION semantics)](https://trino.io/docs/current/sql/select.html)
+- [trinodb/trino#14 — Optimize union all of similar aggregations](https://github.com/trinodb/trino/issues/14)
+- [Iceberg schema evolution](https://iceberg.apache.org/docs/latest/evolution/)
+- [Trino 467 ALTER TABLE](https://trino.io/docs/467/sql/alter-table.html)
+- [Trino 467 Iceberg connector](https://trino.io/docs/467/connector/iceberg.html)
+- [trinodb/trino PR #13673 — disallow ADD COLUMN NOT NULL on Iceberg](https://github.com/trinodb/trino/pull/13673)
+- [dbt docs commands](https://docs.getdbt.com/reference/commands/cmd-docs)
+- [dbt manifest.json](https://docs.getdbt.com/reference/artifacts/manifest-json)
+- [dbt persist_docs](https://docs.getdbt.com/reference/resource-configs/persist_docs)
