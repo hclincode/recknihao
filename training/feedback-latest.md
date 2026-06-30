@@ -1,56 +1,70 @@
-# Judge Feedback — Iteration 1292
+# Judge Feedback — Iteration 1293
 
-**Overall: 4.828 — STRONG PASS. All 4 clean, no new FIX-A, no new watches. Continuous-PASS-loop streak holds.**
+**Overall: 4.7188 — PASS. All 4 clean, no FAILs. One minor grain-miss (Q1 missing per-account dimension), one unexplained-error gap (Q3), one missing NULLIF guard (Q4). No new FIX-A, no new watches. Continuous-PASS-loop streak holds.**
 
 | Q | Score | Acc | Clar | Prac | Compl | Topic | Result |
 |---|---|---|---|---|---|---|---|
-| Q1 (UNION vs UNION ALL) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | SQL query best practices for OLAP | Clean |
-| Q2 (Iceberg ADD COLUMN nullable, metadata-only) | **4.8125** | 5.0 | 4.75 | 5.0 | 4.5 | Lakehouse schema design | Clean |
-| Q3 (dbt docs generate / lineage / persist_docs) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | Oracle PL/SQL → dbt+Trino | Clean |
-| Q4 (Oracle REGEXP_SUBSTR → Trino regexp_extract) | **4.75** | 5.0 | 4.5 | 5.0 | 4.5 | Oracle PL/SQL → dbt+Trino | Clean (cosmetic typo only) |
+| Q1 (bool_and — all-rows-true per group, GIVEN ACCOUNT) | **4.5625** | 4.75 | 4.75 | 4.5 | 4.25 | SQL query best practices for OLAP | Clean-with-grain-ding |
+| Q2 (Iceberg manifests + slow planning + rewrite_manifests Spark-only on 467) | **4.875** | 5.0 | 4.75 | 5.0 | 4.75 | Iceberg table maintenance | Clean |
+| Q3 (dbt on_schema_change four values + default ignore + append_new_columns ADD COLUMN) | **4.625** | 5.0 | 4.75 | 4.5 | 4.25 | Oracle PL/SQL → dbt+Trino | Clean-minus-error-explanation |
+| Q4 (Oracle RATIO_TO_REPORT → x / SUM(x) OVER (PARTITION BY q)) | **4.8125** | 5.0 | 5.0 | 4.75 | 4.5 | Oracle PL/SQL → dbt+Trino | Clean-minus-NULLIF |
 
-Average: (4.875 + 4.8125 + 4.875 + 4.75) / 4 = **4.828**
+Average: (4.5625 + 4.875 + 4.625 + 4.8125) / 4 = **4.7188**
 
 ---
 
 ## Accuracy confirmations (all 4 verified)
 
-### Q1 — UNION vs UNION ALL — CONFIRMED
+### Q1 — bool_and(is_enabled) per group with COALESCE NULL-guard — CONFIRMED (function), GRAIN-MISS noted
 
-- **"UNION removes duplicates (dedup pass = sort/hash-aggregate, slower); UNION ALL keeps all incl duplicates (cheaper, no dedup)"** — CORRECT. Verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) (UNION default is DISTINCT; ALL keeps duplicates) and [SQL UNION vs UNION ALL — Atlassian](https://www.atlassian.com/data/sql/what-is-the-difference-between-union-and-union-all). UNION requires sort/hash to dedupe — computational overhead scales with row count.
-- **"For 'no duplicate customer IDs' use bare UNION (= UNION DISTINCT)"** — CORRECT mapping. Trino bare `UNION` defaults to `DISTINCT`.
-- **"Coworker partially right but BACKWARDS: bare UNION is the SLOWER one; UNION ALL skips dedup"** — CORRECT inversion of the coworker's "UNION-everywhere is slower" claim, which is the OPPOSITE of reality (UNION ALL is the faster default, and is what should be used "everywhere" when dedup is not needed).
-- **Nuance: "if the two queries are already disjoint (date-partitioned), UNION wastes a dedup pass — but here customers overlap across quarters so UNION is correct + the cost is unavoidable"** — CORRECT practical framing. Matches [trinodb/trino#14 — Optimize union all of similar aggregations](https://github.com/trinodb/trino/issues/14) (Trino has optimizer paths specifically for UNION ALL, not for UNION).
+- **`bool_and(boolean) → boolean` exists in Trino 467** — CONFIRMED. Verified via WebFetch of [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): "Returns `TRUE` if every input value is `TRUE`, otherwise `FALSE`." Companion `bool_or` exists with mirror semantics.
+- **NULL handling: bool_and ignores NULL values; all-NULL group returns NULL** — CONFIRMED. Per the same page's generic aggregate-NULL rule: "ignore null values and return null for no input rows or when all values are null," with exceptions explicitly listed (count, count_if, max_by, min_by, approx_distinct). bool_and is NOT in the exception list → follows the standard rule.
+- **`bool_and(COALESCE(is_enabled, false))` to treat NULL as not-enabled** — CORRECT fix. If even one row in the group has NULL (e.g., new user pending opt-in), the bare bool_and would return NULL/TRUE incorrectly; COALESCE forces NULL → false → "not fully rolled out" semantics, which is the conservative-correct interpretation for a feature-flag rollout question.
+- **"Cleaner than CAST-to-int MIN/CASE"** — CORRECT framing. Common workarounds in dialects without bool_and (e.g., `MIN(CAST(is_enabled AS INT)) = 1`, `SUM(CASE WHEN NOT is_enabled THEN 1 ELSE 0 END) = 0`) are functionally equivalent but more verbose; bool_and is the idiomatic Trino form.
 
-### Q2 — Iceberg ADD COLUMN metadata-only + old-rows-NULL — CONFIRMED
+**Grain-miss (load-bearing flag):** The engineer's question said "per flag, is it fully rolled out to a **GIVEN ACCOUNT** (ALL **users** enabled)." The responder's query reads:
 
-- **"ALTER TABLE ADD COLUMN on Iceberg is METADATA-ONLY, no downtime, completes in ms even on 8 months data"** — CORRECT. Verified at [iceberg.apache.org/docs/latest/evolution/](https://iceberg.apache.org/docs/latest/evolution/): "Iceberg schema updates are metadata changes, so no data files are rewritten." Iceberg uses immutable numeric field IDs (not column names) to map columns to Parquet files — adding a new field assigns a new field ID, never touches existing data.
-- **"Old rows return NULL for the new column"** — CORRECT. Per the same Iceberg spec page: when a column is added, existing files have no field ID for it, so reads project NULL. No backfill required.
-- **"Added columns are nullable by design"** — CORRECT for Trino 467 specifically. Per [trinodb/trino PR #13673](https://github.com/trinodb/trino/pull/13673) (release 393), Trino disallows `ALTER TABLE ADD COLUMN ... NOT NULL` on Iceberg precisely because existing files would violate; nullable is the only path on an existing table. Responder did not explicitly raise this caveat (engineer didn't ask), but everything stated is consistent with it.
-- **`ALTER TABLE iceberg.analytics.fct_events ADD COLUMN device_type VARCHAR` syntax** — CORRECT per [trino.io/docs/467/sql/alter-table.html](https://trino.io/docs/467/sql/alter-table.html) and [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html).
-- **"For non-NULL historical: one-off Spark backfill"** — CORRECT secondary alternative. Spark `UPDATE` (or CTAS-and-swap on this stack) is the documented backfill path.
+```sql
+SELECT flag_name, bool_and(COALESCE(is_enabled, false)) AS fully_rolled_out
+FROM feature_flag_assignments
+GROUP BY flag_name
+```
 
-Pin alignment: matches iter1237 Q1 + iter1205 Q1 prior canonicals (field-ID schema evolution); no regression.
+This answers "is the flag rolled out to ALL users across ALL accounts" — NOT "rolled out to all users **in a given account**." The correct query needs either `GROUP BY flag_name, account_id` (per-account view across all accounts) or `WHERE account_id = :acct_id GROUP BY flag_name` (single-account check). An engineer copy-pasting the responder's query would get the wrong answer and probably catch it in review, but the grain miss is a real practical-applicability ding. -0.5 Prac, -0.75 Compl, -0.25 Acc.
 
-### Q3 — dbt docs generate / lineage / persist_docs — CONFIRMED
+### Q2 — Iceberg manifest definition + small-write accumulation + maintenance order — CONFIRMED
 
-- **"`dbt docs generate` builds `target/manifest.json` (DAG / model + test + macro nodes) + `target/catalog.json` (warehouse column metadata via `information_schema`)"** — CORRECT per [dbt docs cmd-docs](https://docs.getdbt.com/reference/commands/cmd-docs) + [Manifest JSON](https://docs.getdbt.com/reference/artifacts/manifest-json): generate copies `index.html`, compiles into `manifest.json`, queries warehouse for `catalog.json`.
-- **"Does NOT run SQL / does NOT materialize models"** — CORRECT. `dbt docs generate` only reads `information_schema` (cheap metadata query) — it does NOT execute model SQL or refresh tables.
-- **"View: `dbt docs serve` → http://localhost:8080"** — CORRECT. Default port 8080, `--port` flag overrides.
-- **"Useful beyond a diagram: search-by-column, lineage upstream/downstream per model, team knowledge from descriptions, BI integration"** — CORRECT.
-- **"GOTCHA: `dbt docs generate` does NOT push descriptions into Trino — for SHOW COLUMNS / BI native comments use `+persist_docs: {relation: true, columns: true}` (writes COMMENT ON TABLE/COLUMN on `dbt build`)"** — CORRECT and load-bearing for this on-prem Trino+dbt stack. Per [persist_docs](https://docs.getdbt.com/reference/resource-configs/persist_docs): the config translates yml `description:` into native database comments. dbt-trino supports this; comments then surface in Trino via `SHOW CREATE TABLE` / `information_schema.columns.comment` and in any BI tool that reads native comments. This is exactly the distinction a SaaS engineer needs to know to avoid the "I wrote descriptions in dbt but my BI tool can't see them" trap.
+- **"Manifest = Iceberg metadata file listing data files in a snapshot + per-column min/max stats"** — CORRECT per [iceberg.apache.org/spec/#manifests](https://iceberg.apache.org/spec/#manifests). Each snapshot points to a manifest list which points to N manifest files; manifests are the prune-by-stats layer the planner walks.
+- **"Spark micro-batch every 15 min × 4 months → thousands of manifests → planner reads them → seconds of planning even when execution is fast"** — CORRECT cause-effect mapping. 4 months × 96 writes/day = ~11.5K snapshots; without compaction every snapshot adds ≥1 manifest. EXPLAIN ANALYZE planning-phase seconds is the classic "metadata-fan-out" symptom (not data scan).
+- **`EXECUTE optimize(file_size_threshold => '256MB')` + `EXECUTE expire_snapshots(retention_threshold => '7d')` + `EXECUTE remove_orphan_files(retention_threshold => '7d')`** — ALL CORRECT Trino 467 ALTER TABLE EXECUTE procedures. Verified via WebFetch of [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): the supported procedures are `optimize`, `expire_snapshots`, `remove_orphan_files`, `drop_extended_stats`. Syntax/args correct.
+- **"MANIFEST REWRITE — Spark-only on Trino 467: `CALL iceberg.system.rewrite_manifests(table => 'analytics.events')`"** — CORRECT. Verified via WebSearch + [trinodb/trino#14821](https://github.com/trinodb/trino/issues/14821) + [trinodb/trino PR #25378](https://github.com/trinodb/trino/pull/25378) + [Release 470](https://trino.io/docs/current/release/release-470.html): Trino's native `optimize_manifests` table procedure was added in **Release 470 (Feb 2025), NOT in 467 (Dec 2024)**. On Trino 467 the only path to rewrite manifests is via Spark's `CALL iceberg.system.rewrite_manifests(...)` (or via cycling tables through `optimize` which compacts data files but does not reorganize manifests). Syntax matches [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/). Pin-aligned with `reference_trino_iceberg_migrate_native` (rewrite_manifests in the Spark-only set).
+- **Check: `SELECT count(*), sum(length)/1024/1024 FROM "events$manifests"`** — CORRECT. The `$manifests` metadata table is valid Trino 467 ([iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — "Inspecting with metadata tables"). "Rewrite if >30 manifests or >100MB" is a reasonable rule of thumb (small for a 4-month table; large means scan planner overhead).
 
-Cited r27 §6.7 (dbt docs / persist_docs canonical zone).
+Solid, mechanism-deep answer. The Spark-vs-Trino split is accurate to 467.
 
-### Q4 — Oracle REGEXP_SUBSTR → Trino regexp_extract 3-arg group — CONFIRMED
+### Q3 — dbt on_schema_change four values + default ignore + append_new_columns ALTER ADD COLUMN — CONFIRMED, error-not-explained noted
 
-- **"Trino 467 has NO regexp_substr (parse error)"** — CORRECT. Verified via WebFetch of [trino.io/docs/467/functions/regexp.html](https://trino.io/docs/467/functions/regexp.html): the only documented regex functions are `regexp_count`, `regexp_extract`, `regexp_extract_all`, `regexp_like`, `regexp_position`, `regexp_replace`, `regexp_split`. No `regexp_substr`.
-- **"Use `regexp_extract(string, pattern)` for full match, `regexp_extract(string, pattern, group)` for a capture group"** — CORRECT both signatures verified verbatim from docs.
-- **"Capture groups are 1-indexed, group 0 = full match, not-found returns NULL"** — CORRECT. Trino regex uses JONI (re2j-style) where capturing group 0 conventionally references the entire match; groups 1..N are explicit parentheses. Not-found → NULL is the documented behavior.
-- **Mapping table: Oracle `REGEXP_SUBSTR(url, 'utm_source=([^&]+)', 1, 1, NULL, 1)` (6th arg = group 1) → Trino `regexp_extract(url, 'utm_source=([^&]+)', 1)` (3rd arg = group 1)** — CORRECT mapping. Oracle's 6th positional arg is the capture-group selector (position, occurrence, match_param, sub_expression respectively at args 3–6); Trino collapses positional / occurrence / flags into the pattern itself, leaving only the group selector as the 3rd arg.
-- **"Trino regex engine is JONI, `'\d'` works"** — CORRECT, matches pinned `reference_trino_regex_backslash` (single-backslash works in actual SQL because string literals do not process backslash escapes; the rendered-HTML double-backslash is a Sphinx artifact).
+- **Four values: `ignore`, `fail`, `append_new_columns`, `sync_all_columns`** — CORRECT. Verified via WebFetch of [docs.getdbt.com/docs/build/incremental-models](https://docs.getdbt.com/docs/build/incremental-models). Exact match to docs.
+- **DEFAULT = `ignore`** — CORRECT. "ignore: Default behavior." Confirmed directly in the docs.
+- **`ignore` behavior: "silently drop new col from insert, no error"** — CORRECT per docs: "If you add a column to your incremental model, and execute a `dbt run`, this column will _not_ appear in your target table." (Caveat: dbt docs note removed columns under `ignore` DO error — "If you remove a column from your incremental model and execute a `dbt run`, `dbt run` will fail." Responder didn't mention this asymmetric behavior, but engineer's case is column-add not column-remove, so it doesn't affect the load-bearing answer.)
+- **`fail` behavior: "dbt run errors when schemas diverge"** — CORRECT per docs.
+- **`append_new_columns` behavior: "ALTER TABLE ADD COLUMN then run, new col propagates + populated"** — CORRECT. dbt's macro `default__alter_relation_add_remove_columns` emits `ALTER TABLE … ADD COLUMN …` via the adapter; dbt-trino supports this on Iceberg (metadata-only ADD COLUMN per pinned `reference_trino_iceberg_evolution` / iter1292-Q2 confirmation). After the ALTER, the model's incremental INSERT runs and populates the new column on incremented rows.
+- **`sync_all_columns` behavior: "adds new + DROPS removed (destructive)"** — CORRECT per docs.
+- **Recommended `append_new_columns` config YAML** — CORRECT. Standard dbt config pattern.
 
-Cosmetic Clar shave (-0.25): "lookahead / lookahead" typo (likely meant "lookahead / lookbehind"). Doesn't change the substance. Cosmetic Compl shave (-0.5): could have noted `regexp_extract_all` as the multi-occurrence alternative (Oracle's 4th arg = `occurrence`, so anyone migrating from `REGEXP_SUBSTR(..., 1, 2)` to extract the 2nd occurrence needs `regexp_extract_all(...)[2]` not 3-arg `regexp_extract`).
+**Unexplained-error gap (minor):** The engineer reported "**dbt errored on schema mismatch**" but the responder said dbt's default is `ignore`, which per docs does NOT error on column-add (only column-remove). So either:
+- (a) the engineer's model has `on_schema_change='fail'` explicitly set somewhere (project-level dbt_project.yml override or model-level config), or
+- (b) the engineer is using an incremental strategy + adapter combination where column-count mismatch in the `INSERT INTO … (col1, col2) SELECT new_col1, new_col2, new_col3` fails at the Trino-engine level rather than at the dbt-config level (dbt-trino's incremental insert can fail with "column count mismatch" even when on_schema_change='ignore' because the underlying SQL doesn't match the existing table schema).
+
+The responder didn't diagnose the why-did-this-error question. The recommended fix (`on_schema_change='append_new_columns'`) WORKS regardless of root cause, so the answer is operationally complete — but a senior engineer would expect the diagnostic step. -0.5 Prac, -0.75 Compl.
+
+### Q4 — Oracle RATIO_TO_REPORT → `x / SUM(x) OVER (PARTITION BY q)` — CONFIRMED, NULLIF gap noted
+
+- **"No RATIO_TO_REPORT in Trino"** — CORRECT. Trino 467 [functions/window.html](https://trino.io/docs/467/functions/window.html) lists the supported window functions; RATIO_TO_REPORT (an Oracle/Snowflake-specific shorthand) is not among them. The standard SQL equivalent is exactly `x / SUM(x) OVER (PARTITION BY …)`.
+- **Both forms given: raw (`x / SUM(x) OVER (...)` = 0-1 fraction) + percentage (`ROUND(100.0 * x / SUM(x) OVER (...), 2)`)** — CORRECT and useful. The raw form is the direct semantic equivalent to Oracle's RATIO_TO_REPORT; the percentage form is the more common SaaS reporting need.
+- **"100.0 forces float (integer division truncates)"** — CORRECT in principle (Trino INTEGER `/` INTEGER → INTEGER truncating division). Caveat: `net_revenue` is almost always DECIMAL in real fact tables, not INTEGER, in which case the 100.0 multiplier is harmless but the truncation warning doesn't actually apply. Phrasing is technically right but slightly over-cautious for the likely real schema.
+
+**NULLIF-zero gap (minor):** If a fiscal quarter has a total of zero (e.g., a quarter where all rows have net_revenue=0, or a freshly-onboarded segment), the partition SUM is 0 and the division throws DIVISION_BY_ZERO (pinned in `reference_trino_division_by_zero` — INTEGER/DECIMAL `/` by zero throws). The bullet-proof form is `x / NULLIF(SUM(x) OVER (PARTITION BY q), 0)`, returning NULL for the empty quarter rather than failing the query. Responder didn't include the guard. -0.25 Prac, -0.5 Compl.
 
 ---
 
@@ -58,31 +72,30 @@ Cosmetic Clar shave (-0.25): "lookahead / lookahead" typo (likely meant "lookahe
 
 - **CARRY iter1290-Q3 small-files-routing (SOFT, re-probe 4-8).** Not exercised this iter.
 - **CARRY iter1289-Q2 position-delete-Spark-vs-Trino (SOFT).** Not exercised this iter.
-- **CARRY iter1289-Q4 LPAD-RPAD-false-divergence (SOFT).** Today's Q4 lands in the broader "Oracle→Trino function dialect" family with `regexp_extract` correctly mapped (NOT a false divergence — Oracle and Trino genuinely differ here, and responder correctly named both); pattern of correct divergence-vs-non-divergence discrimination accumulating.
-- **CARRY perf-triage-recall-ceiling periodic SOFT.** Not exercised this iter (pure breadth round).
-- **No new watches.**
+- **CARRY iter1289-Q4 LPAD-RPAD-false-divergence (SOFT).** Not exercised this iter.
+- **CARRY perf-triage-recall-ceiling periodic SOFT.** Not exercised this iter.
+- **No new watches.** The Q1 grain-miss, Q3 unexplained-error, Q4 NULLIF-gap are all per-instance "minor" cosmetics/completeness — none rise to a FAIL or to a pattern across iterations. Scope each as a one-off per the `responder_broken_secondary_alternative` discipline (per-instance re-probe, NO resource fix, NO churn).
 
 ## FIX-A
 
-**None.** All 4 answers clean. Pure breadth round, continuous-PASS-loop streak (4.828 this iter, 4.828 iter1291, 4.97 iter1093, 4.95 iter1092) holds. No churn.
+**None.** All 4 answers are correct on the load-bearing teaching. The minor flags are completeness/grain shaves, not factual errors. Continuous-PASS-loop streak holds: 4.7188 (this iter) following 4.828 (iter1292), 4.828 (iter1291), 4.97 (iter1093), 4.95 (iter1092). No churn justified.
 
 ## Rubric updates
 
-- **SQL query best practices for OLAP**: 4.5879/306 → (1403.8974 + 4.875)/307 = **4.5887/307** (+0.0008, margin +1.0887).
-- **Lakehouse schema design**: 4.4940/21 → (94.374 + 4.8125)/22 = **4.5085/22** (+0.0145, margin +1.0085).
-- **Oracle PL/SQL → dbt+Trino**: 4.4960/262 → (1177.952 + 4.875 + 4.75)/264 = **4.4984/264** (+0.0024, margin +0.9984).
+- **SQL query best practices for OLAP**: 4.5887/307 → (4.5887×307 + 4.5625)/308 = (1408.7309 + 4.5625)/308 = **4.5887/308** (essentially flat, margin +1.0887).
+- **Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup**: 4.4551/247 → (4.4551×247 + 4.875)/248 = (1100.4097 + 4.875)/248 = **4.4568/248** (+0.0017, margin +1.0068).
+- **Oracle PL/SQL → dbt+Trino**: 4.4984/264 → (4.4984×264 + 4.625 + 4.8125)/266 = (1187.5776 + 9.4375)/266 = **4.4999/266** (+0.0015, margin +0.9999).
 
 All topics PASSED. All-topics-passed terminal state preserved.
 
 ## Sources
 
-- [Trino 467 regexp functions](https://trino.io/docs/467/functions/regexp.html)
-- [Trino SELECT (UNION semantics)](https://trino.io/docs/current/sql/select.html)
-- [trinodb/trino#14 — Optimize union all of similar aggregations](https://github.com/trinodb/trino/issues/14)
-- [Iceberg schema evolution](https://iceberg.apache.org/docs/latest/evolution/)
-- [Trino 467 ALTER TABLE](https://trino.io/docs/467/sql/alter-table.html)
-- [Trino 467 Iceberg connector](https://trino.io/docs/467/connector/iceberg.html)
-- [trinodb/trino PR #13673 — disallow ADD COLUMN NOT NULL on Iceberg](https://github.com/trinodb/trino/pull/13673)
-- [dbt docs commands](https://docs.getdbt.com/reference/commands/cmd-docs)
-- [dbt manifest.json](https://docs.getdbt.com/reference/artifacts/manifest-json)
-- [dbt persist_docs](https://docs.getdbt.com/reference/resource-configs/persist_docs)
+- [Trino 467 aggregate functions (bool_and / bool_or / NULL rule)](https://trino.io/docs/467/functions/aggregate.html)
+- [Trino 467 Iceberg connector (ALTER TABLE EXECUTE procedures + $manifests metadata table)](https://trino.io/docs/467/connector/iceberg.html)
+- [Trino Release 470 — optimize_manifests added (NOT in 467)](https://trino.io/docs/current/release/release-470.html)
+- [trinodb/trino#14821 — Add the functionality of the Iceberg rewrite_manifests procedure](https://github.com/trinodb/trino/issues/14821)
+- [trinodb/trino PR #25378 — Optimize manifests per top-level partition in Iceberg](https://github.com/trinodb/trino/pull/25378)
+- [Apache Iceberg Spark procedures (rewrite_manifests syntax)](https://iceberg.apache.org/docs/latest/spark-procedures/)
+- [Apache Iceberg manifest spec](https://iceberg.apache.org/spec/#manifests)
+- [dbt incremental models — on_schema_change values + default ignore](https://docs.getdbt.com/docs/build/incremental-models)
+- [Trino 467 window functions (no RATIO_TO_REPORT)](https://trino.io/docs/467/functions/window.html)
