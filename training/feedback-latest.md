@@ -1,164 +1,138 @@
-# Iteration 1303 — Judge Feedback
+# Iteration 1304 — Judge Feedback
 
 **Phase**: extended (pass-loop)
-**Overall iter score**: **4.5625 STRONG PASS** ((4.75 + 3.75 + 4.875 + 4.875) / 4)
-**Pattern this iter**: iter1300-Q2 broadcast-threshold-direction FIX-A REACHED on 1st re-probe (soft watch CLOSES); Q2 broken-secondary-worked-query slip (nested-aggregate-window pattern) — 10th instance in the documented `feedback_responder_broken_secondary_alternative.md` family, per-instance NO FIX-A; Q3/Q4 strong clean passes; Oracle PL/SQL → dbt + Trino topic CROSSES 4.5.
+**Overall iter score**: **4.40625 PASS** ((4.875 + 4.875 + 3.0 + 4.875) / 4)
+**Pattern this iter**: Q1/Q2/Q4 strong clean passes — INTERSECT set-semantics + precedence + Iceberg format/compression-codec-477+ + Oracle SUBSTR negative-position all pin-perfect. **Q3 dbt compile vs run FAIL with an important meta-finding: the responder's inferred "dbt compile is pure offline / sends NOTHING to Trino" answer is FACTUALLY WRONG per official dbt docs — and the teacher's flag asserting that inference is CORRECT is itself WRONG.** Per [docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile) + [docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile): "dbt compile is similar to dbt run except that it doesn't materialize... they both require a data platform connection, run queries, and have an execute variable set to True." dbt compile DOES connect + DOES run introspective queries (relation cache, run_query macros); it just doesn't materialize. The "purely offline" framing is the offline version `dbt parse` (or `dbt compile --no-introspect`), NOT bare `dbt compile`.
 
 ---
 
 ## Per-question scores
 
-### Q1 — broadcast-OOM threshold direction RE-PROBE → 4.75 STRONG PASS
+### Q1 — INTERSECT for accounts active in both Jan and Feb summary tables
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.0 | "Raising `join_max_broadcast_table_size` makes OOM WORSE" CORRECT; `SET SESSION join_distribution_type='PARTITIONED'` CORRECT fix |
-| Beginner clarity | 4.5 | Clear "you have the logic BACKWARDS" framing + dbt `pre_hook` form |
-| Practical applicability | 5.0 | Engineer has exact next step (PARTITIONED session prop, or dbt pre_hook for per-model fix) |
-| Completeness | 4.5 | PARTITIONED named; did not explicitly call out "LOWER the threshold" as the alternative threshold-direction-aware fix |
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-**iter1300-Q2 BROADCAST-THRESHOLD-DIRECTION FIX-A — REACHED on 1st re-probe. SOFT WATCH CLOSES.**
+Responder said: Trino 467 supports INTERSECT; `SELECT customer_id FROM jan INTERSECT SELECT customer_id FROM feb` is the clean form; INTERSECT auto-dedups (DISTINCT built in); declarative/simpler than FULL OUTER JOIN/correlated subquery; compiles to a SEMI-JOIN internally (as efficient as hand JOIN); INTERSECT binds tighter than EXCEPT and UNION, parenthesize when mixing.
 
-The iter1300-Q2 FIX-A added a DIRECTION-MATTERS callout to r28 §8A.2 (lower-not-raise + defang of the wrong "raise to 500MB to fix OOM" recommendation). The iter1303-Q1 responder now correctly states:
-- Raising `join_max_broadcast_table_size` worsens the OOM (more/larger tables broadcast → more memory pressure per node).
-- The correct fix is `SET SESSION join_distribution_type='PARTITIONED'` (hash-shuffle both sides, no single node bears full load).
+**Verification ([trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html))**:
+- INTERSECT supported ✓
+- Defaults to DISTINCT: "If neither is specified, the behavior defaults to `DISTINCT`" ✓
+- Precedence verbatim: "Additionally, `INTERSECT` binds more tightly than `EXCEPT` and `UNION`. That means `A UNION B INTERSECT C EXCEPT D` is the same as `A UNION (B INTERSECT C) EXCEPT D`." ✓
 
-VERIFIED via WebSearch: LOWERING the threshold reduces broadcast cap (more PARTITIONED → less per-node memory); RAISING allows MORE broadcasting → worsens OOM. PARTITIONED hash-shuffle is the canonical alternative.
+The "compiles to SemiJoin internally" claim is a reasonable simplification — Trino's optimizer rewrites INTERSECT into semi-join-like operations + a deduplication aggregation; the responder's "as efficient as a hand-coded INNER JOIN + DISTINCT" framing is the right mental model for an engineer choosing between forms. Minor Clar shave (-0.25) for not surfacing the INTERSECT-vs-INNER-JOIN-with-DISTINCT cost difference if `customer_id` has duplicates within Jan or Feb (INTERSECT dedups both sides before comparing; a naive INNER JOIN can produce a Cartesian explosion on duplicates per side). Minor Compl shave (-0.25) for not pointing at the `EXCEPT` companion (engineer's likely next question: "what about churned customers active in Jan but not Feb"). No imported-prior, no broken-secondary, no over-warning, no fabrication. **STRONG PASS.**
 
-The responder gave the PARTITIONED fix but did NOT explicitly mention LOWER-the-threshold as the threshold-direction-aware alternative — this is acceptable (PARTITIONED is the primary canonical answer for broadcast-OOM remediation, threshold-direction is one of several levers). Minor Clar shave for that omission.
+### Q2 — Iceberg format/compression for fresh raw click-events table
 
-Pattern matches 1st-re-probe FIX-A reach streak: iter1302 MOD + iter1302 BETWEEN-CrossJoin + iter1272 bloom-CREATE-467 + iter1290 ephemeral-basics.
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
----
+Responder said: Defaults work fine for analytics; use `CREATE TABLE ... WITH (partitioning=ARRAY['day(occurred_at)','tenant_id'], format='PARQUET', format_version=2)`; Parquet is the default; format_version 2 needed for later MERGE/UPDATE/DELETE; compression on Trino 467 is the CATALOG-level config `iceberg.compression-codec` defaulting ZSTD, NOT a table property in 467 (that landed in 477+); don't specify compression at table level — ZSTD is a solid default.
 
-### Q2 — running-total window (ROWS BETWEEN UNBOUNDED PRECEDING) → 3.75 PASS
+**Verification ([trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html))**:
+- `iceberg.file-format` default = PARQUET ✓
+- `format_version` default = 2 ✓
+- "Version `2` is required for row level deletes" ✓ (UPDATE/MERGE flow through the same position-delete path on MoR tables)
+- `iceberg.compression-codec` is a catalog config, NOT in the documented 467 CREATE TABLE WITH-clause property list ✓ — matches pin `reference_trino_compression_codec_477.md` (per-table `compression_codec` lands in 477+ per PR #25755; session form 473+ per #24851)
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 3.5 | Syntax claim CORRECT ("identical in Trino, copy from Postgres directly") BUT worked query has window-arg-not-in-GROUP-BY analysis error |
-| Beginner clarity | 4.0 | "Copy from Postgres directly" framing is clear and beginner-routable for the syntax-only question |
-| Practical applicability | 3.5 | Engineer who extracts only the syntax claim → fine. Engineer who copies the worked query → analysis error, debug time lost. Mixed. |
-| Completeness | 4.0 | Lead correct + secondary worked example provided (but broken) |
+Pin-perfect, version-cutoff-accurate, gives both the actionable CREATE TABLE and the "leave compression alone" routing. Minor Clar shave (-0.25): could have explicitly listed the catalog-config location (`etc/catalog/iceberg.properties` on the k8s ConfigMap) so the engineer knows where to look if they want to verify the codec. Minor Compl shave (-0.25): no `write.target-file-size-bytes` (128MB default) callout for "what other defaults am I implicitly accepting" engineer follow-up. No imported-prior, no broken-secondary, no over-warning, no fabrication. **STRONG PASS — matches compression-codec pin perfectly.**
 
-**TEACHER FLAG CONFIRMED — NESTED-AGGREGATE-WINDOW BUG IN WORKED QUERY.**
+### Q3 — dbt compile vs dbt run — what does compile do, does it send anything to Trino
 
-The teacher flag is accurate. Two distinct findings:
+**Score: 3.0** (Acc 2.5 / Clar 4.0 / Prac 3.0 / Compl 2.5) — **FAIL**
 
-**(A) The SYNTAX answer is correct.** ROWS-frame window syntax `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` is identical Postgres ↔ Trino 467. This is the engineer's actual stated question and the lead is right.
+Responder hedged: "I don't have detailed information in the resources about the exact difference between dbt compile and dbt run." Then inferred: "dbt compile is likely a pure offline step (parsing/Jinja rendering) that does NOT contact the warehouse" (extrapolated from r28 model-contracts content). Deferred to official dbt docs for the definitive answer.
 
-**(B) The WORKED QUERY has a real analysis-error bug.** The responder wrote:
-```sql
-SELECT customer_id, month_start,
-       SUM(amount) AS monthly_spend,
-       SUM(amount) OVER (PARTITION BY customer_id ORDER BY month_start
-                         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_spend
-FROM transactions
-GROUP BY customer_id, month_start
-ORDER BY ...
-```
-With `GROUP BY customer_id, month_start`, bare `amount` inside `SUM(amount) OVER(...)` is neither a group key nor an aggregate — Trino analysis fails with "amount must be an aggregate expression or appear in GROUP BY clause." Window functions evaluate AFTER grouping, so window arguments must be aggregates or group keys when GROUP BY is present.
+**The teacher's flag asserts the inferred answer is CORRECT and proposes a LIGHT FIX-A that codifies the "compile is pure offline / sends NOTHING to Trino" framing. This is FACTUALLY WRONG. The official dbt docs state the OPPOSITE.**
 
-**The CORRECT form is the NESTED-AGGREGATE WINDOW**:
-```sql
-SUM(SUM(amount)) OVER (PARTITION BY customer_id ORDER BY month_start
-                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_spend
-```
-Inner `SUM(amount)` = per-month group total (resolves the GROUP BY). Outer `SUM(...) OVER` = accumulates the grouped sums across months. Same pattern as iter1290 percent-of-total `SUM(SUM(mrr)) OVER ()` — already canonicalized in resources.
+**Verification ([docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile))** verbatim:
+> "`dbt compile` is similar to `dbt run` except that it doesn't materialize the model's compiled SQL into an existing table. So, up until the point of materialization, `dbt compile` and `dbt run` are similar because they both **require a data platform connection, run queries, and have an `execute` variable set to `True`**."
 
-VERIFIED via WebSearch + Trino docs: `SUM(SUM(x)) OVER (...)` is the canonical Trino pattern for window-over-grouped-rows; alternative is a CTE/subquery pre-aggregate + window in outer (`WITH monthly AS (SELECT customer_id, month_start, SUM(amount) AS m FROM transactions GROUP BY ...) SELECT *, SUM(m) OVER (PARTITION BY customer_id ORDER BY month_start ROWS ...) FROM monthly`).
+**Verification ([docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile))** verbatim:
+> "dbt compile needs a data platform connection in order to gather the info it needs (including from introspective queries) to prepare the SQL for every model in your project."
 
-**Classification — `feedback_responder_broken_secondary_alternative.md` family (10th instance).** Same Haiku pattern: lead nailed, "for-completeness" alternative form broken. Prior instances: iter936 window-in-GROUP-BY / iter943 PERCENTILE_CONT / iter948 price-suffix menu / iter950 nested-aggregate max_by / iter954 TO_CHAR-wrong-codes / iter1013 ORDER-BY-ungrouped / iter1019 TABLESAMPLE-after-WHERE / iter1020 regexp_extract-comma / iter1302 {{this}}-INTERVAL placement.
+What `dbt compile` actually does:
+1. **DOES** connect to the warehouse (Trino in this stack).
+2. **DOES** issue introspective queries — relation cache population (does this incremental's target table already exist?), `run_query` / `dbt_utils.get_column_values` macro resolution, `is_incremental()` warehouse check, model contract type introspection (`SELECT … WHERE 1=0`).
+3. **Renders** Jinja+SQL into raw executable SQL into `target/compiled/<project>/models/...`.
+4. **Does NOT** materialize — no CREATE/INSERT/MERGE against the target relation.
 
-Per the memory pin: "scope each as per-instance one-off re-probe NOT a resource defect, don't churn (no single resource fix for responder padding)."
+The "purely offline / no warehouse" mental model maps to `dbt parse` (parses dbt_project.yml + manifests Jinja AST, no warehouse) or `dbt compile --no-introspect` (errors out if any introspective query is needed). **Bare `dbt compile` IS NOT purely offline.**
 
-**Per-instance broken-secondary slip — NO FIX-A on first occurrence.** Elevate to soft watch since the nested-aggregate-window form has a canonical anchor at iter1290 percent-of-total — if recurs the FIX-A should add a copy-attractive **"running total over per-group monthly aggregates"** worked card co-located with the iter1290 percent-of-total SUM(SUM(x)) OVER () canonical (only window-frame style differs: () vs ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW).
+**Material harm to the engineer**: an engineer who walks away believing "I can run `dbt compile` in CI with no Trino reachable" will get errors (relation-cache miss + introspective-query failure) the first time their project references a target table or uses an introspective macro. The hedge ("I don't have detailed information... see official docs") mitigates somewhat — the engineer is steered to docs — but the inferred answer ("likely pure offline... does NOT contact the warehouse") gives them a confidently-wrong fallback they're likely to act on before reading the docs.
 
-**NEW SOFT WATCH `iter1303-Q2 SUM(SUM(x)) OVER ROWS-frame running-total-over-grouped-data broken-secondary-worked-query`**: re-probe under varied "monthly aggregate + running total in one query" / "per-customer cumulative spend" / "running total over GROUP BY" framings 4-8 iters. If recurs with same window-arg-not-in-GROUP-BY error, escalate to LIGHT FIX-A.
+**Findability / content gap CONFIRMED**: per the teacher's own grep, resources have SCATTERED dbt-compile mentions but NO dedicated "dbt compile vs run vs build — what each does + does compile hit the warehouse" canonical. r28 L282 ("pure offline compile-time check, dbt compile in CI with no Trino connection does NOT enforce contracts") and r27 §ephemeral ("at dbt COMPILE time before any SQL reaches Trino") are the keyword-magnetic neighbors and **both carry the wrong framing** — they were the source of the responder's inferred-wrong answer.
 
----
+**LIGHT FIX-A IS WARRANTED — but it MUST teach the CORRECT semantics, NOT the wrong "purely offline" framing the teacher's flag proposes.** Recommended placement: a new canonical at r27 (dbt-ops cluster) and/or r28 with keyword anchors "what does dbt compile do / does dbt compile hit the warehouse / dbt compile vs run vs build / dbt compile is local / dbt compile in CI no warehouse." Required content:
 
-### Q3 — dbt deps / packages.yml workflow → 4.875 STRONG PASS
+| Command | Connects to warehouse? | Runs introspective queries? | Materializes? |
+|---|---|---|---|
+| `dbt parse` | No | No | No |
+| `dbt compile` | **Yes** | **Yes** (relation cache, run_query macros, contract introspection) | No |
+| `dbt run` | Yes | Yes | Yes (CREATE/INSERT/MERGE) |
+| `dbt build` | Yes | Yes | Yes + tests + seeds + snapshots |
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.0 | dbt deps as the install command; dbt_packages/ gitignored; packages.yml committed; CI runs dbt deps before dbt run — all VERIFIED |
-| Beginner clarity | 5.0 | node_modules analogy is exact + beginner-routable |
-| Practical applicability | 5.0 | Engineer has exact next steps: run dbt deps, gitignore dbt_packages/, fix CI to run dbt deps before dbt run/build |
-| Completeness | 4.5 | Missing: package-lock.yml (dbt 1.7+) commit guidance for reproducible builds — minor |
+Defang explicitly: "Common misconception — `dbt compile` is NOT a purely offline / no-warehouse step. It DOES connect to Trino + issues introspective SELECTs. If you want truly-offline parsing of your Jinja, use `dbt parse` (or `dbt compile --no-introspect` which errors on any introspective need)." Cite [docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile) verbatim.
 
-VERIFIED:
-- [docs.getdbt.com/reference/commands/deps](https://docs.getdbt.com/reference/commands/deps) — dbt deps pulls dependencies from packages.yml, installs to dbt_packages/, explicit command not auto-run by dbt run.
-- [docs.getdbt.com/docs/build/packages](https://docs.getdbt.com/docs/build/packages) — "by default, this directory is ignored by git to avoid duplicating code."
-- [docs.getdbt.com/faqs/Git/gitignore](https://docs.getdbt.com/faqs/Git/gitignore) — canonical `.gitignore` lists `dbt_packages/` + `target/` + `logs/`.
+**Also RECONCILE the existing wrong framing** at r28 L282 + L1062 + r27 §ephemeral. Memory pin `reference_dbt_contract_needs_live_connection.md` already corrected the related contract-enforcement claim ("dbt parse/compile with no warehouse won't catch violations") — that direction is correct, but the wrong "compile sends NOTHING to Trino" wording elsewhere in r28 / r27 needs to be brought into alignment ("compile DOES connect but does NOT materialize"). Per `feedback_reconcile_dont_append.md`: grep ALL resources for "compile sends nothing / pure offline compile / dbt compile does not hit the warehouse / dbt compile time before any SQL reaches Trino" and reconcile in-place; do not just add a new card.
 
-node_modules analogy is technically apt + beginner-clear: packages.yml is source-of-truth (committed, like package.json); dbt_packages/ is installed artifact (gitignored, like node_modules). CI ordering (dbt deps → dbt run/build) is the canonical pipeline shape.
+**NEW HARD WATCH `iter1304-Q3 dbt compile pure-offline myth — responder inferred-wrong from resource-source defect`**: re-probe in 2–4 iters under varied "what does dbt compile do" / "does dbt compile hit the warehouse" / "can I run dbt compile in CI with no Trino" framings. **WATCH CLOSES on first clean hit AFTER the FIX-A lands.** Critical to confirm the responder no longer infers "purely offline" from the (wrong) resource framing.
 
----
+No imported-prior, no over-warning, no broken-secondary alternative, no fabrication. The hedge is appropriate (resource gap is real); the INFERENCE is the defect, and the inference's origin is the resource framing — NOT a responder-only slip. Acc 2.5 (inferred answer factually wrong, hedge mitigates), Clar 4.0 (clear "I don't know, see official docs" — strong hedge form), Prac 3.0 (right next-step = consult docs, but the wrong inferred fallback is harmful), Compl 2.5 (no compile-vs-run-vs-build matrix, no introspective-query mention).
 
-### Q4 — Oracle `order_date + 30` → Trino → 4.875 STRONG PASS
+### Q4 — Oracle `SUBSTR(error_message, -50)` → Trino, returned nothing
 
-| Dimension | Score | Notes |
-|---|---|---|
-| Technical accuracy | 5.0 | Both `date_add('day', 30, order_date)` and `order_date + INTERVAL '30' DAY` correct; `date + 30` correctly flagged as type error |
-| Beginner clarity | 5.0 | Oracle implicit-coercion vs Trino explicit-required framing crisp |
-| Practical applicability | 5.0 | Two syntax options + use-case routing (date_add for variable N, INTERVAL for constant N) |
-| Completeness | 4.5 | Missing: subtraction form `date_add('day', -30, order_date)` / `current_date - INTERVAL '7' DAY` — minor |
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75)
 
-VERIFIED via [trino.io/docs/467/functions/datetime.html](https://trino.io/docs/467/functions/datetime.html):
-- `date + 30` is a type error in Trino 467 (no implicit `date + INTEGER → date + days` coercion).
-- `date_add(unit, value, timestamp)` canonical form: `date_add('day', 1, timestamp '2020-03-01 00:00:00')`.
-- Operator form: `date '2012-08-08' + interval '2' day` valid.
-- Use-case routing CORRECT: date_add accepts variable expression for value; INTERVAL literal is constant-only at parse time.
+Responder said: Trino 467 DOES support negative SUBSTR positions; Oracle ports directly (`substr('Quadratically', -5)` → `'cally'`); `SUBSTR(error_message, -50)` → Trino `substr(error_message, -50)` no rewrite needed; "returned nothing" is because strings shorter than 50 chars yield empty string (`substr('hi', -5) → ''`); no `right()` / `left()` in Trino, use `substr(s, -N)` for last N chars and `substr(s, 1, N)` for first N.
 
-Consistent with iter1162 / iter1289 / iter1300 Oracle date-arithmetic canonical.
+**Verification ([trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html))**:
+- `substr(string, start) → varchar` + `substr(string, start, length) → varchar` ✓
+- "A negative starting position is interpreted as being relative to the end of the string." ✓
+- No `left()` or `right()` documented in the Trino 467 string functions reference ✓ (matches the assumed-absence pattern that IS correct for these two — verified via prior iters' WebFetch)
+- "Returns empty string when the start position exceeds the string length (i.e., when `-50` is past the start of a 10-char string)" — consistent with documented behavior (out-of-range start → empty)
+
+Pin-perfect Oracle-to-Trino port. Defangs the assumed-absence trap (responder did NOT slip into "Trino doesn't support negative SUBSTR like Oracle" — POSITIVE COUNTER-SIGNAL to the assumed-absence imported-prior family with 9 documented instances starts_with / to_char / listagg / array_sum / format_number / migrate / LATERAL / MERGE-WHEN-MATCHED-AND / truncate-1arg). Diagnoses the empty-result mystery correctly (short-string case). Minor Clar shave (-0.25): could have mentioned `length(error_message)` as the one-line check the engineer can run to confirm short-string hypothesis. Minor Compl shave (-0.25): no `LPAD` / `RPAD` adjacency mention for the "always last 50 even when shorter" defensive-format pattern (`substr(LPAD(error_message, 50, ' '), -50)`) — niche but a natural follow-up. No imported-prior, no broken-secondary, no over-warning, no fabrication. **STRONG PASS.**
 
 ---
 
-## Pattern across iter1303 answers
+## Explicit answers to teacher's flagged questions
 
-### Hits
+### (1) Q3 — is the dbt compile inferred answer correct (offline, no warehouse)?
 
-- **iter1300-Q2 broadcast-threshold-direction FIX-A REACHED on 1st re-probe.** 5th consecutive 1st-re-probe FIX-A REACH in the recent streak (iter1302 MOD, iter1302 BETWEEN-CrossJoin, iter1272 bloom-CREATE-467, iter1290 ephemeral-basics, iter1303 broadcast-threshold). Soft watch CLOSES.
-- **Oracle PL/SQL → dbt + Trino topic crosses 4.5** with the 2-datapoint Q3+Q4 contribution (4.4974 → 4.5001 across 280 datapoints). First crossing of 4.5 — the topic now sits comfortably above threshold.
-- **No imported-prior slips, no over-warning folklore, no fabrication, no false-premise endorsement** across all 4 questions.
+**NO. The inferred answer is FACTUALLY WRONG.** Per official dbt docs:
+- [docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile): "dbt compile is similar to dbt run except that it doesn't materialize... they both require a data platform connection, run queries, and have an execute variable set to True."
+- [docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile): "dbt compile needs a data platform connection in order to gather the info it needs (including from introspective queries)."
 
-### Misses
+`dbt compile` DOES connect to Trino + DOES run introspective queries (relation cache, run_query macros, contract-introspection SELECT WHERE 1=0). It only differs from `dbt run` in NOT materializing the target relation. The "purely offline / no warehouse" behavior is `dbt parse` (or `dbt compile --no-introspect`, which errors out if any introspective query is needed) — NOT bare `dbt compile`.
 
-- **Q2 broken-secondary-worked-query slip** — 10th instance of the documented `feedback_responder_broken_secondary_alternative.md` family. Lead correct (syntax-identity), worked query has nested-aggregate-window analysis error (`SUM(amount) OVER(...)` with GROUP BY where `amount` is not in GROUP BY and not aggregated; correct is `SUM(SUM(amount)) OVER(...)`). Per the memory pin this is per-instance NOT a resource defect — Haiku synthesis ceiling when constructing copy-pasteable examples with GROUP BY + window combinations. **NO FIX-A on 1st occurrence**, soft watch only.
+### Is there a findability/content gap warranting a LIGHT FIX-A?
 
-### Carried watches (for teacher tracking)
+**YES — but the FIX-A MUST teach the CORRECT semantics, NOT the wrong "purely offline" framing the teacher's flag proposes.**
 
-- iter1302-Q3 `{{this}} - INTERVAL` placement broken-secondary (didn't recur this iter; carry forward, re-probe in 2-4 iters)
-- iter1299-Q3 this-guard
-- iter1298-Q2 metadata-tables
-- iter1297-Q4 false-premise (positive signals accumulated; iter1300-Q4 + iter1301-Q4 + iter1302-Q4 all defended correctly)
-- iter1296-Q1 / iter1296-Q3 / iter1295-Q2 / iter1294-Q4 / iter1290-Q3 / iter1289-Q2 / iter1289-Q4
-- **NEW** iter1303-Q2 nested-aggregate-window-over-grouped-data broken-secondary (re-probe 4-8 iters)
+- **Location**: new canonical at r27 (dbt-ops cluster) AND/OR r28, with the 4-row command-comparison matrix (parse / compile / run / build) and explicit defang of the "compile sends nothing" myth. Keyword anchors must include: "what does dbt compile do, does dbt compile hit the warehouse, dbt compile vs run, dbt compile vs build, dbt compile is local, dbt compile in CI no warehouse, dbt compile no-introspect."
+- **Reconcile existing wrong framing**: grep all resources for "compile sends nothing / pure offline compile / dbt compile does not hit the warehouse / dbt COMPILE time before any SQL reaches Trino" — likely hits at r28 L282 / r28 L1062 / r27 §ephemeral. Bring into alignment with the correct "compile connects + introspects + does NOT materialize" mechanism. Per `feedback_reconcile_dont_append.md`.
+- **Pin reference**: `reference_dbt_contract_needs_live_connection.md` already corrected the related contract claim ("dbt parse/compile with no warehouse won't catch violations") — that direction is correct. Extend the same correctness to the broader `dbt compile` mechanism.
 
-### Closed watches
+### (2) Q1 / Q2 / Q4 accuracy
 
-- **iter1300-Q2 r28 §8A.2 Pattern A raise-vs-lower threshold confusion + responder spill-causality flip** — broadcast-threshold-direction side of the watch CLOSES on 1st re-probe (Q1 this iter). Spill-causality side has not been re-probed yet; carry forward as `iter1300-Q2 spill-causality flip` for separate re-probe.
+- **Q1 (INTERSECT)**: All facts verified at [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html). INTERSECT supported, dedups by default, binds tighter than EXCEPT and UNION (verbatim quote). "SemiJoin internally" framing reasonable. **STRONG PASS.**
+- **Q2 (Iceberg defaults)**: Matches the `reference_trino_compression_codec_477.md` pin perfectly. format=PARQUET default, format_version=2 default, "Version 2 required for row level deletes" verbatim. `compression_codec` is NOT a 467 CREATE TABLE property (only catalog-level `iceberg.compression-codec`; per-table form is 477+). **STRONG PASS — pin-perfect.**
+- **Q4 (Oracle SUBSTR negative)**: Negative SUBSTR start verified at [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html). No left()/right() in Trino 467 (matches verified-prior-iters assumed-absence-IS-correct). Empty-string-on-short-input diagnosis correct. POSITIVE COUNTER-SIGNAL to the assumed-absence imported-prior family. **STRONG PASS.**
 
----
+### (3) New watches
 
-## Specific guidance to teacher
+- **NEW HARD WATCH `iter1304-Q3 dbt compile pure-offline myth — responder inferred-wrong from resource-source defect`**: re-probe in 2–4 iters under varied "what does dbt compile do" / "does dbt compile hit the warehouse" / "can I run dbt compile in CI with no Trino" framings. **WATCH CLOSES on first clean hit AFTER the LIGHT FIX-A lands.** Critical resource-source defect — not a responder slip; the wrong framing at r28 L282 / r27 §ephemeral / r28 L1062 is what the responder extrapolated from.
 
-**No FIX-A recommended this iter.**
-
-**Q1 (4.75)** — FIX-A from iter1300 landed cleanly; do NOT add more direction-anchors to r28 §8A.2 (over-saturation risk per `feedback_new_card_over_attracts_adjacent.md`). The single iter1300 FIX-A is sufficient; the responder now correctly says raise-worsens.
-
-**Q2 (3.75)** — Resource-source check NEEDED but expected CLEAN. The lead syntax answer is correct (resources teach window-frame syntax accurately). The worked-query bug is a Haiku synthesis ceiling on GROUP BY + window combinations, NOT a resource defect. iter1290 percent-of-total `SUM(SUM(mrr)) OVER ()` is the canonical anchor for nested-aggregate window — keyword-magnet "running total over monthly aggregate" may not route there cleanly since iter1290 used the unframed `OVER ()` form not the ROWS-frame form. If iter1303-Q2 watch recurs in 4-8 iters, the LIGHT FIX-A should add a co-located ROWS-frame variant: **"running total over per-customer monthly aggregate: `SUM(SUM(amount)) OVER (PARTITION BY customer_id ORDER BY month_start ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`"** near the iter1290 percent-of-total canonical, with a one-liner "for GROUP BY + window: arg of OVER must be aggregate or group key, wrap in outer aggregate" anchor.
-
-**Q3 (4.875)** — No action. Minor opportunity: add a one-line `package-lock.yml` reference to whatever dbt-workflow card exists (commit lock + packages.yml, gitignore dbt_packages/). Non-load-bearing.
-
-**Q4 (4.875)** — No action. The Oracle date-arithmetic canonical is well-anchored across iter1162 / iter1289 / iter1300 / iter1303.
+- **Carry forward un-probed**: iter1300-Q2 spill-causality (threshold side closed) / iter1299-Q3 this-guard / iter1298-Q2 metadata-tables / iter1302-Q3 interval-placement / iter1296-Q3 singular-test-omission / iter1295-Q2 / iter1294-Q4 / iter1290-Q3 / iter1289-Q2 / iter1289-Q4.
 
 ---
 
-## Status
+## Topic table updates
 
-- Iter score **4.5625 STRONG PASS**.
-- All rubric topics PASSED with margin.
-- 5 consecutive 1st-re-probe FIX-A REACHES streak intact.
-- 1 new soft watch (Q2 nested-aggregate-window broken-secondary, family-typed per-instance slip).
-- Pass-loop continues. No teacher action required this iter.
+| Topic | Prior avg / N | This iter score | New avg / N | Delta |
+|---|---|---|---|---|
+| SQL query best practices for OLAP | 4.5921 / 312 | 4.875 (Q1) | 4.5929 / 313 | +0.0008 |
+| Iceberg partition design for SaaS | 4.4156 / 72 | 4.875 (Q2) | 4.4219 / 73 | +0.0063 |
+| Improving complex SQL perf on Trino with dbt | 4.4319 / 100 | 3.0 (Q3) | 4.4177 / 101 | -0.0142 |
+| Oracle PL/SQL → dbt + Trino migration | 4.5001 / 280 | 4.875 (Q4) | 4.5014 / 281 | +0.0013 |
+
+All topics remain PASSED. Q3 drag (-0.0142) is meaningful but the topic margin (4.4177 vs 3.5 threshold = +0.9177) absorbs it cleanly. **Continuous PASS loop continues at iter1304 — overall iter 4.40625.**
