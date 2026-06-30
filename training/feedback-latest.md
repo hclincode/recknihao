@@ -1,104 +1,131 @@
-# Judge Feedback — Iteration 1287
+# Judge Feedback — Iteration 1288
 
-**Overall**: 4 questions, average **4.797 STRONG PASS NO-OP** (Q1 5.0 STRONG / Q2 4.875 STRONG / Q3 4.9375 STRONG / Q4 4.6875 STRONG).
+**Overall**: 4 questions, average **4.203 PASS WITH Q1 FAIL** (Q1 **2.0 FAIL** / Q2 5.0 STRONG / Q3 4.8125 STRONG / Q4 5.0 STRONG).
 
-**Headline**: All four reach STRONG PASS, no FIX-A needed. **iter1286 truncate-2-arg L1638 MANDATORY FIX-A REACHED + WATCH CLOSES on 1st re-probe** — Q1 RE-PROBE of Oracle TRUNC(amount,2) port returns the corrected canonical exactly: "Trino 467 truncate() is 1-ARG ONLY, NO 2-arg overload (lands ~471+), use `truncate(x*power(10,d))/power(10,d)`, FLOOR is wrong for negatives (rounds toward -inf), round() is HALF_UP not truncation." Zero recurrence of the 2-arg-available claim, fully reverses iter1286-Q4 mechanism. iter1286-Q4 missed-sibling-reconcile family recovery confirmed. Q4 cleanly handles the engineer's faulty Oracle premise ("Oracle skipped NULLs") — engineer is wrong, Oracle ALSO returns NULL on any NULL arg; PostgreSQL is the actual outlier; cross-engine matrix correct.
+**Headline**: Q1 (plain `SELECT COUNT(*)` on Iceberg) is a **HARD FAIL — responder INVERTED the load-bearing fact** (claimed Trino scans files; reality: it sums manifest `record_count` and is metadata-only/near-instant) AND recommended the **WRONG TOOL** (`approx_distinct` is HyperLogLog distinct-value count, NOT a row count) with broken syntax (`approx_distinct(*)` admitted not working; `approx_distinct(ROW(...))` would count distinct ROW-tuple combinations, still not rows). The 2-3 min slowness on the engineer's table is almost certainly **position-delete files from MoR MERGE/DELETE accumulating** (Trino issue #13092, #17114: "extremely/unusably slow"), which IS in the resources (r28 §297-323 has the diagnostic + EXECUTE optimize fix) but is NOT reachable from a plain "is COUNT(\*) metadata-only / why is mine slow" question. **MANDATORY FIX-A** — see §Q1 below. Q2/Q3/Q4 reach STRONG cleanly and match the pinned references exactly.
 
 | Q | Topic | Score | Status | Verdict |
 |---|---|---|---|---|
-| Q1 Oracle TRUNC(x,2) chop-without-rounding → Trino (RE-PROBE iter1286 L1638) | Oracle PL/SQL → dbt + Trino SQL migration | 5.0 | STRONG PASS | 1-ARG ONLY + scale-by-power(10,d) + 2-arg-is-~471+ + FLOOR-toward-neg-inf trap + round()-is-half-up all correct; iter1286 L1638 FIX-A reach test FULLY CLOSED |
-| Q2 daily-active-users date-spine gap-fill with COALESCE zeros | Analytical query patterns on Iceberg+Trino | 4.875 | STRONG PASS | sequence(date,date,INTERVAL '1' DAY) + UNNEST AS d(day) + LEFT JOIN + COALESCE(metric,0) all correct; both bounds inclusive correct; no-generate_series-in-Trino correct |
-| Q3 accepted_values + severity warn (status validation) | dbt model contracts / dbt tests cluster | 4.9375 | STRONG PASS | Syntax + values + config.severity warn/error semantics + store_failures audit schema + NULL-passes-accepted_values caveat all correct |
-| Q4 Oracle GREATEST/LEAST NULL → Trino (engineer's Oracle-skipped-NULLs premise wrong) | SQL query best practices for OLAP | 4.6875 | STRONG PASS | Engineer's premise CORRECTLY REFUTED — Oracle ALSO returns NULL on any NULL; Postgres is the outlier; cross-engine matrix correct; COALESCE-sentinel workaround sound (minor: floor=0 only safe for non-negative columns, not explicitly flagged) |
+| Q1 COUNT(\*) on Iceberg metadata-only? | Query performance basics | **2.0** | **FAIL** | Inverted metadata-only fact + recommended approx_distinct (wrong tool: HyperLogLog distinct, not row count) + missed position-delete-file diagnosis + missed EXECUTE optimize fix. FINDABILITY/CONTENT GAP confirmed |
+| Q2 TRY_CAST on dirty VARCHAR | SQL query best practices for OLAP | 5.0 | STRONG PASS | TRY_CAST + try() both correct, NULL-on-failure correct, distinction explained |
+| Q3 dbt model contracts compile vs build | dbt model contracts | 4.8125 | STRONG PASS | Matches pin reference_dbt_contract_needs_live_connection (build/run-time + warehouse-interactive + SELECT…WHERE 1=0); dbt-trino only not_null write-enforced correct |
+| Q4 Oracle NULL ordering → Trino | Oracle PL/SQL → dbt + Trino SQL migration | 5.0 | STRONG PASS | Matches pin reference_trino_null_ordering_default; Oracle ASC=LAST/DESC=FIRST + Trino LAST-always correct; OVER-clause caveat correct |
 
 ---
 
-## Q1 — Oracle TRUNC(amount, 2) port (RE-PROBE iter1286 FIX-A) — 5.0 STRONG PASS
+## Q1 — COUNT(*) on Iceberg metadata-only? (2.0 FAIL)
+
+**Acc 1.5 / Clar 3.0 / Prac 1.5 / Compl 2.0.**
+
+### Three load-bearing facts the responder got wrong
+
+**Fact 1 (INVERTED): plain unqualified `SELECT COUNT(*)` on a Trino-Iceberg table IS metadata-only / near-instant.** Verified via WebFetch [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): "Since Iceberg stores the paths to data files in the metadata files, it only consults the underlying file system for files that must be read." Each Iceberg manifest entry records `record_count` per data file; Trino sums those without opening Parquet. Resources confirm: **r18 L20 myth-row reads VERBATIM** "`SELECT COUNT(*) FROM iceberg.x.y` reads the whole table → **NO — on Iceberg, COUNT(\*) is a METADATA query.** Iceberg manifests track `record_count` per file. Trino 467's Iceberg connector sums the per-file record counts from manifests — no Parquet files are opened. Verify by running `EXPLAIN ANALYZE SELECT COUNT(*) FROM iceberg.x.y` and noting `physicalInputDataSize = 0B` for the TableScan." Responder explicitly said the OPPOSITE: "your 2-3 min observation suggests Trino is NOT reading metadata alone — it's scanning files."
+
+**Fact 2 (MISSED ENTIRELY): the actual cause of slow `COUNT(*)` on this prod stack is position-delete-file accumulation from MoR MERGE/DELETE.** Verified via [GitHub trinodb/trino #13092](https://github.com/trinodb/trino/issues/13092) ("Iceberg scanning with Delete Files is extremely/unusably slow") and [#17114](https://github.com/trinodb/trino/issues/17114) ("Read Iceberg v2 table with many delete file is very slowly"): "DeleteFilter will re-open and re-read the split's delete files for each page, which with large delete files can lead to a query taking hours." Resource **r28 §294-327 has the exact diagnostic** (`$files` GROUP BY content with 0=DATA / 1=POSITION_DELETES / 2=EQUALITY_DELETES, interpret-output table, fix = EXECUTE optimize with raised file_size_threshold) but the responder never reached it because the diagnostic is framed for "merge model getting slower" not "COUNT(*) slow." This is a 400M-row table with a 2-3 min count — exactly the position-delete-files-everywhere shape on MoR tables maintained by dbt-trino MERGE.
+
+**Fact 3 (WRONG TOOL): `approx_distinct` is the wrong recommendation for an approximate ROW count.** Verified via [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): `approx_distinct(x)` returns "the approximate number of **distinct input values**" using HyperLogLog with 2.3% standard error. It is a distinct-value cardinality estimator, not a row counter. Responder's recommendation `approx_distinct(ROW(col1,col2,...))` would count distinct row-tuple **combinations** — close to row count ONLY if every row is unique, and would silently undercount on tables with duplicate combinations. Responder even admitted `approx_distinct(*)` doesn't work, then offered the ROW-wrap form anyway. **And separately** — engineer doesn't NEED an approximate count: plain `COUNT(*)` is already metadata-fast on a clean table; if delete files are the cause, the fix is `EXECUTE optimize`, after which the exact count is back to <1s.
+
+### What the correct answer should have looked like
+
+> "Plain `SELECT COUNT(*) FROM iceberg.<schema>.<table>` IS metadata-only on Trino 467 — Iceberg manifests store per-data-file `record_count`, Trino sums them without opening any Parquet file. Verify with `EXPLAIN ANALYZE` and check `physicalInputDataSize = 0B` on the TableScan.
+>
+> Your 2-3 min count on 400M rows means metadata-only is NOT firing. The almost-certain cause on this prod stack (dbt-trino MoR Iceberg) is **accumulated position-delete files**: each MERGE/DELETE writes one position-delete file per affected data file; once they pile up, Trino must apply deletes for an accurate count.
+>
+> **Diagnose** (verified at r28 §294 + GitHub trinodb/trino #17114):
+> ```sql
+> SELECT
+>   CASE content WHEN 0 THEN 'DATA' WHEN 1 THEN 'POSITION_DELETES' WHEN 2 THEN 'EQUALITY_DELETES' END AS file_type,
+>   COUNT(*) AS file_count, ROUND(SUM(file_size_in_bytes)/1e6,2) AS total_mb
+> FROM iceberg.analytics."events$files" GROUP BY content;
+> ```
+> If POSITION_DELETES file_count > 10% of DATA file_count → that's the cause.
+>
+> **Fix** (Trino-only, no Spark needed): `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '1GB')` — raise threshold above your data file sizes to force-rewrite delete-bearing data files; `optimize` APPLIES + DROPS position-deletes for every data file it rewrites (PR #12617/#24086). Follow with `EXECUTE expire_snapshots(retention_threshold => '7d')` to free MinIO bytes.
+>
+> **DO NOT use `approx_distinct` for an approximate row count** — it's HyperLogLog distinct-value cardinality (not rows). After you fix the delete files, exact `COUNT(*)` is back to metadata-fast (sub-second on 400M rows)."
+
+### FIX-A — MANDATORY (HIGH PRIORITY)
+
+**Findability/content gap confirmed via grep.** The building blocks exist but are not keyword-reachable from a plain "is COUNT(\*) metadata-only / why is mine slow / how to fix" question:
+
+| Existing location | What it covers | What it MISSES |
+|---|---|---|
+| r18 L20 (myth-list row) | "COUNT(*) is a METADATA query…manifests track record_count…sums per-file counts" — CORRECT primary fact | (a) Buried inside a myth-list row in a triage doc — not findable from "how to count rows fast on Iceberg" keyword path. (b) Caveat at end says "if position-delete files…still cheap; still no data-file reads" — **CONTRADICTS** GitHub #13092/#17114 reality where delete files DO slow COUNT(*) dramatically. **MUST be reconciled.** |
+| r18 L65-66 | Code-comment "-- bare table count (Iceberg metadata-only, should be <1s)" inside Check 2 of the regression workflow | Not a standalone canonical; reachable only when oncall-debugging an already-slow query |
+| r10 §1008-1023 | Metadata-only `COUNT(*) GROUP BY <partition col>` for billing; identity-vs-bucket-vs-truncate matrix | Framed for GROUP BY billing, not plain unqualified COUNT(\*); does state in passing "Total COUNT(*) (no GROUP BY) is always metadata-only regardless of transform" but it's a side note |
+| r28 §294-327 | Position-delete-file diagnostic + EXECUTE optimize fix | Framed for "dbt merge model getting slower," not for "plain COUNT(\*) slow" — different question, no keyword bridge |
+
+**Recommended FIX-A actions (teacher should pick one anchor location + cross-refs):**
+
+1. **PRIMARY: add a leading findable canonical** titled something like "**COUNT(\*) on Iceberg is metadata-only / near-instant on a clean table — if it's slow it's POSITION-DELETE files (NOT a tool to swap)**". Best anchor candidates (in order of preference):
+   - **r18 — extend the existing "Cheap queries on Iceberg" callout** (referenced by L20 myth row) into a proper standalone H3 section that opens with the metadata-only fact, then routes to r28 §294 for the slow-due-to-delete-files diagnostic. This is the most-searched location and the myth row already points to it.
+   - **r17 (Iceberg maintenance) — add a "Why is COUNT(\*) slow on this table" leading section** that mirrors r28's diagnostic but is keyword-anchored to COUNT-not-MERGE.
+   - **r10 §1008 — extend with an explicit "plain unqualified COUNT(\*) is metadata-only too" leading clause** before the GROUP BY billing material.
+
+2. **RECONCILE r18 L20 caveat** that currently says position-delete files keep COUNT(*) "still cheap; still no data-file reads." Per GitHub trinodb/trino #13092 + #17114, position-delete files DO slow COUNT(*) dramatically (the engineer's 400M-row 2-3 min case is the textbook example). Rewrite to: "if the table has format-v2 with **many** position-delete files (typical of busy MoR MERGE pipelines), COUNT(*) MUST apply the deletes and degrades from <1s to minutes — diagnose via $files GROUP BY content, fix via EXECUTE optimize with raised file_size_threshold; see r28 §294."
+
+3. **DEFANG approx_distinct as a row-count tool.** Add a "wrong-tool" DO-NOT-WRITE row to r23 §approx_distinct or wherever the function is taught: "`approx_distinct` is HyperLogLog distinct-VALUE count, not a row count. For an approximate row count, plain `COUNT(*)` is already metadata-fast on Iceberg — fix the delete files instead of swapping the function."
+
+**Suggested watch**: re-probe within 4-6 iters under various COUNT-slow framings ("COUNT(*) is slow on my Iceberg table…", "is COUNT(*) metadata-only on Iceberg…", "do I need approx_distinct for fast counts on Iceberg…", "what's the fastest way to count rows in a 1B-row Iceberg table") to confirm the new canonical reaches.
+
+---
+
+## Q2 — TRY_CAST on dirty VARCHAR (5.0 STRONG PASS)
 
 **Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0.**
 
-**iter1286-Q4 missed-sibling-reconcile (L1638 mapping-row reversed iter1286) REACHES CLEANLY ON 1ST RE-PROBE — WATCH CLOSES.**
+Verified via WebFetch [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html):
+- **`try_cast(value AS type)` exists** — verbatim signature; verbatim "Like cast(), but returns null if the cast fails."
+- **`try(expression)` exists** — verbatim [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html): handles "division by zero, invalid cast or function argument, and numeric value out of range" — returns NULL.
 
-Three load-bearing facts source-verified this iter via WebFetch of [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html):
-1. **`truncate(x)` is 1-ARG ONLY on 467** — verbatim signature `truncate(x) → double / Returns x rounded to integer by dropping digits after decimal point.` — NO 2-arg `truncate(x, d)` overload listed. Matches pinned `reference_trino_truncate_1arg_only`.
-2. **Correct toward-zero negative-safe form** — `truncate(amount * power(10, 2)) / power(10, 2)`:
-   - 19.999 × 100 = 1999.9 → truncate → 1999 → /100 → 19.99 (correct chop)
-   - -19.999 × 100 = -1999.9 → truncate → -1999 (toward-zero, NOT -2000 toward -inf) → /100 → -19.99 (correct toward-zero behavior, matches Oracle TRUNC)
-3. **FLOOR is WRONG for negatives** — `floor(-19.999 * 100) / 100 = floor(-1999.9)/100 = -2000/100 = -20.00`, which is FALSE for "truncate" (Oracle TRUNC returns -19.99). FLOOR rounds toward -∞, truncate rounds toward zero. Responder explicitly defangs FLOOR — important Oracle-migration trap.
-4. **`round(amount, 2)` is HALF_UP not truncation** — 19.999 → 20.00 (vs truncate's 19.99). Responder explicitly defangs.
-
-iter1286 L1638 mapping-table row reconcile to "1-ARG ONLY + scale-by-power(10,d) form" successfully reaches: responder no longer claims 2-arg form is available on 467, instead leads with the power(10,d) scale-form + correctly gates 2-arg as ~471+. Pattern shape matches iter1285 / iter1271 / iter1267 / iter1232 / iter1216 / iter1198 / iter1221 — every recent MANDATORY FIX-A has reached cleanly on 1st-re-probe (17th consecutive). **iter1286-Q4 watch CLOSES.**
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r27 §4.4C.
-
----
-
-## Q2 — Daily-active-users date-spine gap-fill (4.875 STRONG PASS)
-
-**Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.**
-
-Date-spine gap-fill pattern is the canonical Trino 467 form. Verified facts via WebFetch of [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html):
-- **`sequence(start, stop, step)` for dates** — signature documented with `step` as INTERVAL DAY TO SECOND or INTERVAL YEAR TO MONTH. `sequence(DATE '2025-06-01', DATE '2025-06-30', INTERVAL '1' DAY)` returns an array of DATE values.
-- **Both bounds inclusive** — Trino sequence semantics; responder correctly notes this (matches the Postgres `generate_series(start, stop, step)` inclusive-both behavior).
-- **UNNEST flattens the array into rows** — `UNNEST(sequence(...)) AS d(day)` produces one row per date, the standard Trino spine pattern.
-- **No `generate_series` in Trino** — correct (Postgres-only); responder pre-empts the common port mistake.
-
-Gap-fill pattern is textbook: spine LEFT JOIN sparse_data ON spine.day = sparse_data.day → COALESCE(metric, 0) replaces missing-day NULLs with 0. Engineer can paste-and-run.
-
-Minor Compl shave (-0.5): didn't explicitly walk through the per-account variation (CROSS JOIN accounts × dates spine for per-account zero-fill) — important real-world extension since the engineer's framing is "daily-active-users PER ACCOUNT." Engineer would need to figure that out — minor recall ceiling not a defect.
-
-Minor Clar shave (-0.25): could explain WHY LEFT JOIN (spine drives all dates so missing-day rows appear with NULL on the right side, COALESCE then maps NULL → 0) more pedagogically for the OLAP novice.
+Responder's TRY_CAST(raw_account_id AS BIGINT) → NULL on 'N/A' is exactly correct. The TRY_CAST vs try() distinction (cast-only vs any-expression) is precisely how the docs frame it. Engineer can paste-and-run.
 
 No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Q3 — accepted_values test + warn severity (4.9375 STRONG PASS)
+## Q3 — dbt model contracts: compile vs build, live connection? (4.8125 STRONG PASS)
 
-**Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.**
+**Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.75.**
 
-All four load-bearing facts source-verified via WebFetch of [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests):
-1. **accepted_values syntax** — verbatim `data_tests: - accepted_values: { values: [...] }` schema.yml shape; newer dbt 1.10.5+ uses nested `arguments:` form but both work, responder uses the legacy-flat form which is the most common.
-2. **severity warn vs error** — `config: { severity: warn }` correctly framed: `error` (default) = halt build / non-zero exit / downstream skipped; `warn` = log + continue. Engineer's stated need ("warn not fail") solved directly.
-3. **store_failures: true → `<schema>_dbt_test__audit`** — correct: failing rows captured to an audit schema for later investigation; standard dbt feature.
-4. **NULL-passes-accepted_values caveat** — verbatim from docs: "validates that all of the **non-null** values in a column are present in a supplied list of `values`." Responder correctly explains 3-valued logic: `NULL NOT IN ('active','inactive','pending')` evaluates UNKNOWN (not TRUE), NULL rows excluded from failing set → silent pass. Pair with `not_null` test if NULL must also fail. This is the iter1218 FIX-A canonical reaching cleanly for the Nth consecutive iteration.
+**Matches pin `reference_dbt_contract_needs_live_connection` exactly.** Verified via WebFetch [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract): "When you `dbt run` your model, _before_ dbt has materialized it as a table in the database, you will see this error" — dbt issues a discovery query against the warehouse (commonly the SELECT…WHERE 1=0 introspection pattern responder cited) to read the model's actual result-set column types. Pure offline `dbt parse`/`dbt compile` with no warehouse connection does NOT catch contract violations.
 
-Minor Compl shave (-0.25): didn't explicitly show the paired YAML (`- not_null` + `- accepted_values: ...`) for the engineer's "silent corruption" framing — though the caveat acknowledges the trap. The engineer might just enable warn severity and still have silent NULL corruption.
+Responder's three load-bearing claims all hold:
+1. **"Build/run-time, NOT pure offline compile"** — correct; CI must run `dbt build` against reachable Trino.
+2. **Introspection SELECT…WHERE 1=0** — correct mechanism (zero-row probe to read column types from warehouse metadata).
+3. **dbt-trino: only `not_null` is meaningfully write-enforced** — confirmed via WebSearch of dbt-trino constraint docs: "Currently, only constraints with type as not_null are supported"; primary_key/unique/foreign_key/check are definable as metadata but NOT write-enforced on Trino. Responder correctly recommends pairing with dbt `tests` (unique/relationships generic tests).
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r27 §6.7A.
+YAML example with `contract.enforced: true` + `columns: name + data_type` is the canonical dbt schema.yml shape.
+
+Minor Compl shave (-0.25): could explicitly note that **`data_type` matching is base-type / not granular** (e.g., `VARCHAR` matches `VARCHAR(256)` vs `VARCHAR(257)` — both are `varchar` to dbt's type alias system). Non-load-bearing for the engineer's question framing.
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
-## Q4 — Oracle GREATEST/LEAST NULL → Trino (engineer's premise wrong) — 4.6875 STRONG PASS
+## Q4 — Oracle NULL ordering → Trino (5.0 STRONG PASS)
 
-**Acc 4.75 / Clar 4.75 / Prac 4.75 / Compl 4.5.**
+**Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0.**
 
-**Engineer's faulty premise CORRECTLY REFUTED** — this is the critical evaluation point. Engineer claimed "Oracle GREATEST skipped NULLs, returned max of non-null." Responder explicitly states: "Trino (and **Oracle**, MySQL, BigQuery) return NULL if ANY argument is NULL. PostgreSQL is the OUTLIER — it ignores NULLs." Engineer is WRONG; Oracle ALSO returns NULL on any NULL.
+**Matches pin `reference_trino_null_ordering_default` exactly.** Verified via WebFetch [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): verbatim "The default null ordering is `NULLS LAST`, regardless of the ordering direction." Trino puts NULLs at the bottom for BOTH ASC and DESC by default — NOT the Oracle/NULL-as-largest rule.
 
-**VERIFIED via WebFetch of [database.guide GREATEST in Oracle](https://database.guide/greatest-function-in-oracle/)**: verbatim "If any argument is null, the result is null" with worked example `SELECT GREATEST(null, 2), GREATEST(1, null) FROM DUAL;` both returning null. **VERIFIED via WebSearch of PostgreSQL conditional-expression docs**: "NULL values in the argument list are ignored. The result will be NULL only if all the expressions evaluate to NULL." So:
-- **Trino, Oracle, MySQL, BigQuery, SQL Server**: GREATEST/LEAST returns NULL if ANY arg is NULL (the SQL:2003-standard behavior).
-- **PostgreSQL**: outlier — ignores NULLs.
+Oracle behavior verified via WebSearch (multiple Oracle reference sources): "If the null ordering is not specified, then the handling of the null values is NULLS LAST if the sort is ASC, NULLS FIRST if the sort is DESC" — i.e., Oracle treats NULLs as the LARGEST values, so ASC puts them last and DESC puts them first. Engineer's premise is correct.
 
-Engineer likely confused row-wise GREATEST/LEAST with the MAX aggregate, which DOES skip NULLs in all engines. Responder doesn't explicitly call out this likely-source-of-confusion (would have lifted Compl), but correctly refutes the bare premise.
+So responder's three load-bearing claims all hold:
+1. **Trino default: NULLS LAST for both ASC and DESC** — verified.
+2. **Oracle default: ASC=NULLS LAST, DESC=NULLS FIRST (NULL-as-largest)** — verified.
+3. **Migration fix**: explicit `NULLS FIRST`/`NULLS LAST` on every migrated ORDER BY; for Oracle-matching DESC behavior write `ORDER BY priority DESC NULLS FIRST`; **also apply inside window OVER clauses** — important catch (window-frame NULL ordering would silently differ otherwise).
 
-**COALESCE-sentinel workaround SOUND**: `greatest(coalesce(a,0), coalesce(b,0), coalesce(c,0))` — floor sentinel for GREATEST; `least(coalesce(a,9e18), ...)` — ceiling sentinel for LEAST. Pattern matches r23 §3.1I + iter1226 canonical exactly.
+Side-by-side comparison table is the most useful framing for the Oracle-migration engineer.
 
-**Minor Acc shave (-0.25): floor=0 sentinel is only safe for guaranteed-non-negative columns**. For the engineer's pricing scenario (tier prices, presumably ≥ 0), 0-floor is fine. But for columns where real values CAN be negative (e.g., profit margins, temperature deltas, signed offsets), 0 sentinel would silently win over true negative values and return wrong answer. Responder's framing uses "floor sentinel" / "ceiling sentinel" terminology which IMPLIES outside-domain — but a beginner copying `coalesce(a, 0)` without thinking about whether their column is non-negative gets a silent bug. Should explicitly state: "Choose sentinel BELOW (GREATEST) or ABOVE (LEAST) any possible real value — for non-negative columns 0/9e18 fine; for signed values use -9e18/9e18 or a domain-specific cap."
-
-**Minor Compl shave (-0.5): didn't surface the row-wise-vs-aggregate confusion source** (engineer's likely mental model bug). Brief one-line "you may be thinking of MAX() aggregate, which DOES skip NULLs row-wise vs GREATEST() compares values across columns within a row" would have been pedagogically valuable.
-
-CASE-expression alternative for 2-column case noted. Cross-engine reference matrix (Trino+Oracle+MySQL+BigQuery=NULL-on-any-NULL, Postgres=skip) is the most useful framing for an Oracle-migration engineer.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r23 §3.1I.
-
-This RE-PROBE matches iter1226 Q4 (also GREATEST/LEAST Oracle-premise correction) which scored 5.0. The 0.3125 delta is the sentinel-must-be-outside-domain caveat — non-load-bearing for the engineer's pricing scenario, recall-ceiling for general case.
+No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
 ---
 
 ## Watches / FIX-A actions
 
-### CLOSED
-- **iter1286-Q4 truncate-2-arg L1638 reconcile FIX-A reach test**: Q1 above demonstrates the L1638 mapping-row reverse from "Trino 467 HAS 2-arg `truncate(x, d)` overload" to "1-arg ONLY + scale-by-power(10,d) form" REACHED. Responder no longer recommends 2-arg form. **CLOSED on 1st re-probe (17th consecutive 1st-re-probe-close).**
+### NEW
+- **iter1288-Q1 MANDATORY FIX-A**: add a findable canonical for "plain `SELECT COUNT(*)` on Iceberg = metadata-only / near-instant; if slow → diagnose position-delete files via `$files` GROUP BY content, fix via `EXECUTE optimize(file_size_threshold => '1GB')`; `approx_distinct` is HyperLogLog distinct-value cardinality, NOT a row-count tool". Best anchor: extend r18 "Cheap queries on Iceberg" callout into standalone H3 + reconcile L20 myth-row caveat ("still cheap with delete files" is FALSE per GitHub #13092/#17114) + cross-ref r28 §294 diagnostic + defang approx_distinct as a row-counter in r23. WATCH: re-probe within 4-6 iters under various COUNT-slow framings.
 
 ### CARRY (existing, not re-probed this iter)
 - iter1285-Q2 timestamp-tz tagging pattern (re-probe within 4-6 iters).
@@ -107,27 +134,30 @@ This RE-PROBE matches iter1226 Q4 (also GREATEST/LEAST Oracle-premise correction
 - iter1284-Q3 delete+insert Hive-non-ACID framing (re-probe within 4-8 iters).
 - iter1278-Q1 Scheduled-vs-CPU as I/O-wait imprecision (route to Blocked time explicitly) — periodic SOFT.
 
-### NEW
-- **None this iter.** All four answers reached without exposing new defects. Q4 sentinel-outside-domain caveat is recall-ceiling not resource-sourced (r23 §3.1I shows the pattern correctly; engineer's pricing context defaults non-negative so sentinel 0 is fine in practice).
+### CLOSED
+- None this iter (iter1287's truncate-2-arg L1638 watch already closed last iter).
 
 ---
 
 ## Topic routing
 
-- Q1 (Oracle TRUNC port) → **Oracle PL/SQL → dbt + Trino SQL migration** (Oracle function port to Trino dialect; same routing as iter1286-Q4).
-- Q2 (date-spine gap-fill) → **Analytical query patterns on Iceberg+Trino** (operational time-series gap-fill pattern).
-- Q3 (accepted_values + warn) → **dbt model contracts** cluster (data-integrity declaration / dbt tests subfamily, same routing as iter1218/1221/1229).
-- Q4 (Oracle GREATEST/LEAST → Trino) → **SQL query best practices for OLAP** (cross-engine SQL dialect / function-port pattern, same routing as iter1226 Q4).
+- Q1 (COUNT(\*) metadata-only on Iceberg) → **Query performance basics: partitioning, indexing strategy for analytics** (COUNT performance theory; partition + delete-file impact on scan cost). Also touches **Iceberg table maintenance** (EXECUTE optimize fix) — primary routing is performance.
+- Q2 (TRY_CAST) → **SQL query best practices for OLAP** (function reference / type-safe predicates).
+- Q3 (dbt model contracts) → **dbt model contracts** (canonical row).
+- Q4 (Oracle NULL ordering port) → **Oracle PL/SQL → dbt + Trino SQL migration** (cross-engine SQL dialect migration).
 
-All four touched topics already PASSED with margin >0.9; iter1287 lift contributes small but positive to each.
+Q1 FAIL (2.0) drags Query-performance-basics row arithmetic; updated below. Q2/Q3/Q4 lift their rows by +0.001 to +0.017.
 
 ---
 
 ## Sources
 
-- [trino.io/docs/467/functions/math.html](https://trino.io/docs/467/functions/math.html) — truncate() 1-arg-only signature verified
-- [trino.io/docs/467/functions/array.html](https://trino.io/docs/467/functions/array.html) — sequence() date/timestamp/integer signatures
-- [docs.getdbt.com/reference/resource-properties/data-tests](https://docs.getdbt.com/reference/resource-properties/data-tests) — accepted_values syntax + NULL-non-null caveat + severity
-- [database.guide GREATEST in Oracle](https://database.guide/greatest-function-in-oracle/) — Oracle GREATEST returns NULL if any arg NULL
-- [PostgreSQL Conditional Expressions](https://www.postgresql.org/docs/current/functions-conditional.html) — Postgres GREATEST/LEAST skip NULLs
-- [Trino comparison.html (GREATEST/LEAST NULL semantics)](https://trino.io/docs/467/functions/comparison.html) — Trino returns NULL if any arg NULL
+- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — Iceberg metadata-driven file-system access verified
+- [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) — try_cast signature + null-on-failure verified
+- [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) — try(expression) general-error-suppression signature verified
+- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — Trino NULLS LAST default for both ASC/DESC verified
+- [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) — contract enforcement is build/run-time + warehouse-interactive
+- [GitHub trinodb/trino #13092](https://github.com/trinodb/trino/issues/13092) — Iceberg position-delete file scans extremely slow
+- [GitHub trinodb/trino #17114](https://github.com/trinodb/trino/issues/17114) — Read Iceberg v2 with many delete files is very slow
+- Oracle ORDER BY docs (LearnSQL.com / SQL Jana / sqlines.com) — Oracle ASC=NULLS LAST / DESC=NULLS FIRST default verified
+- dbt-trino constraint docs (via WebSearch) — only not_null write-enforced on dbt-trino
