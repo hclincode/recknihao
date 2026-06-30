@@ -1,163 +1,129 @@
-# Judge Feedback — Iteration 1288
+# Judge Feedback — Iteration 1289
 
-**Overall**: 4 questions, average **4.203 PASS WITH Q1 FAIL** (Q1 **2.0 FAIL** / Q2 5.0 STRONG / Q3 4.8125 STRONG / Q4 5.0 STRONG).
+**Overall**: 4 questions, average **3.547 BARELY PASS** (Q1 4.6875 PASS / Q2 4.5 PASS / Q3 **1.5 FAIL** / Q4 3.5 BORDERLINE).
 
-**Headline**: Q1 (plain `SELECT COUNT(*)` on Iceberg) is a **HARD FAIL — responder INVERTED the load-bearing fact** (claimed Trino scans files; reality: it sums manifest `record_count` and is metadata-only/near-instant) AND recommended the **WRONG TOOL** (`approx_distinct` is HyperLogLog distinct-value count, NOT a row count) with broken syntax (`approx_distinct(*)` admitted not working; `approx_distinct(ROW(...))` would count distinct ROW-tuple combinations, still not rows). The 2-3 min slowness on the engineer's table is almost certainly **position-delete files from MoR MERGE/DELETE accumulating** (Trino issue #13092, #17114: "extremely/unusably slow"), which IS in the resources (r28 §297-323 has the diagnostic + EXECUTE optimize fix) but is NOT reachable from a plain "is COUNT(\*) metadata-only / why is mine slow" question. **MANDATORY FIX-A** — see §Q1 below. Q2/Q3/Q4 reach STRONG cleanly and match the pinned references exactly.
+**Headline**: Q3 (dbt ephemeral models — "temp table or view, downsides?") is a **HARD FAIL: responder HEDGED with "resources don't cover detailed dbt materialization docs"** when grep confirms r28 §3.3 (L940-983, LEADING CANONICAL — "what's the difference between view and ephemeral in dbt" question-shape) + §3.3A (L1021-1083, "the REAL ephemeral-at-scale failure mode — compile-time SQL bloat") + r27 §3.1 (L301 ephemeral table row, L314 cross-ref to r28 §3.3A) carry rich, question-shape-anchored coverage that EXACTLY matches Q3's phrasing. **Pure findability miss** — content is THERE, responder did not route. Q4 has a responder-INVENTED false "DIFFERENCE FROM ORACLE" framing — Oracle LPAD/RPAD truncate identically to Trino, verified via Oracle docs ([techonthenet LPAD](https://www.techonthenet.com/oracle/functions/lpad.php), [oratutorial LPAD](https://www.oracletutorial.com/oracle-string-functions/oracle-lpad/)) — the engineer's exact sub-question "same behavior when string is longer?" → correct answer is YES SAME, responder said NO DIFFERENT. Q1 + Q2 PASS cleanly with minor flags.
 
 | Q | Topic | Score | Status | Verdict |
 |---|---|---|---|---|
-| Q1 COUNT(\*) on Iceberg metadata-only? | Query performance basics | **2.0** | **FAIL** | Inverted metadata-only fact + recommended approx_distinct (wrong tool: HyperLogLog distinct, not row count) + missed position-delete-file diagnosis + missed EXECUTE optimize fix. FINDABILITY/CONTENT GAP confirmed |
-| Q2 TRY_CAST on dirty VARCHAR | SQL query best practices for OLAP | 5.0 | STRONG PASS | TRY_CAST + try() both correct, NULL-on-failure correct, distinction explained |
-| Q3 dbt model contracts compile vs build | dbt model contracts | 4.8125 | STRONG PASS | Matches pin reference_dbt_contract_needs_live_connection (build/run-time + warehouse-interactive + SELECT…WHERE 1=0); dbt-trino only not_null write-enforced correct |
-| Q4 Oracle NULL ordering → Trino | Oracle PL/SQL → dbt + Trino SQL migration | 5.0 | STRONG PASS | Matches pin reference_trino_null_ordering_default; Oracle ASC=LAST/DESC=FIRST + Trino LAST-always correct; OVER-clause caveat correct |
+| Q1 CASE-bucket tiers + HAVING | Analytical query patterns on Iceberg+Trino | **4.6875** | PASS | Query CORRECT; redundant `HAVING COUNT(*) > 0` framed as the filtering mechanism (a CASE-based GROUP BY never emits empty buckets — HAVING is a no-op) — minor Clar ding |
+| Q2 position vs equality deletes | Iceberg table maintenance | **4.5** | PASS | Definitions correct (file_path+row_position vs col-value tuples); content=1/2 correct; CoW default + MoR accumulation correct; $files diagnostic correct; **MISSED Trino-native `ALTER TABLE EXECUTE optimize` for clearing position-deletes** (recommended ONLY Spark `rewrite_position_delete_files`) — Spark-leaning miss against pin `reference_trino_optimize_clears_position_deletes` |
+| Q3 dbt ephemeral models | Improving complex SQL perf on Trino with dbt | **1.5** | **FAIL** | Hedged "resources don't cover dbt materialization" — FALSE. r28 §3.3 + §3.3A + r27 §3.1 all have rich question-shape-anchored ephemeral content. Pure findability miss |
+| Q4 Oracle LPAD/RPAD → Trino | Oracle PL/SQL → dbt+Trino migration | **3.5** | BORDERLINE | lpad/rpad exist + same arg order + CAST needed + format('%08d') safe alt — all correct. **FALSE "critical DIFFERENCE from Oracle" on truncate-when-longer** — Oracle LPAD/RPAD ALSO truncate to first N chars (verified Oracle docs). Responder-invented divergence on the EXACT sub-question asked |
 
 ---
 
-## Q1 — COUNT(*) on Iceberg metadata-only? (2.0 FAIL)
+## Q1 — CASE-bucket tiers + HAVING (4.6875 PASS)
 
-**Acc 1.5 / Clar 3.0 / Prac 1.5 / Compl 2.0.**
+**Acc 4.5 / Clar 4.5 / Prac 5.0 / Compl 4.75.**
 
-### Three load-bearing facts the responder got wrong
+Query shape correct: same CASE expression in SELECT + GROUP BY, COUNT(*) + SUM(revenue), ORDER BY. Engineer can copy-paste and it works on Trino 467.
 
-**Fact 1 (INVERTED): plain unqualified `SELECT COUNT(*)` on a Trino-Iceberg table IS metadata-only / near-instant.** Verified via WebFetch [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html): "Since Iceberg stores the paths to data files in the metadata files, it only consults the underlying file system for files that must be read." Each Iceberg manifest entry records `record_count` per data file; Trino sums those without opening Parquet. Resources confirm: **r18 L20 myth-row reads VERBATIM** "`SELECT COUNT(*) FROM iceberg.x.y` reads the whole table → **NO — on Iceberg, COUNT(\*) is a METADATA query.** Iceberg manifests track `record_count` per file. Trino 467's Iceberg connector sums the per-file record counts from manifests — no Parquet files are opened. Verify by running `EXPLAIN ANALYZE SELECT COUNT(*) FROM iceberg.x.y` and noting `physicalInputDataSize = 0B` for the TableScan." Responder explicitly said the OPPOSITE: "your 2-3 min observation suggests Trino is NOT reading metadata alone — it's scanning files."
+**Minor flag — redundant HAVING explanation.** Responder added `HAVING COUNT(*) > 0` and framed it as the mechanism that filters out empty tier buckets. This is misleading:
+- A `GROUP BY` on a CASE expression only emits groups for rows that EXIST in the source. If zero customers fall in `<500`, the "small" bucket is simply absent from the output — it cannot be "filtered out" because it was never produced.
+- `HAVING COUNT(*) > 0` is therefore a no-op in this construction; every group emitted by `GROUP BY <CASE>` already has `COUNT(*) >= 1`.
+- The "only tiers with customers" requirement is satisfied AUTOMATICALLY by the GROUP-BY-CASE shape — no HAVING needed.
 
-**Fact 2 (MISSED ENTIRELY): the actual cause of slow `COUNT(*)` on this prod stack is position-delete-file accumulation from MoR MERGE/DELETE.** Verified via [GitHub trinodb/trino #13092](https://github.com/trinodb/trino/issues/13092) ("Iceberg scanning with Delete Files is extremely/unusably slow") and [#17114](https://github.com/trinodb/trino/issues/17114) ("Read Iceberg v2 table with many delete file is very slowly"): "DeleteFilter will re-open and re-read the split's delete files for each page, which with large delete files can lead to a query taking hours." Resource **r28 §294-327 has the exact diagnostic** (`$files` GROUP BY content with 0=DATA / 1=POSITION_DELETES / 2=EQUALITY_DELETES, interpret-output table, fix = EXECUTE optimize with raised file_size_threshold) but the responder never reached it because the diagnostic is framed for "merge model getting slower" not "COUNT(*) slow." This is a 400M-row table with a 2-3 min count — exactly the position-delete-files-everywhere shape on MoR tables maintained by dbt-trino MERGE.
+The engineer's takeaway is still correct (the result has no empty buckets) but they walk away with a wrong mental model (thinking they need HAVING to suppress them). Minor Clar/Acc shave only.
 
-**Fact 3 (WRONG TOOL): `approx_distinct` is the wrong recommendation for an approximate ROW count.** Verified via [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html): `approx_distinct(x)` returns "the approximate number of **distinct input values**" using HyperLogLog with 2.3% standard error. It is a distinct-value cardinality estimator, not a row counter. Responder's recommendation `approx_distinct(ROW(col1,col2,...))` would count distinct row-tuple **combinations** — close to row count ONLY if every row is unique, and would silently undercount on tables with duplicate combinations. Responder even admitted `approx_distinct(*)` doesn't work, then offered the ROW-wrap form anyway. **And separately** — engineer doesn't NEED an approximate count: plain `COUNT(*)` is already metadata-fast on a clean table; if delete files are the cause, the fix is `EXECUTE optimize`, after which the exact count is back to <1s.
-
-### What the correct answer should have looked like
-
-> "Plain `SELECT COUNT(*) FROM iceberg.<schema>.<table>` IS metadata-only on Trino 467 — Iceberg manifests store per-data-file `record_count`, Trino sums them without opening any Parquet file. Verify with `EXPLAIN ANALYZE` and check `physicalInputDataSize = 0B` on the TableScan.
->
-> Your 2-3 min count on 400M rows means metadata-only is NOT firing. The almost-certain cause on this prod stack (dbt-trino MoR Iceberg) is **accumulated position-delete files**: each MERGE/DELETE writes one position-delete file per affected data file; once they pile up, Trino must apply deletes for an accurate count.
->
-> **Diagnose** (verified at r28 §294 + GitHub trinodb/trino #17114):
-> ```sql
-> SELECT
->   CASE content WHEN 0 THEN 'DATA' WHEN 1 THEN 'POSITION_DELETES' WHEN 2 THEN 'EQUALITY_DELETES' END AS file_type,
->   COUNT(*) AS file_count, ROUND(SUM(file_size_in_bytes)/1e6,2) AS total_mb
-> FROM iceberg.analytics."events$files" GROUP BY content;
-> ```
-> If POSITION_DELETES file_count > 10% of DATA file_count → that's the cause.
->
-> **Fix** (Trino-only, no Spark needed): `ALTER TABLE iceberg.analytics.events EXECUTE optimize(file_size_threshold => '1GB')` — raise threshold above your data file sizes to force-rewrite delete-bearing data files; `optimize` APPLIES + DROPS position-deletes for every data file it rewrites (PR #12617/#24086). Follow with `EXECUTE expire_snapshots(retention_threshold => '7d')` to free MinIO bytes.
->
-> **DO NOT use `approx_distinct` for an approximate row count** — it's HyperLogLog distinct-value cardinality (not rows). After you fix the delete files, exact `COUNT(*)` is back to metadata-fast (sub-second on 400M rows)."
-
-### FIX-A — MANDATORY (HIGH PRIORITY)
-
-**Findability/content gap confirmed via grep.** The building blocks exist but are not keyword-reachable from a plain "is COUNT(\*) metadata-only / why is mine slow / how to fix" question:
-
-| Existing location | What it covers | What it MISSES |
-|---|---|---|
-| r18 L20 (myth-list row) | "COUNT(*) is a METADATA query…manifests track record_count…sums per-file counts" — CORRECT primary fact | (a) Buried inside a myth-list row in a triage doc — not findable from "how to count rows fast on Iceberg" keyword path. (b) Caveat at end says "if position-delete files…still cheap; still no data-file reads" — **CONTRADICTS** GitHub #13092/#17114 reality where delete files DO slow COUNT(*) dramatically. **MUST be reconciled.** |
-| r18 L65-66 | Code-comment "-- bare table count (Iceberg metadata-only, should be <1s)" inside Check 2 of the regression workflow | Not a standalone canonical; reachable only when oncall-debugging an already-slow query |
-| r10 §1008-1023 | Metadata-only `COUNT(*) GROUP BY <partition col>` for billing; identity-vs-bucket-vs-truncate matrix | Framed for GROUP BY billing, not plain unqualified COUNT(\*); does state in passing "Total COUNT(*) (no GROUP BY) is always metadata-only regardless of transform" but it's a side note |
-| r28 §294-327 | Position-delete-file diagnostic + EXECUTE optimize fix | Framed for "dbt merge model getting slower," not for "plain COUNT(\*) slow" — different question, no keyword bridge |
-
-**Recommended FIX-A actions (teacher should pick one anchor location + cross-refs):**
-
-1. **PRIMARY: add a leading findable canonical** titled something like "**COUNT(\*) on Iceberg is metadata-only / near-instant on a clean table — if it's slow it's POSITION-DELETE files (NOT a tool to swap)**". Best anchor candidates (in order of preference):
-   - **r18 — extend the existing "Cheap queries on Iceberg" callout** (referenced by L20 myth row) into a proper standalone H3 section that opens with the metadata-only fact, then routes to r28 §294 for the slow-due-to-delete-files diagnostic. This is the most-searched location and the myth row already points to it.
-   - **r17 (Iceberg maintenance) — add a "Why is COUNT(\*) slow on this table" leading section** that mirrors r28's diagnostic but is keyword-anchored to COUNT-not-MERGE.
-   - **r10 §1008 — extend with an explicit "plain unqualified COUNT(\*) is metadata-only too" leading clause** before the GROUP BY billing material.
-
-2. **RECONCILE r18 L20 caveat** that currently says position-delete files keep COUNT(*) "still cheap; still no data-file reads." Per GitHub trinodb/trino #13092 + #17114, position-delete files DO slow COUNT(*) dramatically (the engineer's 400M-row 2-3 min case is the textbook example). Rewrite to: "if the table has format-v2 with **many** position-delete files (typical of busy MoR MERGE pipelines), COUNT(*) MUST apply the deletes and degrades from <1s to minutes — diagnose via $files GROUP BY content, fix via EXECUTE optimize with raised file_size_threshold; see r28 §294."
-
-3. **DEFANG approx_distinct as a row-count tool.** Add a "wrong-tool" DO-NOT-WRITE row to r23 §approx_distinct or wherever the function is taught: "`approx_distinct` is HyperLogLog distinct-VALUE count, not a row count. For an approximate row count, plain `COUNT(*)` is already metadata-fast on Iceberg — fix the delete files instead of swapping the function."
-
-**Suggested watch**: re-probe within 4-6 iters under various COUNT-slow framings ("COUNT(*) is slow on my Iceberg table…", "is COUNT(*) metadata-only on Iceberg…", "do I need approx_distinct for fast counts on Iceberg…", "what's the fastest way to count rows in a 1B-row Iceberg table") to confirm the new canonical reaches.
+**Action**: per-instance phrasing slip, NO resource fix. No card mis-teaches this — pure responder framing miss. Watch under "tier bucketing / CASE GROUP BY / HAVING" framings for 4-6 iters; only escalate if it recurs.
 
 ---
 
-## Q2 — TRY_CAST on dirty VARCHAR (5.0 STRONG PASS)
+## Q2 — Position vs equality deletes (4.5 PASS)
 
-**Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0.**
+**Acc 4.5 / Clar 4.75 / Prac 4.25 / Compl 4.5.**
 
-Verified via WebFetch [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html):
-- **`try_cast(value AS type)` exists** — verbatim signature; verbatim "Like cast(), but returns null if the cast fails."
-- **`try(expression)` exists** — verbatim [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html): handles "division by zero, invalid cast or function argument, and numeric value out of range" — returns NULL.
+Definitions accurate and matched to verified sources:
+- Position deletes = (file_path, row_position) pairs — verified per [olake.io MoR vs CoW](https://olake.io/iceberg/mor-vs-cow/) + [Dremio CoW vs MoR](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/).
+- Equality deletes = column-value tuples with predicate semantics — verified per [RisingWave equality-delete problem](https://risingwave.com/blog/the-equality-delete-problem-in-apache-iceberg/).
+- `$files.content` = 0 (data) / 1 (position-delete) / 2 (equality-delete) — correct per Iceberg spec + Trino metadata-table docs.
+- CoW default; MoR opt-in via `write.delete.mode='merge-on-read'` — correct.
+- "MoR accumulates many small delete files → applied at read time → slows queries" — correct, this is the textbook MoR cost.
 
-Responder's TRY_CAST(raw_account_id AS BIGINT) → NULL on 'N/A' is exactly correct. The TRY_CAST vs try() distinction (cast-only vs any-expression) is precisely how the docs frame it. Engineer can paste-and-run.
+**Flag — Spark-leaning maintenance, missed Trino-native path.** Responder's compaction recommendation was ONLY the Spark route: `CALL iceberg.system.rewrite_position_delete_files()`. On this on-prem Trino-467 + Spark-Iceberg-1.5.2 stack, the **Trino-native `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')`** also APPLIES and clears position-delete files for the data files it rewrites — per pinned `reference_trino_optimize_clears_position_deletes.md` (PR [trinodb/trino #12617](https://github.com/trinodb/trino/issues/12617), [#24086](https://github.com/trinodb/trino/issues/24086), candidate selection is SIZE-only so raise threshold above the largest delete-bearing data files). The user explicitly asked about "Spark ingestion + how we do updates/deletes" so leaning Spark is reasonable, but on this stack a Trino-only maintenance loop (run optimize from a dbt macro or cron, no Spark job needed for compaction) is the simpler operational answer.
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
-
----
-
-## Q3 — dbt model contracts: compile vs build, live connection? (4.8125 STRONG PASS)
-
-**Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.75.**
-
-**Matches pin `reference_dbt_contract_needs_live_connection` exactly.** Verified via WebFetch [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract): "When you `dbt run` your model, _before_ dbt has materialized it as a table in the database, you will see this error" — dbt issues a discovery query against the warehouse (commonly the SELECT…WHERE 1=0 introspection pattern responder cited) to read the model's actual result-set column types. Pure offline `dbt parse`/`dbt compile` with no warehouse connection does NOT catch contract violations.
-
-Responder's three load-bearing claims all hold:
-1. **"Build/run-time, NOT pure offline compile"** — correct; CI must run `dbt build` against reachable Trino.
-2. **Introspection SELECT…WHERE 1=0** — correct mechanism (zero-row probe to read column types from warehouse metadata).
-3. **dbt-trino: only `not_null` is meaningfully write-enforced** — confirmed via WebSearch of dbt-trino constraint docs: "Currently, only constraints with type as not_null are supported"; primary_key/unique/foreign_key/check are definable as metadata but NOT write-enforced on Trino. Responder correctly recommends pairing with dbt `tests` (unique/relationships generic tests).
-
-YAML example with `contract.enforced: true` + `columns: name + data_type` is the canonical dbt schema.yml shape.
-
-Minor Compl shave (-0.25): could explicitly note that **`data_type` matching is base-type / not granular** (e.g., `VARCHAR` matches `VARCHAR(256)` vs `VARCHAR(257)` — both are `varchar` to dbt's type alias system). Non-load-bearing for the engineer's question framing.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
+**Action**: per-instance Spark-leaning recall slip, NO resource fix (r17 + r13 §2862 + r28 §297 already document the Trino-native path). **SOFT WATCH `iter1289-Q2 position-delete maintenance Spark-vs-Trino-EXECUTE-optimize routing`** — re-probe in 4-8 iters under "position-deletes accumulating / how do I compact them" framings WITHOUT Spark-leading hint; if Trino-native EXECUTE optimize is again omitted under non-Spark framings, escalate to LIGHT FIX-A adding a Trino-native lead at the position-delete-maintenance keyword zone.
 
 ---
 
-## Q4 — Oracle NULL ordering → Trino (5.0 STRONG PASS)
+## Q3 — dbt ephemeral models (1.5 FAIL)
 
-**Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 5.0.**
+**Acc 1.0 / Clar 3.0 / Prac 1.0 / Compl 1.0.**
 
-**Matches pin `reference_trino_null_ordering_default` exactly.** Verified via WebFetch [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): verbatim "The default null ordering is `NULLS LAST`, regardless of the ordering direction." Trino puts NULLs at the bottom for BOTH ASC and DESC by default — NOT the Oracle/NULL-as-largest rule.
+Responder said: "I don't have enough information; resources cover Spark ingestion / Iceberg maintenance / Trino querying but NOT detailed dbt materialization docs... consult dbt docs."
 
-Oracle behavior verified via WebSearch (multiple Oracle reference sources): "If the null ordering is not specified, then the handling of the null values is NULLS LAST if the sort is ASC, NULLS FIRST if the sort is DESC" — i.e., Oracle treats NULLs as the LARGEST values, so ASC puts them last and DESC puts them first. Engineer's premise is correct.
+**This is FALSE.** Grep CONFIRMS rich, question-shape-anchored ephemeral content in resources:
 
-So responder's three load-bearing claims all hold:
-1. **Trino default: NULLS LAST for both ASC and DESC** — verified.
-2. **Oracle default: ASC=NULLS LAST, DESC=NULLS FIRST (NULL-as-largest)** — verified.
-3. **Migration fix**: explicit `NULLS FIRST`/`NULLS LAST` on every migrated ORDER BY; for Oracle-matching DESC behavior write `ORDER BY priority DESC NULLS FIRST`; **also apply inside window OVER clauses** — important catch (window-frame NULL ordering would silently differ otherwise).
+1. **r28 §3.3 (L940-983)** — LEADING CANONICAL "the dbt materialization COST MODEL (storage + runtime + DB object)" with explicit question-shape anchors at L946: *"what's the difference between `view` and `ephemeral` in dbt", "what database object does each dbt materialization create", "dbt view vs ephemeral at scale"*. Includes the four-row table (view / table / incremental / ephemeral × DB object / storage / re-run / DDL) with the ephemeral row reading: *"NONE — no warehouse object at all... The SELECT is inlined as a CTE into every downstream model that ref()s it — at dbt COMPILE time, before any SQL is sent to Trino."* This EXACTLY answers the engineer's "temp table or view?" sub-question.
 
-Side-by-side comparison table is the most useful framing for the Oracle-migration engineer.
+2. **r28 §3.3A (L1021-1083)** — LEADING CANONICAL "the REAL ephemeral-at-scale failure mode — compile-time SQL bloat" with question-shape anchors at L1025: *"what's the problem with `ephemeral` at scale", "does `ephemeral` slow down dbt", "ephemeral vs view at scale"*. Includes the 5-step worked example (5 downstream models × 80-line ephemeral = 400 lines duplicated SQL → planner re-parses 5×), transitive-ephemeral compounding warning, no-debuggable-object enumeration (no `SELECT COUNT(*)`, no Trino UI per-query, no GRANT, no SHOW STATS), and a threshold rule of thumb. This EXACTLY answers the engineer's "any downsides?" sub-question.
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication.
+3. **r27 §3.1 (L292-316)** — the materialization-decision table with a full ephemeral row (DB object NONE, storage Zero, compile-time inlining mechanism, "use for 1-2 downstreams", "do NOT use for 3+ downstreams — compile-time bloat") + L314 cross-ref to r28 §3.3A.
 
----
+**Classification**: pure FINDABILITY MISS. The content is fully in place; the responder failed to route. Likely root cause is that r28's title ("Improving complex SQL performance on Trino with dbt") does not lexically lead from a basic dbt-101 "what is ephemeral" question, and r27 §3 title ("dbt-trino: the materialization-strategy choice for migrated procedures") is similarly Oracle-migration-framed.
 
-## Watches / FIX-A actions
+### FIX-A decision — **LIGHT FIX-A RECOMMENDED**
 
-### NEW
-- **iter1288-Q1 MANDATORY FIX-A**: add a findable canonical for "plain `SELECT COUNT(*)` on Iceberg = metadata-only / near-instant; if slow → diagnose position-delete files via `$files` GROUP BY content, fix via `EXECUTE optimize(file_size_threshold => '1GB')`; `approx_distinct` is HyperLogLog distinct-value cardinality, NOT a row-count tool". Best anchor: extend r18 "Cheap queries on Iceberg" callout into standalone H3 + reconcile L20 myth-row caveat ("still cheap with delete files" is FALSE per GitHub #13092/#17114) + cross-ref r28 §294 diagnostic + defang approx_distinct as a row-counter in r23. WATCH: re-probe within 4-6 iters under various COUNT-slow framings.
+The question "what does ephemeral do differently? temp table or view? any downsides?" is a fundamental dbt-101 ask any engineer touching the lakehouse will hit. The fact that the responder hedged with a confidently-wrong "we don't cover this" disclaimer is worse than a partial answer — it teaches the engineer the resource doesn't exist.
 
-### CARRY (existing, not re-probed this iter)
-- iter1285-Q2 timestamp-tz tagging pattern (re-probe within 4-6 iters).
-- iter1283-Q3 hard_deletes-as-volunteered-secondary-without-dbt-trino-caveat (re-probe under "set up customers snapshot end-to-end" framings).
-- iter1283-Q4 strpos-3-arg-banned-myth recurrence (re-probe under "nth occurrence of delimiter" framings).
-- iter1284-Q3 delete+insert Hive-non-ACID framing (re-probe within 4-8 iters).
-- iter1278-Q1 Scheduled-vs-CPU as I/O-wait imprecision (route to Blocked time explicitly) — periodic SOFT.
+**Recommended action** (teacher's call on exact placement):
+- **Option A (preferred)**: Add a short standalone leading canonical at the **top of r27 §3** (right after the section header, BEFORE §3.1's decision table) with keyword anchors *"what is dbt ephemeral", "is ephemeral a temp table or a view", "ephemeral materialization explained", "what does ephemeral do differently", "ephemeral vs view in dbt", "downsides of ephemeral"* + a 2-sentence answer (NOT a table, NOT a temp table, NOT a view — NO warehouse object; SELECT is inlined as a CTE at compile time into every downstream's compiled SQL) + cross-ref to r28 §3.3 + §3.3A for the full canonical. This puts the answer where the basic "ephemeral" keyword zone lives (r27 §3 is the materialization-strategy section, more findable than r28).
+- **Option B (alternative)**: Add an explicit r28 §3.3 keyword anchor block at the top of the LEADING CANONICAL extending the question-shape list with the basic framings: *"what does ephemeral materialization do", "is ephemeral a view in dbt", "ephemeral vs temp table", "downsides of using ephemeral models"* — these basic-dbt-101 phrasings are missing from L946's current list.
 
-### CLOSED
-- None this iter (iter1287's truncate-2-arg L1638 watch already closed last iter).
+Both options together would be belt-and-suspenders.
+
+**Watch**: NEW HARD WATCH `iter1289-Q3 dbt ephemeral basics findability` — re-probe within 2-4 iters under varied "what is ephemeral / temp table or view / downsides of ephemeral" framings; if 2+ recurrences after FIX-A, this is a deeper r28-title-discoverability issue and not just an anchor gap.
 
 ---
 
-## Topic routing
+## Q4 — Oracle LPAD/RPAD → Trino (3.5 BORDERLINE)
 
-- Q1 (COUNT(\*) metadata-only on Iceberg) → **Query performance basics: partitioning, indexing strategy for analytics** (COUNT performance theory; partition + delete-file impact on scan cost). Also touches **Iceberg table maintenance** (EXECUTE optimize fix) — primary routing is performance.
-- Q2 (TRY_CAST) → **SQL query best practices for OLAP** (function reference / type-safe predicates).
-- Q3 (dbt model contracts) → **dbt model contracts** (canonical row).
-- Q4 (Oracle NULL ordering port) → **Oracle PL/SQL → dbt + Trino SQL migration** (cross-engine SQL dialect migration).
+**Acc 2.5 / Clar 4.0 / Prac 4.0 / Compl 3.5.**
 
-Q1 FAIL (2.0) drags Query-performance-basics row arithmetic; updated below. Q2/Q3/Q4 lift their rows by +0.001 to +0.017.
+**Correct portions**:
+- Trino HAS lpad/rpad — correct, per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html).
+- Same arg order `(string, size, padstring)` — correct.
+- `CAST(account_id AS VARCHAR)` needed (Trino has no implicit number→string coercion in lpad/rpad) — correct, matches r27 L998 + r23 §716 canonical.
+- `format('%08d', account_id)` never truncates, safer for over-width ids — correct, matches r23 §754.
+- Trino lpad/rpad truncate when source is longer than n — correct, verified via [trino.io string-functions docs](https://trino.io/docs/current/functions/string.html).
+
+**ACCURACY ERROR — false invented "CRITICAL DIFFERENCE from Oracle"**:
+Responder framed the truncate-when-longer behavior as a "CRITICAL DIFFERENCE between Trino and Oracle" — implying Oracle LPAD/RPAD do NOT truncate.
+
+**Verified Oracle behavior** ([techonthenet LPAD](https://www.techonthenet.com/oracle/functions/lpad.php), [oratutorial LPAD](https://www.oracletutorial.com/oracle-string-functions/oracle-lpad/), [techonthenet RPAD](https://www.techonthenet.com/oracle/functions/rpad.php), [orafaq LPAD/RPAD](https://www.orafaq.com/wiki/LPAD_and_RPAD)):
+> "If the padded_length is smaller than the original string, the LPAD function will truncate the string to the size of padded_length... LPAD effectively truncates string1 — it returns only the first padded_length characters of the incoming string1." Same for RPAD.
+
+So **Oracle LPAD/RPAD truncate identically to Trino's** — the behavior is the SAME, NOT a divergence. The engineer's sub-question "same behavior when string already longer than target width?" → correct answer is **YES, both Oracle and Trino truncate to first N chars**. Responder said NO, different — directly mis-answers the asked sub-question.
+
+The truncation HAZARD is real and worth flagging — an Oracle engineer who's been writing `LPAD(account_id, 10, '0')` for 20 years on a column that may exceed 10 chars HAS been silently losing data the whole time. But that's a Trino-and-Oracle-share-this-trap point, not a Trino-introduces-a-new-trap point. The framing matters: the Oracle engineer who already knows their LPAD truncates is being told (incorrectly) that they need to RELEARN this for Trino, when the behavior is identical.
+
+**Resource check**: r23 §716-758 and r27 L998 BOTH correctly describe the truncation hazard WITHOUT claiming Oracle divergence. r23 §721 reads "lpad/rpad pad OR TRUNCATE to EXACTLY `size` characters" — describes Trino-side behavior, doesn't compare to Oracle. r27 L998 LPAD/RPAD migration row mentions only the CAST-VARCHAR difference (the real divergence) — doesn't claim Trino-vs-Oracle truncate divergence.
+
+**This is a responder-INVENTED false divergence** (matches `feedback_responder_overwarning_folklore.md` family — over-warning about a non-difference). Resources are CORRECT.
+
+**FIX-A decision — NO FIX**: per-instance responder slip. Adding an Oracle-truncate-same-as-Trino defang to r23 §716 risks over-attracting an adjacent question per `feedback_new_card_over_attracts_adjacent.md`. 1st instance of this exact false-divergence framing on lpad/rpad.
+
+**Watch**: NEW SOFT WATCH `iter1289-Q4 Oracle-LPAD/RPAD truncate-same-as-Trino false-divergence framing` — re-probe under Oracle-migration framings ("does Trino lpad behave like Oracle LPAD when source longer than width") within 4-8 iters; if 2+ recurrences, consider a LIGHT FIX-A at r27 L998 lpad/rpad row adding *"Truncation behavior is IDENTICAL to Oracle's — both pad-OR-truncate to exactly `n`. The only Trino-specific change is the no-implicit-numeric-coercion CAST requirement."*
 
 ---
 
-## Sources
+## Summary of FIX-As and watches
 
-- [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) — Iceberg metadata-driven file-system access verified
-- [trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html) — try_cast signature + null-on-failure verified
-- [trino.io/docs/467/functions/conditional.html](https://trino.io/docs/467/functions/conditional.html) — try(expression) general-error-suppression signature verified
-- [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html) — Trino NULLS LAST default for both ASC/DESC verified
-- [docs.getdbt.com/reference/resource-configs/contract](https://docs.getdbt.com/reference/resource-configs/contract) — contract enforcement is build/run-time + warehouse-interactive
-- [GitHub trinodb/trino #13092](https://github.com/trinodb/trino/issues/13092) — Iceberg position-delete file scans extremely slow
-- [GitHub trinodb/trino #17114](https://github.com/trinodb/trino/issues/17114) — Read Iceberg v2 with many delete files is very slow
-- Oracle ORDER BY docs (LearnSQL.com / SQL Jana / sqlines.com) — Oracle ASC=NULLS LAST / DESC=NULLS FIRST default verified
-- dbt-trino constraint docs (via WebSearch) — only not_null write-enforced on dbt-trino
+| Action | Q | Where | Priority |
+|---|---|---|---|
+| **LIGHT FIX-A** | Q3 | r27 §3 (top, before §3.1 decision table) — add 2-sentence ephemeral-basics canonical with question-shape anchors (Option A); OR extend r28 §3.3 L946 keyword anchor list with basic dbt-101 framings (Option B); BOTH preferred | **MANDATORY** (hard fail) |
+| NEW HARD WATCH | Q3 | `iter1289-Q3 dbt ephemeral basics findability` — re-probe 2-4 iters, varied "what is ephemeral / temp table or view" framings | High |
+| NEW SOFT WATCH | Q2 | `iter1289-Q2 position-delete maintenance Spark-vs-Trino-EXECUTE-optimize routing` — re-probe 4-8 iters under non-Spark framings; if Trino-EXECUTE optimize omitted again, LIGHT FIX-A | Medium |
+| NEW SOFT WATCH | Q4 | `iter1289-Q4 Oracle-LPAD/RPAD false-divergence framing` — re-probe 4-8 iters; if 2+ recurrences, LIGHT FIX-A at r27 L998 | Medium |
+| Per-instance watch | Q1 | Redundant `HAVING COUNT(*) > 0` framing in CASE-GROUP-BY — minor clarity-only, re-probe 4-6 iters under tier-bucketing framings | Low |
+
+**Carry watches from prior iterations** (per state.json iter1288):
+- `iter1288-Q1 COUNT(*)-slow metadata-only + delete-files canonical reach-test` — HARD WATCH (not probed this iter)
+- `iter1285-Q2 timestamp-tz` — carry
+- `iter1283-Q4 strpos-3-arg` — carry
+- `iter1284-Q3 delete+insert` — carry
+- `iter1283-Q3 hard_deletes` — carry
+- `perf-triage-recall-ceiling periodic SOFT` — carry
+
+**All required topics remain PASSED**; thinnest topic (Query performance basics 4.1701) untouched this iter. The Q3 FAIL drops "Improving complex SQL performance on Trino with dbt" from 4.4856/88 to **4.4521/89** — still comfortably above 3.5 threshold, margin +0.9521.
