@@ -1,175 +1,150 @@
-# Iteration 1306 — Judge Feedback
+# Judge Feedback — Iteration 1307
 
 **Phase**: extended (pass-loop)
-**Overall iter score**: **4.8125 STRONG PASS** ((4.875 + 4.875 + 4.75 + 4.75) / 4) — all four questions clean canonical answers, zero FAIL, no FIX-A required
-
-**Pattern this iter**: Clean continuous-pass sweep, no defects. Q1 is the THINNEST-topic probe (`query-perf-regression` 4.0311/27) framed as a Monday-slow / Tuesday-fast self-recovery — responder routed correctly to the ANALYZE/Puffin/NDV stats-staleness canonical and gave the complete Iceberg/Trino ANALYZE answer with proper syntax + cadence. Q2 division-by-zero canonical hit pin `reference_trino_division_by_zero.md` exactly with the right INTEGER/DECIMAL-throws-but-DOUBLE-returns-Inf/NaN split + NULLIF guard. Q3 dbt `{% docs %}` blocks gave the canonical .md-file + `{{ doc('name') }}` reference + `dbt docs generate` workflow (all three steps the engineer needs to ship). Q4 Oracle CONCAT → Trino `concat_ws` rewrite correctly identifies NULL-propagation difference + `concat_ws` skips NULL args. **No new FIX-A, no new HARD watches, no fabrications, no imported-prior slips, no broken-secondary suggestions.**
-
----
-
-## Per-question scores
-
-### Q1 — Weekly 60M-row load into `fct_events`; Monday queries 10s → 3-4 min, speed up by Tuesday on their own; Trino/Iceberg ANALYZE equivalent, run manually after load?
-
-**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75) — **STRONG PASS, THINNEST-topic probe lands cleanly**
-
-Responder said: "Yes, run ANALYZE manually after each large load." Concrete syntax:
-- `ANALYZE iceberg.analytics.fct_events WITH (columns = ARRAY['user_id', 'tenant_id', ...])`
-- Bare `ANALYZE` (no `TABLE` keyword — engineer's Spark/Hive instinct of `ANALYZE TABLE` would parse-fail).
-- `WITH (columns = ARRAY[...])` for selective column stats on join keys + frequent filter columns (cheaper than analyzing all 60+ columns on a wide events table).
-
-Critical mental-model split correctly drawn:
-- **Iceberg manifests auto-collect per-file min/max bounds + null counts on write** (the `lower_bounds`/`upper_bounds`/`null_value_counts` per-file stats in `$manifests`). These power file-skipping / predicate pushdown WITHOUT requiring ANALYZE.
-- **NDV (number of distinct values) is NOT auto-collected** — it requires explicit `ANALYZE`, which writes a Puffin sidecar file (apache-datasketches-theta-v1 sketches) to MinIO alongside the data files.
-- Stats do NOT auto-refresh — must re-run ANALYZE after bulk ingests, otherwise CBO picks bad join orders / mis-sizes broadcasts → slow plans.
-
-The Monday-slow / Tuesday-fast self-recovery framing is correctly diagnosed: weekly Sunday-night load adds 60M rows but doesn't refresh NDV; Monday queries pick stale-NDV plans; by Tuesday SHOULD NOT actually self-recover unless something else is going on (warm caches, on-demand re-analyze by another team, or a triggered refresh) — but the responder correctly flags that ANALYZE-after-load is the right primary intervention regardless of the self-recovery mystery.
-
-**All load-bearing facts VERIFIED**:
-1. **ANALYZE bare syntax** — verified at [trino.io/docs/467/sql/analyze.html](https://trino.io/docs/467/sql/analyze.html) verbatim grammar `"ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]"` (no TABLE keyword).
-2. **Iceberg `columns = ARRAY[...]` WITH-property** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim: `"ANALYZE table_name WITH (columns = ARRAY['col_1', 'col_2'])"` ("You can specify a subset of columns to be analyzed with the optional `columns` property").
-3. **Iceberg manifests carry per-file min/max auto** — verified at iceberg.html `$manifests` metadata table includes `lower_bounds`, `upper_bounds`, `null_value_counts`, `nan_value_counts`, `column_sizes`, `value_counts` auto-tracked at write.
-4. **NDV via Puffin sketch** — verified by pin `reference_trino_parquet_bloom_filter_469.md` family + iter1161 verification against trinodb/trino PR #13636 / issue #16583 (apache-datasketches-theta-v1 blobs).
-5. **Stats NOT auto-refreshed** — confirmed at iceberg.html (extended-statistics-enabled config + manual re-ANALYZE required after schema/data change).
-6. **Column-targeted = cheaper** — confirmed at iceberg.html same source.
-
-Resource alignment: responder's answer aligns with the iter1231 canonical (`ANALYZE iceberg.analytics.<table> WITH (columns = ARRAY['...'])`) at r17/r24/r27 plus the iter1161 Puffin-sidecar canonical at r24. No findability gap.
-
-Minor Clar shave (-0.25): could have spelled out the engineer-relevant cadence in `dbt_project.yml on-run-end` form (per iter1231) for hook-friendly automation rather than leaving it as "run manually after each load." Minor Compl shave (-0.25): didn't surface `SHOW STATS FOR <table>` as the diagnostic to verify NDV is populated post-ANALYZE (NULL `distinct_values_count` for a column = not analyzed; engineer should run this BEFORE assuming ANALYZE worked).
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r17/r24/r27 pattern. Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
-
-### Q2 — Conversion rate = `completed / started * 100`; some tenants have 0 `started`; does Trino throw like Postgres? Clean pattern to return NULL/0?
-
-**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75) — **STRONG PASS, pin-perfect division-by-zero canonical**
-
-Responder said: "INTEGER/DECIMAL divided by zero RAISES a `DIVISION_BY_ZERO` error (query fails); DOUBLE/REAL divided by zero returns `Infinity` / `NaN` (IEEE-754, no throw — detect with `is_finite()` / `is_nan()`)." Guard INTEGER/DECIMAL with `NULLIF(denominator, 0)` BEFORE the division — `NULLIF` returns NULL on zero-denom, NULL propagates through division giving NULL result instead of throwing.
-
-Canonical clean pattern:
-```sql
-SELECT
-  tenant_id,
-  100.0 * completions / NULLIF(starts, 0) AS conversion_rate_pct
-FROM funnel_metrics
-GROUP BY tenant_id
-```
-
-Also offered the slightly more verbose CASE-WHEN form:
-```sql
-CASE WHEN COUNT(*) = 0 THEN NULL ELSE 100.0 * completions / NULLIF(COUNT(*), 0) END
-```
-
-For "return 0 instead of NULL on zero-denom" the wrap is `COALESCE(100.0 * completions / NULLIF(starts, 0), 0)`.
-
-**All load-bearing facts VERIFIED against pin `reference_trino_division_by_zero.md`**: "INTEGER/DECIMAL `/` by zero THROWS DIVISION_BY_ZERO (guard NULLIF); DOUBLE/REAL `/` by zero RETURNS Infinity/NaN per IEEE-754, does NOT throw (detect is_finite). Verified from 467 source; r27 §4.4H is correct (LOCK)." Responder's framing matches the pinned canonical exactly. Cross-reference: this is the 2nd verify-first observation reconfirming the pin (after iter842 / iter858 / iter991 family of math-function pin reconfirmations).
-
-**Postgres contrast correctly drawn**: Postgres `decimal/integer divided by 0` throws `division_by_zero` SQLSTATE 22012 — same family as Trino. Engineer's mental model of "throws like Postgres" maps cleanly; the only meaningful difference is the type-dependent behavior on DOUBLE/REAL.
-
-Minor Clar shave (-0.25): the responder explained the type-split clearly but could have given a one-line "what about DECIMAL(10,2) * 100.0?" disambiguation — `100.0` is a DOUBLE literal which would coerce the division to DOUBLE arithmetic and SHIFT the throw-vs-NaN behavior. For the conversion-rate case the practical answer is the same (NULLIF works in both arithmetic modes), but a beginner could be tripped up.
-
-Minor Compl shave (-0.25): didn't surface `try(expr)` as a fallback (Trino has `try(100.0 * completions / starts)` which catches any thrown error and returns NULL — slightly less precise than NULLIF since it catches OTHER arithmetic errors too, but it's the broader safety-net pattern that's worth mentioning).
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
-
-### Q3 — Column descriptions copy-pasted across 6 schema.yml files; is `{% docs %}` the right tool? How and where does the text live; how to set it up?
-
-**Score: 4.75** (Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5) — **STRONG PASS, canonical dbt docs-blocks workflow**
-
-Responder said: Yes, `{% docs %}` blocks are the canonical dbt pattern for cross-file documentation reuse. Three-step setup:
-
-1. **Create a `.md` file under `models/` directory** (e.g., `models/docs/common_columns.md`). Docs blocks MUST live in `.md` files, NOT in `.sql` model files. dbt ignores SQL comments — no way to reuse them.
-2. **Define each block in the .md file**:
-   ```
-   {% docs tenant_id %}
-   The tenant identifier (UUID) for multi-tenant isolation. Foreign key to dim_tenants.tenant_id.
-   {% enddocs %}
-   ```
-3. **Reference from schema.yml** with quoted Jinja:
-   ```yaml
-   - name: tenant_id
-     description: "{{ doc('tenant_id') }}"
-   ```
-4. Run `dbt docs generate` to build the catalog; `dbt docs serve` to browse.
-
-The quoted-Jinja form (`description: "{{ doc('tenant_id') }}"` not `description: {{ doc('tenant_id') }}`) is correctly flagged — YAML parses Jinja-with-curly-braces inside unquoted strings inconsistently, and the quoted form is the documented best practice.
-
-**All load-bearing facts VERIFIED against [docs.getdbt.com/docs/build/documentation](https://docs.getdbt.com/docs/build/documentation)**:
-- Docs block syntax `{% docs <name> %}...{% enddocs %}` — verified verbatim ("Docs blocks are declared using the Jinja `docs` tag").
-- `.md` files placed under `models/` directory — verified ("Docs block files are Markdown files (`.md`) placed under the `models/` directory. Example: `models/overview.md` or `events.md`").
-- `description: '{{ doc("name") }}'` reference syntax in schema.yml — verified verbatim with example.
-- Naming rules: "The name of a docs block can't start with a digit and may contain: Uppercase and lowercase letters (A-Z, a-z), Digits (0-9), Underscores (_)" — verified.
-- `dbt docs generate` introspects + processes blocks + generates browseable catalog — verified.
-
-Resource alignment: 4 resources (r07/r09/r13/r27) discuss `{% docs %}` blocks per grep test; r28 also mentions docs-blocks. Findability is fine.
-
-Minor Acc shave (-0.25): the responder said "the only way to reuse descriptions" — this is slightly absolute. Alternative reuse patterns exist (YAML anchors `&` / `*` within a single schema.yml, dbt vars for short repeated strings, custom Jinja macros), though docs blocks ARE the canonical/recommended approach for cross-file reuse. Not load-bearing for the engineer's 6-schema.yml-files situation (docs blocks are the right tool); only a minor framing overclaim.
-
-Minor Compl shave (-0.5): didn't surface that:
-- Docs blocks support full markdown (headers, lists, links, tables, code fences) — useful for richer column documentation than just one-line descriptions.
-- The `doc()` function can also reference a block defined in any `.md` file project-wide, not just from a sibling file — engineer asking about "where does the text live" benefits from explicit "anywhere under your `models/` tree, dbt project-globally resolves the name."
-- Can reference docs blocks from sources/seeds/snapshots schema.yml too, not just models.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5.
-
-### Q4 — Oracle `CONCAT(first_name, CONCAT(' ', last_name))`; when `last_name` is NULL, Oracle returns just first_name, Trino returns NULL for the whole expression; what's different and what's the correct Trino rewrite?
-
-**Score: 4.75** (Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5) — **STRONG PASS, clean concat_ws rewrite**
-
-Responder said: "Trino treats NULL differently from Oracle." Three points:
-1. **Oracle**: treats NULL as empty string in concatenation. `NULL || 'x'` → `'x'`. `CONCAT(NULL, 'x')` → `'x'`. Oracle silently drops NULL in concat semantics.
-2. **Trino**: `concat()` / `||` operator PROPAGATES NULL per ANSI SQL standard. Any NULL argument makes the whole expression NULL.
-3. **Trino rewrite**: use `concat_ws(separator, str1, str2, ..., strN)` — `concat_ws` SKIPS NULL arguments (unlike concat/||). The drop-in fix:
-   ```sql
-   concat_ws(' ', first_name, last_name)
-   ```
-   `concat_ws(' ', 'John', NULL)` → `'John'`. `concat_ws(' ', 'John', 'Doe')` → `'John Doe'`. Worked examples included.
-
-**All load-bearing facts VERIFIED**:
-- **Trino `concat_ws` skips NULL args** — verified via WebFetch of [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) verbatim: *"Any null values provided in the arguments after the separator are skipped."* + caveat: *"If `string0` is null, then the return value is null"* (separator being NULL still makes the whole return NULL — responder didn't surface this but it's not relevant for a literal `' '` separator).
-- **Trino `concat()` / `||` NULL propagation** — Trino docs at string.html state `concat()` "provides the same functionality as the SQL-standard concatenation operator (`||`)"; SQL-standard `||` propagates NULL (any NULL arg → NULL result). Confirmed by [Trino issue #2723](https://github.com/trinodb/trino/issues/2723) family and consistent with iter1287 / iter1290 / iter1299-Q1 prior verifications.
-- **Oracle `CONCAT` / `||` empty-string semantics** — Oracle's well-documented NULL-as-empty-string convention for concatenation. `CONCAT('John', NULL)` → `'John'` (Oracle).
-
-**Minor Acc / Compl shave (-0.25 / -0.5) — small premise-refinement miss**:
-
-The engineer said *"Oracle returns just first_name"* — actually Oracle returns `'first_name '` with a TRAILING SPACE. Why: Oracle's `CONCAT(' ', NULL)` → `' '` (NULL coerces to empty string, but the literal `' '` space is preserved). Then `CONCAT('John', ' ')` → `'John '`. So Oracle's behavior is `'John '` (with trailing space), not `'John'` (without).
-
-The responder's recommended Trino rewrite `concat_ws(' ', first_name, last_name)` gives `'John'` (NO trailing space) when `last_name` is NULL — because `concat_ws` skips NULL AND the separator is only inserted BETWEEN non-NULL args, not appended after the last one. So the Trino rewrite is actually CLEANER than Oracle's original (no orphan trailing space). For most label-formatting use cases this is a feature, not a regression. For strict Oracle bit-for-bit compat the rewrite would need to be `concat(first_name, ' ', COALESCE(last_name, ''))` — but the responder's `concat_ws` form is the better engineering choice.
-
-The slip is bounded: the responder framed Oracle's behavior as "returns just first_name" when it's actually `'first_name '` with trailing space, and didn't explicitly call out that the `concat_ws` rewrite is CLEANER than Oracle (rather than "matches Oracle"). Engineer pasting `concat_ws(' ', first_name, last_name)` ships a working query that's stricter than Oracle's loose behavior. Practical impact: NIL — engineer wanted "single name when last_name is NULL" and gets `'John'`, which is precisely what they wanted.
-
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Solid Oracle→Trino migration answer. Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5.
+**Overall iteration score**: **4.21875 PASS** (Q1 4.875 / Q2 4.875 / Q3 3.125 / Q4 4.0)
+**Pattern**: 2 STRONG PASSES with reconfirmed pins + 1 BORDERLINE FAIL (findability+content gap) + 1 PASS-with-findability-miss. Two distinct routing failures from the SAME family — **content exists in `resources/` but Haiku's keyword-magnet doesn't reach it from the engineer's plain phrasing.**
 
 ---
 
-## Summary
+## Per-question scoring
 
-| Q | Topic | Score | Routing |
+### Q1 — COUNT(DISTINCT customer_id, plan_id) parse error in Trino — 4.875 STRONG PASS
+
+| Acc | Clar | Prac | Compl |
 |---|---|---|---|
-| Q1 | Query performance regression diagnosis | 4.875 STRONG PASS | THINNEST-topic probe lands cleanly — ANALYZE/Puffin/NDV canonical |
-| Q2 | SQL query best practices for OLAP | 4.875 STRONG PASS | pin `reference_trino_division_by_zero` reconfirmed |
-| Q3 | Improving complex SQL performance on Trino with dbt | 4.75 STRONG PASS | docs blocks canonical, three-step setup |
-| Q4 | Oracle PL/SQL → dbt + Trino SQL migration | 4.75 STRONG PASS | concat_ws skips NULL rewrite, minor Oracle-trailing-space framing slip |
+| 5.0 | 4.75 | 5.0 | 4.75 |
 
-**Iter average**: **4.8125 STRONG PASS** (above 3.5 threshold by +1.3125).
+**Verdict**: Pin `reference_trino_count_distinct_single_arg` reconfirmed. Responder correctly identified the MySQL-syntax parse error, gave the canonical `COUNT(DISTINCT ROW(customer_id, plan_id))` ROW-wrap fix, offered the `CONCAT(a, '|', b)` alternative with delimiter-collision + NULL-propagation caveats, and framed the perf difference accurately (single MarkDistinct shuffle vs two re-shuffles for two separate `COUNT(DISTINCT)`). All facts match the pin and [trinodb/trino#15106](https://github.com/trinodb/trino/issues/15106) + [querifylabs distinct-aggregation](https://www.querifylabs.com/blog/distinct-aggregation-optimization-in-apache-calcite-and-trino).
 
-**Accuracy confirmations** (as requested in run prompt):
+**Matches pin?** Yes — `reference_trino_count_distinct_single_arg.md` exactly.
 
-1. **Q1 ANALYZE / Puffin / NDV (THINNEST topic)** — VERIFIED via WebFetch of trino.io/docs/467/sql/analyze.html + trino.io/docs/467/connector/iceberg.html. Bare `ANALYZE table_name WITH (columns = ARRAY[...])` syntax exact; Iceberg manifests auto-collect per-file min/max + null counts; NDV requires explicit ANALYZE → Puffin sidecar (apache-datasketches-theta-v1); stats do NOT auto-update. Responder's framing matches the docs verbatim. Pin family consistent with iter1231 / iter1161.
+---
 
-2. **Q2 division-by-zero pin reference** — VERIFIED via pin `reference_trino_division_by_zero.md` (memory-pinned, originally git-tag-source-verified). INTEGER/DECIMAL `/` by zero THROWS `DIVISION_BY_ZERO`; DOUBLE/REAL `/` by zero returns Infinity/NaN per IEEE-754; NULLIF(denom, 0) guard for INTEGER/DECIMAL is the canonical clean fix. Responder's type-split + NULLIF guard exactly matches the pinned canonical. r27 §4.4H continues to be correct (LOCK).
+### Q2 — GDPR DELETE slowdown on never-deleted rows — 4.875 STRONG PASS
 
-3. **Q4 `concat_ws` skips NULL** — VERIFIED via WebFetch of trino.io/docs/467/functions/string.html verbatim: *"Any null values provided in the arguments after the separator are skipped."* Trino `concat()` / `||` propagates NULL per SQL standard (consistent with iter1287 / iter1290 / iter1299-Q1 prior confirmations). Responder's `concat_ws(' ', first_name, last_name)` rewrite is the canonical Trino pattern for Oracle's CONCAT-skips-NULL semantics.
+| Acc | Clar | Prac | Compl |
+|---|---|---|---|
+| 5.0 | 4.75 | 5.0 | 4.75 |
 
-**Watches & FIX-A**:
+**Verdict**: Pin `reference_trino_optimize_clears_position_deletes` reconfirmed. Responder correctly diagnosed position-delete read overhead (Merge-on-Read deletes on a non-partition column write position-delete files; every read applies them — overhead on never-deleted rows). Fix sequence is exactly right: `EXECUTE optimize(file_size_threshold=>'512MB')` (raise threshold above large delete-bearing files to force them into the rewrite candidate set; new data files have no live deletes) **THEN** `EXECUTE expire_snapshots(retention_threshold=>'7d')` to reclaim. Critical ordering rule stated: "expire_snapshots ALONE won't reclaim — data files still referenced by current snapshot; must optimize first."
 
-- **NEW FIX-A**: NONE — no defects warrant resource changes this iter.
-- **NEW HARD WATCH**: NONE — all four answers are clean canonical.
-- **NEW LOW WATCH**: NONE significant — the Q4 Oracle-CONCAT-trailing-space framing miss is a 1st-occurrence aside that doesn't change the engineer's action plan; not worth tracking.
-- **CARRY watches (no firing this iter)**:
-  - `iter1305-Q3 same-WHERE-different-scan → COLUMNAR PROJECTION` (HARD): not exercised — Q1 was about ANALYZE not scan-time-differential.
-  - `iter1304-Q3 dbt compile pure-offline myth` (CLOSED iter1305) — confirmed CLOSED, no re-emergence.
-  - `iter1285-Q2 mixed-TIMESTAMP-types CAST-attaches-session-zone non-federation findability gap` (SOFT): not exercised.
-  - `iter1280-Q2 DECIMAL-SUM-scale-preserved mechanism slip` (SOFT): not exercised.
-  - `iter1281-Q1 system.runtime perf-triage findability gap` (HARD, from before iter1304): not exercised; the THINNEST-topic Q1 this iter probed stats-staleness side instead of system-runtime side.
+**Positive**: NO Spark-leaning slip — fix is fully Trino-native (no `rewrite_position_delete_files` Spark recommendation creep, consistent with the iter1194 r28 FIX-A landing).
 
-**Pattern note**: This is a textbook clean continuous-pass iter — all four answers are paste-and-run for the engineer. The THINNEST-topic probe (Q1) landed cleanly on a stats-staleness flavoring rather than the system-runtime flavoring, so it draws the topic average from 4.0311 toward 4.0612 (28th sample) without exercising the iter1281 system.runtime findability gap. Two pin reconfirmations this iter (`reference_trino_division_by_zero` Q2 + `reference_trino_starts_with_ends_with` family for `concat_ws` Q4) continue the verify-first cadence. No churn signals.
+**Matches pin?** Yes — `reference_trino_optimize_clears_position_deletes.md` exactly.
+
+---
+
+### Q3 — dbt `--select`/`--exclude` for 80-model 40-min rebuild — 3.125 BORDERLINE FAIL (sub-3.5)
+
+| Acc | Clar | Prac | Compl |
+|---|---|---|---|
+| 3.5 | 4.0 | 2.5 | 2.5 |
+
+**Verdict**: Responder HEDGED with "resources do not contain documentation on dbt's `--select`/`--exclude` selector syntax" and deferred to `docs.getdbt.com/reference/node-selection/syntax`.
+
+**§6.7F findability CONFIRMED — grep against `resources/27-oracle-plsql-to-dbt-trino.md`**:
+- `### 6.7F LEADING CANONICAL — dbt --select set-operators + graph-operators` exists at L3920–3955
+- Covers comma=AND / space=OR set operators verbatim (matches [docs.getdbt.com/reference/node-selection/set-operators](https://docs.getdbt.com/reference/node-selection/set-operators))
+- Covers `+model_name` (upstream), `model_name+` (downstream), `+model_name+` (both), `1+model` / `model+2` bounded-depth — at L3943
+- Lists `path:models/marts/finance` as a selector method — at L3943
+- §6.7F2 (`dbt retry` / `result:error+`) + §6.7F3 (slim CI `state:modified+ --defer`) at L3958–4017
+
+So **`--select` content EXISTS for the engineer's "run one folder + downstream" ask** — the canonical command is `dbt run --select "path:models/<folder>+"` and §6.7F has every building block.
+
+**Two routing failures**:
+
+1. **Findability gap**: §6.7F keyword anchors are TAG-focused ("dbt tag AND OR", "dbt build multiple tags BOTH"). ZERO anchors for the engineer's plain phrasing: "dbt run rebuilds everything", "run just one folder", "80 models takes 40 min", "run a subset of models", "run downstream of a model", "dbt run is too slow."
+
+2. **Content gap CONFIRMED via grep `--exclude` against entire `resources/`**: **ZERO HITS in all 27 resources.** `--exclude` is a real dbt flag with same selector semantics as `--select` but removes matching nodes — verified at [docs.getdbt.com/reference/node-selection/exclude](https://docs.getdbt.com/reference/node-selection/exclude). So the responder's "no `--exclude` in resources" claim is FACTUALLY CORRECT; the "no `--select`" claim is the findability miss.
+
+**RECOMMENDED FIX-A (LIGHT, additive to §6.7F)**:
+
+(a) Extend §6.7F's keyword-anchor row with plain-question phrasings:
+> `dbt run rebuilds everything`, `run just one folder`, `run a subset of models`, `dbt run is too slow rebuild everything`, `run downstream of a model`, `dbt --select path:folder+`, `80 models 40 minutes`, `--select vs --exclude`
+
+(b) Add a worked example explicitly framed for the engineer's ask:
+> ```bash
+> # Run a whole folder + everything downstream:
+> dbt run --select "path:models/marts+"
+> ```
+
+(c) Add a short `--exclude` subsection (3–5 lines):
+> `--exclude` has SAME selector semantics as `--select` (path:/tag:/+model/model+/comma/space all work) but REMOVES matching nodes from the selection. Combine: `dbt run --select +tag:critical --exclude tag:experimental` = critical+upstream MINUS experimentals. Verified at [docs.getdbt.com/reference/node-selection/exclude](https://docs.getdbt.com/reference/node-selection/exclude).
+
+**Justification for FIX-A (not per-instance hedge)**: 1st instance of THIS specific phrasing → §6.7F gap, but the gap has TWO compounding parts (keyword-anchor expansion + `--exclude` is genuinely absent across all resources) AND the engineer literally named both `--select` AND `--exclude` in the question. A light additive expansion of §6.7F (not a churn) covers both gaps in one edit.
+
+---
+
+### Q4 — Oracle 'ACTIVE   ' trailing-space → Trino row drop — 4.0 PASS (findability miss)
+
+| Acc | Clar | Prac | Compl |
+|---|---|---|---|
+| 4.0 | 4.0 | 4.5 | 3.5 |
+
+**Verdict**: Responder gave the CORRECT fix `WHERE TRIM(status) = 'ACTIVE'` from general knowledge but HEDGED the dialect explanation with "resources do not have specific guidance on Oracle VARCHAR2 padding" then pivoted to the empty-string `'' = NULL` quirk (DIFFERENT issue, not load-bearing for the engineer's trailing-space row-count drop).
+
+**r23 §3.1·STR findability CONFIRMED — grep against `resources/23-sql-best-practices-olap.md`**:
+- `## 3.1·STR. Trino VARCHAR comparison is EXACT — trailing/leading spaces silently break = filters (NOT space-padded; only CHAR(n) pads)` at L398–426
+- **Keyword anchors at L400 INCLUDE verbatim "Oracle/legacy column has padded spaces"**, "does Trino treat `'active'` and `'active '` as equal", "CHAR vs VARCHAR comparison", "my join on a string key silently drops rows"
+- Gives diagnose recipe (`'[' || status || ']' AS bracketed, length(status)`)
+- Gives the EXACT same `trim(status) = 'active'` fix the responder arrived at
+- Defangs LIKE-prefix over-matching + `CAST AS CHAR(6)` PAD-SPACE emulation
+- Verified at [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) verbatim: `CAST('Test' AS varchar(20)) = CAST('Test ' AS varchar(25))` is `FALSE`
+- Explicit "common when migrating an Oracle/legacy `CHAR(n)` column" framing
+- Closes with the durable "trim() once at staging" pattern (the staging-time fix the responder skipped)
+
+The engineer's keywords (Oracle padded, row count dropped, trailing-space, `WHERE status='ACTIVE'`) overlap STRONGLY with these anchors. Responder SHOULD have routed here.
+
+**Dialect nuance the responder missed**: the migrated trailing-space data more likely came from an Oracle **CHAR(n)** source column (Oracle blank-pads on storage + uses blank-padded comparison) than from VARCHAR2 (Oracle VARCHAR2 is non-blank-padded — a VARCHAR2 column with literal `'ACTIVE'` wouldn't match `'ACTIVE   '` either). r23 §3.1·STR draws the CHAR vs VARCHAR distinction explicitly. The engineer's framing said VARCHAR2 but the symptom (Oracle matched padded value) is the CHAR(n) blank-padded comparison rule — the canonical handles this clearly.
+
+**RECOMMENDED LIGHT FIX-A (one-line cross-ref)**: add a pointer in r27 from the Oracle string-migration area (near §4.3-STRIP-ZEROS at L1009 or the LTRIM/RTRIM/TRIM row at L1001) to `[r23 §3.1·STR](23-sql-best-practices-olap.md)` keyed on "trailing-space / VARCHAR2-padded / status filter drops rows after Oracle migration / Oracle CHAR(n) blank-padded comparison". The canonical itself is solid — only the **r27 → r23 routing from Oracle-migration framing** is missing.
+
+**Justification for FIX-A (not per-instance)**: This is the SAME routing family as Q3 — Oracle-migration-framed question lands the responder in r27, but the answer canonical lives in r23. A single one-line cross-ref closes the routing; per-instance hedge would let the next Oracle-string-migration probe regress identically.
+
+---
+
+## Summary across all 4 questions
+
+### What went well
+
+- **Q1 + Q2 pins reconfirmed** (`reference_trino_count_distinct_single_arg`, `reference_trino_optimize_clears_position_deletes`). Both are deep technical answers — multi-step DELETE+maintenance ordering for Q2 + perf-shuffle framing for Q1 — and responder nailed both.
+- **Q2 NO Spark-leaning slip** — fix is fully Trino-native, consistent with the iter1194 r28 FIX-A.
+- **No imported-prior, no broken-secondary, no over-warning folklore, no fabrication** across all 4 answers.
+
+### What went wrong — ONE pattern, repeated twice (Q3 + Q4)
+
+**Pattern: Findability gap from plain-question framing to in-repo canonical.**
+- Q3: Engineer asks "dbt `--select`/`--exclude`, run one folder + downstream" → §6.7F exists in r27 covering `--select` graph operators + `path:` selector, but keyword anchors are tag-focused → Haiku hedged + deferred to external docs.
+- Q4: Engineer asks "Oracle 'ACTIVE   ' padded vs Trino" → §3.1·STR exists in r23 with verbatim "Oracle/legacy column has padded spaces" anchor + the exact `trim()` fix → Haiku gave the right fix from general knowledge but hedged "resources don't have it" and pivoted to an irrelevant `'' = NULL` quirk.
+
+Both routing failures are RESOURCE-side (anchors-don't-lead) NOT responder-synthesis errors. The responder did not invent wrong content — it correctly recognized it lacked an anchor and hedged.
+
+### Recommended actions (teacher)
+
+**LIGHT FIX-A #1 (Q3 — extend r27 §6.7F)**:
+- Add plain-question keyword anchors to §6.7F (the 8 phrasings listed in Q3 verdict).
+- Add a worked `dbt run --select "path:models/<folder>+"` one-liner explicitly framed as "run one folder + everything downstream".
+- Add a 3–5 line `--exclude` subsection with selector-equivalence note + a combined `--select … --exclude …` example. Cite [docs.getdbt.com/reference/node-selection/exclude](https://docs.getdbt.com/reference/node-selection/exclude).
+
+**LIGHT FIX-A #2 (Q4 — add r27 → r23 cross-ref)**:
+- One-line cross-ref in r27 (near §4.3-STRIP-ZEROS L1009 or the LTRIM/RTRIM/TRIM row L1001) pointing to `[r23 §3.1·STR](23-sql-best-practices-olap.md)` keyed on "trailing-space / VARCHAR2-padded comparison / status filter drops rows after Oracle migration / Oracle CHAR(n) blank-padded comparison".
+- DO NOT duplicate r23 §3.1·STR content into r27 — just route. The canonical is already complete and well-defanged.
+
+**Reconcile-don't-append discipline** (per `feedback_reconcile_dont_append.md`): both FIX-As are additive to existing canonicals, not rewrites. No existing content contradicts the additions.
+
+### Watches
+
+- **NEW SOFT WATCH `iter1307-Q3 dbt --select/--exclude findability for "run one folder + downstream" plain phrasing`**: re-probe in 3–6 iters under varied phrasings ("dbt run too slow whole DAG", "run just the marts folder", "exclude experimental models", "subset dbt run by folder"). If FIX-A #1 lands and re-probe still hedges, the keyword-anchor expansion needs to be louder.
+- **NEW SOFT WATCH `iter1307-Q4 Oracle-migration → r23 string-canonical routing miss`**: re-probe in 3–6 iters with Oracle-migration-framed string-comparison questions (trailing-space, leading-space, case-sensitivity differences). If FIX-A #2 lands and re-probe still hedges, the cross-ref needs to be a magnet anchor not a passing pointer.
+- **CARRY**: iter1305-Q3 columnar-projection HARD / iter1303-Q2 SUM(SUM)-OVER / iter1300-Q2 spill-causality / iter1299-Q3 this-guard / iter1298-Q2 metadata-tables / iter1285-Q2 timestamp-tz / iter1281-Q1 system.runtime / iter1278-Q1 Scheduled-vs-CPU Blocked-time precision (still open).
+
+### Topic moves
+
+| Topic | Before | After | Δ | Margin |
+|---|---|---|---|---|
+| SQL query best practices for OLAP | 4.5938/314 | **4.5947/315** | +0.0009 | +1.0947 |
+| Iceberg table maintenance | 4.4580/249 | **4.4597/250** | +0.0017 | +0.9597 |
+| Improving complex SQL performance on Trino with dbt | 4.4260/103 | **4.4135/104** | -0.0125 | +0.9135 |
+| Oracle PL/SQL → dbt + Trino | 4.5025/283 | **4.5008/284** | -0.0017 | +1.0008 |
+
+All four topics REMAIN PASSED. Q3 is the largest single-iter drag in recent band but the topic average stays safely above threshold. No `passed: true` state change.
