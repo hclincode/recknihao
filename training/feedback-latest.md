@@ -1,193 +1,142 @@
-# Judge Feedback — Iteration 1308
+# Judge Feedback — Iteration 1309
 
 **Phase**: extended (pass-loop)
-**Overall iteration score**: **4.625 STRONG PASS** (Q1 4.9375 / Q2 4.375 / Q3 4.875 / Q4 4.3125)
-**Pattern**: 2 iter1307 LIGHT FIX-A re-probes — Q1 (`--select`/`--exclude` §6.7F expansion) REACHED cleanly + watch CLOSES; Q2 (trailing-space r23 §3.1·STR cross-ref) PARTIAL REACH — quality of fix REACHED (correct `trim()` + correct Trino-VARCHAR-exact / Oracle-implicit-padded framing) but routing to dedicated canonical did NOT reach (still cited generic r27 L16 TL;DR + still opened with "no complete coverage"). + Q3 HAVING-aggregate-expression-in-ratio clean STRONG PASS + Q4 NULL-ordering facts-correct but FALSE-PREMISE-NOT-SHARPLY-CORRECTED on the engineer's "ASC produced NULLs at top" symptom (which can't happen on Trino default NULLS LAST).
+**Overall iteration score**: **4.609 STRONG PASS** (Q1 4.9375 / Q2 3.75 / Q3 4.875 / Q4 4.875)
+**Pattern**: HARD watch closure on Q1 (iter1305-Q3 columnar-projection mis-attribution → CLOSES POSITIVELY on this re-probe — responder now identifies COLUMNAR PROJECTION as the cause rather than partition-pruning/delete-files). Q2 is the lone drag — one per-instance grain-miss on the LAG worked query (assumed monthly-grained data even though engineer's table shape `account_id, event_date, event_count` strongly suggests daily granularity); LAG mechanism + OVER + ORDER BY + NULL guard all correct, but `LAG(event_count, 1)` directly on `event_date` compares consecutive days/rows not consecutive months → the engineer pasting this against daily-grained data silently gets wrong results. Q3 (snapshot history + time-travel) and Q4 (Oracle DECODE-NULL → Trino CASE) both pin-perfect.
 
 ---
 
 ## Per-question scoring
 
-### Q1 — RE-PROBE iter1307-Q3 FIX-A: dbt `--select`/`--exclude` "rebuild folder + downstream" — **4.9375 STRONG PASS**
+### Q1 — Columnar projection RE-PROBE of iter1305-Q3 HARD watch — **4.9375 STRONG PASS — WATCH CLOSES POSITIVELY**
 
-| Acc | Clar | Prac | Compl |
-|---|---|---|---|
-| 5.0 | 4.75 | 5.0 | 5.0 |
+Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 5.0.
 
-**Verdict — iter1307-Q3 FIX-A REACHED, watch CLOSES.** Responder went straight to:
-- `dbt run --select "path:models/marts/finance+"` — exactly the engineer's "rebuild that folder + downstream" pattern.
-- `+` operator: `name+` (downstream) / `+name` (upstream) / `+name+` (both) — correct directions.
-- `--exclude`: `dbt run --select "path:models/marts/finance+" --exclude "path:models/marts/legacy"` — combined example exactly matches the engineer's compound ask.
-- `--select` restrictive-by-default + `--exclude` subtracts — framing is right.
-- Cited **r27 §6.7F**.
+**Setup**: wide 90-column Iceberg events table; `SELECT *` = 90s, 4-column query = 6s; same WHERE filter, same row count returned. Why so much slower with `SELECT *`?
 
-**Verified** via [docs.getdbt.com/reference/node-selection/methods](https://docs.getdbt.com/reference/node-selection/methods) (`path:` selector + `+` graph operator semantics) + [docs.getdbt.com/reference/node-selection/exclude](https://docs.getdbt.com/reference/node-selection/exclude) (`--exclude` uses same selector syntax as `--select`, subtracts from selection). All claims source-verified.
+**Responder**: Columnar storage (Parquet on Iceberg) physically stores each column separately within row groups; the engine reads ONLY the column chunks for columns named in `SELECT`. `SELECT *` reads all 90 column chunks per row group ≈ 100% of storage. `SELECT 4_columns` reads only those 4 chunks ≈ 4-5% of storage. Same WHERE + same returned row count = same row-filtering work, but `SELECT *` does ~22× more bytes-read I/O at the scan layer. Not a row-filtering problem; it's an I/O / bytes-scanned problem at the file-format layer. Practical guidance: never `SELECT *` in production analytics; list columns explicitly; for SaaS dashboards rewrite to column-specific projections (the engineer's instinct is correct). Cited r03 columnar storage.
 
-**iter1307-Q3 watch (--select/--exclude findability) → CLOSES on 1st re-probe.** The iter1307 LIGHT FIX-A (added plain-question anchors + `path:models/<folder>+` one-liner + `--exclude` subsection to §6.7F) landed cleanly under the engineer's narrative framing.
+**HARD WATCH CLOSURE — iter1305-Q3 columnar-projection mis-attribution**: at iter1305 the responder mis-attributed a `SELECT *`-vs-narrow-column scan-time difference to partition-pruning / position-delete files (wrong mechanism — neither partition pruning nor delete-files explain a same-WHERE different-projection difference; columnar projection is the canonical answer). At this re-probe, given an explicit same-WHERE + same-row-count + projection-only-differs framing, the responder NOW reaches the COLUMNAR PROJECTION canonical cleanly on first pass. Watch **CLOSES POSITIVELY**.
 
-Minor Clar shave (-0.25): the worked combined example could have spelled out what "restrictive-by-default" means in one sentence for a true dbt-CLI beginner. Not load-bearing — paste-and-run command is right there.
+**VERIFIED** via WebSearch on Parquet columnar storage mechanism: column chunks (within row groups) are the unit of I/O — query engines read ONLY chunks for columns named in the projection and skip all others; "column pruning can reduce I/O by 80-95% for wide tables" matches the responder's ~95%-reduction framing for a 4-of-90-column projection. Iceberg uses Parquet underneath (default `format='PARQUET'` confirmed in the production stack), so the mechanism applies directly. Sources: [Parquet Format: A Complete Guide](https://www.velodb.io/glossary/par-1), [What is Apache Parquet? Columns, Encoding, and Performance](https://datalakehousehub.com/blog/2026-04-apache-parquet/).
 
----
+No imported-prior, no broken-secondary, no over-warning, no fabrication. The mechanism is correctly framed at the right abstraction (column chunks, bytes-scanned not rows, I/O not filter), the practical "never SELECT * in production analytics" prescription matches industry consensus, and the engineer's "rewrite dashboards to be column-specific" instinct is endorsed without overclaim.
 
-### Q2 — RE-PROBE iter1307-Q4 FIX-A: Oracle `'US '` trailing-space → Trino strict — **4.375 PASS (partial reach)**
+### Q2 — LAG MoM percent change in one pass — **3.75 PASS (per-instance grain miss; primary worked-query slip)**
 
-| Acc | Clar | Prac | Compl |
-|---|---|---|---|
-| 4.5 | 4.0 | 4.75 | 4.25 |
+Acc 3.5 / Clar 4.0 / Prac 3.5 / Compl 4.0.
 
-**Verdict — iter1307-Q4 FIX-A PARTIAL REACH.** The CORE answer the engineer needs is CORRECT and was delivered:
-- Trailing whitespace in migrated `customer_regions.region_code` — Oracle's source CHAR(n) blank-padded comparison implicitly matched `'US   ' = 'US'`; Trino VARCHAR comparison is EXACT (no padding) so `'US   '` ≠ `'US'` and those rows drop from `WHERE region_code='US'`.
-- **Fix delivered: `WHERE trim(region_code) = 'US'`** (canonical form) + `trim(TRAILING ' ' FROM region_code)` variant + a find-affected-rows diagnostic query (`length(region_code)` / bracket-wrap `'[' || region_code || ']'` style).
+**Setup**: per account, total events this month vs last month as % change. Table `account_id, event_date, event_count`. Two subqueries + join, or LAG in one pass?
 
-**BUT the routing did NOT fully reach the dedicated canonical**:
-- Responder OPENED with "I don't have complete coverage in the resources for this specific scenario" — factually WRONG after the iter1307 FIX-A landed r23 §3.1·STR (which has verbatim "Oracle/legacy column has padded spaces" anchor + the exact `trim()` fix + CHAR-vs-VARCHAR distinction) AND after the iter1307 r27 LTRIM/RTRIM/TRIM-row cross-ref TRAILING-SPACE-MIGRATION-TRAP pointer to r23 §3.1·STR.
-- Initial mention of EMPTY-STRING `'' = NULL` quirk FIRST (different issue) before pivoting to the correct trailing-whitespace explanation — noise before the right answer.
-- Cited **r27 line 16** (generic TL;DR "Trino is strict about types") rather than the dedicated r23 §3.1·STR canonical or the new r27 TRIM-row → r23 cross-ref.
+**Responder lead (CORRECT)**: LAG in one pass is the better Trino 467 form; window function decoration `LAG(event_count, 1) OVER (PARTITION BY account_id ORDER BY event_date) AS prior_month_count`, then `(curr - prior) / NULLIF(prior, 0) * 100` for percent change with NULLIF divide-by-zero guard; `ORDER BY` REQUIRED inside `OVER` for LAG (Trino enforces); YoY = `LAG(..., 12)`; `WHERE event_date >= date_trunc('month', current_date - INTERVAL '13' MONTH)` to scope to the recent window.
 
-**iter1307-Q4 watch decision**: TWO axes.
-- **Answer-quality axis CLOSES**: responder delivers the correct `trim()` fix + correct Trino-VARCHAR-exact / Oracle-implicit-padded explanation (material improvement over iter1307-Q4 which hedged harder + pivoted to empty-string and never returned). This is the load-bearing axis.
-- **Routing-to-dedicated-canonical axis STAYS OPEN**: responder still cited r27 L16 TL;DR not r23 §3.1·STR or the new r27 cross-ref → r23. Quality reach, routing partial.
+**LOAD-BEARING SLIP — grain assumption**: the responder applied `LAG(event_count, 1) OVER (PARTITION BY account_id ORDER BY event_date)` DIRECTLY on the source table. This is CORRECT **ONLY IF** the data is already monthly-grained (one row per `account_id` per month). With the engineer's table shape (`event_date` + `event_count` per row), the more natural reading is DAILY-GRAINED — i.e. `event_count` is the count for one specific `event_date`. On daily-grained data, `LAG(event_count, 1) OVER (ORDER BY event_date)` compares consecutive DAYS / consecutive ROWS, not consecutive MONTHS. The engineer pasting this gets a percent-change-vs-yesterday signal, not a percent-change-vs-prior-month signal — silently wrong.
 
-**DECISION**: DOWNGRADE the iter1307-Q4 watch to LOW priority + carry as a re-probe-2-4-more-iters watch. If responder consistently delivers the correct `trim()` fix even while citing the wrong section, the watch can fully CLOSE on the answer-quality criterion alone — engineer gets the right code, citation precision is secondary. NO ADDITIONAL FIX-A this iter (the iter1307 cross-ref + r23 anchors are correct and complete; the routing miss is a Haiku findability ceiling, not a resource defect).
+**The robust form (NOT given) — aggregate to monthly FIRST, then LAG**:
 
-**Verified facts**:
-- Trino VARCHAR comparison is byte-exact (no whitespace stripping) — [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) verbatim `CAST('Test' AS varchar(20)) = CAST('Test ' AS varchar(25))` is `FALSE`.
-- Oracle CHAR(n) blank-padded comparison rule — Oracle treats `CHAR(n)` as blank-padded so `'US' = 'US   '` matches when the column is CHAR(n); VARCHAR2 is non-blank-padded (so a true VARCHAR2 source with literal 'US' wouldn't have matched 'US   ' on Oracle either — the engineer's framing suggests a CHAR(n) source).
-- `trim(s)` strips BOTH leading + trailing whitespace; `trim(TRAILING ' ' FROM s)` strips only trailing space — both valid Trino 467 forms per [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html).
+```sql
+WITH monthly AS (
+  SELECT account_id,
+         date_trunc('month', event_date) AS mon,
+         SUM(event_count)                 AS monthly_total
+  FROM events
+  WHERE event_date >= date_trunc('month', current_date - INTERVAL '13' MONTH)
+  GROUP BY account_id, date_trunc('month', event_date)
+)
+SELECT account_id, mon, monthly_total,
+       LAG(monthly_total, 1) OVER (PARTITION BY account_id ORDER BY mon) AS prior_month_total,
+       (monthly_total - LAG(monthly_total, 1) OVER (PARTITION BY account_id ORDER BY mon))
+         * 100.0 / NULLIF(LAG(monthly_total, 1) OVER (PARTITION BY account_id ORDER BY mon), 0) AS pct_change
+FROM monthly;
+```
 
-Minor Clar shave (-0.5): hedge opener + initial empty-string side-tangent add noise before the right answer. Minor Compl shave (-0.5): didn't surface the durable "trim() once at staging / fix at the dbt staging model rather than every query" pattern the canonical teaches.
+**Classification — per-instance grain miss on the worked query**: the LAG mechanism itself (OVER, ORDER BY required, offset semantics, NULLIF guard, `LAG(..., 12)` for YoY) is correct; the architectural recommendation (LAG over two-subqueries-and-join) is correct; only the worked SQL assumes monthly-grained input without disclosing the assumption or aggregating first. NOT a resource defect — r07 / r28 LAG canonicals teach the mechanism correctly and the `date_trunc('month', ...) GROUP BY + LAG` pattern is documented elsewhere; the responder didn't compose the two pieces under "% change month over month" framing. Similar in shape to the iter1303-Q2 `SUM(SUM(x)) OVER ROWS-frame` broken-secondary family (worked query missing the inner aggregate level), but here it's the PRIMARY worked query, not a secondary.
 
----
+**NEW SOFT WATCH `iter1309-Q2 LAG-without-aggregate-to-monthly-first grain-assumption`**: re-probe 4-8 iters under varied "MoM / YoY % change with LAG" framings where the source table is daily-grained (`event_date` column rather than `month` column); if responder again drops the `date_trunc + GROUP BY` step and writes LAG directly on the daily table, escalate to LIGHT FIX-A at r07 §LAG-canonical adding a "FIRST aggregate to the comparison grain, THEN LAG" worked card with the daily→monthly aggregation example above. NO FIX-A on first occurrence.
 
-### Q3 — HAVING with COUNT(CASE)/COUNT ratio for per-sales-rep fast-close rate — **4.875 STRONG PASS**
+No imported-prior, no broken-secondary in the strict sense (the LEAD is correct; the worked query has the grain bug), no over-warning, no fabrication.
 
-| Acc | Clar | Prac | Compl |
-|---|---|---|---|
-| 5.0 | 4.75 | 5.0 | 4.75 |
+### Q3 — Iceberg snapshot history + time-travel after a bad dbt run — **4.875 STRONG PASS — pin-perfect**
 
-**Verdict**: Responder correctly stated:
-- Trino HAVING accepts **aggregate expressions directly** — no subquery wrapper needed.
-- Trino HAVING **cannot reference SELECT-list aliases** — must repeat the aggregate expression. (SQL-standard HAVING-evaluated-before-SELECT rule.)
-- Worked query:
-  ```sql
-  SELECT sales_rep_id,
-         COUNT(*) AS total_deals,
-         COUNT(CASE WHEN days_to_close <= 30 THEN 1 END) AS fast_closes,
-         CAST(COUNT(CASE WHEN days_to_close <= 30 THEN 1 END) AS DOUBLE)
-           / NULLIF(COUNT(*), 0) AS fast_close_rate
-  FROM deals
-  GROUP BY sales_rep_id
-  HAVING COUNT(*) >= 10
-     AND CAST(COUNT(CASE WHEN days_to_close <= 30 THEN 1 END) AS DOUBLE)
-           / NULLIF(COUNT(*), 0) > 0.40
-  ```
-- `CAST(... AS DOUBLE)` for float division (otherwise INTEGER / INTEGER = INTEGER truncates to 0 for ratios < 1).
-- `NULLIF(COUNT(*), 0)` divide-by-zero guard (per the `reference_trino_division_by_zero` pin — INTEGER division by zero throws `DIVISION_BY_ZERO`).
-- "Repeat expression not alias" rule named explicitly — the load-bearing dialect note.
+Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
 
-**Verified** via [trino.io/docs/467/sql/select.html](https://trino.io/docs/467/sql/select.html): HAVING example uses `sum(acctbal) > 5700000` (aggregate expression) rather than referencing the SELECT-list alias `totalbal`. SQL-standard order of evaluation (HAVING evaluated before SELECT) confirmed.
+**Setup**: bad dbt model overwrote the production table; list snapshots; query the table as it was before the bad run.
 
-Minor Compl shave (-0.25): could have surfaced `count_if(days_to_close <= 30)` as the Trino-native equivalent of `count(CASE WHEN ... THEN 1 END)` (verified at [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/467/functions/aggregate.html) — `count_if(x) ≡ count(CASE WHEN x THEN 1 END)`). Not load-bearing for the answer; the COUNT(CASE) form is universally portable + correct.
+**Responder**: `SELECT snapshot_id, committed_at, operation, summary FROM iceberg.analytics."events$snapshots" ORDER BY committed_at DESC` to list snapshots and identify the pre-bad-run snapshot_id. Whole-token quoting rule called out — `"events$snapshots"` is one quoted identifier, NOT `events."$snapshots"`. Then read at that snapshot via `SELECT ... FROM iceberg.analytics.events FOR VERSION AS OF <snapshot_id>`. For permanent revert: `CALL iceberg.system.rollback_to_snapshot('analytics', 'events', <snapshot_id>)` (3-arg positional form, metadata-only — table-pointer rewrite, atomic, regardless of table size). Cleanup with `EXECUTE expire_snapshots(retention_threshold => '7d')` AFTER verification.
 
-Minor Clar shave (-0.25): didn't mention the alternative aggregate-FILTER form `count(*) FILTER (WHERE days_to_close <= 30)` — Trino-supported, often more readable than COUNT(CASE).
+**VERIFIED**:
+- `$snapshots` metadata table exposes `snapshot_id` / `committed_at` / `operation` / `summary` (+ `parent_id`, `manifest_list`) per [trino.io/docs/current/connector/iceberg.html](https://trino.io/docs/current/connector/iceberg.html) — every column responder named matches docs verbatim.
+- `FOR VERSION AS OF <snapshot_id>` is the documented Trino 467 time-travel syntax with snapshot_id (BIGINT) — verified via [trino.io Iceberg connector docs](https://trino.io/docs/current/connector/iceberg.html) + [Apache Iceberg Time Travel & Rollbacks in Trino (Starburst)](https://www.starburst.io/blog/apache-iceberg-time-travel-rollbacks-in-trino/). `FOR TIMESTAMP AS OF` also valid for time-based travel (recall ceiling not load-bearing here — engineer wanted snapshot_id).
+- 3-arg `CALL iceberg.system.rollback_to_snapshot('schema', 'table', snapshot_id)` is the canonical Trino 467 form per pin `reference_trino_rollback_snapshot_form` (ALTER TABLE EXECUTE rollback_to_snapshot form is 469+); reconfirmed at iter1297-Q2.
+- Whole-token quoting rule matches the docs example `example.testdb."customer_orders$snapshots"` verbatim.
+
+Minor Compl shave (-0.25): didn't explicitly contrast `FOR VERSION AS OF` (read at snapshot, table-pointer unchanged — safe for ad-hoc reads / data-recovery copy) vs `rollback_to_snapshot` (rewrites the current-snapshot pointer — DISCARDS any legitimate writes committed after the bad-run snapshot). For a single-bad-run + no-concurrent-good-writes scenario these are equivalent; on a busier table it matters. Not load-bearing for this engineer's narrative.
 
 No imported-prior, no broken-secondary, no over-warning, no fabrication.
 
----
+### Q4 — Oracle DECODE NULL + ranges → Trino CASE — **4.875 STRONG PASS — pin-perfect, comprehensive**
 
-### Q4 — Oracle ORDER BY NULLs-at-END vs Trino "NULLs moved to TOP" — **4.3125 PASS (false-premise not sharply corrected)**
+Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
 
-| Acc | Clar | Prac | Compl |
-|---|---|---|---|
-| 4.25 | 4.5 | 4.5 | 4.0 |
+**Setup**: Oracle DECODE with range logic (0-100 → 'low', etc.). Does Oracle DECODE treat NULLs same as CASE WHEN? Convert DECODE-with-ranges to Trino CASE — watch-outs?
 
-**Verdict — FACTS CORRECT, PREMISE NOT SHARPLY CORRECTED.**
+**Responder**:
+1. **Oracle DECODE NULL semantics**: DECODE treats `NULL = NULL` as a MATCH (Oracle's documented exception to the standard `NULL` propagation rule); Trino simple `CASE col WHEN NULL THEN ...` does NOT (per SQL standard `col = NULL` → UNKNOWN → never matches). Use `CASE WHEN col IS NULL THEN ... ELSE ... END` (searched form) for the NULL branch in Trino.
+2. **Range-based DECODE → searched CASE**: DECODE only supports exact-equality matches; range-based "0-100 → 'low'" rewrites in Trino need searched CASE: `CASE WHEN value BETWEEN 0 AND 100 THEN 'low' WHEN value BETWEEN 101 AND 1000 THEN 'mid' ... END`. Do NOT use simple `CASE value WHEN ...` form for ranges (it only does equality).
+3. **NULL gotcha re-emphasized**: `col = NULL` returns UNKNOWN in Trino; simple `CASE col WHEN NULL` therefore never matches. Use `WHEN col IS NULL`.
+4. **Type coercion**: CAST if mixing types across CASE result branches (Trino is strict — all THEN branches must produce a common supertype; Oracle DECODE is more lenient).
+5. **Audit steps**: scan Oracle DDL for DECODE expressions, identify NULL-comparison + range patterns, rewrite each.
 
-**Facts the responder got right**:
-- Table:
-  | Direction | Oracle default | Trino 467 default |
-  |---|---|---|
-  | ASC | NULLS LAST | NULLS LAST |
-  | DESC | NULLS FIRST | NULLS LAST |
-- Trino 467 default is **NULLS LAST regardless of ASC/DESC** (matches pin `reference_trino_null_ordering_default.md` — verified at [trino.io/docs/current/sql/select.html](https://trino.io/docs/current/sql/select.html) ORDER BY null ordering section).
-- Oracle default is **NULLS LAST for ASC, NULLS FIRST for DESC** (verified via [oracle-base.com SQL for Beginners — ORDER BY](https://oracle-base.com/articles/misc/sql-for-beginners-the-order-by-clause) + [oracletutorial.com Oracle ORDER BY](https://www.oracletutorial.com/oracle-basics/oracle-order-by/)).
-- Fix:
-  - To preserve Oracle ASC behavior: just `ORDER BY contract_end_date ASC` (Trino default NULLS LAST matches Oracle ASC default — no change needed!).
-  - To preserve Oracle DESC behavior: `ORDER BY contract_end_date DESC NULLS FIRST` (Trino DESC default NULLS LAST differs from Oracle DESC default NULLS FIRST).
-- Universal rule: **always be explicit with `NULLS FIRST` / `NULLS LAST` on migration** — sound, safe-by-default advice.
+**VERIFIED** via [databasestar.com Oracle DECODE Function](https://www.databasestar.com/oracle-decode-function/) + [oracletutorial.com Oracle DECODE Function](https://www.oracletutorial.com/oracle-comparison-functions/oracle-decode/) + [sqlines.com Oracle to SQL Server DECODE NULL Issue](https://www.sqlines.com/oracle-to-sql-server/decode):
+- DECODE's documented NULL=NULL-as-MATCH exception: "Oracle considers two nulls to be equivalent while working with DECODE function. For example, if expression is null, then Oracle returns the result of the first search that is also null" — exactly matches responder framing.
+- CASE simple-form `WHEN NULL` never matches: "when converting DECODE to CASE expression and there is a NULL condition, you have to use the searched CASE form with IS NULL condition, because WHEN NULL is never true in simple CASE expressions" — verbatim matches.
+- DECODE is equality-only; ranges require CASE — well-established.
 
-**The defect — FALSE PREMISE NOT EXPLICITLY CORRECTED**:
+Minor Compl shave (-0.25): didn't explicitly mention that `NVL(col, sentinel)` wrapping is an alternative pattern to emulate Oracle DECODE's NULL=NULL match (responder went straight to `IS NULL` branch which is cleaner — equally valid choice, not load-bearing).
 
-The engineer claimed: "Oracle `ORDER BY contract_end_date ASC` put NULLs at the END; ported to Trino — NULLs moved to the **TOP**."
-
-But per the responder's own (correct) table: **Trino ASC default = NULLS LAST = NULLs at the END, same as Oracle ASC.** The engineer's "NULLs moved to top" symptom on an ASC query is INCONSISTENT with Trino's default NULLS LAST behavior. So either:
-1. The engineer is actually running DESC (not ASC), and observed Trino NULLS LAST (NULLs at bottom of descending list, which APPEARS in the middle/skew compared to Oracle's NULLS FIRST top placement), OR
-2. The engineer's port introduced an explicit `NULLS FIRST` somewhere, OR
-3. The engineer is mis-reading the result (e.g., counting from top differently).
-
-What the engineer's ASC query CANNOT produce on stock Trino 467 is "NULLs at the top" — that requires either DESC + Oracle-style behavior (which Trino doesn't do) OR explicit `NULLS FIRST` (which the engineer didn't write).
-
-The responder did NOT explicitly flag this. It accepted the premise + framed the situation as "critical silent-wrong bug; Oracle and Trino opposite defaults for DESC" — but the engineer's stated scenario was ASC, where Oracle and Trino DEFAULTS AGREE. The table the responder produced implicitly contradicts the engineer's premise (ASC row shows both = NULLS LAST) but the responder didn't surface this analysis.
-
-**Classification**: per-instance false-premise-endorsement-light slip (sibling to iter1297-Q4 Oracle GROUP-BY-leniency premise + iter1299-Q4 endorsement family — but milder, because the universal "always explicit NULLS FIRST/LAST on migration" fix the responder gave WORKS for both interpretations, so the engineer arrives at correct + safe code regardless of which case they're actually in). The over-generalization to "silently broken" is the cost.
-
-**Why not a FIX-A**: The universal-explicit-NULLS-on-migration rule the responder gave is the right advice for ANY Oracle-to-Trino port (covers both the ASC-vs-DESC split AND any latent assumption); the engineer's code will be correct after they apply it. The premise-correction miss is a clarity ding, not a code-correctness defect. Per `feedback_responder_overwarning_folklore.md` discipline: the responder's "critical silent-wrong bug" framing is mildly over-warning (Trino ASC default = Oracle ASC default = SAFE, not silent-wrong), but the universal fix gets the engineer to safe code. Per-instance, NOT resource-defect.
-
-**Scoring rationale**: Acc 4.25 (table + fix + universal rule all correct; "silent-wrong bug" framing is slightly over-warning given Trino ASC default = Oracle ASC default = NULLS LAST); Clar 4.5 (table clear, but didn't flag the ASC-default-agreement that contradicts the premise); Prac 4.5 (universal "always explicit" rule is safe in any direction); Compl 4.0 (missed surfacing the premise inconsistency — engineer is left thinking ASC migrated wrong when actually ASC migrates clean and the divergence is on DESC; engineer may chase the wrong cause).
-
-No imported-prior (Trino NULLS LAST default verified + matches pin), no broken-secondary, no fabrication.
+No imported-prior (DECODE-NULL-semantics correctly attributed to Oracle, not over-generalized), no broken-secondary, no over-warning, no fabrication. Pin-quality answer; engineer can paste-and-run on a real Oracle→Trino DECODE migration.
 
 ---
 
-## Summary across all 4 questions
+## Source-verified outcomes
 
-### What went well
+- 0 fabrications
+- 0 Trino dialect parse-errors
+- 0 imported-prior assumed-absence
+- 0 broken-secondary in the responder-padding family
+- 0 over-warning folklore
+- 0 false-premise endorsement
+- 0 resource defects
+- 1 LOAD-BEARING grain miss on Q2 worked query (LAG directly on daily-grained `event_date` without aggregate-to-monthly-first step) — per-instance worked-query slip, NOT a resource defect (r07/r28 LAG + `date_trunc + GROUP BY` canonicals are present and correct individually); engineer pasting on daily data silently gets wrong result. CLASSIFIED as new SOFT watch, NOT FIX-A on first occurrence per `feedback_synthesis_ceiling_stop_churning.md` discipline.
 
-- **iter1307-Q3 FIX-A REACHED on 1st re-probe** (Q1: --select/--exclude §6.7F expansion landed cleanly; engineer gets paste-and-run `path:models/marts/finance+ --exclude path:models/marts/legacy` answer with correct `+` operator directions + restrictive-by-default framing). Watch CLOSES.
-- **Q3 HAVING-aggregate-expression** clean STRONG PASS with verified Trino HAVING semantics (aggregate expressions OK, SELECT aliases NOT), CAST DOUBLE for float division, NULLIF divide-by-zero guard — pin `reference_trino_division_by_zero` indirectly reconfirmed.
-- **Q4 facts (table + fix + universal rule)** all correct + match pin `reference_trino_null_ordering_default`. Even with the premise-correction miss, the engineer arrives at safe code.
-- **No imported-prior assumed-absence, no broken-secondary alternative, no fabrication** across all 4 answers.
+---
 
-### What went wrong — TWO per-instance recall patterns
+## Recommendation
 
-1. **Q2 routing partial reach**: iter1307-Q4 FIX-A added the r27 LTRIM/RTRIM/TRIM-row cross-ref → r23 §3.1·STR, but the responder still opened with "I don't have complete coverage" + cited generic r27 L16 TL;DR rather than the dedicated canonical. Answer-quality REACHED (correct `trim()` fix + correct trailing-space-from-Oracle-CHAR-padded framing); routing-to-canonical PARTIAL. Decision: DOWNGRADE watch, re-probe 2-4 more iters under varied trailing-space framings; if quality stays correct the watch can close on the answer-quality criterion.
+**NO-OP** on resources. iter1305-Q3 columnar-projection HARD watch CLOSES positively (the re-probe target reached the right canonical cleanly). Q2 grain-miss is per-instance — new SOFT watch only (re-probe 4-8 iters under varied MoM/YoY framings against daily-grained sources). Q3 + Q4 are pin-perfect, reconfirming `reference_trino_rollback_snapshot_form` (3-arg CALL) and Oracle DECODE-NULL-vs-Trino-CASE-IS-NULL family knowledge.
 
-2. **Q4 false-premise-endorsement-light**: engineer's "ASC produced NULLs at top in Trino" symptom is internally inconsistent with the responder's own (correct) table showing Trino ASC = NULLS LAST = same as Oracle ASC. Responder did not explicitly call this out; over-generalized to "silently broken." The universal "always explicit NULLS FIRST/LAST on migration" fix the responder gave is sound + works regardless of which case the engineer is actually in, so material harm is bounded — engineer's code will be correct after applying it. Classification: per-instance phrasing slip, no FIX-A.
+## Watch updates
 
-### Recommended actions (teacher)
+- **CLOSING (positive)**: iter1305-Q3 columnar-projection mis-attribution HARD watch — responder NOW correctly identifies columnar projection (column chunks per Parquet row group, only selected columns read, I/O not row-filtering) under explicit same-WHERE + same-row-count + projection-differs framing.
+- **NEW LOW SOFT WATCH**: `iter1309-Q2 LAG-without-aggregate-to-monthly-first grain-assumption` — re-probe 4-8 iters under varied "MoM / YoY % change with LAG" framings where the source table is daily-grained (`event_date` column rather than `month` column); escalate to LIGHT FIX-A only at 2+ recurrences with the same grain-miss pattern.
+- **CARRY (not exercised)**: iter1303-Q2 SUM(SUM)-OVER broken-secondary; iter1300-Q2 spill-causality; iter1299-Q3 this-guard; iter1298-Q2 metadata-tables-for-file-layout; iter1285-Q2 timestamp-tz; iter1281-Q1 system.runtime; iter1278-Q1 Scheduled-vs-CPU.
+- **DOWNGRADED previously (carry)**: iter1307-Q4 Oracle-migration→r23 string-canonical routing miss (LOW).
 
-**NO-OP this iter.**
-- **No new FIX-A**: Q1 confirmed iter1307-Q3 FIX-A REACHED (commit + carry); Q2 quality REACHED + routing miss is a Haiku findability ceiling not a resource gap (iter1307 cross-ref is correct + r23 §3.1·STR is complete); Q3 is a clean STRONG PASS with no defect; Q4 is per-instance phrasing on a false-premise the engineer's universal fix covers regardless.
-- **No reconcile needed**: existing canonicals at r27 §6.7F + r23 §3.1·STR + r27 TRIM-row cross-ref are all correct + current.
+## Topic score updates
 
-### Watches
-
-- **iter1307-Q3 dbt `--select`/`--exclude` findability → CLOSES** on 1st re-probe. Q1 paste-and-run answer with correct operator directions + `--exclude` combined example reached cleanly under narrative framing.
-- **iter1307-Q4 Oracle-migration → r23 string-canonical routing → DOWNGRADE to LOW**. Answer-quality axis REACHED (correct `trim()` fix + correct Trino-VARCHAR-exact / Oracle-implicit-padded explanation); routing-to-canonical axis stays OPEN (still cited generic r27 L16 not the dedicated r23 §3.1·STR or new r27 cross-ref → r23). Re-probe 2-4 more iters under varied "trailing-space / leading-space / CHAR-padded migration" framings; if quality stays correct, watch fully closes on answer-quality criterion (citation precision is Haiku ceiling, not resource defect).
-- **NEW LOW SOFT WATCH `iter1308-Q4 false-premise-endorsement-light on ASC-direction Oracle-vs-Trino NULL-ordering symptom`**: engineer's "ASC produced NULLs at top" symptom is internally inconsistent with the responder's own correct table (Trino ASC default = NULLS LAST = same as Oracle ASC); responder didn't flag the inconsistency, over-generalized to "silently broken." Sibling to iter1297-Q4 / iter1299-Q4 premise-endorsement family but milder (universal fix the responder gave covers both cases). Re-probe under varied "ORDER BY NULLs migrated wrong from Oracle to Trino" framings 4-8 iters; only escalate to LIGHT FIX-A if 2+ recurrences show the responder fail to disambiguate ASC-direction-agreement vs DESC-direction-divergence.
-- **CARRY watches not exercised this iter**: iter1305-Q3 columnar-projection HARD / iter1303-Q2 SUM(SUM)-OVER / iter1300-Q2 spill-causality / iter1299-Q3 this-guard / iter1298-Q2 metadata-tables / iter1285-Q2 timestamp-tz / iter1281-Q1 system.runtime / iter1278-Q1 Scheduled-vs-CPU.
-
-### Topic moves
-
-| Topic | Before | After | Δ | Margin |
+| Topic | Before | After | Δ | Margin over 3.5 |
 |---|---|---|---|---|
-| Improving complex SQL performance on Trino with dbt (Q1) | 4.4135/104 | **4.4185/105** | +0.0050 | +0.9185 |
-| Oracle PL/SQL → dbt + Trino (Q2 + Q4) | 4.5008/284 | **4.4997/286** | -0.0011 | +0.9997 |
-| Analytical query patterns on Iceberg+Trino (Q3) | 4.4809/215 | **4.4828/216** | +0.0019 | +0.9828 |
+| Column-oriented storage — what it is and why it's faster for analytics | 4.5416 / 17 | **4.5636 / 18** | +0.0220 | +1.0636 |
+| Analytical query patterns on Iceberg+Trino: funnels, cohorts, time-series SQL | 4.4828 / 216 | **4.4794 / 217** | −0.0034 | +0.9794 |
+| Iceberg table maintenance: compaction, snapshot expiry, orphan file cleanup | 4.4597 / 250 | **4.4614 / 251** | +0.0017 | +0.9614 |
+| Oracle PL/SQL → dbt + Trino migration | 4.4997 / 286 | **4.5010 / 287** | +0.0013 | +1.0010 |
 
-### Source-verified outcomes this iter
+All required topics REMAIN PASSED.
 
-0 fabrications; 0 Trino dialect parse-errors; 0 imported-prior assumed-absence; 0 broken-secondary; 0 over-warning folklore proper (Q4 mild over-generalization noted as per-instance phrasing, not folklore-magnitude); 0 resource defects; 1 partial-routing-reach (Q2 cited generic TL;DR not dedicated canonical) + 1 mild false-premise-endorsement-light (Q4 didn't sharply flag ASC-direction-agreement inconsistency).
+## Pattern observation
+
+This is a notable iter for two reasons: (1) iter1305-Q3 was the longest-standing HARD watch in the recent carry-forward set (mis-attribution of a projection-driven scan-time difference to partition-pruning/delete-files — a fundamental columnar-storage gap); the explicit same-WHERE + same-row-count framing this iter unambiguously isolated projection as the only variable, and the responder reached COLUMNAR PROJECTION cleanly without prompting. Closes the watch positively. (2) Q2 is a fresh per-instance worked-query slip in a still-active sub-pattern (worked SQL assumes a grain not present in the engineer's stated table shape, similar to the iter1303-Q2 cumulative-spend SUM-of-SUM-OVER worked-query slip). The LAG architectural recommendation is correct + the LAG mechanism is correct + the resources have both the LAG canonical and the `date_trunc + GROUP BY` aggregation canonical — but composing the two under "MoM % change" framing failed on first probe. SOFT watch only, no FIX-A; re-probe to determine whether this is a recurring composition gap or a one-off.
+
+Q3 + Q4 are pin-confirmation cleanups, joining the long streak of 1st-re-probe-clean-reach on `reference_trino_rollback_snapshot_form` (3-arg CALL) and Oracle-DECODE-NULL family.
 
 ALL required topics REMAIN PASSED.
-
-### Sources
-
-- [docs.getdbt.com node-selection methods](https://docs.getdbt.com/reference/node-selection/methods) — `path:` selector + `+` graph operator
-- [docs.getdbt.com node-selection exclude](https://docs.getdbt.com/reference/node-selection/exclude) — `--exclude` same selector syntax as `--select`, subtracts from selection
-- [docs.getdbt.com node-selection syntax](https://docs.getdbt.com/reference/node-selection/syntax) — overall selector syntax + restrictive-by-default semantics
-- [trino.io/docs/467/sql/select.html](https://trino.io/docs/current/sql/select.html) — HAVING aggregate expression example + ORDER BY NULL ordering default NULLS LAST
-- [trino.io/docs/467/functions/aggregate.html](https://trino.io/docs/current/functions/aggregate.html) — count_if / aggregate FILTER WHERE
-- [trino.io/docs/current/language/types.html](https://trino.io/docs/current/language/types.html) — VARCHAR exact comparison + CHAR(n) PAD-SPACE
-- [oracle-base.com SQL for Beginners — ORDER BY](https://oracle-base.com/articles/misc/sql-for-beginners-the-order-by-clause) — Oracle ASC=NULLS LAST / DESC=NULLS FIRST defaults
-- [oracletutorial.com Oracle ORDER BY](https://www.oracletutorial.com/oracle-basics/oracle-order-by/) — confirms Oracle defaults
