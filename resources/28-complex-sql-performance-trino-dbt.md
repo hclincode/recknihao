@@ -782,6 +782,23 @@ Resist the urge to make 5 changes at once. After each change, re-EXPLAIN, then E
 
 Correlated subqueries are the SQL shape that most often slows a migrated Oracle query to a crawl on Trino. They look harmless in source, and they sometimes work fine (decorrelation succeeded), and sometimes catastrophically (decorrelation failed).
 
+> **⚠️ FIRST — `CrossJoin` in the plan is NOT the same as `CorrelatedJoin`. If you wrote a PLAIN `JOIN` (no subquery) and the EXPLAIN shows a `CrossJoin`, the cause is a NON-EQUI `ON` condition, not a correlated subquery.** *Keyword anchors: I wrote a LEFT JOIN but EXPLAIN shows a CROSS JOIN, plain JOIN plan shows CrossJoin, where did this cross join come from, JOIN with BETWEEN in ON is slow, JOIN on inequality, no equi-key in ON, JOIN on a function-wrapped key slow, nested-loop join Trino, cartesian product I didn't write.*
+>
+> Trino's fast join operator is a **hash join, which REQUIRES at least one equality (`=`) predicate** between the two sides in the `ON` clause. When the `ON` clause has **no usable equality key**, Trino cannot hash-join — it plans the join as a **`CrossJoin` (cartesian product) + a downstream `Filter`** that applies your condition row-by-row: an **O(N×M) nested loop**. On a 500M-row fact × an 80K-row dim that is billions of comparisons → the "runs but way slower than expected" you're seeing. This is a DIFFERENT plan node and root cause from `CorrelatedJoin` (which comes from a correlated *subquery* that failed to decorrelate — see the router below).
+>
+> **Trigger shapes — any of these in your `ON` makes the JOIN a CrossJoin:**
+>
+> | `ON` clause shape | Why it can't hash-join | Fix |
+> |---|---|---|
+> | `ON a.x > b.lo AND a.x < b.hi` (range / `BETWEEN`) | no `=` predicate | add an equi-key if one exists (e.g. also join on a shared `id`/bucket/day), so Trino hash-joins first then filters the range; or pre-aggregate/bucket to shrink the build side |
+> | `ON a.x <> b.x` / `a.x != b.x` (inequality) | no `=` predicate | usually a logic smell — most "not equal" joins are better as a `NOT EXISTS`/anti-join on the equality key |
+> | `ON LOWER(a.k) = LOWER(b.k)` / `ON CAST(a.k AS varchar) = b.k` (function/CAST wrapping the key) | the `=` is on a *derived* expression, not raw columns — may not be recognized as a hash key, and also defeats stats | **pre-compute the normalized/cast key as a real column in a CTE/staging model**, then join on the bare column |
+> | `ON a.k = b.k` where `a.k` is BIGINT and `b.k` is VARCHAR (type-mismatched key) | implicit cast on one side breaks the hash-key match | CAST in a CTE first so both sides are the same type on a *named* column |
+> | `ON 1=1` / `ON true` / comma-join with no `ON` | genuinely no join key | you forgot the join condition — add it |
+>
+> **Diagnose:** `EXPLAIN (FORMAT TEXT) <query>` and look at the join node — `InnerJoin`/`LeftJoin` with a `[... = ...]` hash key = good; **`CrossJoin`** (often with a `Filter` directly above it carrying your `>`/`BETWEEN`/`<>` predicate) = the non-equi nested loop. Confirm it's the bottleneck with `EXPLAIN ANALYZE` (the CrossJoin operator's wall time / output rows dominate). (`CorrelatedJoin` instead = a different problem, a non-decorrelated subquery — see below.)
+
+
 > **WHICH-X ROUTER — do NOT blanket-rewrite every correlated subquery; the SHAPE decides (read this BEFORE telling anyone "correlated subqueries are slow in Trino, rewrite them all").** *Keyword anchors: is EXISTS slow in Trino, DBA says rewrite correlated subquery, does Trino run EXISTS once per row, should I rewrite EXISTS as a join, correlated subquery nested loop O(N×M), EXISTS vs IN vs JOIN Trino, when is a correlated subquery actually slow.*
 >
 > | Your correlated subquery is… | Trino 467 behavior | Action |
