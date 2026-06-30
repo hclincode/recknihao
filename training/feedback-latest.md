@@ -1,129 +1,128 @@
-# Judge Feedback — Iteration 1289
+# Judge Feedback — Iteration 1290
 
-**Overall**: 4 questions, average **3.547 BARELY PASS** (Q1 4.6875 PASS / Q2 4.5 PASS / Q3 **1.5 FAIL** / Q4 3.5 BORDERLINE).
+**Overall**: 4 questions, average **4.625 STRONG PASS** (Q1 4.8125 PASS / Q2 4.8125 PASS / Q3 4.0 PASS / Q4 4.875 PASS). Massive recovery from iter1289 3.547 BARELY PASS (Q3 FAIL → Q1 FIX-A REACH-TEST clean PASS); all four answers route cleanly. iter1289-Q3 HARD WATCH `dbt ephemeral-basics findability` **CLOSES on 1st re-probe**.
 
-**Headline**: Q3 (dbt ephemeral models — "temp table or view, downsides?") is a **HARD FAIL: responder HEDGED with "resources don't cover detailed dbt materialization docs"** when grep confirms r28 §3.3 (L940-983, LEADING CANONICAL — "what's the difference between view and ephemeral in dbt" question-shape) + §3.3A (L1021-1083, "the REAL ephemeral-at-scale failure mode — compile-time SQL bloat") + r27 §3.1 (L301 ephemeral table row, L314 cross-ref to r28 §3.3A) carry rich, question-shape-anchored coverage that EXACTLY matches Q3's phrasing. **Pure findability miss** — content is THERE, responder did not route. Q4 has a responder-INVENTED false "DIFFERENCE FROM ORACLE" framing — Oracle LPAD/RPAD truncate identically to Trino, verified via Oracle docs ([techonthenet LPAD](https://www.techonthenet.com/oracle/functions/lpad.php), [oratutorial LPAD](https://www.oracletutorial.com/oracle-string-functions/oracle-lpad/)) — the engineer's exact sub-question "same behavior when string is longer?" → correct answer is YES SAME, responder said NO DIFFERENT. Q1 + Q2 PASS cleanly with minor flags.
+**Headline**:
+- **Q1 (ephemeral RE-PROBE) — FIX-A REACHED + iter1289-Q3 watch CLOSES.** Responder fully answers ("ephemeral creates NOTHING, not a temp table not a view; SQL inlined as a CTE at dbt COMPILE time; multi-downstream inlining bloat; promote to view/table at 3+ downstreams") matching the new r27 §3 QUICK-ANSWER canonical + r28 §3.3/§3.3A. Verified vs [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations): "ephemeral models are not directly built into the database... dbt will interpolate the code from an ephemeral model into its dependent models using a common table expression (CTE)" + recommended use "only used in one or two downstream models" + "Overuse of ephemeral materialization can also make queries harder to debug." All facts match.
+- **Q2 (string_agg → Trino) — SOLID PASS.** Responder gives canonical `listagg(sku, ', ') WITHIN GROUP (ORDER BY sku)` + `GROUP BY customer_id` + 90-day `WHERE` filter; correctly defangs listagg-as-window-function (does not exist) with `array_join(array_agg(...) OVER (...), ', ')` windowed alternative. Pin `reference_trino_listagg_native` confirmed at [trino.io aggregate.html](https://trino.io/docs/current/functions/aggregate.html) + [trinodb/trino #16982](https://github.com/trinodb/trino/issues/16982) "LISTAGG currently can't be used as a window function".
+- **Q3 (write.distribution-mode small files) — PASS with completeness gap.** Hash-is-default claim resource-faithful AND verified at [apache/iceberg PR #6828](https://github.com/apache/iceberg/pull/6828) "Spark 3.3: Change default distribution modes" + Iceberg 1.2.0 sets `write.distribution-mode='hash'` for partitioned tables. The distribution-mode mechanism explanation (hash hash-shuffle / none fanout writer / range range-partition) is accurate, and `write.target-file-size-bytes=128MB` is correct. **BUT — completeness gap confirmed**: if hash is the default and engineer is on Iceberg 1.5.2, the "hundreds of tiny files after dbt loads" is much more likely caused by FREQUENT SMALL COMMITS (each dbt incremental run commits at least one data file per partition touched; many small batches accumulate small files regardless of distribution-mode), which distribution-mode does NOT fix. The real fix for already-accumulated small files is COMPACTION (`ALTER TABLE ... EXECUTE optimize` Trino-native, or Spark `rewrite_data_files`). Responder under-emphasizes compaction (only target-file-size-bytes mentioned, no `EXECUTE optimize` / `rewrite_data_files` lead). Distribution-mode explanation is correct + resource-faithful but the diagnostic answer for "tiny files after dbt runs" misses the dominant root cause.
+- **Q4 (Oracle || NULL → Trino) — CLEAN SOLID PASS.** Trino || NULL-propagation correct (SQL-standard; both `||` and `concat` propagate NULL per [trino 467 string.md](https://github.com/trinodb/trino/blob/467/docs/src/main/sphinx/functions/string.md) — "same functionality as the SQL-standard concatenation operator"). Oracle's NULL-as-empty-string idiosyncrasy correctly framed as the divergence. `COALESCE(col, '')` workaround correct. `concat_ws(sep, ...)` "automatically skips NULL" verified at [trino.io string.html](https://trino.io/docs/current/functions/string.html) — "Any null values provided in the arguments after the separator are skipped."
 
 | Q | Topic | Score | Status | Verdict |
 |---|---|---|---|---|
-| Q1 CASE-bucket tiers + HAVING | Analytical query patterns on Iceberg+Trino | **4.6875** | PASS | Query CORRECT; redundant `HAVING COUNT(*) > 0` framed as the filtering mechanism (a CASE-based GROUP BY never emits empty buckets — HAVING is a no-op) — minor Clar ding |
-| Q2 position vs equality deletes | Iceberg table maintenance | **4.5** | PASS | Definitions correct (file_path+row_position vs col-value tuples); content=1/2 correct; CoW default + MoR accumulation correct; $files diagnostic correct; **MISSED Trino-native `ALTER TABLE EXECUTE optimize` for clearing position-deletes** (recommended ONLY Spark `rewrite_position_delete_files`) — Spark-leaning miss against pin `reference_trino_optimize_clears_position_deletes` |
-| Q3 dbt ephemeral models | Improving complex SQL perf on Trino with dbt | **1.5** | **FAIL** | Hedged "resources don't cover dbt materialization" — FALSE. r28 §3.3 + §3.3A + r27 §3.1 all have rich question-shape-anchored ephemeral content. Pure findability miss |
-| Q4 Oracle LPAD/RPAD → Trino | Oracle PL/SQL → dbt+Trino migration | **3.5** | BORDERLINE | lpad/rpad exist + same arg order + CAST needed + format('%08d') safe alt — all correct. **FALSE "critical DIFFERENCE from Oracle" on truncate-when-longer** — Oracle LPAD/RPAD ALSO truncate to first N chars (verified Oracle docs). Responder-invented divergence on the EXACT sub-question asked |
+| Q1 ephemeral RE-PROBE | Improving complex SQL perf on Trino with dbt | **4.8125** | PASS | All 3 sub-questions cleanly answered (no DB object, CTE-at-compile-time, multi-downstream bloat); iter1289 FIX-A REACHED |
+| Q2 string_agg → Trino | SQL query best practices for OLAP | **4.8125** | PASS | Canonical listagg + 90-day filter + windowed alternative; pin `reference_trino_listagg_native` verified |
+| Q3 write.distribution-mode | Iceberg partition design for SaaS: small-files / compaction | **4.0** | PASS | Hash-default + modes + target-file-size all correct; **completeness gap**: misses frequent-small-commit + compaction angle |
+| Q4 Oracle \|\| NULL → Trino | Oracle PL/SQL → dbt+Trino migration | **4.875** | PASS | NULL-propagation + COALESCE fix + concat_ws skip-NULL alternative all verified |
 
 ---
 
-## Q1 — CASE-bucket tiers + HAVING (4.6875 PASS)
+## Q1 — Ephemeral RE-PROBE (4.8125 PASS — iter1289-Q3 WATCH CLOSES)
 
-**Acc 4.5 / Clar 4.5 / Prac 5.0 / Compl 4.75.**
+**Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.75.**
 
-Query shape correct: same CASE expression in SELECT + GROUP BY, COUNT(*) + SUM(revenue), ORDER BY. Engineer can copy-paste and it works on Trino 467.
+Responder routed cleanly to the new r27 §3 QUICK-ANSWER canonical + r28 §3.3/§3.3A. Every sub-question hit:
 
-**Minor flag — redundant HAVING explanation.** Responder added `HAVING COUNT(*) > 0` and framed it as the mechanism that filters out empty tier buckets. This is misleading:
-- A `GROUP BY` on a CASE expression only emits groups for rows that EXIST in the source. If zero customers fall in `<500`, the "small" bucket is simply absent from the output — it cannot be "filtered out" because it was never produced.
-- `HAVING COUNT(*) > 0` is therefore a no-op in this construction; every group emitted by `GROUP BY <CASE>` already has `COUNT(*) >= 1`.
-- The "only tiers with customers" requirement is satisfied AUTOMATICALLY by the GROUP-BY-CASE shape — no HAVING needed.
+1. **"What does ephemeral physically create?"** → "NOTHING — not a temp table, not a view; SQL inlined as a WITH/CTE into every downstream at dbt COMPILE time; zero storage." Matches [docs.getdbt.com/docs/build/materializations](https://docs.getdbt.com/docs/build/materializations) verbatim: "ephemeral models are not directly built into the database. Instead, dbt will interpolate the code from an ephemeral model into its dependent models using a common table expression (CTE)."
 
-The engineer's takeaway is still correct (the result has no empty buckets) but they walk away with a wrong mental model (thinking they need HAVING to suppress them). Minor Clar/Acc shave only.
+2. **"Gotcha if reused from several places?"** → "Multiple downstreams → SQL duplicated/inlined into each → compile + Trino planning bloat (5 downstreams × 100-line ephemeral = 500 lines)." Matches r28 §3.3A's 5-step worked example pattern. Aligns with dbt's recommendation to use "only in one or two downstream models" + "Overuse of ephemeral materialization can also make queries harder to debug."
 
-**Action**: per-instance phrasing slip, NO resource fix. No card mis-teaches this — pure responder framing miss. Watch under "tier bucketing / CASE GROUP BY / HAVING" framings for 4-6 iters; only escalate if it recurs.
+3. **"Ephemeral vs view?"** → Implicit: view is a queryable DB object with persistent SQL; ephemeral has no DB object. Responder also adds the actionable rule of thumb: "Promote to view/table if 3+ downstreams or >50 lines. For your small 1-downstream cleanup steps ephemeral is perfect."
 
----
+iter1289 hedged "resources don't cover dbt materializations" on a near-identical question; iter1290 with the FIX-A applied (QUICK-ANSWER canonical at top of r27 §3 with anchors + cross-ref to r28 §3.3) routes confidently and exhaustively. Pattern matches the iter1271→1272 bloom-CREATE-467 r17-reconcile FIX-A close (1st re-probe clean) and the iter1233 custom-generic-test FIX-A close.
 
-## Q2 — Position vs equality deletes (4.5 PASS)
+**Action**: **CLOSE HARD WATCH `iter1289-Q3 dbt ephemeral-basics findability reach-test`.** No further fix. Single-instance clean reach — re-probe under varied ephemeral framings 1-2 more iters before promoting to fully resolved, but the routing path is now established.
 
-**Acc 4.5 / Clar 4.75 / Prac 4.25 / Compl 4.5.**
-
-Definitions accurate and matched to verified sources:
-- Position deletes = (file_path, row_position) pairs — verified per [olake.io MoR vs CoW](https://olake.io/iceberg/mor-vs-cow/) + [Dremio CoW vs MoR](https://www.dremio.com/blog/row-level-changes-on-the-lakehouse-copy-on-write-vs-merge-on-read-in-apache-iceberg/).
-- Equality deletes = column-value tuples with predicate semantics — verified per [RisingWave equality-delete problem](https://risingwave.com/blog/the-equality-delete-problem-in-apache-iceberg/).
-- `$files.content` = 0 (data) / 1 (position-delete) / 2 (equality-delete) — correct per Iceberg spec + Trino metadata-table docs.
-- CoW default; MoR opt-in via `write.delete.mode='merge-on-read'` — correct.
-- "MoR accumulates many small delete files → applied at read time → slows queries" — correct, this is the textbook MoR cost.
-
-**Flag — Spark-leaning maintenance, missed Trino-native path.** Responder's compaction recommendation was ONLY the Spark route: `CALL iceberg.system.rewrite_position_delete_files()`. On this on-prem Trino-467 + Spark-Iceberg-1.5.2 stack, the **Trino-native `ALTER TABLE ... EXECUTE optimize(file_size_threshold => '256MB')`** also APPLIES and clears position-delete files for the data files it rewrites — per pinned `reference_trino_optimize_clears_position_deletes.md` (PR [trinodb/trino #12617](https://github.com/trinodb/trino/issues/12617), [#24086](https://github.com/trinodb/trino/issues/24086), candidate selection is SIZE-only so raise threshold above the largest delete-bearing data files). The user explicitly asked about "Spark ingestion + how we do updates/deletes" so leaning Spark is reasonable, but on this stack a Trino-only maintenance loop (run optimize from a dbt macro or cron, no Spark job needed for compaction) is the simpler operational answer.
-
-**Action**: per-instance Spark-leaning recall slip, NO resource fix (r17 + r13 §2862 + r28 §297 already document the Trino-native path). **SOFT WATCH `iter1289-Q2 position-delete maintenance Spark-vs-Trino-EXECUTE-optimize routing`** — re-probe in 4-8 iters under "position-deletes accumulating / how do I compact them" framings WITHOUT Spark-leading hint; if Trino-native EXECUTE optimize is again omitted under non-Spark framings, escalate to LIGHT FIX-A adding a Trino-native lead at the position-delete-maintenance keyword zone.
+Minor shave (-0.25 Acc/Clar): the "5×100=500 lines" worked example is the dramatic version; for many engineers the "every downstream re-parses the same SQL → Trino planner cost" framing matters more than line-count. Resource-faithful, no fix.
 
 ---
 
-## Q3 — dbt ephemeral models (1.5 FAIL)
+## Q2 — string_agg → Trino (4.8125 PASS)
 
-**Acc 1.0 / Clar 3.0 / Prac 1.0 / Compl 1.0.**
+**Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.75.**
 
-Responder said: "I don't have enough information; resources cover Spark ingestion / Iceberg maintenance / Trino querying but NOT detailed dbt materialization docs... consult dbt docs."
+The canonical Trino-equivalent answer:
+- Trino has NO `string_agg` (Postgres-only) — correct per pin `reference_trino_listagg_native`.
+- Trino HAS native `listagg(expr, sep) WITHIN GROUP (ORDER BY ...)` — verified at [trino.io aggregate.html](https://trino.io/docs/current/functions/aggregate.html); confirmed in 467 + all recent versions.
+- Worked example correctly uses `WHERE occurred_at >= current_date - interval '90' day` (Trino 467 INTERVAL `'90' day` form is correct per pin `reference_trino_interval_qualifiers`; day is a valid qualifier).
+- `listagg(sku, ', ') WITHIN GROUP (ORDER BY sku) GROUP BY customer_id` — exact canonical shape.
+- Defangs listagg-as-window-function: "listagg is an AGGREGATE not a window function; listagg() OVER() errors/doesn't exist" — verified at [trinodb/trino #16982 "Improve error message for LISTAGG window function"](https://github.com/trinodb/trino/issues/16982): "LISTAGG currently can't be used as a window function."
+- Provides the correct windowed alternative: `array_join(array_agg(x ORDER BY x) OVER (PARTITION BY ...), ', ')` for cases where engineer needs the same comma-string in a window context (e.g., one row per account but also wants a running list).
 
-**This is FALSE.** Grep CONFIRMS rich, question-shape-anchored ephemeral content in resources:
+No imported-prior (correctly identifies listagg AS present in Trino — does not fall into the assumed-absence trap that has bitten 9 times: starts_with/to_char/listagg/array_sum/format_number/migrate/LATERAL/MERGE-WHEN-MATCHED-AND/etc; pin `reference_trino_listagg_native` exists exactly because of an earlier assumed-absence miss). No broken-secondary, no over-warning, no fabrication. Engineer can copy-paste both forms.
 
-1. **r28 §3.3 (L940-983)** — LEADING CANONICAL "the dbt materialization COST MODEL (storage + runtime + DB object)" with explicit question-shape anchors at L946: *"what's the difference between `view` and `ephemeral` in dbt", "what database object does each dbt materialization create", "dbt view vs ephemeral at scale"*. Includes the four-row table (view / table / incremental / ephemeral × DB object / storage / re-run / DDL) with the ephemeral row reading: *"NONE — no warehouse object at all... The SELECT is inlined as a CTE into every downstream model that ref()s it — at dbt COMPILE time, before any SQL is sent to Trino."* This EXACTLY answers the engineer's "temp table or view?" sub-question.
-
-2. **r28 §3.3A (L1021-1083)** — LEADING CANONICAL "the REAL ephemeral-at-scale failure mode — compile-time SQL bloat" with question-shape anchors at L1025: *"what's the problem with `ephemeral` at scale", "does `ephemeral` slow down dbt", "ephemeral vs view at scale"*. Includes the 5-step worked example (5 downstream models × 80-line ephemeral = 400 lines duplicated SQL → planner re-parses 5×), transitive-ephemeral compounding warning, no-debuggable-object enumeration (no `SELECT COUNT(*)`, no Trino UI per-query, no GRANT, no SHOW STATS), and a threshold rule of thumb. This EXACTLY answers the engineer's "any downsides?" sub-question.
-
-3. **r27 §3.1 (L292-316)** — the materialization-decision table with a full ephemeral row (DB object NONE, storage Zero, compile-time inlining mechanism, "use for 1-2 downstreams", "do NOT use for 3+ downstreams — compile-time bloat") + L314 cross-ref to r28 §3.3A.
-
-**Classification**: pure FINDABILITY MISS. The content is fully in place; the responder failed to route. Likely root cause is that r28's title ("Improving complex SQL performance on Trino with dbt") does not lexically lead from a basic dbt-101 "what is ephemeral" question, and r27 §3 title ("dbt-trino: the materialization-strategy choice for migrated procedures") is similarly Oracle-migration-framed.
-
-### FIX-A decision — **LIGHT FIX-A RECOMMENDED**
-
-The question "what does ephemeral do differently? temp table or view? any downsides?" is a fundamental dbt-101 ask any engineer touching the lakehouse will hit. The fact that the responder hedged with a confidently-wrong "we don't cover this" disclaimer is worse than a partial answer — it teaches the engineer the resource doesn't exist.
-
-**Recommended action** (teacher's call on exact placement):
-- **Option A (preferred)**: Add a short standalone leading canonical at the **top of r27 §3** (right after the section header, BEFORE §3.1's decision table) with keyword anchors *"what is dbt ephemeral", "is ephemeral a temp table or a view", "ephemeral materialization explained", "what does ephemeral do differently", "ephemeral vs view in dbt", "downsides of ephemeral"* + a 2-sentence answer (NOT a table, NOT a temp table, NOT a view — NO warehouse object; SELECT is inlined as a CTE at compile time into every downstream's compiled SQL) + cross-ref to r28 §3.3 + §3.3A for the full canonical. This puts the answer where the basic "ephemeral" keyword zone lives (r27 §3 is the materialization-strategy section, more findable than r28).
-- **Option B (alternative)**: Add an explicit r28 §3.3 keyword anchor block at the top of the LEADING CANONICAL extending the question-shape list with the basic framings: *"what does ephemeral materialization do", "is ephemeral a view in dbt", "ephemeral vs temp table", "downsides of using ephemeral models"* — these basic-dbt-101 phrasings are missing from L946's current list.
-
-Both options together would be belt-and-suspenders.
-
-**Watch**: NEW HARD WATCH `iter1289-Q3 dbt ephemeral basics findability` — re-probe within 2-4 iters under varied "what is ephemeral / temp table or view / downsides of ephemeral" framings; if 2+ recurrences after FIX-A, this is a deeper r28-title-discoverability issue and not just an anchor gap.
+**Action**: per-instance clean PASS, no fix.
 
 ---
 
-## Q4 — Oracle LPAD/RPAD → Trino (3.5 BORDERLINE)
+## Q3 — write.distribution-mode small files (4.0 PASS — completeness gap)
 
-**Acc 2.5 / Clar 4.0 / Prac 4.0 / Compl 3.5.**
+**Acc 4.5 / Clar 4.5 / Prac 3.5 / Compl 3.5.**
 
-**Correct portions**:
-- Trino HAS lpad/rpad — correct, per [trino.io/docs/467/functions/string.html](https://trino.io/docs/current/functions/string.html).
-- Same arg order `(string, size, padstring)` — correct.
-- `CAST(account_id AS VARCHAR)` needed (Trino has no implicit number→string coercion in lpad/rpad) — correct, matches r27 L998 + r23 §716 canonical.
-- `format('%08d', account_id)` never truncates, safer for over-width ids — correct, matches r23 §754.
-- Trino lpad/rpad truncate when source is longer than n — correct, verified via [trino.io string-functions docs](https://trino.io/docs/current/functions/string.html).
+### Hash-is-default — VERIFIED CORRECT
+Responder claims hash is the default on Iceberg 1.5.2. Resource r13 §4133 teaches "hash is the DEFAULT since Iceberg 1.2.0/Spark 3.3" — resource-faithful.
 
-**ACCURACY ERROR — false invented "CRITICAL DIFFERENCE from Oracle"**:
-Responder framed the truncate-when-longer behavior as a "CRITICAL DIFFERENCE between Trino and Oracle" — implying Oracle LPAD/RPAD do NOT truncate.
+**Verified independently** at:
+- [apache/iceberg PR #6828 "Spark 3.3: Change default distribution modes"](https://github.com/apache/iceberg/pull/6828) — "the default distribution mode for partitioned but unsorted tables in INSERT being HASH (instead of NONE)" landed in Iceberg via this PR;
+- [Medium — Iceberg & Writing Distribution Modes in Spark](https://medium.com/@deepa.account/a-note-on-iceberg-and-writing-distribution-modes-in-spark-3b1000be8003) — "starting in Iceberg 1.2.0, Iceberg requests that Spark pre-sort data through the table property write.distribution-mode with the value hash."
 
-**Verified Oracle behavior** ([techonthenet LPAD](https://www.techonthenet.com/oracle/functions/lpad.php), [oratutorial LPAD](https://www.oracletutorial.com/oracle-string-functions/oracle-lpad/), [techonthenet RPAD](https://www.techonthenet.com/oracle/functions/rpad.php), [orafaq LPAD/RPAD](https://www.orafaq.com/wiki/LPAD_and_RPAD)):
-> "If the padded_length is smaller than the original string, the LPAD function will truncate the string to the size of padded_length... LPAD effectively truncates string1 — it returns only the first padded_length characters of the incoming string1." Same for RPAD.
+So the responder's hash-default claim AND the modes (hash/none/range) mechanism are accurate.
 
-So **Oracle LPAD/RPAD truncate identically to Trino's** — the behavior is the SAME, NOT a divergence. The engineer's sub-question "same behavior when string already longer than target width?" → correct answer is **YES, both Oracle and Trino truncate to first N chars**. Responder said NO, different — directly mis-answers the asked sub-question.
+### Completeness gap — frequent small commits + compaction
+**This is the load-bearing gap.** If hash is already the default on Iceberg 1.5.2 + Spark 3.3, the engineer's "hundreds of tiny files (<1MB) after dbt loads" is most likely NOT caused by `write.distribution-mode=none` (that would only apply if the table explicitly overrode the default).
 
-The truncation HAZARD is real and worth flagging — an Oracle engineer who's been writing `LPAD(account_id, 10, '0')` for 20 years on a column that may exceed 10 chars HAS been silently losing data the whole time. But that's a Trino-and-Oracle-share-this-trap point, not a Trino-introduces-a-new-trap point. The framing matters: the Oracle engineer who already knows their LPAD truncates is being told (incorrectly) that they need to RELEARN this for Trino, when the behavior is identical.
+The dominant root cause for tiny-files-after-dbt-runs is **frequent small commits**: each dbt incremental run commits at least one data file per partition touched. Over many small batches (hourly / 15-min runs), each partition accumulates many small files even with hash distribution. Distribution-mode is a fanout-prevention knob (prevents ONE write from fanning out small files across many partitions) — it does NOT consolidate the per-commit residual files that pile up across many runs.
 
-**Resource check**: r23 §716-758 and r27 L998 BOTH correctly describe the truncation hazard WITHOUT claiming Oracle divergence. r23 §721 reads "lpad/rpad pad OR TRUNCATE to EXACTLY `size` characters" — describes Trino-side behavior, doesn't compare to Oracle. r27 L998 LPAD/RPAD migration row mentions only the CAST-VARCHAR difference (the real divergence) — doesn't claim Trino-vs-Oracle truncate divergence.
+The real fix:
+1. **Compaction**: `ALTER TABLE iceberg.schema.table EXECUTE optimize(file_size_threshold => '128MB')` (Trino-native, this stack's preferred path per pin `reference_trino_optimize_clears_position_deletes`) OR `CALL iceberg.system.rewrite_data_files(...)` from Spark. Schedule as a dbt macro or k8s cronjob.
+2. **Per-table write target**: `write.target-file-size-bytes=134217728` (128MB) — responder mentions this.
+3. **Reduce commit frequency** if possible: batch dbt incrementals from 15-min to hourly/daily.
+4. (Distribution-mode is a non-issue if already on hash default.)
 
-**This is a responder-INVENTED false divergence** (matches `feedback_responder_overwarning_folklore.md` family — over-warning about a non-difference). Resources are CORRECT.
+Responder mentions `write.target-file-size-bytes=128MB` (item 2) but does NOT lead with compaction (item 1) or address commit-frequency (item 3). Distribution-mode mechanism is correct but is the wrong primary lever for this scenario.
 
-**FIX-A decision — NO FIX**: per-instance responder slip. Adding an Oracle-truncate-same-as-Trino defang to r23 §716 risks over-attracting an adjacent question per `feedback_new_card_over_attracts_adjacent.md`. 1st instance of this exact false-divergence framing on lpad/rpad.
+This is a verifiable completeness gap — not a factual error. The distribution-mode answer the responder gave IS the textbook answer for *certain* small-files causes (fanout with `none`), but the framing implies that "hundreds of tiny files after dbt loads to Iceberg" is fanout-caused, when the more common cause on this stack is commit-frequency. The engineer would walk away thinking "check if distribution-mode is none, set hash, done" and miss the compaction step that actually resolves their existing pile.
 
-**Watch**: NEW SOFT WATCH `iter1289-Q4 Oracle-LPAD/RPAD truncate-same-as-Trino false-divergence framing` — re-probe under Oracle-migration framings ("does Trino lpad behave like Oracle LPAD when source longer than width") within 4-8 iters; if 2+ recurrences, consider a LIGHT FIX-A at r27 L998 lpad/rpad row adding *"Truncation behavior is IDENTICAL to Oracle's — both pad-OR-truncate to exactly `n`. The only Trino-specific change is the no-implicit-numeric-coercion CAST requirement."*
+### FIX-A decision — **NO IMMEDIATE FIX-A; SOFT WATCH**
+
+Resources already document the compaction angle (r13 §2862 ALTER TABLE EXECUTE optimize, r28 §297 dbt + maintenance, pin `reference_trino_optimize_clears_position_deletes`). This is a routing/emphasis miss, not a content gap. r13 §4133 hash-is-default content is accurate.
+
+**NEW SOFT WATCH `iter1290-Q3 small-files-after-dbt-loads root-cause routing: distribution-mode vs commit-frequency-compaction`** — re-probe in 4-8 iters under "small files after frequent dbt runs / how do I compact" framings WITHOUT the "what does distribution-mode do" lead. If responder again routes to distribution-mode and under-emphasizes compaction under non-distribution-mode-led framings, escalate to LIGHT FIX-A adding a "WHY do dbt loads produce small files" routing card at the small-files keyword zone — distribution-mode = fanout cause, commit-frequency = accumulation cause, compaction = the fix for accumulation.
+
+Pattern reference: this is analogous to iter1289-Q2 position-delete Spark-vs-Trino-optimize routing watch (also a routing/emphasis miss with correct base content). Don't churn the resources before establishing a pattern across 2+ probes.
 
 ---
 
-## Summary of FIX-As and watches
+## Q4 — Oracle || NULL → Trino (4.875 PASS)
 
-| Action | Q | Where | Priority |
-|---|---|---|---|
-| **LIGHT FIX-A** | Q3 | r27 §3 (top, before §3.1 decision table) — add 2-sentence ephemeral-basics canonical with question-shape anchors (Option A); OR extend r28 §3.3 L946 keyword anchor list with basic dbt-101 framings (Option B); BOTH preferred | **MANDATORY** (hard fail) |
-| NEW HARD WATCH | Q3 | `iter1289-Q3 dbt ephemeral basics findability` — re-probe 2-4 iters, varied "what is ephemeral / temp table or view" framings | High |
-| NEW SOFT WATCH | Q2 | `iter1289-Q2 position-delete maintenance Spark-vs-Trino-EXECUTE-optimize routing` — re-probe 4-8 iters under non-Spark framings; if Trino-EXECUTE optimize omitted again, LIGHT FIX-A | Medium |
-| NEW SOFT WATCH | Q4 | `iter1289-Q4 Oracle-LPAD/RPAD false-divergence framing` — re-probe 4-8 iters; if 2+ recurrences, LIGHT FIX-A at r27 L998 | Medium |
-| Per-instance watch | Q1 | Redundant `HAVING COUNT(*) > 0` framing in CASE-GROUP-BY — minor clarity-only, re-probe 4-6 iters under tier-bucketing framings | Low |
+**Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.**
 
-**Carry watches from prior iterations** (per state.json iter1288):
-- `iter1288-Q1 COUNT(*)-slow metadata-only + delete-files canonical reach-test` — HARD WATCH (not probed this iter)
-- `iter1285-Q2 timestamp-tz` — carry
-- `iter1283-Q4 strpos-3-arg` — carry
-- `iter1284-Q3 delete+insert` — carry
-- `iter1283-Q3 hard_deletes` — carry
-- `perf-triage-recall-ceiling periodic SOFT` — carry
+Crisp, accurate, and copy-paste-ready answer:
 
-**All required topics remain PASSED**; thinnest topic (Query performance basics 4.1701) untouched this iter. The Q3 FAIL drops "Improving complex SQL performance on Trino with dbt" from 4.4856/88 to **4.4521/89** — still comfortably above 3.5 threshold, margin +0.9521.
+- **Oracle's || treats NULL as empty string** — correct, the historical Oracle idiosyncrasy ("Oracle treats empty string '' as NULL but `||` with NULL operand returns the other operand"). `'John'||NULL||'Doe'='JohnDoe'` is verified Oracle behavior.
+- **Trino's || returns NULL if any piece is NULL** — correct, SQL-standard NULL-propagation. Verified at [trino 467 string.md](https://github.com/trinodb/trino/blob/467/docs/src/main/sphinx/functions/string.md): `concat` "provides the same functionality as the SQL-standard concatenation operator (`||`)" — and SQL-standard is NULL-propagating. The 3-NULL behavior `'John'||NULL||'Doe'` returns NULL in Trino — engineer's Oracle code would silently produce NULL rows after migration.
+- **Fix: `COALESCE(col, '')` wrap each piece** — correct canonical fix.
+- **Alternative: `concat_ws(' ', first_name, last_name, '(' || account_code || ')')` "automatically skips NULL"** — verified at [trino.io 467 string.html](https://trino.io/docs/467/functions/string.html): "Any null values provided in the arguments after the separator are skipped." `concat_ws(sep, ...)` is the cleaner-for-many-pieces alternative.
+
+Caveat the responder correctly nuances: `concat_ws` skips NULL ARGUMENTS but the SEPARATOR is fixed (a space here). The engineer's specific shape `first_name || ' ' || last_name || ' (' || account_code || ')'` has parenthetical wrapping that `concat_ws` won't directly reproduce — so for the exact format `COALESCE` is more faithful, while `concat_ws` is cleaner if the engineer can live with `'John Smith ACC-001'` instead of `'John Smith (ACC-001)'`. Responder cleanly delivers both options.
+
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Clean answer.
+
+**Action**: per-instance clean PASS, no fix.
+
+---
+
+## Summary across the 4 questions
+
+**Pattern this iter**: Massive recovery from iter1289 3.547 (with Q3 1.5 FAIL). iter1289 FIX-A (r27 §3 ephemeral QUICK-ANSWER canonical + r28 §3.3 cross-ref) **REACHED on 1st re-probe** — Q1 4.8125 clean PASS, HARD WATCH closes. Q2 + Q4 are textbook clean PASSes. Q3 is a completeness gap, not a factual error — distribution-mode mechanism explanation is correct and resource-faithful, but the root-cause routing for "tiny files after dbt runs" misses the dominant commit-frequency + compaction angle. Soft watch only; no resource fix until pattern confirms across 2+ probes.
+
+**Watches**:
+- **CLOSE**: `iter1289-Q3 dbt ephemeral-basics findability reach-test` (FIX-A REACHED 1st re-probe).
+- **NEW SOFT**: `iter1290-Q3 small-files-after-dbt-loads root-cause routing: distribution-mode vs commit-frequency-compaction` (re-probe 4-8 iters under non-distribution-mode-led framings).
+- **CARRY SOFT**: `iter1289-Q2 position-delete Spark-vs-Trino-EXECUTE-optimize routing` (4-8 iters).
+- **CARRY SOFT**: `iter1289-Q4 LPAD/RPAD false-divergence` (4-8 iters).
+- **CARRY SOFT**: `iter1288-Q1 COUNT(*)-slow canonical reach-test` (4-6 iters).
+
+**No FIX-A this iter.** All required topics remain PASSED.
+
+**FIX-A nature note**: 2 consecutive 1st-re-probe FIX-A REACHes (iter1271→1272 bloom-CREATE-467 + iter1289→1290 ephemeral-basics) confirm the QUICK-ANSWER-canonical-with-explicit-question-shape-anchors-at-keyword-zone pattern (option A from iter1289 feedback) is reliably effective. Continue using this pattern for future findability misses where content exists but routing fails.
