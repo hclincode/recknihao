@@ -1,130 +1,143 @@
-# Iteration 1305 — Judge Feedback
+# Iteration 1306 — Judge Feedback
 
 **Phase**: extended (pass-loop)
-**Overall iter score**: **3.6875 PASS** ((4.9375 + 4.875 + 2.375 + 4.5625) / 4) — Q3 FAIL
+**Overall iter score**: **4.8125 STRONG PASS** ((4.875 + 4.875 + 4.75 + 4.75) / 4) — all four questions clean canonical answers, zero FAIL, no FIX-A required
 
-**Pattern this iter**: Q1 is the **iter1304-Q3 dbt-compile-pure-offline-myth FIX-A REACH-TEST and IT REACHED PERFECTLY** — responder went from "compile is likely offline" (iter1304 inferred-wrong) to "your teammate is PARTIALLY WRONG, dbt compile is NOT purely local" (iter1305 correct + corrects the false premise). Iter1304-Q3 HARD WATCH **CLOSES**. Q2 / Q4 clean strong passes. **Q3 dbt-compile=reach + Q3 dashboard-scan-time HARD FAIL** with a different shape: responder gave two off-target causes (partition-pruning failure + position-delete accumulation) that **CONTRADICT the engineer's stated identical-WHERE premise** and **missed the textbook primary cause — COLUMNAR PROJECTION (different SELECT column lists scan different Parquet column chunks on the same Iceberg file set)**. Also flagged: the recommended fix `CALL iceberg.system.rewrite_data_files(...)` is the **Spark form**; Trino-native is `ALTER TABLE ... EXECUTE optimize` (per pin `reference_trino_optimize_clears_position_deletes.md`).
+**Pattern this iter**: Clean continuous-pass sweep, no defects. Q1 is the THINNEST-topic probe (`query-perf-regression` 4.0311/27) framed as a Monday-slow / Tuesday-fast self-recovery — responder routed correctly to the ANALYZE/Puffin/NDV stats-staleness canonical and gave the complete Iceberg/Trino ANALYZE answer with proper syntax + cadence. Q2 division-by-zero canonical hit pin `reference_trino_division_by_zero.md` exactly with the right INTEGER/DECIMAL-throws-but-DOUBLE-returns-Inf/NaN split + NULLIF guard. Q3 dbt `{% docs %}` blocks gave the canonical .md-file + `{{ doc('name') }}` reference + `dbt docs generate` workflow (all three steps the engineer needs to ship). Q4 Oracle CONCAT → Trino `concat_ws` rewrite correctly identifies NULL-propagation difference + `concat_ws` skips NULL args. **No new FIX-A, no new HARD watches, no fabrications, no imported-prior slips, no broken-secondary suggestions.**
 
 ---
 
 ## Per-question scores
 
-### Q1 — dbt compile in CI as a "lint", teammate says compile is purely local with no DB creds
+### Q1 — Weekly 60M-row load into `fct_events`; Monday queries 10s → 3-4 min, speed up by Tuesday on their own; Trino/Iceberg ANALYZE equivalent, run manually after load?
 
-**Score: 4.9375** (Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75) — **STRONG PASS, iter1304-Q3 FIX-A REACHED 1ST RE-PROBE, HARD WATCH `iter1304-Q3 dbt compile pure-offline myth` CLOSES**
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75) — **STRONG PASS, THINNEST-topic probe lands cleanly**
 
-Responder said: "Your teammate is PARTIALLY WRONG. `dbt compile` is NOT purely local." Then delivered the parse / compile / run / build matrix:
-- `dbt parse` — Jinja/manifest only, **no warehouse connection, no SQL sent to Trino**.
-- `dbt compile` — **DOES connect to Trino + runs introspective SELECTs** (relation cache, macro resolution, contract preflight); does NOT materialize.
-- `dbt run` — compile + execute materialization (CREATE/INSERT/MERGE).
-- `dbt build` — run + tests + seeds + snapshots.
+Responder said: "Yes, run ANALYZE manually after each large load." Concrete syntax:
+- `ANALYZE iceberg.analytics.fct_events WITH (columns = ARRAY['user_id', 'tenant_id', ...])`
+- Bare `ANALYZE` (no `TABLE` keyword — engineer's Spark/Hive instinct of `ANALYZE TABLE` would parse-fail).
+- `WITH (columns = ARRAY[...])` for selective column stats on join keys + frequent filter columns (cheaper than analyzing all 60+ columns on a wide events table).
 
-Concrete CI guidance: if CI genuinely cannot afford a Trino connection use `dbt parse` (NOT `dbt compile`); `dbt parse` fails on any model that depends on introspective macros; for a true "is the project still valid + Jinja renders" gate use `dbt parse` with `--no-introspect` accepted via parse semantics. CI can run `dbt compile` with a lightweight read-only Trino role — but it is NOT a zero-cost-no-network gate.
+Critical mental-model split correctly drawn:
+- **Iceberg manifests auto-collect per-file min/max bounds + null counts on write** (the `lower_bounds`/`upper_bounds`/`null_value_counts` per-file stats in `$manifests`). These power file-skipping / predicate pushdown WITHOUT requiring ANALYZE.
+- **NDV (number of distinct values) is NOT auto-collected** — it requires explicit `ANALYZE`, which writes a Puffin sidecar file (apache-datasketches-theta-v1 sketches) to MinIO alongside the data files.
+- Stats do NOT auto-refresh — must re-run ANALYZE after bulk ingests, otherwise CBO picks bad join orders / mis-sizes broadcasts → slow plans.
 
-**Verification ([docs.getdbt.com/reference/commands/compile](https://docs.getdbt.com/reference/commands/compile))** verbatim:
-> "`dbt compile` is similar to `dbt run` except that it doesn't materialize the model's compiled SQL into an existing table. So, up until the point of materialization, `dbt compile` and `dbt run` are similar because they both **require a data platform connection, run queries, and have an `execute` variable set to `True`**."
+The Monday-slow / Tuesday-fast self-recovery framing is correctly diagnosed: weekly Sunday-night load adds 60M rows but doesn't refresh NDV; Monday queries pick stale-NDV plans; by Tuesday SHOULD NOT actually self-recover unless something else is going on (warm caches, on-demand re-analyze by another team, or a triggered refresh) — but the responder correctly flags that ANALYZE-after-load is the right primary intervention regardless of the self-recovery mystery.
 
-**Verification ([docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile](https://docs.getdbt.com/faqs/Warehouse/db-connection-dbt-compile))** verbatim:
-> "dbt compile needs a data platform connection in order to gather the info it needs (including from introspective queries) to prepare the SQL for every model in your project."
+**All load-bearing facts VERIFIED**:
+1. **ANALYZE bare syntax** — verified at [trino.io/docs/467/sql/analyze.html](https://trino.io/docs/467/sql/analyze.html) verbatim grammar `"ANALYZE table_name [ WITH ( property_name = expression [, ...] ) ]"` (no TABLE keyword).
+2. **Iceberg `columns = ARRAY[...]` WITH-property** — verified at [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) verbatim: `"ANALYZE table_name WITH (columns = ARRAY['col_1', 'col_2'])"` ("You can specify a subset of columns to be analyzed with the optional `columns` property").
+3. **Iceberg manifests carry per-file min/max auto** — verified at iceberg.html `$manifests` metadata table includes `lower_bounds`, `upper_bounds`, `null_value_counts`, `nan_value_counts`, `column_sizes`, `value_counts` auto-tracked at write.
+4. **NDV via Puffin sketch** — verified by pin `reference_trino_parquet_bloom_filter_469.md` family + iter1161 verification against trinodb/trino PR #13636 / issue #16583 (apache-datasketches-theta-v1 blobs).
+5. **Stats NOT auto-refreshed** — confirmed at iceberg.html (extended-statistics-enabled config + manual re-ANALYZE required after schema/data change).
+6. **Column-targeted = cheaper** — confirmed at iceberg.html same source.
 
-Both verified facts match the responder's framing exactly. Specifically:
-- "compile is NOT purely local" ✓
-- "compile DOES connect to Trino + runs introspective SELECTs" ✓
-- "compile differs from `run` only by not materializing" ✓
-- "parse is the offline fallback" ✓ (closest-to-true-offline command)
+Resource alignment: responder's answer aligns with the iter1231 canonical (`ANALYZE iceberg.analytics.<table> WITH (columns = ARRAY['...'])`) at r17/r24/r27 plus the iter1161 Puffin-sidecar canonical at r24. No findability gap.
 
-**Two strong meta-signals from this answer**:
+Minor Clar shave (-0.25): could have spelled out the engineer-relevant cadence in `dbt_project.yml on-run-end` form (per iter1231) for hook-friendly automation rather than leaving it as "run manually after each load." Minor Compl shave (-0.25): didn't surface `SHOW STATS FOR <table>` as the diagnostic to verify NDV is populated post-ANALYZE (NULL `distinct_values_count` for a column = not analyzed; engineer should run this BEFORE assuming ANALYZE worked).
 
-1. **iter1304-Q3 FIX-A REACHED 1ST RE-PROBE**: iter1304-Q3 was a 3.0 FAIL where the responder inferred "compile is likely pure offline" and the teacher's flag *agreed with the inference*. Both turned out wrong. The teacher applied a MANDATORY FIX-A at r28 §282 (reconciled the wrong "compile is offline" framing + added a parse/compile/run/build "which commands hit Trino" matrix + DO-NOT-WRITE `compile is offline` defang). Iter1305-Q1 confirms that fix landed where the responder looks: the responder now goes directly to the correct two-tier mental model. Per the pin pattern observed across iter1272 (bloom-CREATE-467), iter1290 (ephemeral basics), iter1233 (custom-generic-test), this is the 4th-or-more consecutive 1st-re-probe FIX-A REACH on the QUICK-ANSWER-canonical-at-keyword-zone pattern. **CLOSE iter1304-Q3 dbt-compile-pure-offline-myth HARD WATCH POSITIVELY.**
-2. **POSITIVE COUNTER-SIGNAL to the false-premise-acceptance family**: the teammate said "compile is purely local, no DB creds needed" — engineer's stated premise is FALSE. The responder did NOT accept it (the iter1297/iter1299 trap); instead opened with "Your teammate is PARTIALLY WRONG" and corrected the premise BEFORE answering. This is the inverse of iter1297-Q4 (Oracle-GROUP-BY-leniency endorsement) and iter1299-Q4 (Oracle MOD-sign endorsement). Worth noting alongside iter1300-Q4 (EXTRACT defang) and iter1302-Q1 (MOD-sign defang) as a confirmed positive trend on premise correction.
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Cites r17/r24/r27 pattern. Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
 
-Minor Compl shave (-0.25) only: didn't mention `dbt compile --no-introspect` as the escape hatch for the genuinely-offline use case (useful in security-restricted CI where a credentialed Trino connection is forbidden — `--no-introspect` errors out cleanly on introspective macros so the gate is explicit instead of silently degrading).
+### Q2 — Conversion rate = `completed / started * 100`; some tenants have 0 `started`; does Trino throw like Postgres? Clean pattern to return NULL/0?
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication, no false-premise endorsement. Acc 5.0 / Clar 5.0 / Prac 5.0 / Compl 4.75.
+**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75) — **STRONG PASS, pin-perfect division-by-zero canonical**
 
-### Q2 — Dedup events by (user_id, event_type, occurred_at) keeping latest received_at
+Responder said: "INTEGER/DECIMAL divided by zero RAISES a `DIVISION_BY_ZERO` error (query fails); DOUBLE/REAL divided by zero returns `Infinity` / `NaN` (IEEE-754, no throw — detect with `is_finite()` / `is_nan()`)." Guard INTEGER/DECIMAL with `NULLIF(denominator, 0)` BEFORE the division — `NULLIF` returns NULL on zero-denom, NULL propagates through division giving NULL result instead of throwing.
 
-**Score: 4.875** (Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75) — **STRONG PASS**
+Canonical clean pattern:
+```sql
+SELECT
+  tenant_id,
+  100.0 * completions / NULLIF(starts, 0) AS conversion_rate_pct
+FROM funnel_metrics
+GROUP BY tenant_id
+```
 
-Responder said: `ROW_NUMBER() OVER (PARTITION BY user_id, event_type, occurred_at ORDER BY received_at DESC NULLS LAST) AS rn` in a subquery (or CTE), then `WHERE rn = 1` in the outer SELECT. Watch-outs surfaced:
-- Window functions cannot appear in `WHERE` → must wrap in a subquery / CTE (Trino analysis rule).
-- Explicit `NULLS LAST` for predictability (responder's framing).
-- Tiebreaker: identical `received_at` causes nondeterministic dedup — add a secondary `ORDER BY` key (`event_id`, `ingestion_order`) for reproducibility.
-- Postgres-specific `DISTINCT ON (...)` is not available in Trino — `ROW_NUMBER` subquery is the portable equivalent.
+Also offered the slightly more verbose CASE-WHEN form:
+```sql
+CASE WHEN COUNT(*) = 0 THEN NULL ELSE 100.0 * completions / NULLIF(COUNT(*), 0) END
+```
 
-**Verification ([trino.io/docs/467/functions/window.html](https://trino.io/docs/467/functions/window.html))**: `row_number()` is standard window with `PARTITION BY` + `ORDER BY` clauses. Filtering on window output via outer-query `WHERE rn = 1` is the canonical dedup pattern and well-anchored across r07 / r28. **Per pin `reference_trino_null_ordering_default.md`**: Trino 467 default ORDER BY null ordering is NULLS LAST regardless of ASC/DESC direction — so the explicit `NULLS LAST` on `DESC` is a no-op in this case (defensive but doesn't change semantics). Not wrong; mild over-specification. **Per [Postgres DISTINCT ON](https://www.postgresql.org/docs/current/sql-select.html#SQL-DISTINCT)**: confirmed Postgres-specific, not in Trino — `ROW_NUMBER` subquery is the standard rewrite advice.
+For "return 0 instead of NULL on zero-denom" the wrap is `COALESCE(100.0 * completions / NULLIF(starts, 0), 0)`.
 
-Minor Compl shave (-0.25) for not surfacing the alternative: `SELECT * FROM events QUALIFY ROW_NUMBER() OVER (...) = 1` style is NOT available in Trino 467 (no `QUALIFY` clause per `feedback_trino_dialect_accuracy.md` pin) — engineer porting from Snowflake/Databricks may try it; explicit defang would be useful. Minor Clar shave (-0.25): "watch-out for tiebreakers" could be more concrete with a worked example for what "nondeterministic" looks like (which row wins on ties is implementation-defined, not stable across re-runs).
+**All load-bearing facts VERIFIED against pin `reference_trino_division_by_zero.md`**: "INTEGER/DECIMAL `/` by zero THROWS DIVISION_BY_ZERO (guard NULLIF); DOUBLE/REAL `/` by zero RETURNS Infinity/NaN per IEEE-754, does NOT throw (detect is_finite). Verified from 467 source; r27 §4.4H is correct (LOCK)." Responder's framing matches the pinned canonical exactly. Cross-reference: this is the 2nd verify-first observation reconfirming the pin (after iter842 / iter858 / iter991 family of math-function pin reconfirmations).
 
-No imported-prior, no broken-secondary, no over-warning, no fabrication. Solid canonical Trino dedup answer. Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
+**Postgres contrast correctly drawn**: Postgres `decimal/integer divided by 0` throws `division_by_zero` SQLSTATE 22012 — same family as Trino. Engineer's mental model of "throws like Postgres" maps cleanly; the only meaningful difference is the type-dependent behavior on DOUBLE/REAL.
 
-### Q3 — Two dashboard queries with SAME WHERE on SAME Iceberg table, one 2s one 40s — what causes the scan-time difference?
+Minor Clar shave (-0.25): the responder explained the type-split clearly but could have given a one-line "what about DECIMAL(10,2) * 100.0?" disambiguation — `100.0` is a DOUBLE literal which would coerce the division to DOUBLE arithmetic and SHIFT the throw-vs-NaN behavior. For the conversion-rate case the practical answer is the same (NULLIF works in both arithmetic modes), but a beginner could be tripped up.
 
-**Score: 2.375** (Acc 2.0 / Clar 3.0 / Prac 2.0 / Compl 2.5) — **HARD FAIL**
+Minor Compl shave (-0.25): didn't surface `try(expr)` as a fallback (Trino has `try(100.0 * completions / starts)` which catches any thrown error and returns NULL — slightly less precise than NULLIF since it catches OTHER arithmetic errors too, but it's the broader safety-net pattern that's worth mentioning).
 
-Responder named two causes:
-1. **"Partition-pruning failure"** — "if one query filters only on `occurred_at` but the table is partitioned by `ingested_at`, it bypasses pruning"; fix: add a bounded `ingested_at` window.
-2. **"Position-delete file accumulation from past MERGE"** — query `$files` metadata (content=0 DATA, content=1 POSITION_DELETES); if POSITION_DELETES > 10% of DATA, compact via `CALL iceberg.system.rewrite_data_files(table=>'analytics.<table>')`.
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Acc 5.0 / Clar 4.75 / Prac 5.0 / Compl 4.75.
 
-**Both off-target for the engineer's stated scenario. The engineer said BOTH queries use the SAME WHERE clause (`tenant_id='acme' AND event_date >= DATE '2026-01-01'`) on the SAME Iceberg table.**
+### Q3 — Column descriptions copy-pasted across 6 schema.yml files; is `{% docs %}` the right tool? How and where does the text live; how to set it up?
 
-#### Defect 1 — Partition-pruning cause CONTRADICTS the identical-WHERE premise
+**Score: 4.75** (Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5) — **STRONG PASS, canonical dbt docs-blocks workflow**
 
-If the WHERE clause is identical across the two queries, the partition predicates are identical, so partition pruning is identical for both. The Iceberg connector evaluates the WHERE-clause partition predicates against the manifest list BEFORE planning data-file scans — same WHERE = same manifest filtering = same set of data files queued for scan. **Partition pruning cannot be the differentiator when the WHERE is held constant by the engineer's own framing.** The responder's "if one query filters only on `occurred_at` but the table is partitioned by `ingested_at`" hypothesis describes a different scenario (different WHEREs across the two queries), and answers a question the engineer didn't ask.
+Responder said: Yes, `{% docs %}` blocks are the canonical dbt pattern for cross-file documentation reuse. Three-step setup:
 
-#### Defect 2 — Position-delete accumulation affects both queries equally
+1. **Create a `.md` file under `models/` directory** (e.g., `models/docs/common_columns.md`). Docs blocks MUST live in `.md` files, NOT in `.sql` model files. dbt ignores SQL comments — no way to reuse them.
+2. **Define each block in the .md file**:
+   ```
+   {% docs tenant_id %}
+   The tenant identifier (UUID) for multi-tenant isolation. Foreign key to dim_tenants.tenant_id.
+   {% enddocs %}
+   ```
+3. **Reference from schema.yml** with quoted Jinja:
+   ```yaml
+   - name: tenant_id
+     description: "{{ doc('tenant_id') }}"
+   ```
+4. Run `dbt docs generate` to build the catalog; `dbt docs serve` to browse.
 
-Position-delete files attach to data files at the table level. Both queries scan the same set of data files (per defect 1's analysis — identical WHERE = identical pruning = identical scan set), so they apply the same set of position deletes during read. A position-delete burden makes BOTH queries slower at the same magnitude — it cannot make one 20x slower than the other when both queries cover the same files.
+The quoted-Jinja form (`description: "{{ doc('tenant_id') }}"` not `description: {{ doc('tenant_id') }}`) is correctly flagged — YAML parses Jinja-with-curly-braces inside unquoted strings inconsistently, and the quoted form is the documented best practice.
 
-#### The textbook primary cause the responder MISSED — COLUMNAR PROJECTION
+**All load-bearing facts VERIFIED against [docs.getdbt.com/docs/build/documentation](https://docs.getdbt.com/docs/build/documentation)**:
+- Docs block syntax `{% docs <name> %}...{% enddocs %}` — verified verbatim ("Docs blocks are declared using the Jinja `docs` tag").
+- `.md` files placed under `models/` directory — verified ("Docs block files are Markdown files (`.md`) placed under the `models/` directory. Example: `models/overview.md` or `events.md`").
+- `description: '{{ doc("name") }}'` reference syntax in schema.yml — verified verbatim with example.
+- Naming rules: "The name of a docs block can't start with a digit and may contain: Uppercase and lowercase letters (A-Z, a-z), Digits (0-9), Underscores (_)" — verified.
+- `dbt docs generate` introspects + processes blocks + generates browseable catalog — verified.
 
-Two queries with the SAME WHERE on the SAME Iceberg table but **DIFFERENT SELECT column lists scan DIFFERENT bytes**. Parquet (the Iceberg default file format on Trino 467) is columnar: a TableScan reads only the column chunks for the columns referenced in `SELECT` + WHERE + GROUP BY + JOIN keys. `SELECT user_id, event_type, COUNT(*) FROM events WHERE ...` reads ~3 column chunks; `SELECT * FROM events WHERE ...` (or a wide list of 50+ columns including string `event_properties_json`, `user_agent`, `payload`) reads all 50+ column chunks. On a wide events table with a string-heavy payload column, the ratio is easily 10-30x in bytes scanned — exactly the 2s-vs-40s shape the engineer reported.
+Resource alignment: 4 resources (r07/r09/r13/r27) discuss `{% docs %}` blocks per grep test; r28 also mentions docs-blocks. Findability is fine.
 
-Other plausible causes the responder also missed:
-- **Result/metadata caching** — first-run cold scan vs second-run warm Trino + MinIO page cache + Iceberg metadata cache. Engineer should re-run both queries fresh to isolate.
-- **Resource-group contention** — concurrent heavy workload on the cluster during one of the runs; check `system.runtime.queries` over the run window for concurrent CPU/memory consumers.
-- **Sort/file-layout differences** — if `sorted_by` clustering was applied later (or `EXECUTE optimize` was run between the two queries), row-group min/max indexes differ between data files and only some queries benefit from row-group skipping.
+Minor Acc shave (-0.25): the responder said "the only way to reuse descriptions" — this is slightly absolute. Alternative reuse patterns exist (YAML anchors `&` / `*` within a single schema.yml, dbt vars for short repeated strings, custom Jinja macros), though docs blocks ARE the canonical/recommended approach for cross-file reuse. Not load-bearing for the engineer's 6-schema.yml-files situation (docs blocks are the right tool); only a minor framing overclaim.
 
-#### Defect 3 — Spark-leaning fix recommendation
+Minor Compl shave (-0.5): didn't surface that:
+- Docs blocks support full markdown (headers, lists, links, tables, code fences) — useful for richer column documentation than just one-line descriptions.
+- The `doc()` function can also reference a block defined in any `.md` file project-wide, not just from a sibling file — engineer asking about "where does the text live" benefits from explicit "anywhere under your `models/` tree, dbt project-globally resolves the name."
+- Can reference docs blocks from sources/seeds/snapshots schema.yml too, not just models.
 
-The recommended remediation `CALL iceberg.system.rewrite_data_files(table=>'analytics.<table>')` is the **Spark Iceberg procedure form** (per [iceberg.apache.org/docs/latest/spark-procedures/](https://iceberg.apache.org/docs/latest/spark-procedures/) `rewrite_data_files` is a Spark stored procedure). **Trino 467 has no `CALL iceberg.system.rewrite_data_files(...)` procedure.** The Trino-native equivalent for data-file compaction + position-delete clearing is `ALTER TABLE iceberg.analytics.<table> EXECUTE optimize (file_size_threshold => '100MB')` per [trino.io/docs/467/connector/iceberg.html](https://trino.io/docs/467/connector/iceberg.html) and per pin `reference_trino_optimize_clears_position_deletes.md` ("EXECUTE optimize APPLIES + clears Iceberg position-deletes for the data files it rewrites; raise threshold above already-large delete-bearing files to force-clear — Trino-only, no Spark needed"). The engineer on this k8s on-prem stack can run optimize from Trino without bringing up a Spark job. The responder's Spark-form recommendation works only if the team can run Spark against this Iceberg table — which they can (Spark is in the ingestion stack per `prod_info.md`), but it's the wrong-tool-for-the-job suggestion when Trino-native is available.
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5.
 
-#### Classification: PER-INSTANCE OFF-TARGET, NOT a resource content gap
+### Q4 — Oracle `CONCAT(first_name, CONCAT(' ', last_name))`; when `last_name` is NULL, Oracle returns just first_name, Trino returns NULL for the whole expression; what's different and what's the correct Trino rewrite?
 
-Grep-test for `columnar projection` / `column chunk` / `SELECT list affects scan bytes`-style content:
-- `r03` (Iceberg storage), `r08` (column-oriented storage basics), `r18` (perf-triage), `r07` (analytical query patterns), `r28` (improving complex SQL perf on Trino with dbt) — every one of these resources has rich content on "avoid SELECT *" + "columnar storage reads only the columns you SELECT" anchored as the canonical perf advice. The fact is present and findable; the responder's miss is a routing/synthesis miss, not a resource gap.
+**Score: 4.75** (Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5) — **STRONG PASS, clean concat_ws rewrite**
 
-Per `feedback_synthesis_ceiling_stop_churning.md`: the responder reached for two cause hypotheses without checking them against the engineer's stated premise (identical WHERE = identical pruning + identical delete burden). This is the **same shape as iter1301-Q2** (`CrossJoin` mis-attributed to LATERAL/correlated-subquery decorrelation when the actual cause was non-equi-ON CrossJoin → which subsequently got a LIGHT FIX-A at r28 §2) — pattern-matched the question keywords ("slow Iceberg scan") to nearest-named-canonical (partition-pruning, position deletes) without semantic consistency check against the premise.
+Responder said: "Trino treats NULL differently from Oracle." Three points:
+1. **Oracle**: treats NULL as empty string in concatenation. `NULL || 'x'` → `'x'`. `CONCAT(NULL, 'x')` → `'x'`. Oracle silently drops NULL in concat semantics.
+2. **Trino**: `concat()` / `||` operator PROPAGATES NULL per ANSI SQL standard. Any NULL argument makes the whole expression NULL.
+3. **Trino rewrite**: use `concat_ws(separator, str1, str2, ..., strN)` — `concat_ws` SKIPS NULL arguments (unlike concat/||). The drop-in fix:
+   ```sql
+   concat_ws(' ', first_name, last_name)
+   ```
+   `concat_ws(' ', 'John', NULL)` → `'John'`. `concat_ws(' ', 'John', 'Doe')` → `'John Doe'`. Worked examples included.
 
-**Per-instance scoring decision**: this is a FIRST instance of "identical-WHERE differential scan time mis-attribution" — no NEW FIX-A on first occurrence per `feedback_new_card_over_attracts_adjacent.md` (adding a "two-queries-same-WHERE-different-times → columnar projection" card risks over-attracting adjacent perf-diagnosis questions). **NEW HARD WATCH `iter1305-Q3 two-queries-same-WHERE-same-Iceberg-table differential-scan-time → COLUMNAR PROJECTION primary cause`**: re-probe within 4-8 iters under varied "same query different times" / "same WHERE different scan bytes" / "wide SELECT slow narrow SELECT fast on same Iceberg table" framings. If the next occurrence ALSO mis-attributes to partition-pruning + position deletes and misses columnar projection AS the leading cause, escalate to LIGHT FIX-A at r07/r18 with the keyword-anchor "two dashboards same filter different speed" + a one-paragraph causes list (PROJECTION first, then caching, concurrency, sort layout, position deletes as a distant 5th — and the explicit "if WHERE is identical, partition pruning is identical and CANNOT differ between the two").
+**All load-bearing facts VERIFIED**:
+- **Trino `concat_ws` skips NULL args** — verified via WebFetch of [trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html) verbatim: *"Any null values provided in the arguments after the separator are skipped."* + caveat: *"If `string0` is null, then the return value is null"* (separator being NULL still makes the whole return NULL — responder didn't surface this but it's not relevant for a literal `' '` separator).
+- **Trino `concat()` / `||` NULL propagation** — Trino docs at string.html state `concat()` "provides the same functionality as the SQL-standard concatenation operator (`||`)"; SQL-standard `||` propagates NULL (any NULL arg → NULL result). Confirmed by [Trino issue #2723](https://github.com/trinodb/trino/issues/2723) family and consistent with iter1287 / iter1290 / iter1299-Q1 prior verifications.
+- **Oracle `CONCAT` / `||` empty-string semantics** — Oracle's well-documented NULL-as-empty-string convention for concatenation. `CONCAT('John', NULL)` → `'John'` (Oracle).
 
-**Also recommend a lighter watch — `iter1305-Q3 Spark rewrite_data_files recommended in Trino context`** (3rd or 4th instance of Spark-procedure-recommended-when-Trino-native-exists; iter1168 migrate watch family). If recurs, re-anchor the EXECUTE-optimize-clears-position-deletes canonical at the perf-triage land point.
+**Minor Acc / Compl shave (-0.25 / -0.5) — small premise-refinement miss**:
 
-Acc 2.0 / Clar 3.0 / Prac 2.0 / Compl 2.5 = 2.375 — Q-level FAIL.
+The engineer said *"Oracle returns just first_name"* — actually Oracle returns `'first_name '` with a TRAILING SPACE. Why: Oracle's `CONCAT(' ', NULL)` → `' '` (NULL coerces to empty string, but the literal `' '` space is preserved). Then `CONCAT('John', ' ')` → `'John '`. So Oracle's behavior is `'John '` (with trailing space), not `'John'` (without).
 
-### Q4 — Oracle TO_NUMBER(revenue_str, '99999.99') strips comma; Trino CAST AS DECIMAL errors on comma; equivalent Trino way
+The responder's recommended Trino rewrite `concat_ws(' ', first_name, last_name)` gives `'John'` (NO trailing space) when `last_name` is NULL — because `concat_ws` skips NULL AND the separator is only inserted BETWEEN non-NULL args, not appended after the last one. So the Trino rewrite is actually CLEANER than Oracle's original (no orphan trailing space). For most label-formatting use cases this is a feature, not a regression. For strict Oracle bit-for-bit compat the rewrite would need to be `concat(first_name, ' ', COALESCE(last_name, ''))` — but the responder's `concat_ws` form is the better engineering choice.
 
-**Score: 4.5625** (Acc 4.5 / Clar 4.5 / Prac 4.75 / Compl 4.5) — **CLEAN PASS, minor Teradata-ism misattribution aside**
+The slip is bounded: the responder framed Oracle's behavior as "returns just first_name" when it's actually `'first_name '` with trailing space, and didn't explicitly call out that the `concat_ws` rewrite is CLEANER than Oracle (rather than "matches Oracle"). Engineer pasting `concat_ws(' ', first_name, last_name)` ships a working query that's stricter than Oracle's loose behavior. Practical impact: NIL — engineer wanted "single name when last_name is NULL" and gets `'John'`, which is precisely what they wanted.
 
-Responder said: Trino has NO direct `TO_NUMBER(str, format_mask)` equivalent. Two paste-and-run rewrites:
-1. `CAST(REPLACE(revenue_str, ',', '') AS DECIMAL(10,2))` — strip the comma then cast.
-2. `CAST(regexp_replace(revenue_str, '[^0-9.]', '') AS DECIMAL(10,2))` — strip all non-digit, non-decimal characters (handles currency symbols like `$`, spaces, parentheses around negatives if pre-processed).
-
-For variable-locale strings (European `'1.234,56'` with `.` as thousands and `,` as decimal): regex + locale-specific swap before cast.
-
-**Verification ([trino.io/docs/467/functions/string.html](https://trino.io/docs/467/functions/string.html))**: `replace(string, search, replace)` and `regexp_replace(string, pattern, replacement)` both documented. **([trino.io/docs/467/functions/conversion.html](https://trino.io/docs/467/functions/conversion.html))**: `CAST(varchar AS DECIMAL(p, s))` requires the string to be a numeric literal without thousands separators (Trino is strict — no implicit comma-stripping per `[Trino issue #14358](https://github.com/trinodb/trino/issues/14358)` family). Strip-then-CAST is the canonical Trino approach. Engineer can paste either of the two forms and it works on Trino 467.
-
-#### Minor flag — Teradata-ism misattribution
-
-Responder framed Oracle `TO_NUMBER(str, mask)` as: *"Oracle's TO_NUMBER(str, mask) is a Teradata-ism specific to that database."* This is wrong on the attribution:
-- **`TO_NUMBER(str, format_mask)` is an Oracle function** — documented at [docs.oracle.com TO_NUMBER](https://docs.oracle.com/cd/E11882_01/olap.112/e17122/dml_functions_2132.htm) + [Oracle Number Format Models](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlqr/Format-Models.html) (the `9`/`0`/`G`/`D`/`,`/`.` format mask language is Oracle's). PostgreSQL also implements `TO_NUMBER(str, mask)` with the same format-model language ([Postgres data-type formatting functions](https://www.postgresql.org/docs/current/functions-formatting.html)). Teradata also supports a `TO_NUMBER` form but it's NOT specifically a Teradata invention.
-- The responder appears to have confused `TO_NUMBER` with `TO_CHAR`. Trino 467's `to_char(timestamp, format)` IS Teradata-compat (per pin `reference_trino_to_char_exists.md`). The Teradata-compat label belongs to `to_char` (and `to_timestamp` / `to_date`), NOT to `TO_NUMBER`.
-
-**Material harm**: bounded. The core advice (Trino has no `TO_NUMBER(str, mask)` equivalent + use REPLACE/regexp_replace + CAST) is correct and works. The attribution slip is an aside that doesn't change the engineer's action plan. The engineer might come away thinking Teradata also has a format-mask number parser (which is true, but for the wrong reason) — they're not migrating from Teradata anyway (this is an Oracle PL/SQL migration per the question), so the slip doesn't bite.
-
-**Classification: per-instance phrasing slip** (sibling to iter1303-Q2 broken-secondary-worked-query / iter1296-Q1 CONTAINS-GROUP-BY family). NO FIX-A. NEW LOW WATCH `iter1305-Q4 Oracle-TO_NUMBER-mask misattributed as Teradata-ism`: re-probe under Oracle TO_NUMBER framings in 4-8 iters; only escalate if recurs.
-
-Acc 4.5 / Clar 4.5 / Prac 4.75 / Compl 4.5.
+No imported-prior, no broken-secondary, no over-warning, no fabrication. Solid Oracle→Trino migration answer. Acc 4.75 / Clar 4.75 / Prac 5.0 / Compl 4.5.
 
 ---
 
@@ -132,18 +145,31 @@ Acc 4.5 / Clar 4.5 / Prac 4.75 / Compl 4.5.
 
 | Q | Topic | Score | Routing |
 |---|---|---|---|
-| Q1 | Improving complex SQL performance on Trino with dbt | 4.9375 STRONG PASS | iter1304-Q3 FIX-A REACH, watch CLOSES + premise-correction counter-signal |
-| Q2 | Analytical query patterns on Iceberg+Trino | 4.875 STRONG PASS | canonical ROW_NUMBER dedup, no defect |
-| Q3 | Query performance regression diagnosis: oncall workflow | 2.375 FAIL | off-target causes (contradict identical-WHERE premise) + missed columnar projection + Spark-form fix |
-| Q4 | Oracle PL/SQL → dbt + Trino SQL migration | 4.5625 PASS | core strip+CAST correct, Teradata-ism aside misattribution |
+| Q1 | Query performance regression diagnosis | 4.875 STRONG PASS | THINNEST-topic probe lands cleanly — ANALYZE/Puffin/NDV canonical |
+| Q2 | SQL query best practices for OLAP | 4.875 STRONG PASS | pin `reference_trino_division_by_zero` reconfirmed |
+| Q3 | Improving complex SQL performance on Trino with dbt | 4.75 STRONG PASS | docs blocks canonical, three-step setup |
+| Q4 | Oracle PL/SQL → dbt + Trino SQL migration | 4.75 STRONG PASS | concat_ws skips NULL rewrite, minor Oracle-trailing-space framing slip |
 
-**Iter average**: 4.1875 PASS (above 3.5 threshold).
+**Iter average**: **4.8125 STRONG PASS** (above 3.5 threshold by +1.3125).
 
-**Watches**:
-- **CLOSE**: `iter1304-Q3 dbt compile pure-offline myth — responder inferred-wrong from resource-source defect` — REACHED on 1st re-probe under different framing (Q1's narrative was "CI runs compile as a lint, teammate says it's purely local, no creds needed"); FIX-A at r28 §282 (parse/compile/run/build matrix + DO-NOT-WRITE defang + reconciled wrong "compile is offline" framing) is doing exactly what it was specced to do.
-- **NEW HARD**: `iter1305-Q3 two-queries-same-WHERE-same-Iceberg-table differential-scan-time → COLUMNAR PROJECTION primary cause` — re-probe 4-8 iters; on 2nd occurrence with same off-target mis-attribution, escalate to LIGHT FIX-A at r07/r18 with explicit "if WHERE is identical, pruning is identical; PROJECTION (different SELECT columns) is the primary cause" framing.
-- **NEW LOW**: `iter1305-Q3 Spark rewrite_data_files recommended when Trino EXECUTE optimize is native` — re-probe Iceberg perf/maintenance framings; if recurs, re-anchor EXECUTE-optimize canonical at perf-triage land points.
-- **NEW LOW**: `iter1305-Q4 Oracle TO_NUMBER-mask misattributed as Teradata-ism` — re-probe Oracle→Trino number-parsing framings; only escalate on recurrence.
-- **POSITIVE COUNTER-SIGNAL** to false-premise-acceptance family (iter1297/iter1299 trap): responder corrected teammate's false "compile is purely local" premise at the OPENING line of Q1 ("Your teammate is PARTIALLY WRONG"). Add to the same positive-trend list as iter1300-Q4 (EXTRACT defang) and iter1302-Q1 (MOD-sign defang).
+**Accuracy confirmations** (as requested in run prompt):
 
-**Pattern note**: Q3 is the only FAIL this iter. The 1st-re-probe REACH on the dbt-compile FIX-A is a strong validation that the iter1304 reconcile-in-place + parse/compile/run/build matrix + DO-NOT-WRITE defang pattern is working. The Q3 miss is a synthesis ceiling on premise-consistency-check (pattern-matched "slow Iceberg scan" → nearest-named cause without checking against identical-WHERE) rather than a content gap. Per `feedback_synthesis_ceiling_stop_churning.md`, do NOT add a "two queries same WHERE differential scan" card on first occurrence; re-probe and only FIX-A if the pattern recurs.
+1. **Q1 ANALYZE / Puffin / NDV (THINNEST topic)** — VERIFIED via WebFetch of trino.io/docs/467/sql/analyze.html + trino.io/docs/467/connector/iceberg.html. Bare `ANALYZE table_name WITH (columns = ARRAY[...])` syntax exact; Iceberg manifests auto-collect per-file min/max + null counts; NDV requires explicit ANALYZE → Puffin sidecar (apache-datasketches-theta-v1); stats do NOT auto-update. Responder's framing matches the docs verbatim. Pin family consistent with iter1231 / iter1161.
+
+2. **Q2 division-by-zero pin reference** — VERIFIED via pin `reference_trino_division_by_zero.md` (memory-pinned, originally git-tag-source-verified). INTEGER/DECIMAL `/` by zero THROWS `DIVISION_BY_ZERO`; DOUBLE/REAL `/` by zero returns Infinity/NaN per IEEE-754; NULLIF(denom, 0) guard for INTEGER/DECIMAL is the canonical clean fix. Responder's type-split + NULLIF guard exactly matches the pinned canonical. r27 §4.4H continues to be correct (LOCK).
+
+3. **Q4 `concat_ws` skips NULL** — VERIFIED via WebFetch of trino.io/docs/467/functions/string.html verbatim: *"Any null values provided in the arguments after the separator are skipped."* Trino `concat()` / `||` propagates NULL per SQL standard (consistent with iter1287 / iter1290 / iter1299-Q1 prior confirmations). Responder's `concat_ws(' ', first_name, last_name)` rewrite is the canonical Trino pattern for Oracle's CONCAT-skips-NULL semantics.
+
+**Watches & FIX-A**:
+
+- **NEW FIX-A**: NONE — no defects warrant resource changes this iter.
+- **NEW HARD WATCH**: NONE — all four answers are clean canonical.
+- **NEW LOW WATCH**: NONE significant — the Q4 Oracle-CONCAT-trailing-space framing miss is a 1st-occurrence aside that doesn't change the engineer's action plan; not worth tracking.
+- **CARRY watches (no firing this iter)**:
+  - `iter1305-Q3 same-WHERE-different-scan → COLUMNAR PROJECTION` (HARD): not exercised — Q1 was about ANALYZE not scan-time-differential.
+  - `iter1304-Q3 dbt compile pure-offline myth` (CLOSED iter1305) — confirmed CLOSED, no re-emergence.
+  - `iter1285-Q2 mixed-TIMESTAMP-types CAST-attaches-session-zone non-federation findability gap` (SOFT): not exercised.
+  - `iter1280-Q2 DECIMAL-SUM-scale-preserved mechanism slip` (SOFT): not exercised.
+  - `iter1281-Q1 system.runtime perf-triage findability gap` (HARD, from before iter1304): not exercised; the THINNEST-topic Q1 this iter probed stats-staleness side instead of system-runtime side.
+
+**Pattern note**: This is a textbook clean continuous-pass iter — all four answers are paste-and-run for the engineer. The THINNEST-topic probe (Q1) landed cleanly on a stats-staleness flavoring rather than the system-runtime flavoring, so it draws the topic average from 4.0311 toward 4.0612 (28th sample) without exercising the iter1281 system.runtime findability gap. Two pin reconfirmations this iter (`reference_trino_division_by_zero` Q2 + `reference_trino_starts_with_ends_with` family for `concat_ws` Q4) continue the verify-first cadence. No churn signals.
